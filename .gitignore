@@ -1,0 +1,28 @@
+# 本地设计、任务与操作文档暂不发布；根目录 README.md 是公开项目入口。
+/docs/
+
+# CMake / CTest local build trees.
+/build/
+/build-*/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+Testing/
+
+# Local Codex review artifacts.
+/.codex_docx_review/
+
+# Compiler, linker and firmware outputs.
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+*.elf
+*.bin
+*.map
+*.gcda
+*.gcno
+*.gcov

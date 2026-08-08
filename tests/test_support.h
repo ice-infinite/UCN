@@ -1,0 +1,35 @@
+#ifndef UCN_TEST_SUPPORT_H
+#define UCN_TEST_SUPPORT_H
+
+#include <stdio.h>
+
+#define TEST_ASSERT(condition) \
+    do { \
+        if (!(condition)) { \
+            printf("ASSERT failed: %s (%s:%d)\n", #condition, __FILE__, __LINE__); \
+            return 1; \
+        } \
+    } while (0)
+
+int test_core(void);
+int test_frame(void);
+int test_node(void);
+int test_virtual_link(void);
+int test_qos(void);
+int test_route(void);
+int test_aodv_lite(void);
+int test_security(void);
+int test_host_boundary(void);
+int test_integration(void);
+int test_link_metrics(void);
+int test_neighbor_lifecycle(void);
+int test_hello_join(void);
+int test_neighbor_heartbeat(void);
+int test_endpoint(void);
+int test_candidate_route(void);
+int test_adapter(void);
+int test_v3(void);
+int test_path_trace(void);
+int test_node_snapshot(void);
+
+#endif
