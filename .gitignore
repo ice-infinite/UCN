@@ -1,6 +1,3 @@
-# 本地设计、任务与操作文档暂不发布；根目录 README.md 是公开项目入口。
-/docs/
-
 # CMake / CTest local build trees.
 /build/
 /build-*/

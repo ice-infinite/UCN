@@ -1,0 +1,174 @@
+# UCN 协议分层与配置档案
+
+> 状态：**UCN v4 C99 Core 源码快照（2026-08-08）**；真实 Adapter、生产 AEAD Provider 和实机资源报告仍待接入。  
+> 日期：2026-08-04  
+> 关联文档：[UCN 整体架构设计](UCN_整体架构设计.md)
+
+## 1. 拆分目标
+
+UCN 的第一目标是让资源受限 MCU 独立完成安全自组网，而不是让每个节点默认携带服务目录、文件传输、时间同步和 Linux 桥接。
+
+因此协议固定拆为三层：
+
+```text
+UCN-Core      所有参与自组网的 MCU 必须具备
+    ↑
+UCN-Extended  只有协调器、网关或资源充足节点按需增加
+    ↑
+UCN-Host      只有 Linux、地面站、ROS2 等外部主机使用
+```
+
+上层只能依赖下层，不能反向依赖：关闭 `Extended` 或完全不部署 `Host` 时，`Core` 的认证、发现、路由、转发和失联恢复仍完整可用。
+
+当前仓库已实现 v4 帧、邻居保活/回收、Route Epoch/grace、受限 Candidate 选路、静态 Endpoint、Endpoint Q1 首包等待、Q0/Q1、受保护业务 Provider 边界、透明密文中继、按需路径追踪、按需节点快照和 Adapter 模拟；`Extended`、真实 Linux Host、生产密码库和真实介质驱动仍未实现。
+
+## 2. 三个档案的边界
+
+| 档案 | 典型节点 | 必须解决的问题 | 明确不包含 |
+| --- | --- | --- | --- |
+| `UCN-Core` | 所有 MCU 自组网节点、MCU 中继、MCU Coordinator。 | 安全入网、可信邻居、有限多跳、逐跳转发、Q0/Q1、失联安全。 | 服务目录、文件分片、全网日志、ROS2、视频、Linux IPC。 |
+| `UCN-Extended` | Coordinator、资源更充足的网关、少数主控 MCU。 | 服务发现、组播、时间同步、Q2 可靠传输、可控分片和诊断。 | Linux 特有 API、ROS2、图形化界面和无限大缓存。 |
+| `UCN-Host` | Linux、地面站、ROS2/AI 计算机。 | 将现有主机业务受控映射到 UCN，提供运维、日志和大数据能力。 | 作为 MCU 网络的必经路由、唯一身份中心或唯一 Coordinator。 |
+
+## 3. UCN-Core：MCU 自组网最小闭环
+
+### 3.1 Core 模块与当前状态
+
+| 模块 | 当前状态 | 后续范围 |
+| --- | --- | --- |
+| Fixed Frame | 已实现版本 4、32 B 基础头/36 B Route Extension、CRC、长度/网络/TTL/Flag 校验；受保护业务带 16 B Tag，v3 拒绝。 | 跨 Link 分片。 |
+| Identity & Join | 已实现最小 HELLO、邻居状态机和三种准入策略。 | JOIN 挑战/接受、设备证书/身份格式。 |
+| Session & Replay | 已实现 Provider 回调、会话 ID、持久化发送序号、入站去重、`seal/open`、固定 AAD 和 Node/Endpoint 安全策略。 | 生产 AEAD、密钥轮换、完整重放窗口。 |
+| Trusted Neighbor | 已实现固定 Candidate/Admitted/Suspect/Removed/Rejected/Expired 表、Heartbeat 和已接纳节点撤销/Link 槽复用。 | 随机退避、入网令牌桶与实机在线时间标定。 |
+| AODV-Lite Route | 已实现 RREQ/RREP/RERR、Active/Candidate 固定表、刷新、Probe/Activate、Route Epoch/grace、老化、保守未知 Cost 和源端控制 Token。 | Cost 抖动窗口和实机质量标定。 |
+| Forwarding / QoS | 已实现 TTL、下一跳、Q0/Q1、deadline、latest-value、静态 Endpoint 分发；Endpoint Q1 未知路由固定等待/自动 RREQ。 | Q2/Q3、可靠确认。 |
+| Health | 已实现候选/路由老化、Heartbeat、Link down 路径清理和动态 Link 回收。 | 统一 Link 状态消息、应用失联事件。 |
+
+### 3.2 Core 的报文类型与实现状态
+
+| 类别 | 报文 | 当前状态 |
+| --- | --- | --- |
+| 邻居 | `HELLO` | 已处理，一跳绑定 Node ID 并执行准入；不转发、不交给应用。 |
+| 入网 | `JOIN_REQ`、`JOIN_CHALLENGE`、`JOIN_ACCEPT` | 枚举值已保留，尚未实现状态机。 |
+| 路由 | `ROUTE_REQ`、`ROUTE_REPLY`、`ROUTE_ERROR` | 已处理。 |
+| 健康 | `HEARTBEAT` | 已处理：一跳 8 B 请求/ACK 和邻居状态机；`LINK_STATE` 尚未定义为线协议消息。 |
+| 路径验证 | `PATH_PROBE`、`PATH_PROBE_ACK`、`PATH_ACTIVATE`、`PATH_ACTIVATE_ACK` | 已处理为 v4 控制面；Activate/ACK 载荷为 Candidate ID + Route Epoch，业务按 Epoch 查 Current/Previous。 |
+| 按需诊断 | `PATH_TRACE_REQ`、`PATH_TRACE_REPLY` | 已处理：`DIAGNOSTIC=0x04`、逐跳 Node ID、固定 Pending/Reverse 表和回调结果；只查当前 Cache，不触发 RREQ，也不锁定业务路径。 |
+| 按需诊断 | `NODE_SNAPSHOT_REQ`、`NODE_SNAPSHOT_REPLY` | 已处理：受限泛洪、短期 Reverse、随机短延迟 Reply、源端固定结果表与默认拒绝 ACL；不常驻保存全网节点或拓扑。 |
+| 数据 | `DATA_Q0`、`DATA_Q1`、静态 Endpoint `0x40～0xBF` | 已处理；Endpoint 可固定分发，不增加帧字节。 |
+
+Core 只需要单播、受限广播和有限多跳。组播、服务调用、文件传输和任意长度分片不是 Core 的前置条件。
+
+`ROUTE_REQ`/`ROUTE_REPLY` 的控制载荷携带累计 `route_cost` 与 hop 数；非 Candidate `ROUTE_REPLY` 还带 2 B Route Epoch。Link 未上报质量时使用保守未知 Cost（默认 1000）；因此 WiFi、BLE、LoRa、CAN、UART 的质量指标必须先由各自 Adapter 归一化，不能把 RSSI 等无线字段写入共同线协议。
+
+### 3.3 Core 的资源纪律
+
+Core 必须满足“所有可增长状态均有编译期上限”：
+
+```c
+UCN_MAX_NEIGHBORS
+UCN_MAX_LINKS
+UCN_MAX_ROUTES
+UCN_MAX_ROUTE_DISCOVERIES
+UCN_SEEN_CACHE_SIZE
+UCN_MAX_FRAME_BYTES
+UCN_TX_Q0_DEPTH
+UCN_TX_Q1_DEPTH
+UCN_PENDING_Q1_DEPTH
+UCN_MAX_CANDIDATE_ROUTES
+UCN_MAX_ENDPOINT_SECURITY_POLICIES
+UCN_PATH_TRACE_PENDING_DEPTH
+UCN_PATH_TRACE_REVERSE_DEPTH
+UCN_PATH_TRACE_TIMEOUT_MS
+UCN_NODE_SNAPSHOT_MAX_RESULTS
+UCN_NODE_SNAPSHOT_PENDING_DEPTH
+UCN_NODE_SNAPSHOT_REVERSE_DEPTH
+UCN_NODE_SNAPSHOT_REPLY_QUEUE_DEPTH
+UCN_NODE_SNAPSHOT_TIMEOUT_MS
+UCN_NODE_SNAPSHOT_TOKEN_REFILL_MS
+UCN_ADAPTER_RX_QUEUE_DEPTH
+```
+
+上述宏当前定义在公共头文件中，可由构建参数覆盖；`UCN_MAX_HOPS=16` 是当前固定协议上限。实际产品需按 MCU 的 RAM、Flash、Link MTU、节点数和安全算法测量后冻结。
+
+Core 禁止以下实现方式：
+
+- 运行时无限动态内存分配。
+- 无上限的路由泛洪、重传和广播缓存。
+- 每个报文携带昂贵的数字签名。
+- 让 Q0 等待路由发现，或让 Q1 重传过期旧状态。
+- 把 Host 是否在线作为节点转发条件。
+
+### 3.4 Core 在没有 Linux 时怎样运行
+
+1. MCU 从产品配置读取 Node ID、Network ID；启用安全时由 Provider 读取会话与持久化计数器。
+2. Adapter 将无线/总线物理端点绑定为 `peer_node_id=0` 的 Candidate Link，并仅把完整帧放入有界收包队列。
+3. 协议任务 Pump 收包；双方用物理广播 `HELLO` 绑定一跳 Node ID。最小 HELLO 不转发、不进入应用。
+4. `Manual`、`Open` 或 `Provider` 决定是否记录已准入邻居；生产网络必须由 Provider/Coordinator 身份策略授权，中继不能擅自授权。
+5. Endpoint Q1 目标不在直连/Route Cache 时，`ucn_node_send_endpoint()` 通过受限 `ROUTE_REQ` 建立 Route Cache，并按 `(destination, Endpoint)` 在固定等待表中覆盖旧值；Q0 和兼容的原始 `ucn_node_send()` 仍显式寻路/不等待。
+6. Q0/Q1 通过缓存路径发送；路径断开时清理缓存并产生 `ROUTE_ERROR`。
+7. 若找不到安全路径，应用收到不可达事件，飞控/执行器执行本地失联安全策略。
+
+这套流程只要求 MCU 能使用至少一种 Link。STM32 没有无线收发器时，可以通过 CAN-FD/RS485 成网，或外挂无线模块；协议本身不要求 Linux。
+
+Adapter 不把 MAC、CAN ID 或蓝牙地址当作 UCN 身份。其统一接口、固定队列和物理地址映射见 [UCN Adapter 契约](UCN_Adapter_契约.md)。当前 Core 不做跨 Link 分片：各节点的 `UCN_MAX_FRAME_BYTES` 必须冻结为不大于该 Profile 最小有效 MTU；经典 CAN 需要后续的有界 Carrier 分段/重组。
+
+## 4. UCN-Extended：按需增加而非默认常驻
+
+| 可选模块 | 解决的问题 | 关闭后的行为 |
+| --- | --- | --- |
+| Service Discovery | 发布 `motor.control`、`imu.data` 等服务及版本。 | 应用以预配置 Node ID + Message Type 通信。 |
+| Group / Multicast | 面向编队或同类传感器的受权限组消息。 | 使用受限广播或多次单播。 |
+| Q2 Reliable | 参数写入、配置和需确认的普通服务。 | Core 仅提供 Q0/Q1，参数通过本地工具或专用节点维护。 |
+| Fragmentation | 在小 MTU Link 上传输较大消息。 | 超过 Core 最大载荷直接拒绝，不隐式切片。 |
+| Q3 Bulk | 日志、OTA、文件与低优先级限速。 | 不在 MCU Mesh 中传大文件。 |
+| Time Sync | 日志关联、编队与传感融合时间基准。 | 使用本地单调时间，不提供跨节点精密时间。 |
+| Diagnostics | 详细统计、抓包镜像、长期质量历史。 | Core 只保留必要的错误计数和健康状态。 |
+
+`Extended` 节点仍必须服从 Core 的固定内存原则。尤其是分片和 Q3 必须有独立配额，绝不能吞掉 Q0/Q1 的队列、会话或路由内存。
+
+## 5. UCN-Host：兼容层，不是协议中心
+
+`UCN-Host` 的目标是复用与 MCU 相同的线协议、身份和 ACL，但当前仓库只验证了“Host 作为普通逻辑节点”的虚拟 Link 边界，尚未提供 UDP/Ethernet/SocketCAN 或 ROS2/MAVLink 实现。未来 Host 增加的能力为：
+
+- Linux UDP/Ethernet/SocketCAN 适配。
+- ROS2、MAVLink/PX4、地面站与用户应用的白名单 Bridge。
+- 日志、抓包、可视化配网、性能测试和大数据处理。
+- 可作为已授权的时间源或管理操作发起端。
+
+它不能获得协议特权：
+
+- 无权绕过 MCU Coordinator 批准节点加入。
+- 无权修改 MCU 的 Route Cache 或让其强制经由 Host 转发。
+- Host 断开时，不影响已建立 MCU 会话、邻居表和 MCU 间数据转发。
+
+## 6. 节点配置组合
+
+| 节点类型 | 编译档案 | 典型用途 |
+| --- | --- | --- |
+| Sensor / Actuator Node | `Core` | 只发送实时状态或接收受限控制；必要时可转发。 |
+| Flight / Control Node | `Core` | 飞控、姿态控制、关键执行器；Q0/Q1 和本地失联安全优先。 |
+| MCU Relay Node | `Core` | 参与邻居、路由和多跳转发，连接不同 Link。 |
+| MCU Coordinator | `Core + Extended(Enrollment/Time 可选)` | 授权入网、网络策略、可选时间源；不做业务中心。 |
+| MCU Service Gateway | `Core + Extended` | 服务目录、参数、分片或受控 Q2/Q3。 |
+| Linux / Ground Station | `Host`，按需叠加 `Extended` | 观察、运维、ROS2/PX4、AI、日志和大数据。 |
+
+## 7. V1 的实施顺序
+
+### Phase A：只实现 Core
+
+当前已通过内存虚拟 Link 验证三个逻辑 MCU 的两跳 `DATA_Q1`、`ROUTE_ERROR`、重新寻路和 Q0/Q1 队列隔离；真实三板安全入网、生产密码与本地失联事件仍待 T14/T15。
+
+### Phase B：只给必要 MCU 增加 Extended
+
+先增加服务发现与 Q2 可靠参数，再按实际需要增加时间同步、分片和 Q3。每增加一项都要记录新增 Flash、静态 RAM、峰值 RAM、CPU 和空口占用。
+
+### Phase C：最后接入 Host
+
+再实现 Linux/ROS2/MAVLink Bridge。验收点不是“Host 能控制网络”，而是 Host 接入、异常退出和断链都不影响 MCU Mesh 的基本通信。
+
+## 8. 对“简洁、完整、低消耗”的最终判断
+
+拆分后，`UCN-Core` 的功能是完整的最小自组网闭环，但刻意不承担服务目录、大包、文件和主机生态；因此它适合长期运行在 MCU 上。
+
+`UCN-Extended` 与 `UCN-Host` 让系统在需要时变完整，而不把所有复杂度复制到每个节点。运行消耗仍不能凭架构文字宣称“很低”，但拆分后的资源边界清晰：低资源节点只为 Core 付费，额外能力必须单独编译、单独测量、单独验收。

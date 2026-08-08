@@ -13,7 +13,7 @@ Linux、ROS 2、MAVLink 或地面站可以作为普通 Host/Adapter 接入，但
 - Adapter 将物理地址和驱动回调转换为有界 RX 队列；协议任务中再执行路由和应用回调。
 - 按需路径追踪与低频节点快照诊断。节点快照默认拒绝远端请求，产品必须显式配置管理节点授权。
 
-当前仓库仅发布 Core 源码、单元/虚拟拓扑测试、CMake 配置和本 README。本地 `docs/` 中的设计讨论、任务表与操作记录暂不随仓库发布。
+仓库同时发布 Core 源码、单元/虚拟拓扑测试、CMake 配置，以及 `docs/` 下的架构、协议设计、任务表和项目操作记录。建议先阅读 [UCN v4 协议核心说明](docs/UCN_v4_协议核心说明.md)，再按需要进入完整架构和专题设计文档。
 
 ## 目录
 
@@ -21,6 +21,7 @@ Linux、ROS 2、MAVLink 或地面站可以作为普通 Host/Adapter 接入，但
 include/ucn/  公共 C API 与固定资源配置
 src/          C99 Core 实现
 tests/        单元测试与虚拟 Link 集成测试
+docs/         架构、协议设计、任务表与操作记录
 CMakeLists.txt
 ```
 

@@ -1,0 +1,109 @@
+# UCN 多介质 Adapter 契约
+
+> 状态：T13 已完成公共接口、固定收包队列、物理地址绑定与内存模拟；本文不是 ESP-IDF、Zephyr 或 Linux 的具体驱动实现。
+
+## 1. 目的与边界
+
+Adapter 的作用是把某一种物理介质变成 `ucn_link_t`，而不是把 WiFi、CAN、蓝牙或 Linux 的专有概念带进 UCN-Core。
+
+```mermaid
+flowchart LR
+    D["驱动 / ISR / 协议回调"] --> Q["Adapter 固定收包队列"]
+    Q --> P["协议任务: ucn_adapter_rx_pump"]
+    P --> H["Core: 校验帧 / HELLO / 准入 / 路由"]
+    H --> L["ucn_link_t::send"]
+    L --> T["Adapter 编帧 / 驱动发送"]
+```
+
+Core 不读取 MAC、RSSI、CAN ID、串口号、蓝牙连接句柄或 Linux socket。业务层也只使用 Node ID、消息类型和 QoS；介质地址只保留在 Adapter 私有映射表中。
+
+## 2. 必须遵守的执行模型
+
+1. 驱动 ISR 或 WiFi/BLE 回调不得执行 `ucn_node_receive()`、路由、准入 Provider 或应用回调。
+2. 回调只将完整 UCN 帧复制到**有上限**的驱动队列或 `ucn_adapter_rx_queue_t`。
+3. 单一协议任务调用 `ucn_adapter_rx_pump()`，再由它调用 `ucn_node_receive()`；Core 的 Node 状态因此不需要并发访问。
+4. Adapter 的 `send()` 只做当前 Link 的实际发送；它不得自行改写 UCN 源/目的 Node ID、TTL、序号或路由。
+5. 队列满时必须丢弃并计数，绝不能在回调中无限等待。Q0 的紧急业务策略由产品决定，但不能挤占未受限的 RAM。
+
+公共队列默认 `UCN_ADAPTER_RX_QUEUE_DEPTH=2`，占用约 `2 × UCN_MAX_FRAME_BYTES` 原始帧缓存（默认约 512 B），可在编译期设为 1。它可使用 `ucn_port_ops_t` 的临界区钩子保护并发访问；真正 ISR 中应优先使用 RTOS/驱动提供的 ISR 安全队列，再由任务转交给本接口。
+
+当前 `ucn_adapter_rx_pump()` 只负责“已入队帧 → `ucn_node_receive()`”，不会自动调用 `ucn_link_ops_t::poll_rx`。轮询型真实 Adapter 必须在自己的任务中执行 `poll_rx` 并调用 `ucn_adapter_rx_enqueue()`，随后再 Pump；这能保证所有介质采用同一 Core 入口。
+
+## 3. 物理地址不是设备身份
+
+`ucn_adapter_address_t` 只表示 Adapter 的物理端点（最长 8 字节）：ESP-NOW/BLE MAC、LoRa EUI、CAN 的本地端点编号、RS485 站号或 UART 端口地址。它**不是** UCN Node ID，也不能代替身份认证。
+
+Adapter 为每个已看到的物理端点从静态 Link 池取一个 `ucn_link_t`，初始设置：
+
+```text
+physical address → Candidate Link (peer_node_id = 0)
+```
+
+随后将收到的帧与这个 Candidate Link 一起入队。只有 Core 校验通过最小 `HELLO` 后，才把其 `source`/负载中的 Node ID 写入 `link->peer_node_id`，并按 `Manual`、`Open` 或 `Provider` 策略处理。生产系统应使用 `Provider` 将签名/AEAD/ACL 与出厂身份绑定；MAC 伪造或 BLE 随机地址都不应被当作入网成功。
+
+公共辅助接口：
+
+| 接口 | 作用 |
+| --- | --- |
+| `ucn_adapter_bind_peer()` | 将一个物理地址固定绑定到静态 Link；同地址试图改绑到另一个 Link 会报配置冲突。 |
+| `ucn_adapter_find_peer()` | 由收到的物理地址找 Candidate/已知 Link。 |
+| `ucn_adapter_rx_enqueue()` | 复制一帧到固定队列；满时返回 `UCN_ERR_NO_SPACE` 并计数。 |
+| `ucn_adapter_rx_pump()` | 在协议任务中 FIFO 出队、调用 Core；格式/安全/准入失败也会出队并记 `rejected_by_core`，不会堵塞后续帧。 |
+
+`ucn_node_broadcast_hello()` 用于完全未知 Node ID 时的物理广播；`ucn_node_probe_neighbor()` 用于 Adapter 已知对端 Node ID 时的定向 HELLO。广播 HELLO 只做一跳身份发现，Core 不转发、也不交给应用。
+
+## 4. 标准 Adapter 流程
+
+```text
+启动 Adapter
+  → 建立静态 Link 池 + 物理地址绑定表 + 有界收包队列
+  → 发现物理端点（MAC / 总线地址 / 已建立连接）
+  → 分配 Candidate Link，peer_node_id = 0
+  → 周期性物理广播 HELLO（或收到对端 HELLO）
+  → 收包回调：find/bind Link → enqueue(frame)
+  → 协议任务：pump → Core 校验 HELLO → Provider/策略准入
+  → 成功：Admitted Link 可参与 DATA、RREQ/RREP、转发
+  → 链路掉线：Adapter 更新 get_status/metrics；后续 T15 决定移除、重试与审计策略
+```
+
+一个物理端点只允许对应一个活动 Candidate/Admitted Link。Link 池满时 Adapter 必须拒绝新端点，不能覆盖已接纳节点；候选淘汰和已接纳节点撤销的产品策略留待 T15 结合真实身份与业务安全设计。
+
+## 5. Link 回调契约
+
+| 回调 | Adapter 必须做什么 | 不得做什么 |
+| --- | --- | --- |
+| `open` | 初始化/激活物理对端资源。 | 分配无上限资源或隐式信任对端。 |
+| `send` | 发送一个完整 UCN 帧；失败返回明确错误。 | 改写 UCN 帧的身份/路由字段。 |
+| `poll_rx` | 可选：在非回调驱动中拉取原始帧并入队。 | 直接运行 Core 路由。 |
+| `get_status` | 返回 up/down、实际 MTU 和错误计数。 | 用“最后一次成功”伪造当前连通。 |
+| `get_metrics` | 可选：将介质质量归一成非零、越小越好的 `route_cost`。 | 将 RSSI/SNR/CAN 专有字段加入 UCN 帧。 |
+| `close` | 释放该 Link 的物理资源。 | 擅自清除 Core 路由或邻居表。 |
+
+## 6. 各介质的映射
+
+| 介质 | 物理地址/发现 | 收包与发送要点 | 建议的 Cost 输入 |
+| --- | --- | --- | --- |
+| ESP-NOW / WiFi | MAC、广播发现。 | WiFi 回调只入队；Node ID 以后续 HELLO/Provider 为准。 | RSSI、丢包、重传、发送队列。 |
+| BLE | 连接句柄与 MAC/EUI。 | 随机 MAC 不可当身份；连接事件只改变 Link 状态。 | RSSI、连接间隔、重传。 |
+| LoRa | EUI/节点地址。 | 限制广播频率和空口时间，严控候选表。 | SNR、空口时间、丢包。 |
+| RS485 / UART | 站号、端口或点对点通道。 | Adapter 完成字节流切帧、半双工仲裁与 CRC 错误统计。 | 超时、CRC 错误、队列积压。 |
+| CAN-FD / CAN | 总线端点或应用地址。 | 先保证完整 UCN 帧能由 Carrier 有界地承载，再交给 Core。 | Bus-Off、错误帧、总线负载、发送等待。 |
+
+## 7. MTU 基线（必须先冻结）
+
+Core 当前不含跨 Link 分片与重组。因此一个参与同一 Mesh 的 Core Profile 必须满足：
+
+```text
+UCN_MAX_FRAME_BYTES ≤ 该 Profile 中所有可用 Link 的有效 MTU
+```
+
+`UCN_MAX_FRAME_BYTES` 已允许编译期覆盖。ESP-NOW v1 的单包上限为 250 B，启用它时应将 UCN Profile 设为不大于 250 B；CAN-FD 直承载时应设为不大于 64 B（固定 32 B 帧头意味着应用负载最多 32 B）。经典 CAN 的 8 B 载荷小于 UCN 基础帧头，不能直接承载完整 UCN 帧，必须先实现 Adapter 内部的**有界 Carrier 分段/重组**，或不将经典 CAN 纳入该 Core Profile。
+
+这不是业务层“文件分片”功能：它是某种底层 Carrier 将一个固定上限 UCN 帧可靠交给 Link 的必要条件。实施前应新增专门任务，定义分段编号、重组槽位、超时、总线仲裁和故障注入测试，不能临时在 `send()` 里拼接。
+
+## 8. 已验证与未验证边界
+
+- 已验证：固定队列 FIFO/满队列计数、临界区钩子、物理地址到静态 Link 的冲突保护、未知 Link 数据拒绝、广播 HELLO 绑定 Node ID、开放策略自动准入、准入后的业务交付。
+- 未验证：ESP-IDF、ESP-NOW、FreeRTOS ISR、BLE、LoRa、UART、RS485、CAN/CAN-FD 的真实驱动、无线性能和实机资源占用。
+
+T14 才负责指定 ESP32/ESP-IDF 的实际 Adapter；T15 才接入生产身份 Provider、撤销/淘汰与压力验证。
