@@ -39,7 +39,7 @@ Adapter 为每个已看到的物理端点从静态 Link 池取一个 `ucn_link_t
 physical address → Candidate Link (peer_node_id = 0)
 ```
 
-随后将收到的帧与这个 Candidate Link 一起入队。只有 Core 校验通过最小 `HELLO` 后，才把其 `source`/负载中的 Node ID 写入 `link->peer_node_id`，并按 `Manual`、`Open` 或 `Provider` 策略处理。生产系统应使用 `Provider` 将签名/AEAD/ACL 与出厂身份绑定；MAC 伪造或 BLE 随机地址都不应被当作入网成功。
+随后将收到的帧与这个 Candidate Link 一起入队。v5 HELLO 的 Payload 长度严格为 0；Core 只使用已校验 Header 的 `source` 绑定 `link->peer_node_id`，并记录该帧声明的固定 Wire Profile 上限，再按 `Manual`、`Open` 或 `Provider` 策略处理。旧 4 B HELLO 会被拒绝。生产系统应使用 `Provider` 将签名/AEAD/ACL 与出厂身份绑定；MAC 伪造或 BLE 随机地址都不应被当作入网成功。
 
 公共辅助接口：
 
@@ -117,7 +117,7 @@ Core 当前不含跨 Link 分片与重组。因此一个参与同一 Mesh 的 Co
 UCN_MAX_FRAME_BYTES ≤ 该 Profile 中所有可用 Link 的有效 MTU
 ```
 
-`UCN_MAX_FRAME_BYTES` 已允许编译期覆盖。ESP-NOW v1 的单包上限为 250 B，启用它时应将 UCN Profile 设为不大于 250 B；CAN-FD 直承载时应设为不大于 64 B（固定 32 B 帧头意味着应用负载最多 32 B）。经典 CAN 的 8 B 载荷小于 UCN 基础帧头，不能直接承载完整 UCN 帧，必须先实现 Adapter 内部的**有界 Carrier 分段/重组**，或不将经典 CAN 纳入该 Core Profile。
+`UCN_MAX_FRAME_BYTES` 已允许编译期覆盖。ESP-NOW v1 的单包上限为 250 B，启用它时应将 Build Profile 设为不大于 250 B；CAN-FD 直承载时应设为不大于 64 B。v5 基础头按 W0～W3 为 17/21/26/30 B，但 Full 的默认 32 B Policy Diagnostic Reply 仍使当前完整功能最小 Build MTU 为 64 B。经典 CAN 的 8 B 载荷小于最小 W0 Header，不能直接承载完整 UCN 帧，必须先实现 Adapter 内部的**有界 Carrier 分段/重组**，或不将经典 CAN 纳入该 Core Profile。
 
 这不是业务层“文件分片”功能：它是某种底层 Carrier 将一个固定上限 UCN 帧可靠交给 Link 的必要条件。实施前应新增专门任务，定义分段编号、重组槽位、超时、总线仲裁和故障注入测试，不能临时在 `send()` 里拼接。
 

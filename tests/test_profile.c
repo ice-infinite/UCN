@@ -263,8 +263,8 @@ int test_profile(void)
 #if UCN_FEATURE_SERVICE
     TEST_ASSERT(test_profile_service_switch() == 0);
 #endif
-    printf("UCN_PROFILE name=%s value=%d service=%d node_bytes=%zu\n",
+    printf("UCN_PROFILE name=%s value=%d service=%d node_bytes=%zu link_bytes=%zu\n",
            UCN_PROFILE_NAME, UCN_PROFILE, UCN_FEATURE_SERVICE,
-           sizeof(ucn_node_t));
+           sizeof(ucn_node_t), sizeof(ucn_link_t));
     return 0;
 }

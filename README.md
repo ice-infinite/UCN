@@ -7,14 +7,14 @@ Linux、ROS 2、MAVLink 或地面站可以作为普通 Host/Adapter 接入，但
 ## 当前能力
 
 - 固定长度上限的帧、固定表和静态内存模型，不依赖动态内存。
-- v5 线协议 Codec：官方 W0/W1/W2/W3 基础头为 17/21/26/30 B，Route/Path 扩展宽度随档位固定推导，CRC 和可选端到端 Provider 边界保留；V5-01 中 Node 新发帧仍默认 W3，固定域选档归 V5-02。
-- 一跳 HELLO/准入、Heartbeat、受限 AODV-Lite 路由发现、RERR 与路由/邻居老化。
+- v5 线协议 Codec：官方 W0/W1/W2/W3 基础头为 17/21/26/30 B；Node 可固定本地域与接收上限，也可显式开启路由感知的最小档自动选择。地址、Hop、Path、MTU、对端上限及可选 16 B Tag 任一不满足时失败关闭，不静默截断。
+- 零 Payload 的一跳 HELLO/准入、Heartbeat、压缩 RREQ、受限 AODV-Lite 路由发现、RERR 与路由/邻居老化。
 - Q0/Q1 有界发送调度、静态 Endpoint 业务分发和跨介质通用 `route_cost`。
 - Adapter 将物理地址和驱动回调转换为有界 RX 队列；协议任务中再执行路由和应用回调。
 - 按需路径追踪与低频节点快照诊断。节点快照默认拒绝远端请求，产品必须显式配置管理节点授权。
 - 编译期 Nano/Lite/Full Feature Profile；Service Router/Bridge 可独立开启或移除。
 
-仓库同时发布 Core 源码、单元/虚拟拓扑测试、CMake 配置，以及 `docs/` 下的架构、协议设计、任务表和项目操作记录。开始接入时先阅读 [UCN 网络容量与关键参数总览](docs/UCN_网络容量与关键参数总览.md)，再按运行环境阅读 [UCN 快速使用手册](docs/快速使用手册/README.md) 和 [UCN 使用与调用手册](docs/UCN_使用与调用手册.md)；Adapter 实现者还必须遵守 [Link Metrics 与 Cost 契约](docs/UCN_Link_Metrics与Cost契约.md)。需要追踪实际函数路径时进入 [UCN 调用关系树](docs/calltree/README.md)；需要继续开发时先读 [稳定化第二阶段问题与执行建议](docs/UCN_稳定化第二阶段问题与执行建议.md) 和 [任务表](docs/00-任务表.md)。动态网络软件验收与复现命令见 [S05 动态综合压力测试](docs/UCN_S05_动态综合压力测试.md)，极限规模、全节点高负载和逐节点 CSV 见 [S21 方案](docs/UCN_S21_极限规模模拟测试方案.md) 与 [S21 结果](docs/UCN_S21_极限规模模拟测试结果.md)，高并发重复抑制、RREQ 拆分和生产安全激活门禁见 [S22～S26 稳定化修复报告](docs/UCN_S22_重复抑制与稳定化修复报告.md)，小 RAM MCU 的档位选择和资源证据见 [S04 Feature Profile 与资源报告](docs/UCN_S04_Feature_Profile与资源报告.md)，公共 API/静态存储和 Replay 边界见 [S08 公共 API 与静态存储边界](docs/UCN_S08_公共API与静态存储边界.md)，再按需要阅读 [UCN v4 协议核心说明](docs/UCN_v4_协议核心说明.md)、[UCN v5 Adaptive Wire Profile 设计方案](docs/UCN_v5_Adaptive_Wire_Profile设计方案.md)、[V5-01 Codec 实现报告](docs/UCN_V5_01_官方Wire_Profile_Codec实现报告.md)、完整架构和专题设计文档。
+仓库同时发布 Core 源码、单元/虚拟拓扑测试、CMake 配置，以及 `docs/` 下的架构、协议设计、任务表和项目操作记录。开始接入时先阅读 [UCN 网络容量与关键参数总览](docs/UCN_网络容量与关键参数总览.md)，再按运行环境阅读 [UCN 快速使用手册](docs/快速使用手册/README.md) 和 [UCN 使用与调用手册](docs/UCN_使用与调用手册.md)；Adapter 实现者还必须遵守 [Link Metrics 与 Cost 契约](docs/UCN_Link_Metrics与Cost契约.md)。需要追踪实际函数路径时进入 [UCN 调用关系树](docs/calltree/README.md)。v5 的最终软件证据、资源与未完成硬件边界集中在 [V5-07 发布门禁报告](docs/UCN_V5_07_发布门禁与软件验证报告.md)，设计依据见 [Adaptive Wire Profile 方案](docs/UCN_v5_Adaptive_Wire_Profile设计方案.md)，继续开发时以 [任务表](docs/00-任务表.md) 为准。
 
 ## 目录
 
@@ -43,6 +43,7 @@ ctest --test-dir build --output-on-failure
 ```powershell
 cmake --build build --target ucn_scale_sim --parallel
 .\tools\run_ucn_scale_ladder.ps1 -BuildDir build -Traffic local
+.\build\ucn_scale_sim.exe --nodes 256 --traffic local --wire-mode auto --quiet
 ```
 
 选择裁剪档位：

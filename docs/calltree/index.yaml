@@ -1,5 +1,5 @@
 project: UCN
-protocol_version: "4"
+protocol_version: "5"
 description: MCU-first UCN Core 调用关系索引；Linux 仅是可选 Host/Adapter，不是路由前提。
 source_root: E:\File\MESH\UCN
 
@@ -14,7 +14,7 @@ modules:
   - id: frame
     file: frame.calltree.yaml
     status: current
-    role: v4 帧编码、解码、CRC 和 E2E AAD
+    role: v5 W0～W3 编解码、自动最小档、CRC 和 E2E AAD
     entry: frame.ucn_frame_encode
     source_files: [src/ucn_frame.c]
 

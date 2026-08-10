@@ -1,6 +1,6 @@
 # UCN 整体架构设计：MCU 自组网优先
 
-> 状态：**UCN v5 V5-01 C99 Core（2026-08-11）**；官方 W0～W3 Codec 已完成软件验证，Node 固定域选档仍待 V5-02。v4 已由标签和本地目录独立冻结；生产密码库、目标板资源和多跳实机仍待验证。
+> 状态：**UCN v5 V5-01～V5-07 软件闭环（2026-08-11）**；W0～W3 Codec、Node 固定域、控制帧压缩、安全绑定、路由感知自动选档和 Host 发布门禁已完成。v4 已独立冻结；生产密码库、目标板资源和多介质多跳实机仍待验证。
 > 日期：2026-08-11
 > 目标：以 MCU 为主体完成安全自组网；Linux 仅作为兼容接入端；协议小而可裁剪；资源占用由目标硬件配置决定。
 
@@ -10,7 +10,7 @@ UCN 是一个可移植的 C 通信协议栈。它的最小运行形态不是 Lin
 
 Linux、ROS2、PX4/MAVLink、地面站与 AI 系统可以通过 `UCN-Host` 接入同一网络，但它们不拥有路由中心、入网中心或控制中心的地位，更不替代 Linux 自己已有的网络体系。
 
-当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Route Epoch/grace、受限 AODV-Lite、Candidate Probe/Activate、Endpoint Q1 首包自动寻路、固定邻居表、最小 HELLO、通用 Link Cost、端到端 Provider 边界、Path ID 逐跳表、固定/主备与 Q1 流亲和策略，以及按需诊断**。V5-01 为保持既有 Node 行为，新发帧仍默认 W3；将本地域档位写入 Node 配置、控制帧压缩和自动选档分别归 V5-02/V5-03/V5-05。真实 `JOIN_*`、经审计 AEAD/身份库、真实无线多板和小 MTU Carrier 仍是后续任务，不能由软件测试替代。
+当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Node 固定发送档/最大接收档、零载荷 HELLO、压缩 RREQ、Profile 绑定 AAD、透明密文中继、显式开启的路由感知最小档选择、Route Epoch/grace、受限 AODV-Lite、Candidate Probe/Activate、Endpoint Q1 首包自动寻路、固定邻居表、通用 Link Cost、Path ID 逐跳表、固定/主备与 Q1 流亲和策略，以及按需诊断**。默认仍是固定 W3，保证未显式配置的产品行为保守且可预测；自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、真实无线多板和小 MTU Carrier 仍是后续任务，不能由软件测试替代。
 
 这份架构只围绕四项约束设计：
 
@@ -73,7 +73,7 @@ flowchart TB
 
 | 模块 | 当前已实现 | 明确尚未实现 |
 | --- | --- | --- |
-| Packet | v5 W0～W3 基础头 17/21/26/30 B；Route/Path Header 由 Profile+Flags 唯一推导，W3 为 32/36 B。长度/CRC/Network/Hop/Flag/字段范围失败关闭并拒绝 v4；可选受保护业务额外 16 B Tag。 | V5-02 Node 固定域档位、V5-03 控制帧压缩、跨 Link 分片。 |
+| Packet | v5 W0～W3 基础头 17/21/26/30 B；Route/Path Header 由 Profile+Flags 唯一推导；固定域和最大接收档可配置，自动模式按字段、路由 Hop、Path、MTU、对端上限及 Tag 选择最小可用档。长度/CRC/Network/Hop/Flag/字段范围失败关闭并拒绝 v4。 | 跨 Link 分片仍未实现。 |
 | Identity & Join | 最小 `HELLO`、Candidate/Admitted/Suspect/Removed/Rejected/Expired 邻居表、`Manual`/`Open`/`Provider` 准入。 | `JOIN_REQ`/挑战/接受状态机、出厂身份格式。 |
 | Session & Replay | 可注入 Provider 的会话 ID、发送序号持久化、TX/RX 授权、固定 `seal/open`、30 B 不可变 AAD（Path 帧含 Path ID）、明文/受保护策略和入站去重缓存。 | 生产 AEAD、密钥轮换、完整重放窗口与产品 ACL 表。 |
 | Route / Forwarding | 固定 Active/Candidate 表、受限 AODV-Lite、RREQ/RREP/RERR、`PATH_PROBE/ACK`、携带 Candidate ID + Epoch 的 `PATH_ACTIVATE/ACK`、TTL、断链清表、保守 Link Cost；业务按 `(destination, route_epoch)` 区分 Current/Previous，默认 1 s grace。 | 自动业务重发、全网拓扑。 |
@@ -179,7 +179,7 @@ UCN 没有全网总发送队列，也没有要求一条路径传完后另一条�
 
 当前 Active/Candidate 解决的是“同一目标 Node 的自动换路”，不是“不同业务固定走不同路径”或“多路径同时分担”。T22.1 已在 `ucn_node_t` 中加入固定 Policy、当地 Path、Q1 Flow 和 Link 质量快照表；默认上限为 8/8/8/4，均可按 RAM Profile 编译期调整。Policy 按 `(destination, Endpoint[, traffic_class])` 精确或 traffic-class 通配匹配；未配置业务仍保持原有 `AUTO_BEST`。它已提供 `ucn_node_set_route_policy()`、`ucn_node_set_policy_path()`、`ucn_node_bind_q1_flow()` 和质量/统计查询 API。
 
-T22.2 已引入真正的线上 Path ID，但它与 T22.1 的本地 `local_path_id` 仍不是同一个概念。v5 Path 业务帧按 Profile 使用 19/25/31/36 B Header；V5-01 的 Node 默认 W3，即 36 B。表项以 `(源 Node、源 Session、Path ID、目标)` 识别，并在每一跳保存固定的“下一跳/egress 或终端”关系。默认每节点最多 8 项，租约到期自动回收；中继只按表转发，端到端密文只由目标解密。远程安装、更新、撤销依次通过 Security Provider、显式 Path 控制面授权回调和按认证 `(源 Node、源 Session)` 的固定管理预算；没有授权回调默认拒绝，同源改变 Bearer 不会刷新 Token。Path ID 纳入端到端保护 AAD，Path 范围 RERR 仅回收故障 P1，不会误清 P2。
+T22.2 已引入真正的线上 Path ID，但它与 T22.1 的本地 `local_path_id` 仍不是同一个概念。v5 Path 业务帧按 Profile 使用 19/25/31/36 B Header；固定模式使用 Node 发送档，自动模式选择能表达 Path ID、地址、Hop、Tag 且满足 MTU/对端上限的最小档。表项以 `(源 Node、源 Session、Path ID、目标)` 识别，并在每一跳保存固定的“下一跳/egress 或终端”关系。默认每节点最多 8 项，租约到期自动回收；中继保留源端已选 Wire Profile，只按表转发，端到端密文只由目标解密。
 
 T22.3 将 Policy 的 Primary/Backup 本地句柄绑定到已经验证的线上 Path ID，并接入 `ucn_node_send_endpoint()`。`PINNED_STRICT` 只发送 Primary，任何失败都直接返回；`PINNED_FAILOVER` 仅在 Link Down 或 Path 不存在时标记该本地 Path Down 并尝试 Backup，Cost、队列抖动、背压和 Security 错误均不会触发切换。Primary/Backup 都不可用时，只有配置显式允许的 Q1 才会进入既有 RREQ/等待槽；这代表该次业务已经允许退回普通 Route，Q0 永不自动寻路。
 

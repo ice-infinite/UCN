@@ -20,6 +20,8 @@ CONFIG_PRODUCT_UCN_SERVICE_Q0_DEPTH=4
 
 ## 2. 选择唯一的 Protocol 执行上下文
 
+无论选择 pthread 还是 Work Queue，都在其启动前完成 `ucn_node_init()` → `ucn_node_set_wire_profiles()` → 可选 `ucn_node_set_wire_profile_auto(true)` → Link/Security 注册。不要从 shell 命令或第二线程运行时改 Wire 域；需要改变产品域时应安全停网并重建 Node。
+
 二选一，不要混用：
 
 1. **专用 Protocol pthread**：适合有稳定线程资源的板子。由该线程独占 `ucn_node_t`，并周期执行 `ucn_node_step()`。

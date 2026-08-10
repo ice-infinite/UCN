@@ -49,12 +49,12 @@ CMake 会把 `UCN_PROFILE` 和 `UCN_FEATURE_SERVICE` 作为 `ucn_core` 的 `PUBL
 
 | 配置 | 编译期最小 `UCN_MAX_FRAME_BYTES` | 原因 |
 | --- | ---: | --- |
-| Nano + Service OFF | 33 B | 32 B 基础头 + 至少 1 B 业务 Payload。 |
-| Lite + Service OFF | 50 B | 32 B 基础头 + 18 B AODV-Lite `ROUTE_REPLY`。 |
-| Full + Service OFF | 64 B | 32 B 基础头 + 32 B Policy Diagnostic Reply。 |
+| Nano + Service OFF | 33 B | 当前静态 Payload 缓冲仍按保守 32 B Build 边界至少保留 1 B；Wire W0 Header 本身为 17 B。 |
+| Lite + Service OFF | 50 B | 保守 W3 控制面和 18 B AODV-Lite `ROUTE_REPLY`。 |
+| Full + Service OFF | 64 B | 保守 W3 控制面和 32 B Policy Diagnostic Reply。 |
 | 任意 Profile + Service ON | 64 B | 默认 `UCN_SERVICE_MAX_PAYLOAD_BYTES=32`。 |
 
-GCC 严格构建已验证 33/50/64 B 分别可编译；32/49/63 B 分别按预期在编译期拒绝。这里是 Core 编译边界，不代表 CAN 等小 MTU 介质无需 Carrier 分段。
+GCC 严格构建已验证 33/50/64 B 的 `ucn_core` 分别可编译；32/49/63 B 分别按预期在编译期拒绝。这里是 **Core 正向/负向编译门禁**，不是 33 B 配置下运行包含大帧向量的整套 CTest；也不代表 CAN 等小 MTU 介质无需 Carrier 分段。
 
 ## 6. Host 资源对比
 
@@ -62,11 +62,11 @@ GCC 严格构建已验证 33/50/64 B 分别可编译；32/49/63 B 分别按预�
 
 | Profile | `sizeof(ucn_node_t)` | 相对 Full | 静态库 `.text` 合计 | 相对 Full |
 | --- | ---: | ---: | ---: | ---: |
-| Nano | 2,648 B | -71.8% | 13,132 B | -88.1% |
-| Lite | 5,888 B | -37.4% | 52,120 B | -52.6% |
-| Full | 9,400 B | 基线 | 109,900 B | 基线 |
+| Nano | 2,648 B | -71.8% | 19,116 B | -83.7% |
+| Lite | 5,888 B | -37.4% | 57,688 B | -50.8% |
+| Full | 9,400 B | 基线 | 117,164 B | 基线 |
 
-该表已同步到 S22 完成后的当前代码。S22 前的历史基线为 Node `2640/5456/8136 B`、`.text` `13904/50308/106704 B`；本轮按 Profile 增加有界 Source/Session 位图窗口和独立 RREQ Cache，详见[S22 稳定化修复报告](UCN_S22_重复抑制与稳定化修复报告.md)。
+该表已在 V5-07 以 GCC 14.2 Release/Service OFF 重新测量。Node 仍为 `2648/5888/9400 B`，`ucn_link_t` 三档均为 40 B；相对 V5-01，Wire 域/自动选档未继续扩大 Node，但 Codec、固定域门禁、控制压缩和自动选择函数增加了 Archive `.text`。历史变化见[S22 稳定化修复报告](UCN_S22_重复抑制与稳定化修复报告.md)和[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)。
 
 这些数字不是 MCU ELF 的最终 Flash/RAM：目标 ABI、编译器、LTO、表深度、`UCN_MAX_FRAME_BYTES` 和产品静态实例数都会改变结果。目标板必须另外报告 ELF 段、静态对象、运行时栈高水位和 Heap；不能把 Host `.a` 直接写成 ESP32/STM32 Flash。
 
@@ -76,6 +76,7 @@ GCC 严格构建已验证 33/50/64 B 分别可编译；32/49/63 B 分别按预�
 - Lite：直接运行 AODV/RERR、Neighbor/HELLO/Heartbeat、多 Bearer、安全 Provider、Control Budget、Stress；Candidate/Path/Policy/Diagnostic 返回 `UCN_ERR_CONFIG`。
 - API 完整性：头文件声明的 56 个 `ucn_node_*`/`ucn_path_*`/`ucn_policy_*` 符号在 Nano、Lite、Full 静态库中均存在；低档 Profile 不会在链接阶段才暴露缺失能力。
 - Full：现有完整单元、虚拟拓扑、动态压力和 Profile 测试全部通过。
+- v5：四档固定域、零载荷 HELLO、压缩 RREQ、AAD Profile 绑定、W0 透明密文中继和固定/自动选档对照均通过。
 - Service：Nano/OFF 证明源码可移除；Lite/ON 证明正交组合可初始化 Router；Full/OFF 与 Full/ON 均可构建测试。
 - 编译器：MSVC Debug 与 GCC 14.2 Release 均验证；GCC 启用 `-Wall -Wextra -Wpedantic -Werror`。
 - CI：工作流已加入 Nano/OFF、Lite/ON、Full/ON 矩阵；只有远端 Actions 实际运行成功后，才能写成远端 CI 已通过。

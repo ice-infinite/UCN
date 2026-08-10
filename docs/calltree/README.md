@@ -1,6 +1,6 @@
 # UCN 调用关系树（Call Tree）
 
-> 数据依据：`E:\File\MESH\UCN` 当前 v5 V5-01 Core 的 `include/ucn/`、`src/` 与测试入口；v4 调用树由 `v4.0.0-final-before-v5` 标签保留。
+> 数据依据：`E:\File\MESH\UCN` 当前 v5 V5-07 软件状态的 `include/ucn/`、`src/` 与测试入口；v4 调用树由 `v4.0.0-final-before-v5` 标签保留。
 > 目的：回答“一个 API 被谁调用、它继续调用什么、在哪个上下文运行、会经过哪些固定队列/回调”。源码是最终事实；本文档不替代源码或测试。
 
 本目录参考 `E:\File\PlatformIO\F405_Zephyr_Parachute\docs\calltree` 的组织方式：以 YAML 为调用关系源数据，按模块拆分，节点使用唯一 ID，关系只记录真实的直接调用、回调或固定队列边界。
@@ -26,6 +26,8 @@
   → auto / pinned / AUTO_BALANCE 选路
   → route.ucn_node_send 或 route.ucn_node_send_path
   → security.protect_outbound_business
+  → node_runtime.prepare_outbound_wire_profile_static
+  → frame.ucn_frame_select_min_wire_profile（仅显式自动模式）
   → frame.ucn_frame_encode
   → Link ops->send
 
@@ -47,6 +49,8 @@ S16 给这条循环增加产品时间契约：`UCN_MAX_STEP_INTERVAL_MS` 默认 
 S19 给 Path 管理写状态增加独立门禁：目标 Node 只有依次通过 Security、产品 Path Authorizer 和按认证 `(Source, Session)` 的固定 Token Bucket 后才安装/撤销 Path。同一来源改变 Bearer 不会刷新额度；正常业务、Heartbeat/RREQ 使用不同预算。
 
 S04 后，本调用树以默认 `FULL + Service ON` 展示完整可达关系。`LITE` 仍走动态 `ucn_node.c` 的 HELLO/Neighbor/Heartbeat/AODV/Security 主链，但 Candidate、Path、Policy 和 Diagnostic 分支在编译期不存在；`NANO` 改走 `ucn_node_nano.c`，只保留静态 Link/Route、Q0/Q1、转发和 Endpoint 分发，不存在自动 Mesh 主链。Service 树仅在 `UCN_FEATURE_SERVICE=ON` 时成立。关闭能力对应的高级 API 只进入 `ucn_profile_stubs.c` 并返回 `UCN_ERR_CONFIG`。
+
+V5-05 后，默认发送仍固定 W3。产品只有显式调用 `ucn_node_set_wire_profile_auto(true)` 才进入自动最小档路径；控制帧使用固定 TX 档，中继保留来源帧档位。业务发送先确定是否带 16 B Tag，再结合地址/Hop/Route/Path、Link MTU 和 Peer Ceiling 选档，最后才 Seal/Encode。
 
 ## 2. 目录和阅读顺序
 

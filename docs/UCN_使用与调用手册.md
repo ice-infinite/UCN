@@ -1,6 +1,6 @@
 # UCN 使用与调用手册
 
-> 适用版本：UCN v5 V5-01 当前 Core。Node 新发帧仍默认 W3，固定域选档待 V5-02；其余调用方式以当前公开头文件为准。产品工程的 Adapter、密钥、板级引脚和业务 Endpoint 可在此基础上扩展。
+> 适用版本：UCN v5 V5-07 当前 Core。默认固定 W3；产品可在注册 Link/安装 Security 前设置固定域，或显式开启路由感知自动选档。产品工程的 Adapter、密钥、板级引脚和业务 Endpoint 仍需自行实现。
 > 目标：让业务代码只关心“发给哪个 Node 的哪个 Endpoint、什么 QoS”，而不关心数据当前经过 Wi-Fi、UART、CAN、BLE 或其他 Bearer。
 
 ## 1. 先理解 UCN 在系统中的位置
@@ -34,6 +34,7 @@ Linux、ROS 2、地面站可以通过一个 Link/Adapter 作为普通 Node 接�
 | --- | --- | --- |
 | `network_id` | 哪些设备属于同一 UCN 网络 | 同一网络必须一致；不同网络的帧会被拒绝。 |
 | `node_id` | 每块 MCU 的稳定逻辑身份 | 可由 MAC 派生作默认值，但产品建议支持 Flash/编译期手动指定，网络内不得重复。 |
+| Wire Profile | 固定发送档、最大接收档、是否自动最小档 | 默认固定 W3；`ucn_node_set_wire_profiles()` 必须在 Link/Security 前调用，自动模式需显式开启。 |
 | Endpoint ABI | 数据代表什么、长度/字节序/单位/QoS/消费者 | 静态冻结；语义变化新分配 Endpoint，不复用旧 ID。 |
 | Service Binding | 哪个本机任务拥有哪个 Endpoint | R1 是一 Endpoint 一消费者，固定表、无动态注册。 |
 | Link/Bearer | UART、ESP-NOW、CAN 等如何发收、MTU、对端身份 | 一个 Neighbor 可有多个 Bearer；业务不直接选择物理介质。 |
@@ -120,9 +121,17 @@ static void protocol_init(void)
     };
 
     /* 任一步返回非 UCN_OK，停止进入业务运行态并记录错误。 */
-    (void)ucn_node_init(&g_node, &config);
+    if (ucn_node_init(&g_node, &config) != UCN_OK ||
+        ucn_node_set_wire_profiles(&g_node,
+            UCN_WIRE_PROFILE_W1_EDGE,
+            UCN_WIRE_PROFILE_W3_BACKBONE) != UCN_OK ||
+        ucn_node_set_wire_profile_auto(&g_node, true) != UCN_OK) {
+        product_enter_safe_mode();
+    }
 }
 ```
+
+固定域模式只省去自动决策，适合资源/地址范围完全冻结的产品；自动模式不是协商任意格式，而是从四个官方档位中选满足本帧与当前出口的最小档。控制帧继续使用固定发送档，HELLO 会学习 `link->peer_wire_profile`；静态链路也可在注册后用 `ucn_node_set_link_wire_profile_limit()` 配置可信上限。中继不重新选档，防止在途帧被静默改写。
 
 只有静态分配并独占 Node 的 Protocol Task 所在 `.c/.cpp` 文件需要包含
 `ucn_node_storage.h`。业务任务、Adapter 声明和只传递 `ucn_node_t *` 的模块应

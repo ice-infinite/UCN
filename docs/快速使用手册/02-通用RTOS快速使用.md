@@ -59,6 +59,8 @@ static const ucn_service_bridge_inbound_hooks_t g_hooks = {
 
 ## 3. 初始化顺序
 
+在创建任何 RTOS Task 前，由启动线程依次执行 `ucn_node_init()`、`ucn_node_set_wire_profiles()`，可选执行 `ucn_node_set_wire_profile_auto(true)`，然后才注册 Link、安装 Security 和初始化 Router/Bridge。Wire Profile 是 Node 初始化策略，不是每个业务 Task 自己选择的状态。
+
 ```c
 void ucn_rtos_start(void)
 {

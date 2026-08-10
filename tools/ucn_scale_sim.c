@@ -11,6 +11,7 @@
 #include <sys/time.h>
 #endif
 
+#include "ucn/ucn_frame.h"
 #include "ucn/ucn_node_storage.h"
 
 #define SCALE_DEFAULT_NODES ((size_t)32U)
@@ -29,8 +30,6 @@
 #define SCALE_ENDPOINT_Q0 ((ucn_endpoint_t)0x60U)
 #define SCALE_Q1_STREAMS ((uint8_t)4U)
 #define SCALE_NETWORK_ID UINT32_C(0x5343414C)
-#define SCALE_WIRE_MESSAGE_TYPE_OFFSET ((size_t)3U)
-#define SCALE_WIRE_SOURCE_OFFSET ((size_t)12U)
 #define SCALE_PAYLOAD_META_BYTES ((uint16_t)12U)
 
 typedef enum scale_topology {
@@ -46,6 +45,11 @@ typedef enum scale_traffic {
     SCALE_TRAFFIC_ALL_TO_ALL = 4,
     SCALE_TRAFFIC_MIXED = 5
 } scale_traffic_t;
+
+typedef enum scale_wire_mode {
+    SCALE_WIRE_FIXED = 0,
+    SCALE_WIRE_AUTO = 1
+} scale_wire_mode_t;
 
 typedef struct scale_options {
     size_t node_count;
@@ -66,6 +70,7 @@ typedef struct scale_options {
     size_t event_capacity;
     scale_topology_t topology;
     scale_traffic_t traffic;
+    scale_wire_mode_t wire_mode;
     const char *report_prefix;
     bool quiet;
 } scale_options_t;
@@ -369,30 +374,31 @@ static void scale_account_wire_tx(scale_network_t *network,
                                   size_t length)
 {
     scale_node_metrics_t *local;
-    uint8_t message_type;
-    ucn_node_id_t source;
+    ucn_frame_t decoded;
 
-    if (!network->measuring || length <= SCALE_WIRE_SOURCE_OFFSET + 3U) {
+    if (!network->measuring) {
+        return;
+    }
+    if (ucn_frame_decode(frame, length, &decoded) != UCN_OK) {
+        network->fatal_error = true;
         return;
     }
     local = &network->metrics[context->source_index];
-    message_type = frame[SCALE_WIRE_MESSAGE_TYPE_OFFSET];
-    source = scale_read_u32_be(&frame[SCALE_WIRE_SOURCE_OFFSET]);
     local->frames_tx++;
     local->wire_bytes_tx += length;
-    if (message_type < 0x40U) {
+    if (decoded.message_type < 0x40U) {
         local->control_frames_tx++;
     } else {
         local->business_frames_tx++;
     }
-    if (source != (ucn_node_id_t)(context->source_index + 1U)) {
+    if (decoded.source != (ucn_node_id_t)(context->source_index + 1U)) {
         local->forwarded_frames_tx++;
     }
-    if (source > 0U && source <= network->options.node_count) {
-        scale_node_metrics_t *origin = &network->metrics[source - 1U];
+    if (decoded.source > 0U && decoded.source <= network->options.node_count) {
+        scale_node_metrics_t *origin = &network->metrics[decoded.source - 1U];
 
         origin->origin_wire_bytes += length;
-        if (message_type >= 0x40U) {
+        if (decoded.message_type >= 0x40U) {
             origin->origin_business_wire_bytes += length;
         }
     }
@@ -1128,10 +1134,17 @@ static bool scale_network_init(scale_network_t *network,
         ucn_config_t config;
         size_t slot;
 
-        config.network_id = SCALE_NETWORK_ID;
+        config.network_id = options->wire_mode == SCALE_WIRE_AUTO ?
+                                UINT32_C(42) : SCALE_NETWORK_ID;
         config.node_id = (ucn_node_id_t)(node + 1U);
         config.default_hop_limit = UCN_MAX_HOPS;
         if (ucn_node_init(&network->nodes[node], &config) != UCN_OK ||
+            ucn_node_set_wire_profiles(
+                &network->nodes[node], UCN_WIRE_PROFILE_W3_BACKBONE,
+                UCN_WIRE_PROFILE_W3_BACKBONE) != UCN_OK ||
+            ucn_node_set_wire_profile_auto(
+                &network->nodes[node],
+                options->wire_mode == SCALE_WIRE_AUTO) != UCN_OK ||
             ucn_node_set_join_policy(&network->nodes[node], UCN_JOIN_OPEN,
                                      NULL, NULL) != UCN_OK) {
             return false;
@@ -1475,7 +1488,7 @@ static bool scale_write_summary_csv(const scale_network_t *network,
         return false;
     }
     (void)fprintf(file,
-        "status,profile,topology,traffic,nodes,ticks,step_ms,"
+        "status,profile,wire_mode,topology,traffic,nodes,ticks,step_ms,"
         "messages_per_node,payload_bytes,warmup_ticks,warmup_batch,"
         "loss_per_mille,"
         "duplicate_per_mille,max_delay_ms,flap_every_ticks,"
@@ -1489,7 +1502,7 @@ static bool scale_write_summary_csv(const scale_network_t *network,
         "total_node_storage_bytes,host_allocated_bytes,host_work_ms,"
         "wall_elapsed_ms\n");
     (void)fprintf(file,
-        "%s,%s,%s,%s,%zu,%" PRIu32 ",%" PRIu32 ",%u,%u,%" PRIu32
+        "%s,%s,%s,%s,%s,%zu,%" PRIu32 ",%" PRIu32 ",%u,%u,%" PRIu32
         ",%" PRIu32 ",%u,%u,%u,"
         "%" PRIu32 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
         "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
@@ -1506,6 +1519,7 @@ static bool scale_write_summary_csv(const scale_network_t *network,
 #else
         "NANO",
 #endif
+        network->options.wire_mode == SCALE_WIRE_AUTO ? "auto" : "fixed",
         scale_topology_name(network->options.topology),
         scale_traffic_name(network->options.traffic),
         network->options.node_count, network->options.ticks,
@@ -1551,7 +1565,7 @@ static void scale_print_summary(const scale_network_t *network, bool passed)
          (double)totals.sum_squared_deliveries);
 
     (void)printf(
-        "SCALE_RESULT status=%s topology=%s traffic=%s nodes=%zu ticks=%"
+        "SCALE_RESULT status=%s wire_mode=%s topology=%s traffic=%s nodes=%zu ticks=%"
         PRIu32 " generated=%" PRIu64 " accepted=%" PRIu64
         " delivered=%" PRIu64 " delivery=%.3f%% wire_eff=%.3f%%"
         " p95=%" PRIu32 "ms p99=%" PRIu32 "ms fairness=%.6f"
@@ -1559,6 +1573,7 @@ static void scale_print_summary(const scale_network_t *network, bool passed)
         " duplicate_business=%u route_loop=%u host_alloc=%" PRIu64
         "B wall=%" PRIu64 "ms\n",
         passed ? "PASS" : "FAIL",
+        network->options.wire_mode == SCALE_WIRE_AUTO ? "auto" : "fixed",
         scale_topology_name(network->options.topology),
         scale_traffic_name(network->options.traffic),
         network->options.node_count, network->options.ticks,
@@ -1655,6 +1670,7 @@ static void scale_usage(const char *program)
         "  --payload-bytes N         12..UCN_MAX_PAYLOAD_BYTES\n"
         "  --topology tree|ring4     default tree\n"
         "  --traffic local|two-hop|pairs|incast|all-to-all|mixed\n"
+        "  --wire-mode fixed|auto    fixed W3 or route-aware minimum\n"
         "  --loss-per-mille N        0..1000\n"
         "  --duplicate-per-mille N   0..1000\n"
         "  --delay-ms N               virtual maximum delay\n"
@@ -1697,6 +1713,7 @@ static bool scale_parse_options(int argc, char **argv, scale_options_t *options)
     options->seed = UINT32_C(0x5CA1E123);
     options->topology = SCALE_TOPOLOGY_TREE;
     options->traffic = SCALE_TRAFFIC_TWO_HOP;
+    options->wire_mode = SCALE_WIRE_FIXED;
     for (index = 1; index < argc; ++index) {
         const char *argument = argv[index];
         const char *value;
@@ -1737,6 +1754,16 @@ static bool scale_parse_options(int argc, char **argv, scale_options_t *options)
                 options->traffic = SCALE_TRAFFIC_ALL_TO_ALL;
             } else if (strcmp(value, "mixed") == 0) {
                 options->traffic = SCALE_TRAFFIC_MIXED;
+            } else {
+                return false;
+            }
+            continue;
+        }
+        if (strcmp(argument, "--wire-mode") == 0) {
+            if (strcmp(value, "fixed") == 0) {
+                options->wire_mode = SCALE_WIRE_FIXED;
+            } else if (strcmp(value, "auto") == 0) {
+                options->wire_mode = SCALE_WIRE_AUTO;
             } else {
                 return false;
             }
@@ -1843,11 +1870,12 @@ int main(int argc, char **argv)
     if (!options.quiet) {
         (void)printf(
             "SCALE_START nodes=%zu topology=%s traffic=%s ticks=%" PRIu32
-            " warmup=%" PRIu32 " messages_per_node=%u event_slots=%zu"
+            " warmup=%" PRIu32 " messages_per_node=%u wire_mode=%s event_slots=%zu"
             " node_storage=%zuB host_alloc=%" PRIu64 "B\n",
             options.node_count, scale_topology_name(options.topology),
             scale_traffic_name(options.traffic), options.ticks,
             options.warmup_ticks, (unsigned)options.messages_per_node,
+            options.wire_mode == SCALE_WIRE_AUTO ? "auto" : "fixed",
             network.event_capacity, sizeof(ucn_node_t),
             network.allocated_bytes);
     }

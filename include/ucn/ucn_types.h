@@ -24,7 +24,7 @@ extern "C" {
 #define UCN_FRAME_W1_PATH_HEADER_SIZE ((size_t)25U)
 #define UCN_FRAME_W2_PATH_HEADER_SIZE ((size_t)31U)
 #define UCN_FRAME_W3_PATH_HEADER_SIZE ((size_t)36U)
-/* Compatibility names mean the default W3 encoding in V5-01. */
+/* Compatibility names mean the conservative fixed W3 encoding. */
 #define UCN_FRAME_HEADER_SIZE UCN_FRAME_W3_HEADER_SIZE
 #define UCN_FRAME_ROUTE_HEADER_SIZE UCN_FRAME_W3_ROUTE_HEADER_SIZE
 #define UCN_FRAME_PATH_HEADER_SIZE UCN_FRAME_W3_PATH_HEADER_SIZE
@@ -65,8 +65,9 @@ typedef uint32_t ucn_sequence_t;
 typedef uint32_t ucn_session_id_t;
 
 /* API values intentionally differ from the 2-bit wire code so a zero-filled
- * v4-style frame remains an explicit "unspecified" request.  V5-01 resolves
- * unspecified frames to W3; V5-02 will let each Node choose a fixed domain. */
+ * v4-style frame remains an explicit "unspecified" request.  The frame codec
+ * resolves unspecified standalone frames to W3; Node TX uses its configured
+ * fixed domain or the explicitly enabled route-aware automatic selector. */
 typedef uint8_t ucn_wire_profile_t;
 enum {
     UCN_WIRE_PROFILE_UNSPECIFIED = 0U,

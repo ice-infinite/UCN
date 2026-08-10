@@ -28,6 +28,7 @@ typedef struct v3_receive_state {
     uint32_t count;
     uint8_t payload;
     bool protected_frame;
+    ucn_wire_profile_t wire_profile;
 } v3_receive_state_t;
 
 static ucn_result_t v3_load_sequence(void *context, ucn_sequence_t *next_sequence)
@@ -202,8 +203,8 @@ static int v3_init_node(ucn_node_t *node, ucn_node_id_t node_id)
     if (result != UCN_OK) {
         return 1;
     }
-    return ucn_node_set_wire_profiles(node, UCN_WIRE_PROFILE_W0_LOCAL,
-                                      UCN_WIRE_PROFILE_W0_LOCAL) == UCN_OK ?
+    return ucn_node_set_wire_profiles(node, UCN_WIRE_PROFILE_W3_BACKBONE,
+                                      UCN_WIRE_PROFILE_W3_BACKBONE) == UCN_OK ?
                0 : 1;
 }
 
@@ -215,6 +216,7 @@ static void v3_receive(void *context, const ucn_frame_t *frame)
     state->payload = frame->payload[0];
     state->protected_frame =
         (frame->flags & UCN_FRAME_FLAG_E2E_PROTECTED) != 0U;
+    state->wire_profile = frame->wire_profile;
 }
 
 static int v3_test_frame_format(void)
@@ -359,6 +361,7 @@ static int v3_test_transparent_security(void)
     TEST_ASSERT(ucn_node_set_endpoint_security_policy(&a, endpoint, &encrypted) == UCN_OK);
     TEST_ASSERT(ucn_node_set_endpoint_security_policy(&b, endpoint, &encrypted) == UCN_OK);
     TEST_ASSERT(ucn_node_set_endpoint_security_policy(&c, endpoint, &encrypted) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profile_auto(&a, true) == UCN_OK);
 
     ab.ops = &V3_LINK_OPS; ab.context = &cab; ab.link_id = 1U; ab.mtu = UCN_MAX_FRAME_BYTES;
     ab.peer_node_id = UINT32_C(2);
@@ -387,12 +390,14 @@ static int v3_test_transparent_security(void)
     TEST_ASSERT(ucn_node_discover_route(&a, UINT32_C(3), 200U) == UCN_OK);
     TEST_ASSERT(ucn_node_step(&a, 201U) == UCN_OK);
     TEST_ASSERT(received.count == 1U && received.payload == payload &&
-                received.protected_frame);
+                received.protected_frame &&
+                received.wire_profile == UCN_WIRE_PROFILE_W0_LOCAL);
 
     TEST_ASSERT(ucn_node_send_endpoint(&a, UINT32_C(3), endpoint,
                                        UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);
     TEST_ASSERT(received.count == 2U && received.payload == payload &&
-                received.protected_frame);
+                received.protected_frame &&
+                received.wire_profile == UCN_WIRE_PROFILE_W0_LOCAL);
     TEST_ASSERT(a_state.seal_calls == 2U && c_state.open_calls == 2U &&
                 b_state.open_calls == 0U &&
                 b.stats.e2e_protected_forwarded == 2U);

@@ -18,6 +18,7 @@ nodes:
       - frame.ucn_frame_encode
       - frame.ucn_frame_decode
       - frame.ucn_frame_write_e2e_aad
+      - frame.ucn_frame_select_min_wire_profile
       - external.application_encoder
     calls: []
 
@@ -68,6 +69,25 @@ nodes:
       - target: frame.ucn_frame_max_payload_for_profile
         type: direct
         reason: 固定以 W3 执行 Profile-aware 计算。
+
+  - id: frame.ucn_frame_select_min_wire_profile
+    symbol: ucn_frame_select_min_wire_profile
+    type: function
+    file: src/ucn_frame.c
+    layer: core
+    role: 在官方 W0～W3 中选择能完整表达当前字段且满足最大档与实际 MTU 的最小档；可选 Tag 已计入最终长度。
+    called_by:
+      - node_runtime.prepare_outbound_wire_profile_static
+      - external.application_encoder
+    calls:
+      - target: frame.ucn_wire_profile_get_descriptor
+        type: direct
+        reason: 只遍历官方固定档位。
+      - target: frame.ucn_frame_encoded_size
+        type: direct
+        reason: 逐档校验地址、Hop、Route/Path、Payload、Tag 与 MTU。
+    notes:
+      - 无可用共同档返回错误，不截断字段，也不回退到超出 Peer Ceiling 的 W3。
 
   - id: frame.ucn_frame_encoded_size
     symbol: ucn_frame_encoded_size
@@ -153,7 +173,7 @@ nodes:
         type: direct
         reason: AAD 生成前拒绝无法由目标 Profile 表示的字段。
     notes:
-      - Hop Limit/Route Epoch 不在 AAD 内；无密钥跨域改写需未来外层 Wire 与内层规范 E2E 信封，V5-01 未实现。
+      - Hop Limit/Route Epoch 不在 AAD 内；Wire Profile 已绑定，透明中继不能改档后复用旧 Tag。
 
   - id: frame.ucn_crc16_ccitt
     symbol: ucn_crc16_ccitt

@@ -23,6 +23,8 @@ config PRODUCT_UCN_RX_DEPTH
 
 ## 2. 静态线程和对象
 
+在 `rt_thread_startup()` 前完成 `ucn_node_init()`、`ucn_node_set_wire_profiles()`、可选自动最小档和 Link/Security 注册。Wire Profile 配置属于产品初始化，不能由不同业务线程各自修改；业务线程只通过 Service Router 发送 Endpoint 数据。
+
 ```c
 #include "ucn/ucn_node_storage.h"
 

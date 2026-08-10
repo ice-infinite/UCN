@@ -1,6 +1,6 @@
 # UCN 快速使用手册
 
-> 适用：当前 `codex/v5-adaptive-wire` 的 UCN Core 5.0.0 / 线协议 v5 V5-01。Node 新发帧暂时默认 W3；W0～W2 Codec 可直接测试，但产品 Node 固定域配置要等 V5-02。本文档组其余流程仍以公开 C99 API 和现有 ESP32 FreeRTOS 参考实现为准。
+> 适用：当前 `codex/v5-adaptive-wire` 的 UCN Core 5.0.0 / 线协议 v5 V5-07 软件状态。默认固定 W3；固定域和显式自动最小档已可用。本文档组以公开 C99 API 和现有 ESP32 FreeRTOS 参考实现为准。
 
 ## 选择你的运行环境
 
@@ -58,7 +58,7 @@ include/ucn/
 
 ## 先完成这四项，再让业务入网
 
-1. 冻结 `network_id`、每块板稳定且不重复的 `node_id`、Endpoint ABI、QoS 和最大 Payload。
+1. 冻结 `network_id`、每块板稳定且不重复的 `node_id`、固定 TX/最大 RX Wire Profile、Endpoint ABI、QoS 和最大 Payload。
 2. 实现至少一种 Link 的 `open/send/poll_rx/get_status/close/get_metrics`，并把它注册到 Node。
 3. 让完整帧遵守“驱动队列 → Protocol Task → `ucn_adapter_rx_pump()`”路径；验证队列满会丢弃并计数，不会卡死回调。
 4. 先以一个 Endpoint 的 Q1 数据做两节点收发，再接 Service Router、多 Bearer、Path、策略和安全 Provider。

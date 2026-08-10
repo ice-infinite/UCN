@@ -97,7 +97,7 @@ nodes:
     type: function
     file: src/ucn_node.c
     layer: security
-    role: 在业务帧发送前选择保护模式，必要时生成 AAD、调用 seal 并附加 Tag。
+    role: 在业务帧发送前先确定保护 Flag，再让 Wire 选档把 16 B Tag/MTU 纳入计算，最后生成 AAD、调用 seal 并附加 Tag。
     called_by:
       - route.ucn_node_send
       - route.ucn_node_send_path
@@ -108,6 +108,9 @@ nodes:
       - target: external.security_provider_select_tx_protection
         type: callback
         reason: 在 AUTO 策略下决定当前帧是否保护。
+      - target: node_runtime.prepare_outbound_wire_profile_static
+        type: direct
+        reason: E2E Flag 确定后才选档，确保 Tag 不会让最终帧越过 MTU。
       - target: frame.ucn_frame_write_e2e_aad
         type: direct
         reason: 绑定不可变的业务身份和 Path ID。

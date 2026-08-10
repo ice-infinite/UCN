@@ -163,5 +163,14 @@ if(UCN_BUILD_TESTS)
             --traffic two-hop
             --quiet
         )
+        add_test(NAME ucn_scale_auto_smoke COMMAND ucn_scale_sim
+            --nodes 8
+            --ticks 20
+            --warmup-ticks 40
+            --drain-ticks 120
+            --traffic two-hop
+            --wire-mode auto
+            --quiet
+        )
     endif()
 endif()

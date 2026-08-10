@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | 已入网节点突然断开 | `get_status()` Down 时立即清相关动态路由并回收动态 Link；无驱动事件时以一跳 Heartbeat/认证业务刷新 `last_seen`，3 s 进入 SUSPECT、4 s 移除（默认宏，可覆盖）。 | 默认时间只通过虚拟 Link 验证，真实介质需 T14/T18 标定。 |
 | 新节点接入 | Adapter 先建立物理 Candidate Link；双方调用物理一跳广播 `HELLO`，Core 绑定 Node ID，再按 Manual/Open/Provider 策略准入。 | 虚拟测试中双方 HELLO 后立即可单跳通信；当前没有自动 HELLO 周期、真实 Adapter 或实机测量，不能给出毫秒承诺。 |
-| 新节点对全网的影响 | HELLO 是一跳、4 B 载荷的控制帧，不转发；加入本身不全网重算路由。 | 单个 HELLO 为 `32 B 帧头 + 4 B 载荷 = 36 B` UCN 帧。只有其他节点第一次需要到达它时，才会按需发 RREQ。 |
+| 新节点对全网的影响 | v5 HELLO 是一跳、0 B Payload 的控制帧，不转发；加入本身不全网重算路由。 | 单个 HELLO 只含所选 Wire Profile 的 17/21/26/30 B Header。只有其他节点第一次需要到达它时，才会按需发 RREQ。 |
 | 无用状态清理 | 动态 Route 默认 30 s 到期，Candidate 邻居默认 5 s 到期；已准入邻居失联后注销本地 Link、清 Node ID 并复用固定槽。 | Adapter 自己的物理地址池释放回调和实机压力测量待 T14。 |
 | 无缝路径切换 | 已有“旧 Active 持续业务、Candidate 先 Probe、Activate 后切换”的 v4 控制面；业务以 Route Epoch 区分 Current/Previous，默认 grace 1 s。 | 已交给驱动的帧不可迁移，仍不能承诺零乱序/零丢失。 |
 | 定期最优路径检查 | 已实现已使用多跳 Active 路径刷新、保守未知 Cost 与固定源端 Token。 | Cost 抖动连续窗口、随机 HELLO 退避和实机参数。 |

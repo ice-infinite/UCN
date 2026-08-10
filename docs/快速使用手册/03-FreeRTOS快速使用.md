@@ -33,6 +33,8 @@ FreeRTOS 的 Task、事件 Queue、Adapter RX 缓冲和 UCN 固定表都应在�
 
 ## 3. 启动顺序
 
+Node 启动顺序固定为 `ucn_node_init()` → `ucn_node_set_wire_profiles()` → 可选 `ucn_node_set_wire_profile_auto(true)` → Link/Security → Router/Bridge/Port → 创建任务。所有配置都在 Scheduler 启动前完成，不能让多个 Task 在运行中修改 Wire 域。
+
 ```cpp
 static void create_ucn_service_task(void)
 {

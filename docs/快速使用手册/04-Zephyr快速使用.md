@@ -47,6 +47,8 @@ flowchart LR
 
 ## 3. 静态 Protocol Thread
 
+在线程启动前完成 Node 配置：`ucn_node_init()` 后调用 `ucn_node_set_wire_profiles()`，再按产品需要显式开启自动最小档，随后注册 Link 和 Security Provider。建议把固定 TX/最大 RX 档映射为产品 Kconfig 常量，但仍只调用官方 W0～W3 API，不自定义位宽。
+
 ```c
 #include <zephyr/kernel.h>
 #include "ucn/ucn_adapter.h"

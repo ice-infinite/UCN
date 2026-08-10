@@ -178,13 +178,16 @@ nodes:
     type: function
     file: src/ucn_node.c
     layer: core
-    role: 对已准备好的帧执行长度检查、编码并调用具体 Link 的 send。
+    role: 读取 Link 状态，对未选档的源发业务帧准备固定/自动 Wire Profile，再编码并调用具体 Link 的 send；转发帧保留原 Profile。
     called_by:
       - route.ucn_node_send
       - route.ucn_node_send_path
       - node_runtime.forward_or_dispatch_static
       - node_runtime.send_control_on_link_static
     calls:
+      - target: node_runtime.prepare_outbound_wire_profile_static
+        type: direct
+        reason: 源发帧按 Node 模式、Peer Ceiling 和 Link MTU 固定或自动选档。
       - target: frame.ucn_frame_encode
         type: direct
         reason: 生成最终线上帧。
@@ -193,6 +196,22 @@ nodes:
         reason: 交给 ESP-NOW/UART/CAN/BLE/LoRa 等 Adapter 的发送实现。
     notes:
       - Link send 成功只代表本介质接受该帧；端到端业务执行需由上层结果 Endpoint/确认协议表达。
+
+  - id: node_runtime.prepare_outbound_wire_profile_static
+    symbol: prepare_outbound_wire_profile
+    type: function
+    file: src/ucn_node.c
+    layer: core
+    role: 合并 Node 固定 TX 档、自动开关、Link Peer Ceiling、实际 MTU 与当前帧 Route Hop/Path/Tag 要求。
+    called_by:
+      - node_runtime.send_frame_on_link_static
+      - security.protect_outbound_business
+    calls:
+      - target: frame.ucn_frame_select_min_wire_profile
+        type: direct
+        reason: 自动模式选择满足全部约束的最小官方档。
+    notes:
+      - 显式已有 Profile 的转发帧只验证出口兼容性，不重新编码到另一档。
 
   - id: node_runtime.ucn_duplicate_accept_frame_static
     symbol: ucn_duplicate_accept_frame
