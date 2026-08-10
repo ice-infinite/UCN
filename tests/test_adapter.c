@@ -77,7 +77,6 @@ static ucn_result_t adapter_encode_frame(uint8_t message_type,
                                          uint8_t *encoded,
                                          size_t *encoded_length)
 {
-    uint8_t hello_payload[4];
     ucn_frame_t frame;
 
     (void)memset(&frame, 0, sizeof(frame));
@@ -89,14 +88,7 @@ static ucn_result_t adapter_encode_frame(uint8_t message_type,
     frame.source = source;
     frame.destination = destination;
     frame.sequence = sequence;
-    if (message_type == UCN_MSG_HELLO) {
-        hello_payload[0] = (uint8_t)(hello_node_id >> 24U);
-        hello_payload[1] = (uint8_t)(hello_node_id >> 16U);
-        hello_payload[2] = (uint8_t)(hello_node_id >> 8U);
-        hello_payload[3] = (uint8_t)hello_node_id;
-        frame.payload = hello_payload;
-        frame.payload_length = (uint16_t)sizeof(hello_payload);
-    }
+    (void)hello_node_id;
     return ucn_frame_encode(&frame, encoded, UCN_MAX_FRAME_BYTES, encoded_length);
 }
 

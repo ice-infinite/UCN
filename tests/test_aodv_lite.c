@@ -72,7 +72,8 @@ int test_aodv_lite(void)
 {
     uint8_t first_payload = 0x31U;
     uint8_t repaired_payload = 0x32U;
-    uint8_t duplicate_payload[16];
+    uint8_t duplicate_payload[9];
+    uint8_t legacy_request_payload[16] = { 0U };
     uint8_t duplicate_encoded[UCN_MAX_FRAME_BYTES];
     size_t duplicate_length = 0U;
     bool ab_up = true;
@@ -122,14 +123,31 @@ int test_aodv_lite(void)
     ucn_node_set_rx_handler(&c, aodv_rx, &received);
 
     (void)memset(&duplicate_request, 0, sizeof(duplicate_request));
-    duplicate_payload[0] = 0U; duplicate_payload[1] = 0U;
-    duplicate_payload[2] = 0U; duplicate_payload[3] = 1U;
-    duplicate_payload[4] = 0U; duplicate_payload[5] = 0U;
-    duplicate_payload[6] = 0U; duplicate_payload[7] = 99U;
-    duplicate_payload[8] = 0U; duplicate_payload[9] = 0U;
-    duplicate_payload[10] = 0U; duplicate_payload[11] = 1U;
-    duplicate_payload[12] = 0U; duplicate_payload[13] = 0U;
-    duplicate_payload[14] = 0U; duplicate_payload[15] = 0U;
+    legacy_request_payload[3] = 1U;
+    legacy_request_payload[7] = 99U;
+    legacy_request_payload[11] = 1U;
+    duplicate_request.message_type = UCN_MSG_ROUTE_REQ;
+    duplicate_request.wire_profile = UCN_WIRE_PROFILE_W0_LOCAL;
+    duplicate_request.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
+    duplicate_request.hop_limit = 4U;
+    duplicate_request.network_id = UINT32_C(42);
+    duplicate_request.source = UINT32_C(1);
+    duplicate_request.destination = UCN_NODE_BROADCAST;
+    duplicate_request.sequence = UINT32_C(0xA9);
+    duplicate_request.payload = legacy_request_payload;
+    duplicate_request.payload_length = (uint16_t)sizeof(legacy_request_payload);
+    TEST_ASSERT(ucn_frame_encode(&duplicate_request, duplicate_encoded,
+                                 sizeof(duplicate_encoded),
+                                 &duplicate_length) == UCN_OK);
+    TEST_ASSERT(ucn_node_receive(&b, &ba, duplicate_encoded, duplicate_length) ==
+                UCN_ERR_MALFORMED);
+
+    (void)memset(&duplicate_request, 0, sizeof(duplicate_request));
+    duplicate_payload[0] = 99U;
+    duplicate_payload[1] = 0U; duplicate_payload[2] = 0U;
+    duplicate_payload[3] = 0U; duplicate_payload[4] = 1U;
+    duplicate_payload[5] = 0U; duplicate_payload[6] = 0U;
+    duplicate_payload[7] = 0U; duplicate_payload[8] = 0U;
     duplicate_request.message_type = UCN_MSG_ROUTE_REQ;
     duplicate_request.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
     duplicate_request.hop_limit = 4U;

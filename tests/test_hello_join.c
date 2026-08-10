@@ -95,10 +95,6 @@ static ucn_result_t encode_hello(ucn_network_id_t network_id,
     uint8_t payload[4];
     ucn_frame_t frame;
 
-    payload[0] = (uint8_t)(payload_node_id >> 24U);
-    payload[1] = (uint8_t)(payload_node_id >> 16U);
-    payload[2] = (uint8_t)(payload_node_id >> 8U);
-    payload[3] = (uint8_t)payload_node_id;
     (void)memset(&frame, 0, sizeof(frame));
     frame.message_type = UCN_MSG_HELLO;
     frame.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
@@ -107,8 +103,14 @@ static ucn_result_t encode_hello(ucn_network_id_t network_id,
     frame.source = source;
     frame.destination = destination;
     frame.sequence = sequence;
-    frame.payload = payload;
-    frame.payload_length = (uint16_t)sizeof(payload);
+    if (payload_node_id != 0U) {
+        payload[0] = (uint8_t)(payload_node_id >> 24U);
+        payload[1] = (uint8_t)(payload_node_id >> 16U);
+        payload[2] = (uint8_t)(payload_node_id >> 8U);
+        payload[3] = (uint8_t)payload_node_id;
+        frame.payload = payload;
+        frame.payload_length = (uint16_t)sizeof(payload);
+    }
     return ucn_frame_encode(&frame, encoded, encoded_capacity, encoded_length);
 }
 
@@ -210,13 +212,13 @@ int test_hello_join(void)
     TEST_ASSERT(ucn_node_neighbor_count(&node_c, UCN_NEIGHBOR_CANDIDATE) == 0U);
 
     TEST_ASSERT(encode_hello(config_c.network_id + 1U, config_a.node_id,
-                             config_c.node_id, config_a.node_id, 3U, encoded,
+                             config_c.node_id, 0U, 3U, encoded,
                              sizeof(encoded), &encoded_length) == UCN_OK);
     TEST_ASSERT(ucn_node_receive(&node_c, &candidate_ingress, encoded,
                                  encoded_length) == UCN_ERR_NETWORK);
 
     TEST_ASSERT(encode_hello(config_c.network_id, config_a.node_id, config_c.node_id,
-                             config_a.node_id, 4U, encoded, sizeof(encoded),
+                             0U, 4U, encoded, sizeof(encoded),
                              &encoded_length) == UCN_OK);
     TEST_ASSERT(ucn_node_receive(&node_c, &candidate_ingress, encoded,
                                  encoded_length) == UCN_OK);

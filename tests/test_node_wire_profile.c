@@ -62,6 +62,63 @@ static void setup_link(ucn_link_t *link,
     link->mtu = mtu;
 }
 
+#if UCN_FEATURE_DYNAMIC_MESH
+static uint32_t read_width_be(const uint8_t *data, uint8_t width)
+{
+    uint8_t index;
+    uint32_t value = 0U;
+
+    for (index = 0U; index < width; ++index) {
+        value = (value << 8U) | data[index];
+    }
+    return value;
+}
+
+static int verify_control_profile(ucn_wire_profile_t profile,
+                                  uint32_t network_id,
+                                  ucn_node_id_t source,
+                                  ucn_node_id_t target,
+                                  uint8_t hop_limit)
+{
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(profile);
+    ucn_config_t config = { network_id, source, hop_limit };
+    ucn_node_t node;
+    ucn_link_t link;
+    wire_link_context_t context;
+    ucn_frame_t decoded;
+
+    TEST_ASSERT(descriptor != NULL);
+    TEST_ASSERT(ucn_node_init(&node, &config) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profiles(&node, profile, profile) == UCN_OK);
+    setup_link(&link, &context, (uint32_t)profile + 100U, 0U,
+               UCN_MAX_FRAME_BYTES);
+
+    TEST_ASSERT(ucn_node_broadcast_hello(&node, &link, 1U) == UCN_OK);
+    TEST_ASSERT(ucn_frame_decode(context.last_frame, context.last_length,
+                                 &decoded) == UCN_OK);
+    TEST_ASSERT(decoded.message_type == UCN_MSG_HELLO);
+    TEST_ASSERT(decoded.wire_profile == profile);
+    TEST_ASSERT(decoded.payload_length == 0U);
+    TEST_ASSERT(context.last_length ==
+                ucn_frame_header_size_for_profile(profile, 0U));
+
+    TEST_ASSERT(ucn_node_register_link(&node, &link) == UCN_OK);
+    TEST_ASSERT(ucn_node_discover_route(&node, target, 10U) == UCN_OK);
+    TEST_ASSERT(ucn_frame_decode(context.last_frame, context.last_length,
+                                 &decoded) == UCN_OK);
+    TEST_ASSERT(decoded.message_type == UCN_MSG_ROUTE_REQ);
+    TEST_ASSERT(decoded.wire_profile == profile);
+    TEST_ASSERT(decoded.payload_length ==
+                (uint16_t)(descriptor->address_bytes + 8U));
+    TEST_ASSERT(read_width_be(decoded.payload, descriptor->address_bytes) ==
+                target);
+    TEST_ASSERT(read_width_be(decoded.payload + descriptor->address_bytes, 4U) !=
+                0U);
+    return 0;
+}
+#endif
+
 static int verify_profile_send(ucn_wire_profile_t profile,
                                uint32_t network_id,
                                ucn_node_id_t source,
@@ -117,6 +174,18 @@ int test_node_wire_profile(void)
                                     UINT32_C(0xAABBCCDD), UINT32_C(0x1000001),
                                     UINT32_C(0x1000002), 16U,
                                     UCN_FRAME_W3_HEADER_SIZE) == 0);
+#if UCN_FEATURE_DYNAMIC_MESH
+    TEST_ASSERT(verify_control_profile(UCN_WIRE_PROFILE_W0_LOCAL, 42U, 1U, 2U,
+                                       4U) == 0);
+    TEST_ASSERT(verify_control_profile(UCN_WIRE_PROFILE_W1_EDGE, 300U, 300U,
+                                       301U, 16U) == 0);
+    TEST_ASSERT(verify_control_profile(UCN_WIRE_PROFILE_W2_MESH, 70000U, 70000U,
+                                       70001U, 16U) == 0);
+    TEST_ASSERT(verify_control_profile(UCN_WIRE_PROFILE_W3_BACKBONE,
+                                       UINT32_C(0xAABBCCDD),
+                                       UINT32_C(0x1000001),
+                                       UINT32_C(0x1000002), 16U) == 0);
+#endif
 
     TEST_ASSERT(ucn_node_init(&node, &config) == UCN_OK);
     TEST_ASSERT(ucn_node_get_tx_wire_profile(&node) ==
