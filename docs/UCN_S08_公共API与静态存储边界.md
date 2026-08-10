@@ -1,5 +1,7 @@
 # UCN S08 公共 API 与静态存储边界
 
+> v5 后续说明：本文保留为 `v4.0.0-final-before-v5` 的 API/资源历史证据。当前 v5 V5-01 已把帧 Codec 升为 W0～W3，但没有改变 Node API/Storage owner 边界；当前资源和线格式以 `UCN_V5_01_官方Wire_Profile_Codec实现报告.md` 为准。
+
 ## 1. 当前结论
 
 S08 已把 Node 的“对外 API”和“固定内存实现布局”分成两个显式头文件，同时保留 MCU-first 的静态分配方式：

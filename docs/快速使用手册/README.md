@@ -1,6 +1,6 @@
 # UCN 快速使用手册
 
-> 适用：当前 UCN Core 4.0.0 / 线协议 v4。本文档组以 `include/ucn/` 的公开 C99 API 和现有 ESP32 FreeRTOS 参考实现为准。
+> 适用：当前 `codex/v5-adaptive-wire` 的 UCN Core 5.0.0 / 线协议 v5 V5-01。Node 新发帧暂时默认 W3；W0～W2 Codec 可直接测试，但产品 Node 固定域配置要等 V5-02。本文档组其余流程仍以公开 C99 API 和现有 ESP32 FreeRTOS 参考实现为准。
 
 ## 选择你的运行环境
 

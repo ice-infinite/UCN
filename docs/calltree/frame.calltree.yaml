@@ -1,55 +1,113 @@
 module: frame
-description: v4 32/36/40 B Header、CRC-16 和端到端 AAD 的编解码路径。
+description: v5 W0/W1/W2/W3 官方 Header、CRC-16 和端到端 AAD 编解码路径。
 entry: frame.ucn_frame_encode
 source_files:
   - src/ucn_frame.c
 
 nodes:
+  - id: frame.ucn_wire_profile_get_descriptor
+    symbol: ucn_wire_profile_get_descriptor
+    type: function
+    file: src/ucn_frame.c
+    layer: core
+    role: 按 API Profile 返回唯一只读官方描述符；不接受用户自定义字段宽度。
+    called_by:
+      - frame.ucn_frame_header_size_for_profile
+      - frame.ucn_frame_max_payload_for_profile
+      - frame.ucn_frame_encoded_size
+      - frame.ucn_frame_encode
+      - frame.ucn_frame_decode
+      - frame.ucn_frame_write_e2e_aad
+      - external.application_encoder
+    calls: []
+
+  - id: frame.ucn_frame_header_size_for_profile
+    symbol: ucn_frame_header_size_for_profile
+    type: function
+    file: src/ucn_frame.c
+    layer: core
+    role: 由 W0～W3 Descriptor 与 Route/Path Flag 唯一推导 17～36 B Header。
+    called_by:
+      - frame.ucn_frame_max_payload_for_profile
+      - frame.ucn_frame_encoded_size
+      - frame.ucn_frame_encode
+      - frame.ucn_frame_decode
+      - external.application_encoder
+    calls:
+      - target: frame.ucn_wire_profile_get_descriptor
+        type: direct
+        reason: 未指定 Profile 兼容解析为 W3，显式值只接受四个官方档位。
+
+  - id: frame.ucn_frame_max_payload_for_profile
+    symbol: ucn_frame_max_payload_for_profile
+    type: function
+    file: src/ucn_frame.c
+    layer: core
+    role: 同时按 Profile Length 宽度、实际 Header、Tag、UCN_MAX_FRAME_BYTES 和静态 Payload 上限裁剪。
+    called_by:
+      - frame.ucn_frame_max_payload
+      - frame.profile_validation_helpers_static
+      - external.application_encoder
+    calls:
+      - target: frame.ucn_wire_profile_get_descriptor
+        type: direct
+        reason: 读取 Length 字段宽度。
+      - target: frame.ucn_frame_header_size_for_profile
+        type: direct
+        reason: 扣除实际 Header 和可选 16 B Tag。
+
   - id: frame.ucn_frame_max_payload
     symbol: ucn_frame_max_payload
     type: function
     file: src/ucn_frame.c
     layer: core
-    role: 按 Route/Path/E2E Flags 返回当前固定 MTU 下真实可用 Payload 上限。
+    role: 为旧调用保留的 W3 Payload 上限查询。
     called_by:
       - external.application_encoder
     calls:
-      - target: frame.header_layout_helpers_static
+      - target: frame.ucn_frame_max_payload_for_profile
         type: direct
-        reason: 选择 32/36/40 B Header 并扣除可选 16 B Tag。
+        reason: 固定以 W3 执行 Profile-aware 计算。
 
   - id: frame.ucn_frame_encoded_size
     symbol: ucn_frame_encoded_size
     type: function
     file: src/ucn_frame.c
     layer: core
-    role: 根据基础/Route/Path Header、Payload 和可选 Tag 计算并校验最终帧长度。
+    role: 校验 Profile/字段/扩展/Tag 后，计算 Header、Payload 与可选 Tag 的最终长度。
     called_by:
       - frame.ucn_frame_encode
       - node_runtime.send_frame_on_link
     calls:
-      - target: frame.header_layout_helpers_static
+      - target: frame.profile_validation_helpers_static
         type: direct
-        reason: 依据 has_route_extension/has_path_id 选择 32/36/40 B Header。
-    notes:
-      - 固定上限由 UCN_MAX_FRAME_BYTES 限制；超限直接失败，不在 Core 自动分片。
+        reason: 拒绝地址、Hop、Length、Route Epoch、Path ID 和 Flag 超出官方档位。
+      - target: frame.ucn_frame_header_size_for_profile
+        type: direct
+        reason: 取得 Profile+Flags 唯一 Header 长度。
 
   - id: frame.ucn_frame_encode
     symbol: ucn_frame_encode
     type: function
     file: src/ucn_frame.c
     layer: core
-    role: 将 ucn_frame_t 编为线上字节序列，写入 Header、Payload、可选 E2E Tag 和 CRC。
+    role: 将 ucn_frame_t 编为官方 W0～W3 字节序列，写 Header、Payload、可选 Tag 和 CRC。
     called_by:
       - node_runtime.send_frame_on_link
       - node_runtime.send_control_on_link
     calls:
+      - target: frame.profile_validation_helpers_static
+        type: direct
+        reason: 未指定 Profile 解析为 W3，超范围失败而不截断。
       - target: frame.ucn_frame_encoded_size
         type: direct
-        reason: 先校验帧扩展组合和输出容量。
+        reason: 校验最终输出容量。
+      - target: frame.ucn_frame_header_size_for_profile
+        type: direct
+        reason: 推导 CRC 和 Payload 起始位置。
       - target: frame.ucn_crc16_ccitt
         type: direct
-        reason: 覆盖 Header（不含 CRC 字段）、Payload 和可选 Tag 计算 CRC。
+        reason: 覆盖 Header CRC 前缀、Payload 和可选 Tag。
     notes:
       - CRC 仅检错，不提供身份认证或防篡改能力。
 
@@ -58,32 +116,44 @@ nodes:
     type: function
     file: src/ucn_frame.c
     layer: core
-    role: 校验 Magic、协议版本、Header 组合、长度、Hop Limit 与 CRC，并解析为 ucn_frame_t 视图。
+    role: 先解析 Version+Profile 和 Traffic+Flags，再推导 Header，校验字段、长度、Hop、CRC并返回视图。
     called_by:
       - node_runtime.ucn_node_receive
     calls:
+      - target: frame.ucn_wire_profile_get_descriptor
+        type: direct
+        reason: 由线上 2 bit Code 选择官方 Descriptor。
+      - target: frame.ucn_frame_header_size_for_profile
+        type: direct
+        reason: 不依赖线上 Header Size 字段推导布局。
+      - target: frame.profile_validation_helpers_static
+        type: direct
+        reason: CRC 后执行完整语义边界校验。
       - target: frame.ucn_crc16_ccitt
         type: direct
         reason: 重算并对比接收帧 CRC。
     outputs:
-      - 成功：frame.payload/auth_tag 指向本次输入缓冲区。
-      - 失败：UCN_ERR_MALFORMED、UCN_ERR_VERSION、UCN_ERR_CRC 或 UCN_ERR_TOO_LARGE。
+      - 成功：wire_profile 为明确 W0～W3，payload/auth_tag 指向本次输入缓冲区。
+      - 失败：UCN_ERR_MALFORMED、UCN_ERR_VERSION 或 UCN_ERR_CRC。
     notes:
-      - 调用者必须在 Payload 被使用期间保持输入缓冲区有效；Adapter Pump 在当前同步调用内满足此条件。
+      - 调用者必须在 Payload 被使用期间保持输入缓冲区有效。
 
   - id: frame.ucn_frame_write_e2e_aad
     symbol: ucn_frame_write_e2e_aad
     type: function
     file: src/ucn_frame.c
     layer: security
-    role: 生成不可变业务身份字段的 30 B AAD，Path 帧额外绑定 Path ID。
+    role: 生成 30 B 规范 AAD；Profile+Version、地址、Sequence、Session、Length 和可选 Path ID 被绑定。
     called_by:
       - security.protect_outbound_business
       - security.validate_inbound_business_security
       - external.security_provider
-    calls: []
+    calls:
+      - target: frame.profile_validation_helpers_static
+        type: direct
+        reason: AAD 生成前拒绝无法由目标 Profile 表示的字段。
     notes:
-      - Hop Limit/Route Epoch 不在 AAD 内，因此中继可合法递减 TTL/维护 Route；源/目的/序号/Session/Path ID 受保护。
+      - Hop Limit/Route Epoch 不在 AAD 内；无密钥跨域改写需未来外层 Wire 与内层规范 E2E 信封，V5-01 未实现。
 
   - id: frame.ucn_crc16_ccitt
     symbol: ucn_crc16_ccitt
@@ -96,14 +166,22 @@ nodes:
       - frame.ucn_frame_decode
     calls: []
 
-  - id: frame.header_layout_helpers_static
-    symbol: frame_header_size/frame_crc_offset
+  - id: frame.profile_validation_helpers_static
+    symbol: resolve_profile/validate_frame_fields/read_uint_be/write_uint_be
     type: function
     file: src/ucn_frame.c
     layer: core
-    role: 根据扩展 Flag 选择 Header 长度和 CRC 字段位置。
+    role: 完成 Profile 默认解析、宽度读写、广播映射和所有字段范围的失败关闭校验。
     called_by:
+      - frame.ucn_frame_max_payload_for_profile
       - frame.ucn_frame_encoded_size
       - frame.ucn_frame_encode
       - frame.ucn_frame_decode
-    calls: []
+      - frame.ucn_frame_write_e2e_aad
+    calls:
+      - target: frame.ucn_wire_profile_get_descriptor
+        type: direct
+        reason: 所有宽度和上限只来自官方固定表。
+      - target: frame.ucn_frame_max_payload_for_profile
+        type: direct
+        reason: 校验 Payload 的路径无关本机上限。

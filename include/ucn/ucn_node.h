@@ -258,10 +258,9 @@ typedef char ucn_unknown_route_cost_must_use_reserved_sentinel[
     (UCN_FRAME_HEADER_SIZE + UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES + \
      2U * sizeof(ucn_node_id_t))
 #define UCN_PATH_TRACE_NODE_CAPACITY_BY_FRAME \
-    (UCN_MAX_FRAME_BYTES >= \
-             (UCN_FRAME_HEADER_SIZE + UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES) ? \
-         ((UCN_MAX_FRAME_BYTES - UCN_FRAME_HEADER_SIZE - \
-           UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES) / sizeof(ucn_node_id_t)) : \
+    (UCN_MAX_PAYLOAD_BYTES >= UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES ? \
+         ((UCN_MAX_PAYLOAD_BYTES - UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES) / \
+          sizeof(ucn_node_id_t)) : \
          0U)
 #if UCN_FEATURE_DIAGNOSTICS
 #define UCN_PATH_TRACE_MAX_NODES \
@@ -364,7 +363,8 @@ typedef char ucn_unknown_route_cost_must_use_reserved_sentinel[
 
 #if UCN_FEATURE_DYNAMIC_MESH
 typedef char ucn_dynamic_mesh_control_must_fit_frame[
-    UCN_MAX_FRAME_BYTES >= UCN_DYNAMIC_MESH_MIN_FRAME_BYTES ? 1 : -1];
+    UCN_MAX_FRAME_BYTES >= UCN_DYNAMIC_MESH_MIN_FRAME_BYTES &&
+            UCN_MAX_PAYLOAD_BYTES >= (size_t)18U ? 1 : -1];
 typedef char ucn_rreq_cache_must_not_be_empty[
     UCN_RREQ_CACHE_SIZE > 0U ? 1 : -1];
 typedef char ucn_rreq_cache_timeout_must_be_valid[

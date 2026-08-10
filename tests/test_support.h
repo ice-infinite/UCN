@@ -15,6 +15,7 @@
 
 int test_core(void);
 int test_frame(void);
+int test_wire_profile(void);
 int test_node(void);
 int test_virtual_link(void);
 int test_qos(void);

@@ -8,7 +8,7 @@ int test_core(void)
     ucn_config_t config;
 
     (void)memset(&config, 0, sizeof(config));
-    TEST_ASSERT(strcmp(ucn_version(), "4.0.0") == 0);
+    TEST_ASSERT(strcmp(ucn_version(), "5.0.0") == 0);
     TEST_ASSERT(ucn_validate_config(NULL) == UCN_ERR_ARGUMENT);
     TEST_ASSERT(ucn_validate_config(&config) == UCN_ERR_CONFIG);
 

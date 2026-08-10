@@ -1,6 +1,6 @@
 # UCN 使用与调用手册
 
-> 适用版本：UCN v4 当前 Core。本文以当前公开头文件为准；产品工程的 Adapter、密钥、板级引脚和业务 Endpoint 可在此基础上扩展。
+> 适用版本：UCN v5 V5-01 当前 Core。Node 新发帧仍默认 W3，固定域选档待 V5-02；其余调用方式以当前公开头文件为准。产品工程的 Adapter、密钥、板级引脚和业务 Endpoint 可在此基础上扩展。
 > 目标：让业务代码只关心“发给哪个 Node 的哪个 Endpoint、什么 QoS”，而不关心数据当前经过 Wi-Fi、UART、CAN、BLE 或其他 Bearer。
 
 ## 1. 先理解 UCN 在系统中的位置

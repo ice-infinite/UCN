@@ -1,6 +1,6 @@
 # UCN 协议分层与配置档案
 
-> 状态：**UCN v4 C99 Core 源码快照（2026-08-10）**；Nano/Lite/Full 源码裁剪已完成软件验证，真实 Adapter、生产 AEAD Provider 和各 Profile 的目标板资源报告仍待接入。
+> 状态：**UCN v5 V5-01 C99 Core（2026-08-11）**；Nano/Lite/Full 与 W0～W3 是正交维度。Wire Codec 已完成软件验证，Node 固定域档位待 V5-02；真实 Adapter、生产 AEAD 和目标板资源仍待接入。
 > 日期：2026-08-04  
 > 关联文档：[UCN 整体架构设计](UCN_整体架构设计.md)
 
@@ -20,7 +20,7 @@ UCN-Host      只有 Linux、地面站、ROS2 等外部主机使用
 
 上层只能依赖下层，不能反向依赖：关闭 `Extended` 或完全不部署 `Host` 时，`Core` 的认证、发现、路由、转发和失联恢复仍完整可用。
 
-当前仓库已实现 v4 帧、邻居保活/回收、Route Epoch/grace、受限 Candidate 选路、静态 Endpoint、Endpoint Q1 首包等待、Q0/Q1、受保护业务 Provider 边界、透明密文中继、受认证 Path ID 逐跳表、按需路径追踪、按需节点快照、受授权的按需策略诊断和 Adapter 模拟；`Extended`、真实 Linux Host、生产密码库和真实介质驱动仍未实现。
+当前仓库已实现 v5 W0～W3 Codec，以及从 v4 继承的邻居保活/回收、Route Epoch/grace、受限 Candidate 选路、静态 Endpoint、Endpoint Q1 首包等待、Q0/Q1、受保护业务 Provider 边界、透明密文中继、受认证 Path ID 逐跳表、按需诊断和 Adapter 模拟。Node 新发帧仍默认 W3；`Extended`、真实 Linux Host、生产密码库和真实介质驱动仍未实现。
 
 ## 2. 三个档案的边界
 
@@ -48,12 +48,12 @@ Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个�
 
 | 模块 | 当前状态 | 后续范围 |
 | --- | --- | --- |
-| Fixed Frame | 已实现版本 4、32 B 基础头/36 B Route Extension/40 B Path Header、CRC、长度/网络/TTL/Flag 校验；受保护业务带 16 B Tag，v3 与未知 Path 格式拒绝。 | 跨 Link 分片。 |
+| Fixed Frame | 已实现版本 5 的 W0/W1/W2/W3 官方 Codec；基础头 17/21/26/30 B，Route/Path 长度由 Profile+Flags 推导，保留 CRC、16 B 可选 Tag、长度/网络/Hop/Flag/字段范围校验并拒绝 v4。V5-01 的 Node 发送仍默认 W3。 | V5-02 Node 固定域配置、V5-03 控制帧压缩、跨 Link 分片。 |
 | Identity & Join | 已实现最小 HELLO、邻居状态机和三种准入策略。 | JOIN 挑战/接受、设备证书/身份格式。 |
 | Session & Replay | 已实现 Provider 回调、会话 ID、持久化发送序号、入站去重、`seal/open`、固定 AAD 和 Node/Endpoint 安全策略。 | 生产 AEAD、密钥轮换、完整重放窗口。 |
 | Trusted Neighbor | 已实现固定 Candidate/Admitted/Suspect/Removed/Rejected/Expired 表、Heartbeat 和已接纳节点撤销/Link 槽复用。 | 随机退避、入网令牌桶与实机在线时间标定。 |
 | AODV-Lite Route | 已实现 RREQ/RREP/RERR、Active/Candidate 固定表、刷新、Probe/Activate、Route Epoch/grace、老化、保守未知 Cost 和源端控制 Token。 | Cost 抖动窗口和实机质量标定。 |
-| Explicit Path | 已实现默认 8 项的逐跳 Path 表、40 B Path Header、受认证安装/撤销、透明 E2E 中继和 Path 范围 RERR；T22.3 的 `PINNED_*` 与 T22.4 的 Q1 Flow 亲和 `AUTO_BALANCE` 已接入普通 Endpoint；T22.5 已让同 Neighbor Bearer 主备在不改变 Path ID 的前提下参与每跳 egress 解析；T22.6 可按需查看 Policy/Path/Flow 与质量快照。 | 真实多板验收。 |
+| Explicit Path | 已实现默认 8 项的逐跳 Path 表；v5 Path Header 为 W0～W3 的 19/25/31/36 B，当前 Node 默认 W3。受认证安装/撤销、透明 E2E 中继、Path RERR、`PINNED_*` 与 Q1 Flow 亲和 `AUTO_BALANCE` 保持。 | V5-02 档位接入与真实多板验收。 |
 | Forwarding / QoS | 已实现 TTL、下一跳、Q0/Q1、deadline、latest-value、静态 Endpoint 分发；Endpoint Q1 未知路由固定等待/自动 RREQ。 | Q2/Q3、可靠确认。 |
 | Node 内 Service / Task | Endpoint 目前分发到协议任务中的固定回调，不增加帧字节。 | T25：Port 层的静态 Endpoint→任务队列映射、统一任务发送 API、本机直投和任务收发统计；不把 FreeRTOS 写入 Core。 |
 | Health | 已实现候选/路由老化、Heartbeat、Link down 路径清理和动态 Link 回收。 | 统一 Link 状态消息、应用失联事件。 |
@@ -66,7 +66,7 @@ Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个�
 | 入网 | `JOIN_REQ`、`JOIN_CHALLENGE`、`JOIN_ACCEPT` | 枚举值已保留，尚未实现状态机。 |
 | 路由 | `ROUTE_REQ`、`ROUTE_REPLY`、`ROUTE_ERROR` | 已处理。 |
 | 健康 | `HEARTBEAT` | 已处理：一跳 8 B 请求/ACK 和邻居状态机；`LINK_STATE` 尚未定义为线协议消息。 |
-| 路径验证 | `PATH_PROBE`、`PATH_PROBE_ACK`、`PATH_ACTIVATE`、`PATH_ACTIVATE_ACK` | 已处理为 v4 控制面；Activate/ACK 载荷为 Candidate ID + Route Epoch，业务按 Epoch 查 Current/Previous。 |
+| 路径验证 | `PATH_PROBE`、`PATH_PROBE_ACK`、`PATH_ACTIVATE`、`PATH_ACTIVATE_ACK` | v5 继续使用现有控制语义；Activate/ACK 载荷为 Candidate ID + Route Epoch，业务按 Epoch 查 Current/Previous。 |
 | Path 控制 | `PATH_INSTALL`、`PATH_REVOKE` | 已处理：固定 `{Path ID, Destination, Next Hop, Lease}` / `{Path ID, Destination}`，依次需要 Provider、显式控制面授权和按 `(Source, Session)` 的固定管理预算；同源换 Bearer 不会重置预算。 |
 | 按需诊断 | `PATH_TRACE_REQ`、`PATH_TRACE_REPLY` | 已处理：`DIAGNOSTIC=0x04`、逐跳 Node ID、固定 Pending/Reverse 表和回调结果；只查当前 Cache，不触发 RREQ，也不锁定业务路径。 |
 | 按需诊断 | `NODE_SNAPSHOT_REQ`、`NODE_SNAPSHOT_REPLY` | 已处理：受限泛洪、短期 Reverse、随机短延迟 Reply、源端固定结果表与默认拒绝 ACL；不常驻保存全网节点或拓扑。 |
@@ -131,7 +131,7 @@ Core 禁止以下实现方式：
 
 任务间消息同样采用固定表/固定队列：一个 MCU 只维护一个 Node/邻居/路由实例；本机目标由后续 T25 Service/Task Adapter 直接投递，不生成 UCN 帧。它是产品 Port 层，不是额外的路由协议或 Node 身份；详见[节点内任务通信建议](UCN_节点内任务通信建议.md)。
 
-远端高风险 Q0 使用 `UCN_SERVICE_BRIDGE_MAX_VALIDATORS` 个固定 Validator 槽；可选防重放状态使用 `UCN_SERVICE_BRIDGE_REPLAY_DEPTH` 个固定槽。两者均由产品编译档案确定、无动态扩容，也不改变 v4 线格式或普通 Payload。Binding 要求强制 Validator 而产品未注册时，Bridge handler 安装失败关闭。
+远端高风险 Q0 使用 `UCN_SERVICE_BRIDGE_MAX_VALIDATORS` 个固定 Validator 槽；可选防重放状态使用 `UCN_SERVICE_BRIDGE_REPLAY_DEPTH` 个固定槽。两者均由产品编译档案确定、无动态扩容，也不改变 v5 线格式或普通 Payload。Binding 要求强制 Validator 而产品未注册时，Bridge handler 安装失败关闭。
 
 ### 3.4 Core 在没有 Linux 时怎样运行
 

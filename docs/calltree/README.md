@@ -1,6 +1,6 @@
 # UCN 调用关系树（Call Tree）
 
-> 数据依据：`E:\File\MESH\UCN` 当前 v4 Core 的 `include/ucn/`、`src/` 与测试入口。
+> 数据依据：`E:\File\MESH\UCN` 当前 v5 V5-01 Core 的 `include/ucn/`、`src/` 与测试入口；v4 调用树由 `v4.0.0-final-before-v5` 标签保留。
 > 目的：回答“一个 API 被谁调用、它继续调用什么、在哪个上下文运行、会经过哪些固定队列/回调”。源码是最终事实；本文档不替代源码或测试。
 
 本目录参考 `E:\File\PlatformIO\F405_Zephyr_Parachute\docs\calltree` 的组织方式：以 YAML 为调用关系源数据，按模块拆分，节点使用唯一 ID，关系只记录真实的直接调用、回调或固定队列边界。

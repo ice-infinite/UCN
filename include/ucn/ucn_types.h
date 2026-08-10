@@ -9,12 +9,25 @@
 extern "C" {
 #endif
 
-#define UCN_PROTOCOL_VERSION ((uint8_t)4U)
+#define UCN_PROTOCOL_VERSION ((uint8_t)5U)
 #define UCN_FRAME_MAGIC_0 ((uint8_t)0x55U)
 #define UCN_FRAME_MAGIC_1 ((uint8_t)0x43U)
-#define UCN_FRAME_HEADER_SIZE ((size_t)32U)
-#define UCN_FRAME_ROUTE_HEADER_SIZE ((size_t)36U)
-#define UCN_FRAME_PATH_HEADER_SIZE ((size_t)40U)
+#define UCN_FRAME_W0_HEADER_SIZE ((size_t)17U)
+#define UCN_FRAME_W1_HEADER_SIZE ((size_t)21U)
+#define UCN_FRAME_W2_HEADER_SIZE ((size_t)26U)
+#define UCN_FRAME_W3_HEADER_SIZE ((size_t)30U)
+#define UCN_FRAME_W0_ROUTE_HEADER_SIZE ((size_t)18U)
+#define UCN_FRAME_W1_ROUTE_HEADER_SIZE ((size_t)23U)
+#define UCN_FRAME_W2_ROUTE_HEADER_SIZE ((size_t)28U)
+#define UCN_FRAME_W3_ROUTE_HEADER_SIZE ((size_t)32U)
+#define UCN_FRAME_W0_PATH_HEADER_SIZE ((size_t)19U)
+#define UCN_FRAME_W1_PATH_HEADER_SIZE ((size_t)25U)
+#define UCN_FRAME_W2_PATH_HEADER_SIZE ((size_t)31U)
+#define UCN_FRAME_W3_PATH_HEADER_SIZE ((size_t)36U)
+/* Compatibility names mean the default W3 encoding in V5-01. */
+#define UCN_FRAME_HEADER_SIZE UCN_FRAME_W3_HEADER_SIZE
+#define UCN_FRAME_ROUTE_HEADER_SIZE UCN_FRAME_W3_ROUTE_HEADER_SIZE
+#define UCN_FRAME_PATH_HEADER_SIZE UCN_FRAME_W3_PATH_HEADER_SIZE
 #define UCN_E2E_TAG_SIZE ((size_t)16U)
 #define UCN_FRAME_FLAG_ROUTE_EXTENSION ((uint8_t)0x01U)
 #define UCN_FRAME_FLAG_E2E_PROTECTED ((uint8_t)0x02U)
@@ -28,9 +41,16 @@ extern "C" {
 #endif
 
 typedef char ucn_max_frame_must_fit_header[
-    UCN_MAX_FRAME_BYTES >= (UCN_FRAME_HEADER_SIZE + 1U) ? 1 : -1];
+    UCN_MAX_FRAME_BYTES >= (UCN_FRAME_W3_HEADER_SIZE + 1U) ? 1 : -1];
 
-#define UCN_MAX_PAYLOAD_BYTES (UCN_MAX_FRAME_BYTES - UCN_FRAME_HEADER_SIZE)
+#ifndef UCN_MAX_PAYLOAD_BYTES
+/* Header compression does not silently grow the static payload buffers. */
+#define UCN_MAX_PAYLOAD_BYTES \
+    ((UCN_MAX_FRAME_BYTES > (size_t)32U) ? \
+         (UCN_MAX_FRAME_BYTES - (size_t)32U) : (size_t)0U)
+#endif
+typedef char ucn_payload_buffer_must_not_be_empty[
+    UCN_MAX_PAYLOAD_BYTES >= 1U ? 1 : -1];
 #define UCN_NODE_BROADCAST UINT32_C(0xFFFFFFFF)
 #ifndef UCN_MAX_HOPS
 #define UCN_MAX_HOPS ((uint8_t)16U)
@@ -43,6 +63,18 @@ typedef uint32_t ucn_node_id_t;
 typedef uint32_t ucn_network_id_t;
 typedef uint32_t ucn_sequence_t;
 typedef uint32_t ucn_session_id_t;
+
+/* API values intentionally differ from the 2-bit wire code so a zero-filled
+ * v4-style frame remains an explicit "unspecified" request.  V5-01 resolves
+ * unspecified frames to W3; V5-02 will let each Node choose a fixed domain. */
+typedef uint8_t ucn_wire_profile_t;
+enum {
+    UCN_WIRE_PROFILE_UNSPECIFIED = 0U,
+    UCN_WIRE_PROFILE_W0_LOCAL = 1U,
+    UCN_WIRE_PROFILE_W1_EDGE = 2U,
+    UCN_WIRE_PROFILE_W2_MESH = 3U,
+    UCN_WIRE_PROFILE_W3_BACKBONE = 4U
+};
 
 typedef enum ucn_result {
     UCN_OK = 0,
@@ -106,6 +138,7 @@ typedef enum ucn_message_type {
 
 typedef struct ucn_frame {
     uint8_t message_type;
+    ucn_wire_profile_t wire_profile;
     ucn_traffic_class_t traffic_class;
     uint8_t flags;
     uint8_t hop_limit;

@@ -375,7 +375,7 @@ static int test_path_frame_extension(void)
     TEST_ASSERT(aad_length_a == ucn_frame_e2e_aad_size() &&
                 aad_length_a == aad_length_b &&
                 memcmp(aad_a, aad_b, aad_length_a) != 0);
-    encoded[5] = (uint8_t)(encoded[5] & (uint8_t)~UCN_FRAME_FLAG_PATH_ID);
+    encoded[4] = (uint8_t)(encoded[4] & (uint8_t)~UCN_FRAME_FLAG_PATH_ID);
     TEST_ASSERT(ucn_frame_decode(encoded, encoded_length, &decoded) == UCN_ERR_MALFORMED);
     return 0;
 }

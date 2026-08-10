@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ucn_core VERSION 4.0.0 LANGUAGES C)
+project(ucn_core VERSION 5.0.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -91,6 +91,7 @@ if(UCN_BUILD_TESTS)
         tests/test_main.c
         tests/test_core.c
         tests/test_frame.c
+        tests/test_wire_profile.c
         tests/test_node.c
         tests/test_virtual_link.c
         tests/test_qos.c

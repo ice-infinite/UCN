@@ -5,7 +5,7 @@
 #include "ucn/ucn_node.h"
 
 /* The historical filename is retained so old failure logs remain searchable.
- * This suite exercises the current v4 wire/security behavior and the explicit
+ * This suite exercises the current v5 wire/security behavior and the explicit
  * rejection of older protocol versions; "v3" prefixes below are test-local
  * fixture names, not production API or current-version claims. */
 
@@ -267,7 +267,7 @@ static int v3_test_frame_format(void)
                 memcmp(decoded.auth_tag, tag, sizeof(tag)) == 0);
     encoded[UCN_FRAME_ROUTE_HEADER_SIZE + sizeof(payload)] ^= 0x01U;
     TEST_ASSERT(ucn_frame_decode(encoded, encoded_length, &decoded) == UCN_ERR_CRC);
-    encoded[2] = 3U;
+    encoded[2] = 4U;
     TEST_ASSERT(ucn_frame_decode(encoded, encoded_length, &decoded) == UCN_ERR_VERSION);
     return 0;
 }

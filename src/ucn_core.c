@@ -2,7 +2,7 @@
 
 const char *ucn_version(void)
 {
-    return "4.0.0";
+    return "5.0.0";
 }
 
 ucn_result_t ucn_validate_config(const ucn_config_t *config)

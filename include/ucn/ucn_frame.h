@@ -7,11 +7,27 @@
 extern "C" {
 #endif
 
+typedef struct ucn_wire_profile_descriptor {
+    ucn_wire_profile_t profile;
+    uint8_t wire_code;
+    uint8_t address_bytes;
+    uint8_t payload_length_bytes;
+    uint8_t route_epoch_bytes;
+    uint8_t path_id_bytes;
+    uint8_t max_hops;
+    uint32_t max_wire_value;
+    uint32_t max_node_id;
+} ucn_wire_profile_descriptor_t;
+
+const ucn_wire_profile_descriptor_t *ucn_wire_profile_get_descriptor(
+    ucn_wire_profile_t profile);
+size_t ucn_frame_header_size_for_profile(ucn_wire_profile_t profile,
+                                         uint8_t flags);
 size_t ucn_frame_encoded_size(const ucn_frame_t *frame);
-/* Maximum payload that fits UCN_MAX_FRAME_BYTES for a valid flag set.  This
- * accounts for the 32/36/40 B header and the optional E2E authentication tag.
- * Unknown flags return 0. */
+/* Default-compatible W3 query.  New code should use the profile-aware form. */
 size_t ucn_frame_max_payload(uint8_t flags);
+size_t ucn_frame_max_payload_for_profile(ucn_wire_profile_t profile,
+                                         uint8_t flags);
 size_t ucn_frame_e2e_aad_size(void);
 ucn_result_t ucn_frame_write_e2e_aad(const ucn_frame_t *frame,
                                      uint8_t *output,

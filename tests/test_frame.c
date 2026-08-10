@@ -44,25 +44,25 @@ int test_frame(void)
     TEST_ASSERT((decoded.flags & UCN_FRAME_FLAG_DIAGNOSTIC) != 0U);
     source.flags = 0U;
     TEST_ASSERT(ucn_frame_encode(&source, encoded, sizeof(encoded), &encoded_length) == UCN_OK);
-    encoded[5] = UINT8_C(0x80);
+    encoded[4] = (uint8_t)(encoded[4] | UINT8_C(0x20));
     TEST_ASSERT(ucn_frame_decode(encoded, encoded_length, &decoded) == UCN_ERR_MALFORMED);
     TEST_ASSERT(ucn_frame_encode(&source, encoded, sizeof(encoded), &encoded_length) == UCN_OK);
     encoded[UCN_FRAME_HEADER_SIZE] ^= 0x01U;
     TEST_ASSERT(ucn_frame_decode(encoded, encoded_length, &decoded) == UCN_ERR_CRC);
     encoded[UCN_FRAME_HEADER_SIZE] ^= 0x01U;
-    encoded[2] = (uint8_t)(UCN_PROTOCOL_VERSION + 1U);
+    encoded[2] = (uint8_t)((UINT8_C(3) << 6U) |
+                           (uint8_t)(UCN_PROTOCOL_VERSION + 1U));
     TEST_ASSERT(ucn_frame_decode(encoded, encoded_length, &decoded) == UCN_ERR_VERSION);
-    encoded[2] = UCN_PROTOCOL_VERSION;
+    encoded[2] = (uint8_t)((UINT8_C(3) << 6U) | UCN_PROTOCOL_VERSION);
     TEST_ASSERT(ucn_frame_decode(encoded, UCN_FRAME_HEADER_SIZE - 1U, &decoded) == UCN_ERR_MALFORMED);
 
     source.payload = NULL;
     source.payload_length = 1U;
     TEST_ASSERT(ucn_frame_encode(&source, encoded, sizeof(encoded), &encoded_length) == UCN_ERR_ARGUMENT);
 
-    TEST_ASSERT(ucn_frame_max_payload(0U) ==
-                UCN_MAX_FRAME_BYTES - UCN_FRAME_HEADER_SIZE);
+    TEST_ASSERT(ucn_frame_max_payload(0U) == UCN_MAX_PAYLOAD_BYTES);
     TEST_ASSERT(ucn_frame_max_payload(UCN_FRAME_FLAG_ROUTE_EXTENSION) ==
-                UCN_MAX_FRAME_BYTES - UCN_FRAME_ROUTE_HEADER_SIZE);
+                UCN_MAX_PAYLOAD_BYTES);
     TEST_ASSERT(ucn_frame_max_payload(UCN_FRAME_FLAG_PATH_ID) == 0U);
     TEST_ASSERT(ucn_frame_max_payload(UCN_FRAME_FLAG_ROUTE_EXTENSION |
                                       UCN_FRAME_FLAG_PATH_ID) ==

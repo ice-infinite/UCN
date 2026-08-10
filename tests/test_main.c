@@ -7,6 +7,7 @@ int main(void)
 
     result |= test_core();
     result |= test_frame();
+    result |= test_wire_profile();
     result |= test_node();
     result |= test_virtual_link();
     result |= test_qos();

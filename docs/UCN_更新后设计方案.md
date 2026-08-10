@@ -1,5 +1,7 @@
 # UCN 更新后设计方案：MCU 自组网、稳定入离网与受限自动选路
 
+> v5 迁移说明（2026-08-11）：本文主体保留为 `v4.0.0-final-before-v5` 的完整设计快照，其中 32/36/40 B、版本 4 和逐字段偏移不再是当前 v5 线格式。当前实现请先读 [v5 Adaptive Wire Profile 设计方案](UCN_v5_Adaptive_Wire_Profile设计方案.md) 与 [V5-01 Codec 实现报告](UCN_V5_01_官方Wire_Profile_Codec实现报告.md)；路由、Service 和产品安全边界在未被 v5 专题替代前继续参考本文。
+
 > 状态：**UCN v4 Core 已实现：Route Epoch/grace、受保护业务 Provider、透明中继、Endpoint Q1 等待、受认证 Path ID 逐跳表、按需路径追踪、按需节点快照与受授权策略诊断；真实 Adapter、生产密码/身份和多板 Path 验证仍未完成。**
 > 日期：2026-08-08  
 > 适用范围：MCU-first 的 UCN-Core、跨介质 Adapter、可选 Linux Host；覆盖节点入离网、动态路由刷新、候选路径验证与故障恢复。  

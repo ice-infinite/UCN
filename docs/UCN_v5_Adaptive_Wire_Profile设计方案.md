@@ -1,6 +1,6 @@
 # UCN v5 Adaptive Wire Profile 设计方案
 
-> 状态：v5 设计与执行基线；本文不描述当前 v4 已实现能力。
+> 状态：V5-00/V5-01 已完成；V5-02 起仍按本文执行。已实现证据见 [V5-01 官方 Wire Profile Codec 实现报告](UCN_V5_01_官方Wire_Profile_Codec实现报告.md)。
 >
 > 原则：MCU-first、固定资源、官方固定格式、无 Linux 也能组网；Linux/Gateway 只是可选扩展节点。
 >
