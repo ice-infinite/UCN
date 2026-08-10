@@ -5,6 +5,19 @@ source_files:
   - src/ucn_frame.c
 
 nodes:
+  - id: frame.ucn_frame_max_payload
+    symbol: ucn_frame_max_payload
+    type: function
+    file: src/ucn_frame.c
+    layer: core
+    role: 按 Route/Path/E2E Flags 返回当前固定 MTU 下真实可用 Payload 上限。
+    called_by:
+      - external.application_encoder
+    calls:
+      - target: frame.header_layout_helpers_static
+        type: direct
+        reason: 选择 32/36/40 B Header 并扣除可选 16 B Tag。
+
   - id: frame.ucn_frame_encoded_size
     symbol: ucn_frame_encoded_size
     type: function

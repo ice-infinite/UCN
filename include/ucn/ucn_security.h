@@ -61,6 +61,15 @@ typedef struct ucn_security_ops {
                          uint16_t ciphertext_length,
                          const uint8_t auth_tag[UCN_E2E_TAG_SIZE],
                          uint8_t *plaintext);
+    /* Optional long-running rollover.  Before returning UCN_OK the Provider
+     * must atomically persist/provision the new Session/Key and next Sequence
+     * so a reset cannot reuse the previous pair.  The returned Session must
+     * be non-zero/different and next_sequence must start below the Core
+     * rotation threshold. */
+    ucn_result_t (*rotate_session)(void *context,
+                                   ucn_session_id_t current_session_id,
+                                   ucn_session_id_t *new_session_id,
+                                   ucn_sequence_t *next_sequence);
 } ucn_security_ops_t;
 
 #ifdef __cplusplus

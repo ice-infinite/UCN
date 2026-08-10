@@ -295,7 +295,9 @@ const ucn_result_t rc = g_service_port.send(destination_node_id,
                                             sizeof(servo_payload));
 ```
 
-`send()` 成功只代表 Router 接受并复制了 Payload。对 Q0 命令，业务层仍必须保留本地失效保护；不要把“入队成功”当作执行器已经动作的确认。
+`send()` 成功只代表 Router 接受并复制了 Payload。需要明确区分时调用 `ucn_service_send_ex()`：它返回的 Acceptance 是 `LOCAL_DELIVERED` 或 `REMOTE_ENQUEUED`；后者仍可能在 Bridge/Core/Link 阶段失败，不是端到端 ACK。对 Q0 命令，业务层必须保留本地失效保护，不能把“入队成功”当作执行器已经动作的确认。
+
+Task 停机/重启前调用 `ucn_service_set_ready(..., false)`：Router 会清空对应 Q0 FIFO/Q1 Latest，重启后不会恢复执行旧命令。高风险 Q0 可按需在业务 Payload 前加 12 B `ucn_service_command_guard`，由消费者检查 `command_id`、有效期和结果 Endpoint；跨节点时间戳只有在产品提供共享时间域时才有意义。
 
 ### 7.4 从业务 Task 接收
 

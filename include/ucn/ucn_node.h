@@ -5,6 +5,7 @@
 #include "ucn/ucn_endpoint.h"
 #include "ucn/ucn_neighbor.h"
 #include "ucn/ucn_security.h"
+#include "ucn/ucn_time.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -99,8 +100,11 @@ typedef char ucn_route_switch_improvement_percent_must_be_less_than_100[
     UCN_ROUTE_SWITCH_IMPROVEMENT_PERCENT < 100U ? 1 : -1];
 
 #ifndef UCN_UNKNOWN_LINK_ROUTE_COST
-#define UCN_UNKNOWN_LINK_ROUTE_COST ((uint16_t)1000U)
+#define UCN_UNKNOWN_LINK_ROUTE_COST UCN_LINK_ROUTE_COST_UNKNOWN
 #endif
+
+typedef char ucn_unknown_route_cost_must_use_reserved_sentinel[
+    UCN_UNKNOWN_LINK_ROUTE_COST == UCN_LINK_ROUTE_COST_UNKNOWN ? 1 : -1];
 
 #ifndef UCN_CONTROL_TOKEN_BURST
 #define UCN_CONTROL_TOKEN_BURST ((uint8_t)4U)
@@ -108,6 +112,28 @@ typedef char ucn_route_switch_improvement_percent_must_be_less_than_100[
 
 #ifndef UCN_CONTROL_TOKEN_REFILL_MS
 #define UCN_CONTROL_TOKEN_REFILL_MS UINT32_C(100)
+#endif
+
+/* Independent inbound budgets stop one admitted but faulty peer from turning
+ * unique control IDs into unbounded relay/reply work.  They are deliberately
+ * separate from the local-origin control budget above. */
+#ifndef UCN_ROUTE_REQUEST_RX_TOKEN_BURST
+#define UCN_ROUTE_REQUEST_RX_TOKEN_BURST ((uint8_t)5U)
+#endif
+#ifndef UCN_ROUTE_REQUEST_RX_TOKEN_REFILL_MS
+#define UCN_ROUTE_REQUEST_RX_TOKEN_REFILL_MS UINT32_C(200)
+#endif
+#ifndef UCN_HEARTBEAT_RX_TOKEN_BURST
+#define UCN_HEARTBEAT_RX_TOKEN_BURST ((uint8_t)4U)
+#endif
+#ifndef UCN_HEARTBEAT_RX_TOKEN_REFILL_MS
+#define UCN_HEARTBEAT_RX_TOKEN_REFILL_MS UINT32_C(100)
+#endif
+#ifndef UCN_PATH_TRACE_RX_TOKEN_BURST
+#define UCN_PATH_TRACE_RX_TOKEN_BURST ((uint8_t)1U)
+#endif
+#ifndef UCN_PATH_TRACE_RX_TOKEN_REFILL_MS
+#define UCN_PATH_TRACE_RX_TOKEN_REFILL_MS UINT32_C(1000)
 #endif
 
 #ifndef UCN_PENDING_Q1_DEPTH
@@ -118,12 +144,22 @@ typedef char ucn_route_switch_improvement_percent_must_be_less_than_100[
 #define UCN_PENDING_Q1_TIMEOUT_MS UINT32_C(1000)
 #endif
 
+#ifndef UCN_SEQUENCE_ROTATION_THRESHOLD
+#define UCN_SEQUENCE_ROTATION_THRESHOLD (UINT32_MAX - UINT32_C(1024))
+#endif
+
 /* PATH_TRACE is an on-demand diagnostic.  Its records live in the frame
  * payload, so the maximum is bounded by both the wire MTU and hop limit. */
 #define UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES ((size_t)8U)
+#define UCN_PATH_TRACE_MIN_FRAME_BYTES \
+    (UCN_FRAME_HEADER_SIZE + UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES + \
+     2U * sizeof(ucn_node_id_t))
 #define UCN_PATH_TRACE_NODE_CAPACITY_BY_FRAME \
-    ((UCN_MAX_FRAME_BYTES - UCN_FRAME_HEADER_SIZE - \
-      UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES) / sizeof(ucn_node_id_t))
+    (UCN_MAX_FRAME_BYTES >= \
+             (UCN_FRAME_HEADER_SIZE + UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES) ? \
+         ((UCN_MAX_FRAME_BYTES - UCN_FRAME_HEADER_SIZE - \
+           UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES) / sizeof(ucn_node_id_t)) : \
+         0U)
 #define UCN_PATH_TRACE_MAX_NODES \
     ((size_t)(UCN_PATH_TRACE_NODE_CAPACITY_BY_FRAME < \
                       ((size_t)UCN_MAX_HOPS + 1U) ? \
@@ -219,10 +255,26 @@ typedef char ucn_control_token_burst_must_be_positive[
     UCN_CONTROL_TOKEN_BURST > 0U ? 1 : -1];
 typedef char ucn_control_token_refill_must_be_positive[
     UCN_CONTROL_TOKEN_REFILL_MS > 0U ? 1 : -1];
+typedef char ucn_route_request_rx_token_burst_must_be_positive[
+    UCN_ROUTE_REQUEST_RX_TOKEN_BURST > 0U ? 1 : -1];
+typedef char ucn_route_request_rx_token_refill_must_be_positive[
+    UCN_ROUTE_REQUEST_RX_TOKEN_REFILL_MS > 0U ? 1 : -1];
+typedef char ucn_heartbeat_rx_token_burst_must_be_positive[
+    UCN_HEARTBEAT_RX_TOKEN_BURST > 0U ? 1 : -1];
+typedef char ucn_heartbeat_rx_token_refill_must_be_positive[
+    UCN_HEARTBEAT_RX_TOKEN_REFILL_MS > 0U ? 1 : -1];
+typedef char ucn_path_trace_rx_token_burst_must_be_positive[
+    UCN_PATH_TRACE_RX_TOKEN_BURST > 0U ? 1 : -1];
+typedef char ucn_path_trace_rx_token_refill_must_be_positive[
+    UCN_PATH_TRACE_RX_TOKEN_REFILL_MS > 0U ? 1 : -1];
 typedef char ucn_pending_q1_timeout_must_be_positive[
     UCN_PENDING_Q1_TIMEOUT_MS > 0U ? 1 : -1];
+typedef char ucn_sequence_rotation_threshold_must_leave_valid_range[
+    UCN_SEQUENCE_ROTATION_THRESHOLD > 1U &&
+            UCN_SEQUENCE_ROTATION_THRESHOLD < UINT32_MAX ? 1 : -1];
 typedef char ucn_path_trace_must_fit_two_node_ids[
-    UCN_PATH_TRACE_MAX_NODES >= 2U ? 1 : -1];
+    UCN_MAX_FRAME_BYTES >= UCN_PATH_TRACE_MIN_FRAME_BYTES &&
+            UCN_PATH_TRACE_MAX_NODES >= 2U ? 1 : -1];
 typedef char ucn_path_trace_timeout_must_be_positive[
     UCN_PATH_TRACE_TIMEOUT_MS > 0U ? 1 : -1];
 typedef char ucn_path_trace_token_burst_must_be_positive[
@@ -312,6 +364,33 @@ typedef char ucn_bearer_quality_probe_attempts_must_cover_acks[
     UCN_BEARER_QUALITY_PROBE_REQUIRED_ACKS ? 1 : -1];
 typedef char ucn_bearer_quality_probe_interval_must_be_positive[
     UCN_BEARER_QUALITY_PROBE_INTERVAL_MS > 0U ? 1 : -1];
+typedef char ucn_node_relative_durations_must_be_wrap_safe[
+    UCN_ROUTE_ENTRY_LIFETIME_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_ROUTE_REQUEST_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_ROUTE_REQUEST_MIN_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_ROUTE_REFRESH_ADVANCE_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_ROUTE_REFRESH_MIN_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_ROUTE_CANDIDATE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_PATH_PROBE_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_ROUTE_EPOCH_GRACE_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_CONTROL_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_ROUTE_REQUEST_RX_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_HEARTBEAT_RX_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_PATH_TRACE_RX_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_PENDING_Q1_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_PATH_TRACE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_PATH_TRACE_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_NODE_SNAPSHOT_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_NODE_SNAPSHOT_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_NODE_SNAPSHOT_REPLY_JITTER_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_POLICY_DIAGNOSTIC_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_POLICY_DIAGNOSTIC_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_NEIGHBOR_CANDIDATE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_HEARTBEAT_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_NEIGHBOR_REMOVE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_BEARER_QUALITY_SAMPLE_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_BEARER_QUALITY_PROBE_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS ? 1 : -1];
 
 #ifndef UCN_MAX_ENDPOINT_HANDLERS
 #define UCN_MAX_ENDPOINT_HANDLERS ((size_t)8U)
@@ -338,6 +417,24 @@ typedef struct ucn_endpoint_security_policy_entry {
     ucn_endpoint_t endpoint;
     ucn_security_policy_t policy;
 } ucn_endpoint_security_policy_entry_t;
+
+typedef enum ucn_control_rx_budget_type {
+    UCN_CONTROL_RX_ROUTE_REQUEST = 0,
+    UCN_CONTROL_RX_HEARTBEAT_REQUEST = 1,
+    UCN_CONTROL_RX_PATH_TRACE_REQUEST = 2,
+    UCN_CONTROL_RX_BUDGET_TYPE_COUNT = 3
+} ucn_control_rx_budget_type_t;
+
+typedef struct ucn_control_rx_budget {
+    uint8_t tokens;
+    uint32_t last_refill_ms;
+} ucn_control_rx_budget_t;
+
+typedef struct ucn_control_rx_peer_budget {
+    bool occupied;
+    ucn_node_id_t peer_node_id;
+    ucn_control_rx_budget_t budgets[UCN_CONTROL_RX_BUDGET_TYPE_COUNT];
+} ucn_control_rx_peer_budget_t;
 
 typedef struct ucn_send_request {
     ucn_node_id_t destination;
@@ -430,6 +527,11 @@ typedef void (*ucn_node_snapshot_handler_t)(
  * can admit only its designated diagnostic/management Node IDs. */
 typedef bool (*ucn_node_snapshot_authorize_fn)(void *context,
                                                ucn_node_id_t requester);
+
+/* A NULL authorizer disables remote PATH_TRACE_REQ handling.  The hook is
+ * evaluated at every relay/target before reverse state or a reply is created. */
+typedef bool (*ucn_path_trace_authorize_fn)(void *context,
+                                            ucn_node_id_t requester);
 
 /* A NULL authorizer disables remote POLICY_DIAGNOSTIC_REQ handling.  This
  * report may reveal local strategy/quality state, so it is never public by
@@ -620,6 +722,9 @@ typedef struct ucn_node_stats {
     uint32_t route_epoch_rejected;
     uint32_t e2e_protected_forwarded;
     uint32_t control_budget_dropped;
+    uint32_t route_request_rx_rate_dropped;
+    uint32_t heartbeat_rx_rate_dropped;
+    uint32_t path_trace_rx_rate_dropped;
     uint32_t q1_route_wait_queued;
     uint32_t q1_route_wait_expired;
     uint32_t path_trace_requests_sent;
@@ -651,6 +756,7 @@ typedef struct ucn_node_stats {
     uint32_t path_forwards;
     uint32_t path_rejected;
     uint32_t path_route_errors_sent;
+    uint32_t session_rotations;
 } ucn_node_stats_t;
 
 typedef struct ucn_route_entry {
@@ -698,6 +804,7 @@ typedef struct ucn_candidate_route {
 typedef struct ucn_seen_frame {
     bool valid;
     ucn_node_id_t source;
+    ucn_session_id_t session_id;
     ucn_sequence_t sequence;
     uint16_t best_route_request_cost;
 } ucn_seen_frame_t;
@@ -741,6 +848,7 @@ struct ucn_node {
     uint8_t business_tx_since_maintenance;
     uint8_t control_tokens;
     uint32_t control_last_refill_ms;
+    ucn_control_rx_peer_budget_t control_rx_peer_budgets[UCN_MAX_NEIGHBORS];
     uint8_t path_trace_tokens;
     uint32_t path_trace_last_refill_ms;
     uint8_t node_snapshot_tokens;
@@ -755,6 +863,8 @@ struct ucn_node {
     void *neighbor_authorize_context;
     ucn_node_snapshot_authorize_fn node_snapshot_authorize;
     void *node_snapshot_authorize_context;
+    ucn_path_trace_authorize_fn path_trace_authorize;
+    void *path_trace_authorize_context;
     ucn_policy_diagnostic_authorize_fn policy_diagnostic_authorize;
     void *policy_diagnostic_authorize_context;
     ucn_path_control_authorize_fn path_control_authorize;
@@ -785,6 +895,10 @@ ucn_result_t ucn_node_set_join_policy(ucn_node_t *node,
 ucn_result_t ucn_node_set_node_snapshot_authorizer(
     ucn_node_t *node,
     ucn_node_snapshot_authorize_fn authorize,
+    void *context);
+ucn_result_t ucn_node_set_path_trace_authorizer(
+    ucn_node_t *node,
+    ucn_path_trace_authorize_fn authorize,
     void *context);
 ucn_result_t ucn_node_set_policy_diagnostic_authorizer(
     ucn_node_t *node,

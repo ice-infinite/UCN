@@ -89,6 +89,12 @@ static void trace_callback(void *context, const ucn_path_trace_result_t *result)
     state->result = *result;
 }
 
+static bool trace_authorize_all(void *context, ucn_node_id_t requester)
+{
+    (void)context;
+    return requester != 0U && requester != UCN_NODE_BROADCAST;
+}
+
 static int trace_test_complete_truncated_and_rejected(void)
 {
     ucn_node_t a, b, c;
@@ -115,6 +121,10 @@ static int trace_test_complete_truncated_and_rejected(void)
     TEST_ASSERT(trace_init_node(&a, UINT32_C(1), 5U) == 0);
     TEST_ASSERT(trace_init_node(&b, UINT32_C(2), 5U) == 0);
     TEST_ASSERT(trace_init_node(&c, UINT32_C(3), 5U) == 0);
+    TEST_ASSERT(ucn_node_set_path_trace_authorizer(&b, trace_authorize_all,
+                                                    NULL) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_path_trace_authorizer(&c, trace_authorize_all,
+                                                    NULL) == UCN_OK);
     trace_setup_link(&ab, &cab, 1U, UINT32_C(2));
     trace_setup_link(&ba, &cba, 2U, UINT32_C(1));
     trace_setup_link(&bc, &cbc, 3U, UINT32_C(3));
@@ -154,6 +164,8 @@ static int trace_test_complete_truncated_and_rejected(void)
     TEST_ASSERT(a.stats.path_trace_rate_dropped == 1U && complete.count == 1U);
 
     TEST_ASSERT(ucn_node_step(&a, UCN_PATH_TRACE_TOKEN_REFILL_MS) == UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_node_step(&b, UCN_PATH_TRACE_RX_TOKEN_REFILL_MS) == UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_node_step(&c, UCN_PATH_TRACE_RX_TOKEN_REFILL_MS) == UCN_ERR_NOT_FOUND);
     TEST_ASSERT(ucn_node_request_path_trace(&a, UINT32_C(3), 1U,
                                              trace_callback, &truncated) == UCN_OK);
     TEST_ASSERT(truncated.count == 1U &&
@@ -161,6 +173,8 @@ static int trace_test_complete_truncated_and_rejected(void)
                 truncated.result.node_count == 1U &&
                 truncated.result.node_ids[0] == UINT32_C(1));
     TEST_ASSERT(ucn_node_step(&a, UCN_PATH_TRACE_TOKEN_REFILL_MS * 2U) ==
+                UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_node_step(&b, UCN_PATH_TRACE_RX_TOKEN_REFILL_MS * 2U) ==
                 UCN_ERR_NOT_FOUND);
     TEST_ASSERT(ucn_node_request_path_trace(&a, UINT32_C(99), 0U,
                                              trace_callback, &no_route) == UCN_OK);
@@ -224,6 +238,10 @@ static int trace_test_ttl_and_timeout(void)
     TEST_ASSERT(trace_init_node(&a, UINT32_C(11), 1U) == 0);
     TEST_ASSERT(trace_init_node(&b, UINT32_C(12), 5U) == 0);
     TEST_ASSERT(trace_init_node(&c, UINT32_C(13), 5U) == 0);
+    TEST_ASSERT(ucn_node_set_path_trace_authorizer(&b, trace_authorize_all,
+                                                    NULL) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_path_trace_authorizer(&c, trace_authorize_all,
+                                                    NULL) == UCN_OK);
     trace_setup_link(&ab, &cab, 11U, UINT32_C(12));
     trace_setup_link(&ba, &cba, 12U, UINT32_C(11));
     trace_setup_link(&bc, &cbc, 13U, UINT32_C(13));

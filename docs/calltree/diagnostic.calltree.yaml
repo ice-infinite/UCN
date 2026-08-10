@@ -14,6 +14,9 @@ nodes:
     called_by:
       - external.management_task
     calls:
+      - target: external.path_trace_authorizer
+        type: callback
+        reason: 每个中继/目标默认拒绝，产品显式授权请求来源后才继续。
       - target: diagnostic.path_trace_runtime_helpers_static
         type: direct
         reason: 通过当前 Route 发送带固定记录容量的 Trace Request。
@@ -35,6 +38,8 @@ nodes:
       - target: node_runtime.send_frame_on_link_static
         type: direct
         reason: 中继继续转发 Trace Request。
+    notes:
+      - 授权通过后仍按直连 ingress 对端和 Trace 类型消费独立入站预算；耗尽时不分配 Reverse 状态。
 
   - id: diagnostic.ucn_node_request_node_snapshot
     symbol: ucn_node_request_node_snapshot

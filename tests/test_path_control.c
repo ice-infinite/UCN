@@ -148,7 +148,8 @@ static const ucn_security_ops_t PATH_SECURITY_OPS = {
     path_security_authorize_rx,
     NULL,
     path_security_seal,
-    path_security_open
+    path_security_open,
+    NULL
 };
 
 static ucn_result_t path_authorize(void *context,
@@ -582,6 +583,23 @@ int test_path_control(void)
     TEST_ASSERT(ucn_node_add_route(&a, UINT32_C(4), &ab) == UCN_OK);
     ucn_node_set_rx_handler(&d, path_receive, &received);
 
+    /* AUTO_BALANCE uses only normalized base Cost plus active-flow count.
+     * Large raw RTT/failure samples on the cheaper P1 must not be added to the
+     * Cost score; queue pressure remains a separate sustained-congestion gate. */
+    cab.metrics.route_cost_valid = true;
+    cab.metrics.route_cost = 10U;
+    cab.metrics.rtt_valid = true;
+    cab.metrics.rtt_ms = 1000U;
+    cab.metrics.tx_failure_rate_valid = true;
+    cab.metrics.tx_failure_per_mille = 1000U;
+    cac.metrics.route_cost_valid = true;
+    cac.metrics.route_cost = 15U;
+    cac.metrics.rtt_valid = true;
+    cac.metrics.rtt_ms = 1U;
+    cac.metrics.tx_failure_rate_valid = true;
+    cac.metrics.tx_failure_per_mille = 0U;
+    TEST_ASSERT(path_step(&a, 0U) == 0);
+
     /* A security Provider alone is not sufficient: remote Path changes are
      * denied until the product installs an explicit authorization callback. */
     TEST_ASSERT(ucn_node_send_path_install(&a, UINT32_C(2), path_p1,
@@ -673,9 +691,9 @@ int test_path_control(void)
     cab.metrics.queue_pressure_per_mille = 1000U;
     cac.metrics.queue_pressure_valid = true;
     cac.metrics.queue_pressure_per_mille = 0U;
-    TEST_ASSERT(path_step(&a, 1U) == 0);
-    TEST_ASSERT(path_step(&a, UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS + 1U) == 0);
-    TEST_ASSERT(path_step(&a, UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS * 2U + 1U) ==
+    TEST_ASSERT(path_step(&a, UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS) == 0);
+    TEST_ASSERT(path_step(&a, UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS * 2U) == 0);
+    TEST_ASSERT(path_step(&a, UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS * 3U) ==
                 0);
     TEST_ASSERT(ucn_node_find_policy_path(&a, 1U)->congestion_samples ==
                 UCN_POLICY_BALANCE_CONGESTED_SAMPLE_LIMIT);
@@ -689,7 +707,7 @@ int test_path_control(void)
     /* One healthy sample clears the sustained-congestion state.  A new flow
      * sees P1's lower active-flow count and takes P1 before any failure. */
     cab.metrics.queue_pressure_per_mille = 0U;
-    TEST_ASSERT(path_step(&a, UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS * 3U + 1U) ==
+    TEST_ASSERT(path_step(&a, UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS * 4U) ==
                 0);
     TEST_ASSERT(ucn_node_find_policy_path(&a, 1U)->congestion_samples == 0U);
     policy.key.endpoint = (ucn_endpoint_t)0x49U;

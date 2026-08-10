@@ -66,6 +66,18 @@ static const ucn_link_ops_t CANDIDATE_LINK_OPS = {
     NULL, candidate_link_send, NULL, candidate_link_status, NULL, candidate_link_metrics
 };
 
+static ucn_result_t candidate_step_network(ucn_node_t *a,
+                                           ucn_node_t *b,
+                                           ucn_node_t *c,
+                                           ucn_node_t *d,
+                                           uint32_t now_ms)
+{
+    b->now_ms = now_ms;
+    c->now_ms = now_ms;
+    d->now_ms = now_ms;
+    return ucn_node_step(a, now_ms);
+}
+
 static int candidate_init_node(ucn_node_t *node, ucn_node_id_t id)
 {
     ucn_config_t config;
@@ -194,14 +206,14 @@ int test_candidate_route(void)
     q1_request.payload_length = 1U;
     for (now_ms = UINT32_C(24096); now_ms < UINT32_C(24100); ++now_ms) {
         TEST_ASSERT(ucn_node_enqueue(&a, &q1_request) == UCN_OK);
-        TEST_ASSERT(ucn_node_step(&a, now_ms) == UCN_OK);
+        TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, now_ms) == UCN_OK);
     }
     TEST_ASSERT(ucn_node_enqueue(&a, &q1_request) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 24100U) == UCN_OK);
+    TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 24100U) == UCN_OK);
     TEST_ASSERT(a.stats.route_refreshes_started >= 2U);
     TEST_ASSERT(a.stats.maintenance_preemptions >= 1U);
     TEST_ASSERT(a.stats.candidate_routes_learned >= 1U);
-    TEST_ASSERT(ucn_node_step(&a, 24100U) == UCN_OK);
+    TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 24100U) == UCN_OK);
     reset_send_counts(contexts, 8U);
     TEST_ASSERT(ucn_node_send(&a, UINT32_C(3), UCN_MSG_DATA_Q1,
                               UCN_TRAFFIC_Q1_REALTIME, &first_payload, 1U) == UCN_OK);
@@ -216,29 +228,30 @@ int test_candidate_route(void)
     q0_request.payload = &first_payload;
     q0_request.payload_length = 1U;
     TEST_ASSERT(ucn_node_enqueue(&a, &q0_request) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 24101U) == UCN_OK);
+    TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 24101U) == UCN_OK);
     TEST_ASSERT(a.stats.path_probes_sent == 0U);
     contexts[7].deliver = false;
-    TEST_ASSERT(ucn_node_step(&a, 24201U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 24301U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 24401U) == UCN_OK);
+    TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 24201U) == UCN_OK);
+    TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 24301U) == UCN_OK);
+    TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 24401U) == UCN_OK);
     TEST_ASSERT(a.stats.path_probes_sent == UCN_PATH_PROBE_REQUIRED_ACKS);
     TEST_ASSERT(a.stats.path_probe_acks_received == 0U);
-    TEST_ASSERT(ucn_node_step(&a, 27200U) == UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 27200U) ==
+                UCN_ERR_NOT_FOUND);
     reset_send_counts(contexts, 8U);
     TEST_ASSERT(ucn_node_send(&a, UINT32_C(3), UCN_MSG_DATA_Q1,
                               UCN_TRAFFIC_Q1_REALTIME, &first_payload, 1U) == UCN_OK);
     TEST_ASSERT(contexts[0].send_count == 1U && contexts[4].send_count == 0U);
 
     contexts[7].deliver = true;
-    TEST_ASSERT(ucn_node_step(&a, 29100U) == UCN_OK);
+    TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 29100U) == UCN_OK);
     TEST_ASSERT(a.stats.route_refreshes_started >= 3U);
-    TEST_ASSERT(ucn_node_step(&a, 29101U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 29201U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 29301U) == UCN_OK);
+    TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 29101U) == UCN_OK);
+    TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 29201U) == UCN_OK);
+    TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 29301U) == UCN_OK);
     TEST_ASSERT(a.stats.path_probes_sent == (uint32_t)UCN_PATH_PROBE_REQUIRED_ACKS * 2U);
     TEST_ASSERT(a.stats.path_probe_acks_received == UCN_PATH_PROBE_REQUIRED_ACKS);
-    TEST_ASSERT(ucn_node_step(&a, 29401U) == UCN_OK);
+    TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 29401U) == UCN_OK);
     TEST_ASSERT(a.stats.route_switches == 1U);
 
     reset_send_counts(contexts, 8U);

@@ -102,6 +102,9 @@ static int heartbeat_run_sustained_backlog(bool include_q0, bool include_q1)
     TEST_ASSERT(ucn_node_step(&a, 0U) == UCN_OK);
     for (now_ms = 1U; now_ms <= UINT32_C(30000); ++now_ms) {
         payload = (uint8_t)now_ms;
+        /* Synchronous virtual delivery stands in for a peer Protocol Task;
+         * keep the receiver's monotonic clock aligned for RX token refill. */
+        b.now_ms = now_ms;
         if (include_q0) {
             ucn_result_t enqueue_result;
 
@@ -141,6 +144,40 @@ static int heartbeat_run_sustained_backlog(bool include_q0, bool include_q1)
     TEST_ASSERT(a.stats.neighbor_removed == 0U);
     TEST_ASSERT(ucn_node_neighbor_count(&a, UCN_NEIGHBOR_ADMITTED) == 1U);
     TEST_ASSERT(ucn_node_neighbor_count(&b, UCN_NEIGHBOR_ADMITTED) == 1U);
+    return 0;
+}
+
+static int heartbeat_run_wraparound_lifecycle(void)
+{
+    const uint32_t base_ms = UINT32_MAX - UINT32_C(1000);
+    ucn_node_t a, b;
+    ucn_link_t ab, ba;
+    heartbeat_link_context_t cab, cba;
+
+    (void)memset(&a, 0, sizeof(a));
+    (void)memset(&b, 0, sizeof(b));
+    (void)memset(&ab, 0, sizeof(ab));
+    (void)memset(&ba, 0, sizeof(ba));
+    (void)memset(&cab, 0, sizeof(cab));
+    (void)memset(&cba, 0, sizeof(cba));
+    TEST_ASSERT(heartbeat_init_node(&a, UINT32_C(21)) == 0);
+    TEST_ASSERT(heartbeat_init_node(&b, UINT32_C(22)) == 0);
+    heartbeat_setup_link(&ab, &cab, 21U);
+    heartbeat_setup_link(&ba, &cba, 22U);
+    cab.peer = &b; cab.peer_ingress = &ba;
+    cba.peer = &a; cba.peer_ingress = &ab;
+    TEST_ASSERT(ucn_node_broadcast_hello(&a, &ab, base_ms) == UCN_OK);
+    TEST_ASSERT(ucn_node_broadcast_hello(&b, &ba, base_ms) == UCN_OK);
+
+    cab.deliver = false;
+    cba.deliver = false;
+    (void)ucn_node_step(&a, base_ms + UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS - 1U);
+    TEST_ASSERT(ucn_node_neighbor_count(&a, UCN_NEIGHBOR_ADMITTED) == 1U);
+    (void)ucn_node_step(&a, base_ms + UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS);
+    TEST_ASSERT(ucn_node_neighbor_count(&a, UCN_NEIGHBOR_SUSPECT) == 1U);
+    (void)ucn_node_step(&a, base_ms + UCN_NEIGHBOR_REMOVE_TIMEOUT_MS);
+    TEST_ASSERT(ucn_node_neighbor_count(&a, UCN_NEIGHBOR_REMOVED) == 1U);
+    TEST_ASSERT(a.link_count == 0U && cab.close_count == 1U);
     return 0;
 }
 
@@ -235,5 +272,6 @@ int test_neighbor_heartbeat(void)
     TEST_ASSERT(heartbeat_run_sustained_backlog(false, true) == 0);
     TEST_ASSERT(heartbeat_run_sustained_backlog(true, false) == 0);
     TEST_ASSERT(heartbeat_run_sustained_backlog(true, true) == 0);
+    TEST_ASSERT(heartbeat_run_wraparound_lifecycle() == 0);
     return 0;
 }

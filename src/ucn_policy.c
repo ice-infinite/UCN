@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "ucn/ucn_node.h"
+#include "ucn/ucn_time.h"
 
 static bool policy_node_id_is_valid(ucn_node_id_t node_id)
 {
@@ -34,11 +35,6 @@ static bool policy_flow_key_equal(const ucn_policy_flow_key_t *left,
     return left->destination == right->destination &&
            left->endpoint == right->endpoint &&
            left->traffic_class == right->traffic_class;
-}
-
-static bool policy_deadline_expired(uint32_t now_ms, uint32_t deadline_ms)
-{
-    return (int32_t)(now_ms - deadline_ms) >= 0;
 }
 
 static bool policy_link_is_registered(const ucn_node_t *node,
@@ -295,7 +291,8 @@ void ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
         }
 
         update_optional_ewma(&snapshot->route_cost_valid, &snapshot->route_cost,
-                             metrics.route_cost_valid && metrics.route_cost != 0U,
+                             metrics.route_cost_valid && metrics.route_cost != 0U &&
+                                 metrics.route_cost != UCN_LINK_ROUTE_COST_UNKNOWN,
                              metrics.route_cost);
         update_optional_ewma(&snapshot->rtt_valid, &snapshot->rtt_ewma_ms,
                              metrics.rtt_valid, metrics.rtt_ms);
@@ -346,7 +343,7 @@ void ucn_policy_expire_flows(ucn_policy_state_t *state, uint32_t now_ms)
     }
     for (index = 0U; index < UCN_MAX_POLICY_FLOWS; ++index) {
         if (state->flows[index].occupied &&
-            policy_deadline_expired(now_ms, state->flows[index].expires_at_ms)) {
+            ucn_deadline_expired(now_ms, state->flows[index].expires_at_ms)) {
             (void)memset(&state->flows[index], 0, sizeof(state->flows[index]));
             state->stats.flow_bindings_expired++;
         }
@@ -379,7 +376,7 @@ ucn_result_t ucn_node_set_route_policy(ucn_node_t *node,
         if (config->primary_local_path_id == 0U ||
             config->allow_discovery_on_hard_failure ||
             (config->balance_flow_lease_ms != 0U &&
-             config->balance_flow_lease_ms >= UINT32_C(0x80000000))) {
+             !ucn_duration_is_valid(config->balance_flow_lease_ms))) {
             return UCN_ERR_ARGUMENT;
         }
     } else if (config->balance_flow_lease_ms != 0U) {
@@ -534,8 +531,8 @@ ucn_result_t ucn_node_bind_q1_flow(ucn_node_t *node,
     size_t index;
 
     if (node == NULL || !policy_node_id_is_valid(destination) ||
-        !ucn_endpoint_is_static(endpoint) || local_path_id == 0U || lease_ms == 0U ||
-        lease_ms >= UINT32_C(0x80000000)) {
+        !ucn_endpoint_is_static(endpoint) || local_path_id == 0U ||
+        !ucn_duration_is_valid(lease_ms)) {
         return UCN_ERR_ARGUMENT;
     }
     ucn_policy_expire_flows(&node->policy_state, node->now_ms);
@@ -565,7 +562,7 @@ ucn_result_t ucn_node_bind_q1_flow(ucn_node_t *node,
     binding->occupied = true;
     binding->key = key;
     binding->local_path_id = local_path_id;
-    binding->expires_at_ms = node->now_ms + lease_ms;
+    binding->expires_at_ms = ucn_deadline_from_now(node->now_ms, lease_ms);
     binding->last_used_at_ms = node->now_ms;
     return UCN_OK;
 }
@@ -586,7 +583,8 @@ const ucn_policy_flow_binding_t *ucn_node_find_q1_flow(
     key.endpoint = endpoint;
     key.traffic_class = UCN_TRAFFIC_Q1_REALTIME;
     binding = find_flow_binding((ucn_policy_state_t *)&node->policy_state, &key);
-    if (binding != NULL && policy_deadline_expired(node->now_ms, binding->expires_at_ms)) {
+    if (binding != NULL &&
+        ucn_deadline_expired(node->now_ms, binding->expires_at_ms)) {
         return NULL;
     }
     return binding;

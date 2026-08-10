@@ -59,8 +59,8 @@ Core 只依赖抽象的 `Link`、时间/随机数/临界区等 Port 接口；它
 | Policy / Path / quality | 为按业务策略选 Path 准备固定 Policy、当地 Path、Q1 Flow、Link 质量与线上 Path 转发表。 | T22.1 已完成固定表、500 ms/25% EWMA 和质量查询；T22.2 已完成 40 B Path ID、逐跳安装/撤销、Path 范围 RERR 和 E2E AAD；T22.3 已使 `PINNED_STRICT`/`PINNED_FAILOVER` 生效；T22.4 已使 `AUTO_BALANCE` 按 Q1 Flow 租约选择最多两条已验证 Path，并仅在持续拥塞/Down/租约边界重绑。 |
 | Endpoint / QoS | 把“发给哪个 Node”与“Node 内哪类数据”分开；调度 Q0/Q1。 | 静态业务 Endpoint 为 `0x40..0xBF`；Q0 为普通尽力而为，Q1 为最新值优先。Q2/Q3、可靠确认和大包分片尚未实现。 |
 | Node 内任务通信 | 让同一 MCU 上的多个业务任务使用同一 Endpoint 语义。 | T25.3 已在 ESP32 产品 Port 静态接入固定 Service Router、Q0/Q1 Inbox、唯一 Protocol Task→Core Bridge、1 B Endpoint 事件 Queue 与业务 Task 通知；C99 Core 不含 FreeRTOS，真实任务资源/时延仍待实测，不把任务变为独立 Node。 |
-| Security boundary | 发送/接收策略、Session/Counter、授权与可插拔 `seal/open` Provider。 | 支持按 Node/Endpoint 选择明文或端到端受保护、目标解密和中继透明转发；生产密钥、审计过的 AEAD、轮换/撤销和产品 ACL 表仍待接入。 |
-| Diagnostics | 只在需要时查询网络状态。 | 已有按需路径追踪 `PATH_TRACE_REQ/REPLY`、按需节点快照 `NODE_SNAPSHOT_REQ/REPLY` 和受授权的单 Node 策略诊断 `POLICY_DIAGNOSTIC_REQ/REPLY`；均独立限流、固定表项，默认不维护永久全网地图。 |
+| Security boundary | 发送/接收策略、Session/Counter、授权与可插拔 `seal/open/rotate_session` Provider。 | 支持按 Node/Endpoint 选择明文或端到端受保护、目标解密和中继透明转发；Sequence 到阈值前要求 Provider 轮换 Session，失败则停止发送。生产密钥、审计过的 AEAD、逐跳 Link 认证、撤销和产品 ACL 表仍待接入。 |
+| Diagnostics | 只在需要时查询网络状态。 | 已有按需路径追踪 `PATH_TRACE_REQ/REPLY`、按需节点快照 `NODE_SNAPSHOT_REQ/REPLY` 和受授权的单 Node 策略诊断 `POLICY_DIAGNOSTIC_REQ/REPLY`；均固定表项、默认拒绝远端请求。RREQ、Heartbeat Request 与 Trace 另按直连对端和控制类型限流。 |
 
 ## 5. 路由、质量与切换是怎样协同的
 

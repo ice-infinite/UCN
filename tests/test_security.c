@@ -10,6 +10,9 @@ typedef struct security_provider_state {
     bool fail_store;
     bool deny_tx;
     bool deny_rx;
+    bool fail_rotate;
+    uint32_t rotate_calls;
+    struct security_provider_state *rotation_peer;
 } security_provider_state_t;
 
 typedef struct security_link_context {
@@ -76,9 +79,35 @@ static ucn_result_t security_authorize_rx(void *context,
     return UCN_OK;
 }
 
+static ucn_result_t security_rotate(void *context,
+                                    ucn_session_id_t current_session_id,
+                                    ucn_session_id_t *new_session_id,
+                                    ucn_sequence_t *next_sequence)
+{
+    security_provider_state_t *state = (security_provider_state_t *)context;
+    ucn_session_id_t rotated_session;
+
+    state->rotate_calls++;
+    if (state->fail_rotate || current_session_id != state->session_id) {
+        return UCN_ERR_SECURITY;
+    }
+    rotated_session = state->session_id + 1U;
+    if (rotated_session == 0U) {
+        rotated_session = 1U;
+    }
+    state->session_id = rotated_session;
+    state->next_sequence = 1U;
+    if (state->rotation_peer != NULL) {
+        state->rotation_peer->session_id = rotated_session;
+    }
+    *new_session_id = rotated_session;
+    *next_sequence = 1U;
+    return UCN_OK;
+}
+
 static const ucn_security_ops_t TEST_SECURITY_OPS = {
     security_load, security_store, security_session, security_authorize_tx, security_authorize_rx,
-    NULL, NULL, NULL
+    NULL, NULL, NULL, security_rotate
 };
 
 static ucn_result_t security_link_send(ucn_link_t *link,
@@ -127,11 +156,22 @@ int test_security(void)
     ucn_node_t a, a_after_reboot, b;
     ucn_link_t ab, ba, reboot_ab;
     security_link_context_t cab, cba, creboot_ab;
-    security_provider_state_t a_security = { 40U, 0x77U, false, false, false, false };
-    security_provider_state_t b_security = { 70U, 0x77U, false, false, false, false };
-    security_provider_state_t bad_security = { 1U, 0x77U, true, false, false, false };
+    security_provider_state_t a_security = {
+        .next_sequence = 1U,
+        .session_id = 0x77U
+    };
+    security_provider_state_t b_security = {
+        .next_sequence = 70U,
+        .session_id = 0x77U
+    };
+    security_provider_state_t bad_security = {
+        .next_sequence = 1U,
+        .session_id = 0x77U,
+        .fail_load = true
+    };
     security_receive_state_t received;
     ucn_security_ops_t incomplete_ops = TEST_SECURITY_OPS;
+    ucn_security_ops_t no_rotation_ops = TEST_SECURITY_OPS;
 
     (void)memset(&a, 0, sizeof(a));
     (void)memset(&a_after_reboot, 0, sizeof(a_after_reboot));
@@ -162,9 +202,9 @@ int test_security(void)
     ucn_node_set_rx_handler(&b, security_rx, &received);
     TEST_ASSERT(ucn_node_send(&a, UINT32_C(2), UCN_MSG_DATA_Q1,
                               UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);
-    TEST_ASSERT(a_security.next_sequence == 41U);
+    TEST_ASSERT(a_security.next_sequence == 2U);
     TEST_ASSERT(received.count == 1U);
-    TEST_ASSERT(received.last_sequence == 40U);
+    TEST_ASSERT(received.last_sequence == 1U);
     TEST_ASSERT(received.last_session == 0x77U);
 
     TEST_ASSERT(security_init_node(&a_after_reboot, UINT32_C(1)) == 0);
@@ -176,9 +216,9 @@ int test_security(void)
     TEST_ASSERT(ucn_node_register_link(&a_after_reboot, &reboot_ab) == UCN_OK);
     TEST_ASSERT(ucn_node_send(&a_after_reboot, UINT32_C(2), UCN_MSG_DATA_Q1,
                               UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);
-    TEST_ASSERT(a_security.next_sequence == 42U);
+    TEST_ASSERT(a_security.next_sequence == 3U);
     TEST_ASSERT(received.count == 2U);
-    TEST_ASSERT(received.last_sequence == 41U);
+    TEST_ASSERT(received.last_sequence == 2U);
 
     b_security.deny_rx = true;
     TEST_ASSERT(ucn_node_send(&a_after_reboot, UINT32_C(2), UCN_MSG_DATA_Q1,
@@ -192,6 +232,40 @@ int test_security(void)
     a_security.fail_store = true;
     TEST_ASSERT(ucn_node_send(&a_after_reboot, UINT32_C(2), UCN_MSG_DATA_Q1,
                               UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_ERR_SECURITY);
-    TEST_ASSERT(a_security.next_sequence == 44U);
+    TEST_ASSERT(a_security.next_sequence == 5U);
+
+    /* A Core never wraps Sequence inside the same Session.  Without an
+     * explicit Provider rollover it fails closed; Provider failure also keeps
+     * the old state.  A successful atomic rollover starts the new Session at
+     * Sequence 1, which the receiver accepts even though old Session/1 is in
+     * its Seen Cache. */
+    a_security.fail_store = false;
+    a_security.next_sequence = UCN_SEQUENCE_ROTATION_THRESHOLD;
+    a_after_reboot.next_sequence = UCN_SEQUENCE_ROTATION_THRESHOLD;
+    no_rotation_ops.rotate_session = NULL;
+    TEST_ASSERT(ucn_node_set_security(&a_after_reboot, &no_rotation_ops,
+                                      &a_security) == UCN_OK);
+    TEST_ASSERT(ucn_node_send(&a_after_reboot, UINT32_C(2), UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) ==
+                UCN_ERR_SECURITY);
+    TEST_ASSERT(a_security.session_id == 0x77U && a_security.rotate_calls == 0U);
+
+    a_security.fail_rotate = true;
+    TEST_ASSERT(ucn_node_set_security(&a_after_reboot, &TEST_SECURITY_OPS,
+                                      &a_security) == UCN_OK);
+    TEST_ASSERT(ucn_node_send(&a_after_reboot, UINT32_C(2), UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) ==
+                UCN_ERR_SECURITY);
+    TEST_ASSERT(a_security.session_id == 0x77U && a_security.rotate_calls == 1U);
+
+    a_security.fail_rotate = false;
+    a_security.rotation_peer = &b_security;
+    TEST_ASSERT(ucn_node_send(&a_after_reboot, UINT32_C(2), UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);
+    TEST_ASSERT(a_security.session_id == 0x78U && a_security.next_sequence == 2U &&
+                a_security.rotate_calls == 2U &&
+                a_after_reboot.stats.session_rotations == 1U);
+    TEST_ASSERT(received.count == 3U && received.last_sequence == 1U &&
+                received.last_session == 0x78U);
     return 0;
 }

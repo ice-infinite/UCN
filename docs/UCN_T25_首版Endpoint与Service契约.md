@@ -151,6 +151,9 @@ R1 只为 T25.1 的纯 C Router 冻结一组**测试默认值**；不同 MCU 可
 - 本机 Fast Path 不产生网络密文，但 T25.1 预留 `source Service -> Endpoint` 静态 ACL 位置；首版最小规则是 `SENSOR/POWER` 不得向执行器 Endpoint 发送。
 - ACTUATOR 必须独立检查模式、范围、标志、序号与 `valid_for_ms`，并在超时/未就绪/队列满/远端不可达时进入本机安全状态。UCN 的 Q0 只保证有界投递，不替代硬件互锁、PWM 限幅或 FOC 安全闭环。
 - Q1 传感器状态的损失或覆盖不能自动触发旧值重放；CONTROL 应按本地接收时间检测数据新鲜度。
+- Task 进入 `ready=false` 时，Router 会清空该 Binding 的 Q0 FIFO/Q1 Latest；未 ready 时不能读取旧消息，重新 ready 后只接受新消息。
+- `ucn_service_send_ex()` 可区分 `LOCAL_DELIVERED` 与 `REMOTE_ENQUEUED`；后者只表示本机 Router 拥有副本，不表示 Bridge/Core/Link 已接受，更不表示远端执行。
+- 高风险 Q0 可选用 12 B `ucn_service_command_guard` 业务前缀（`command_id/issued_at_ms/valid_for_ms/result_endpoint`）。它不增加所有 Service 消息的固定 RAM；跨 Node 使用 `issued_at_ms` 时必须由产品提供共享时间域，否则应使用产品自己的 Generation/Lease 规则，不能假定两块 MCU 的启动时钟天然同步。
 
 ## 7. T25.1 的直接实现输入
 

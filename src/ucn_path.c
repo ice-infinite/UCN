@@ -1,11 +1,7 @@
 #include <string.h>
 
 #include "ucn/ucn_path.h"
-
-static bool deadline_expired(uint32_t now_ms, uint32_t deadline_ms)
-{
-    return (int32_t)(now_ms - deadline_ms) >= 0;
-}
+#include "ucn/ucn_time.h"
 
 static bool path_identity_matches(const ucn_path_forward_entry_t *entry,
                                   ucn_node_id_t owner,
@@ -21,7 +17,7 @@ bool ucn_path_is_expired(const ucn_path_forward_entry_t *entry,
                          uint32_t now_ms)
 {
     return entry == NULL || !entry->occupied ||
-           deadline_expired(now_ms, entry->expires_at_ms);
+           ucn_deadline_expired(now_ms, entry->expires_at_ms);
 }
 
 const ucn_path_forward_entry_t *ucn_path_find(

@@ -4,6 +4,7 @@
 #include "ucn/ucn_endpoint.h"
 #include "ucn/ucn_link.h"
 #include "ucn/ucn_path.h"
+#include "ucn/ucn_time.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -68,6 +69,9 @@ typedef char ucn_policy_balance_queue_pressure_threshold_must_be_valid[
         UCN_LINK_METRIC_PER_MILLE_MAX ? 1 : -1];
 typedef char ucn_policy_balance_congestion_samples_must_be_positive[
     UCN_POLICY_BALANCE_CONGESTED_SAMPLE_LIMIT > 0U ? 1 : -1];
+typedef char ucn_policy_relative_durations_must_be_wrap_safe[
+    UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_POLICY_BALANCE_FLOW_LEASE_MS <= UCN_MAX_SAFE_DURATION_MS ? 1 : -1];
 
 /* A wildcard applies only to the traffic-class portion of a policy key.
  * Destination and Endpoint always remain explicit, so a product cannot

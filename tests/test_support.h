@@ -39,5 +39,9 @@ int test_policy(void);
 int test_policy_diagnostic(void);
 int test_service(void);
 int test_service_bridge(void);
+int test_control_budget(void);
+int test_time(void);
+int test_link_contract(void);
+int test_stress(void);
 
 #endif

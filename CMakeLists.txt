@@ -60,6 +60,10 @@ if(UCN_BUILD_TESTS)
         tests/test_policy_diagnostic.c
         tests/test_service.c
         tests/test_service_bridge.c
+        tests/test_control_budget.c
+        tests/test_time.c
+        tests/test_link_contract.c
+        tests/test_stress.c
     )
 
     target_link_libraries(ucn_tests PRIVATE ucn_core)

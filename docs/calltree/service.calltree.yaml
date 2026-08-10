@@ -25,7 +25,7 @@ nodes:
       - R1 是一 Endpoint 一个 owner Service；Router 不拥有 Link 或 Node。
 
   - id: service.ucn_service_send
-    symbol: ucn_service_send
+    symbol: ucn_service_send/ucn_service_send_ex
     type: function
     file: src/ucn_service.c
     layer: service
@@ -41,11 +41,24 @@ nodes:
         type: queue
         reason: destination 为远端时按 Q0 FIFO 或 Q1 Latest Value 保存 Remote TX。
     outputs:
-      - UCN_OK 表示 Router 已拥有 Payload 固定副本。
+      - ucn_service_send_ex 以 LOCAL_DELIVERED/REMOTE_ENQUEUED 明确副本所在边界。
       - UCN_ERR_NO_SPACE/ACCESS/NOT_FOUND 表示本机 Router 拒绝，业务必须处理。
     notes:
       - 本函数不调用 Link、Node、路由或加密；调用返回后 Payload 可复用。
       - Q1 的同 (destination, Endpoint) Remote TX 会覆盖旧值；Q0 满即显式失败。
+      - REMOTE_ENQUEUED 不是远端送达或执行确认；Bridge/Core/Link 仍可能失败。
+
+  - id: service.command_guard_helpers
+    symbol: ucn_service_command_guard_encode/decode/validate
+    type: module
+    file: src/ucn_service.c
+    layer: service
+    role: 为高风险 Q0 提供可选 12 B 业务前缀的编码、重复命令和有效期校验。
+    called_by:
+      - external.application_service_task
+    calls: []
+    notes:
+      - 不改变所有 Service Message 的固定结构；跨 Node issued_at 依赖产品共享时间域。
 
   - id: service.ucn_service_deliver_remote
     symbol: ucn_service_deliver_remote
@@ -74,6 +87,7 @@ nodes:
     calls: []
     notes:
       - owner_service_id 不匹配会被拒绝；Q1 通知后应循环读取直到 Inbox 为空。
+      - Binding 为 not-ready 时不能读取；set_ready(false) 会先清空旧 Q0/Q1。
 
   - id: service.ucn_service_remote_tx_take
     symbol: ucn_service_remote_tx_take

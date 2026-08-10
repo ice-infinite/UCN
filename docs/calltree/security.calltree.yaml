@@ -23,7 +23,25 @@ nodes:
         type: callback
         reason: 获取本次 Node Session ID。
     notes:
-      - Core 不内置生产 AEAD、密钥存储、轮换或身份库。
+      - Core 不内置生产 AEAD、密钥存储或身份库；Provider 可实现原子 Session/Key 轮换。
+
+  - id: security.allocate_sequence_static
+    symbol: allocate_sequence
+    type: function
+    file: src/ucn_node.c
+    layer: security
+    role: 分配并持久化发送 Sequence；接近阈值时要求 Provider 先原子轮换 Session。
+    called_by:
+      - node_runtime.send_frame_on_link_static
+    calls:
+      - target: external.security_provider_rotate_session
+        type: callback
+        reason: 建立新 Session/Key 并把 Sequence 重新置于有效起点。
+      - target: external.security_provider_store_next_sequence
+        type: callback
+        reason: 在帧可发送前持久化下一序号。
+    notes:
+      - 没有轮换回调、Provider 失败或返回重复 Session 时失败关闭，不允许同 Session 回绕。
 
   - id: security.ucn_node_set_security_policy
     symbol: ucn_node_set_security_policy

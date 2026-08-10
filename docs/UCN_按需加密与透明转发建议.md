@@ -82,7 +82,7 @@ C：按 (source=A, destination=C, endpoint, session) 找到 E2E Key
 | 字段类别 | 处理原则 |
 | --- | --- |
 | 不可变 AAD | Version、`E2E_PROTECTED`/Path 标志、Network ID、Source、Destination、Message Type/Endpoint、Traffic Class、Session ID、Sequence、Payload Length，以及存在时的 Path ID。 |
-| 可变转发元数据 | Hop Limit、Route Extension、CRC。中继可按协议改写；它们不能作为“原始来源身份”的证明。 |
+| 可变转发元数据 | Hop Limit、Route Extension/Route Epoch、CRC。中继可按协议改写；它们不能作为“原始来源身份”的证明，生产 Link 必须用逐跳认证保护其完整性。 |
 | 受保护内容 | 整个业务 Payload 和 AEAD Tag。 |
 
 最终目标以不可变 AAD 和密文共同验 Tag。即使 B 能修改 TTL 或重算 CRC，也不能把 IMU 密文改成电机命令、不能把来源 A 改成另一控制节点，更不能构造有效 Tag。
@@ -118,7 +118,7 @@ C：按 (source=A, destination=C, endpoint, session) 找到 E2E Key
 | 带 Path ID 的明文 | `40 + P` | 216 B |
 | 带 Path ID 的端到端受保护 | `40 + P + 16` | 200 B |
 
-Nonce 不额外放入每一帧；由方向、Source Node、Session ID、Sequence 和密钥 Epoch 按已冻结算法确定。前提是同一密钥下绝不能重用该组合：发送 Counter 需持久化或在重启前后换出新会话密钥，Sequence 到上限前必须换密钥。
+Nonce 不额外放入每一帧；由方向、Source Node、Session ID、Sequence 和密钥 Epoch 按已冻结算法确定。前提是同一密钥下绝不能重用该组合：发送 Counter 需持久化或在重启前后换出新会话密钥。Core 现在会在 `UCN_SEQUENCE_ROTATION_THRESHOLD` 前调用可选 `rotate_session()`；Provider 必须原子持久化新 Session/Key/next Sequence，没有回调、轮换失败或返回重复 Session 时发送失败关闭，绝不在同一 Session 内回绕。
 
 ### 5.3 可选逐跳 Link AEAD
 
@@ -138,7 +138,7 @@ Nonce 不额外放入每一帧；由方向、Source Node、Session ID、Sequence
 2. `JOIN_REQ / JOIN_CHALLENGE / JOIN_ACCEPT` 完成真实身份校验、挑战应答、会话密钥建立和权限下发；Coordinator 可以是 MCU，Linux 不参与必经安全路径。
 3. 端到端业务密钥只给发送 Endpoint 与最终接收 Endpoint；透明中继不保存该 Key。
 4. 路由、入网、Heartbeat、Probe 等控制帧不能套用“不解密透明业务转发”语义：它们需要各自的逐跳认证/会话保护，否则中继无法安全处理控制 Payload。
-5. 节点撤销、密钥 Epoch 轮换和重放窗口均为固定容量表项；表满、计数器回退、Tag 失败和 ACL 拒绝应有计数与退避，不能无限占用队列。
+5. 节点撤销、密钥 Epoch 轮换和重放窗口均为固定容量表项；表满、计数器回退、Tag 失败和 ACL 拒绝应有计数与退避，不能无限占用队列。Core 的 Seen Cache 只做网络去重，不能替代生产 Provider 的 Replay Window。
 
 ## 7. 安全覆盖范围与限制
 

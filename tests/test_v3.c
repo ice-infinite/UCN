@@ -129,12 +129,12 @@ static ucn_result_t v3_open(void *context,
 
 static const ucn_security_ops_t V3_SECURITY_OPS = {
     v3_load_sequence, v3_store_sequence, v3_session, v3_authorize_tx,
-    v3_authorize_rx, NULL, v3_seal, v3_open
+    v3_authorize_rx, NULL, v3_seal, v3_open, NULL
 };
 
 static const ucn_security_ops_t V3_FORWARD_ONLY_SECURITY_OPS = {
     v3_load_sequence, v3_store_sequence, v3_session, v3_authorize_tx,
-    v3_authorize_rx, NULL, NULL, NULL
+    v3_authorize_rx, NULL, NULL, NULL, NULL
 };
 
 static ucn_result_t v3_link_send(ucn_link_t *link,

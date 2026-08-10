@@ -47,6 +47,12 @@ extern "C" {
 #define UCN_SERVICE_SOURCE_MASK(service_id) \
     (UINT32_C(1) << (uint32_t)(service_id))
 
+/* Optional product payload prefix for high-risk Q0 commands.  It is not part
+ * of every Service message and therefore adds no Router RAM or normal-frame
+ * overhead.  issued_at_ms is meaningful only inside a product-defined shared
+ * 32-bit millisecond time domain. */
+#define UCN_SERVICE_COMMAND_GUARD_BYTES ((size_t)12U)
+
 typedef char ucn_service_payload_must_fit_core_frame[
     UCN_SERVICE_MAX_PAYLOAD_BYTES <= UCN_MAX_PAYLOAD_BYTES ? 1 : -1];
 typedef char ucn_service_q0_binding_limit_must_fit[
@@ -60,6 +66,23 @@ typedef enum ucn_service_delivery_mode {
     UCN_SERVICE_DELIVERY_Q0_FIFO = 0,
     UCN_SERVICE_DELIVERY_Q1_LATEST = 1
 } ucn_service_delivery_mode_t;
+
+/* This is an ownership/acceptance result, never an end-to-end delivery ACK.
+ * REMOTE_ENQUEUED means only that the local Router now owns a fixed copy; a
+ * later Bridge/Core/Link operation may still fail. */
+typedef enum ucn_service_acceptance {
+    UCN_SERVICE_ACCEPTANCE_NONE = 0,
+    UCN_SERVICE_ACCEPTANCE_LOCAL_DELIVERED = 1,
+    UCN_SERVICE_ACCEPTANCE_REMOTE_ENQUEUED = 2
+} ucn_service_acceptance_t;
+
+typedef struct ucn_service_command_guard {
+    uint32_t command_id;
+    uint32_t issued_at_ms;
+    uint16_t valid_for_ms;
+    ucn_endpoint_t result_endpoint;
+    uint8_t flags;
+} ucn_service_command_guard_t;
 
 /* One static Endpoint has one local owner in R1.  A source Service mask is
  * checked only for local Fast-Path/outbound calls; remote source authority
@@ -128,6 +151,7 @@ typedef struct ucn_service_stats {
     uint32_t traffic_rejected;
     uint32_t q0_inbox_full;
     uint32_t q1_overwrites;
+    uint32_t binding_purges;
     uint32_t remote_q0_full;
     uint32_t remote_q1_full;
     uint32_t remote_q1_overwrites;
@@ -147,6 +171,9 @@ typedef struct ucn_service_router {
 
 ucn_result_t ucn_service_router_init(ucn_service_router_t *router,
                                      const ucn_service_router_config_t *config);
+/* Setting ready=false also purges this Binding's Q0 FIFO or Q1 Latest value.
+ * A restarted Task can therefore never consume a command/sample queued before
+ * it became not-ready.  The caller/RTOS Port must serialize Router access. */
 ucn_result_t ucn_service_set_ready(ucn_service_router_t *router,
                                    ucn_endpoint_t endpoint,
                                    bool ready);
@@ -161,6 +188,17 @@ ucn_result_t ucn_service_send(ucn_service_router_t *router,
                               ucn_traffic_class_t traffic_class,
                               const uint8_t *payload,
                               uint16_t payload_length);
+
+/* Backward-compatible extended form that makes the successful ownership
+ * boundary explicit.  acceptance may be NULL. */
+ucn_result_t ucn_service_send_ex(ucn_service_router_t *router,
+                                 ucn_node_id_t destination,
+                                 ucn_service_id_t source_service_id,
+                                 ucn_endpoint_t endpoint,
+                                 ucn_traffic_class_t traffic_class,
+                                 const uint8_t *payload,
+                                 uint16_t payload_length,
+                                 ucn_service_acceptance_t *acceptance);
 
 /* Called by the later Protocol-Task bridge after Core has accepted an
  * endpoint frame for this Node.  It never performs routing or decryption. */
@@ -180,6 +218,22 @@ ucn_result_t ucn_service_remote_tx_take(ucn_service_router_t *router,
                                         ucn_service_message_t *message);
 
 const ucn_service_stats_t *ucn_service_get_stats(const ucn_service_router_t *router);
+
+ucn_result_t ucn_service_command_guard_encode(
+    const ucn_service_command_guard_t *guard,
+    uint8_t output[UCN_SERVICE_COMMAND_GUARD_BYTES]);
+ucn_result_t ucn_service_command_guard_decode(
+    const uint8_t *payload,
+    size_t payload_length,
+    ucn_service_command_guard_t *guard);
+/* Consumer-side validation for products that use the optional guard.  A
+ * product must supply a shared/synchronized issued_at clock; otherwise use a
+ * product generation/lease rule instead of pretending local uptimes match. */
+ucn_result_t ucn_service_command_guard_validate(
+    const ucn_service_command_guard_t *guard,
+    uint32_t now_ms,
+    bool has_last_command_id,
+    uint32_t last_command_id);
 
 #ifdef __cplusplus
 }

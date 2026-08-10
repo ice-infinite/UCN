@@ -78,7 +78,7 @@ ucn_node_request_path_trace(node, destination, record_limit, callback, context);
 
 - `record_limit=0` 表示使用当前 `UCN_PATH_TRACE_MAX_NODES`；非零值可让调用方主动限制诊断载荷，达到上限返回 `TRUNCATED`。回调一次性拿到 `status`、`trace_id`、`node_count` 和固定数组 `node_ids[]`；不分配堆内存。
 - Trace 仅允许单播，使用独立的、低频的诊断 Token；不占用 Q0 关键控制预算，也不应抢占 Q0/Q1 业务队列。
-- 当前 Core 固定编入这组按需诊断代码，但不会自行发送 Trace；产品若要进一步裁剪代码，需要在目标 Profile 增加专门的构建开关，当前仓库尚未提供该开关。安全 Provider 存在时，既有入站 `authorize_rx()` 必须先通过；没有授权的 Link 仍不能进入 Trace 处理。
+- 当前 Core 固定编入这组按需诊断代码，但不会自行发送 Trace；产品若要进一步裁剪代码，需要在目标 Profile 增加专门的构建开关，当前仓库尚未提供该开关。安全 Provider 存在时，既有入站 `authorize_rx()` 必须先通过；此外每个中继/目标必须显式安装 `ucn_node_set_path_trace_authorizer()`，默认 `NULL` 拒绝远端 Trace。通过授权后仍受“直连对端 + Trace 类型”的独立入站令牌桶限制，授权失败不会分配 Reverse 状态。
 - Trace 不是路径锁定或负载均衡机制。T22.2～T22.5 已提供可安装的业务 Path、固定主备、Q1 流亲和均衡和同 Neighbor Bearer 联动，但 Trace 结果不会自动创建、更新或选择任何 Path；只有已配置 Policy 的 `PINNED_*` 或 `AUTO_BALANCE` Endpoint 才按其规则发送，其他业务仍按当时 Active/Previous Route 与 Cost 规则发送。
 
 ## 5. T23 实施门禁
@@ -87,7 +87,7 @@ ucn_node_request_path_trace(node, destination, record_limit, callback, context);
 | --- | --- | --- |
 | T23.1 | 已完成：新增 Flag、消息类型、固定 Trace/Pending/Reverse 数据结构、API 与统计。 | `DIAGNOSTIC` 编解码、未知 Flag 拒绝、参数/表满/超时。 |
 | T23.2 | 已完成：Request 逐跳追加、目标 Reply、反向临时表与中途失败 Reply。 | A→B→C 返回 `[A,B,C]`；无路由、TTL、调用方限额截断、反向 Reply。 |
-| T23.3 | 已完成：控制/安全/调度联动。 | E2E Trace 拒绝、未准入 Link 拒绝、独立低频预算；全量 Q0 回归。 |
+| T23.3 | 已完成：控制/安全/调度联动。 | E2E Trace 拒绝、未准入 Link 拒绝、显式 Authorizer 默认拒绝、按直连对端/类型入站预算与源端低频预算；全量 Q0 回归。 |
 | T23.4 | 已完成：全量回归与 Profile 验证。 | Debug、Release、64 B Profile、现有 v4/路由/安全/Adapter 测试全绿。 |
 | T23.5 | 实机验证。 | 至少三板 A→B→C 查询、重启/断链/重组网、Trace 时延和控制开销。 |
 

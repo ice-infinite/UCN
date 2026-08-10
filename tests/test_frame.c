@@ -58,5 +58,21 @@ int test_frame(void)
     source.payload = NULL;
     source.payload_length = 1U;
     TEST_ASSERT(ucn_frame_encode(&source, encoded, sizeof(encoded), &encoded_length) == UCN_ERR_ARGUMENT);
+
+    TEST_ASSERT(ucn_frame_max_payload(0U) ==
+                UCN_MAX_FRAME_BYTES - UCN_FRAME_HEADER_SIZE);
+    TEST_ASSERT(ucn_frame_max_payload(UCN_FRAME_FLAG_ROUTE_EXTENSION) ==
+                UCN_MAX_FRAME_BYTES - UCN_FRAME_ROUTE_HEADER_SIZE);
+    TEST_ASSERT(ucn_frame_max_payload(UCN_FRAME_FLAG_PATH_ID) == 0U);
+    TEST_ASSERT(ucn_frame_max_payload(UCN_FRAME_FLAG_ROUTE_EXTENSION |
+                                      UCN_FRAME_FLAG_PATH_ID) ==
+                UCN_MAX_FRAME_BYTES - UCN_FRAME_PATH_HEADER_SIZE);
+    TEST_ASSERT(ucn_frame_max_payload(UCN_FRAME_FLAG_E2E_PROTECTED) ==
+                UCN_MAX_FRAME_BYTES - UCN_FRAME_HEADER_SIZE - UCN_E2E_TAG_SIZE);
+    TEST_ASSERT(ucn_frame_max_payload(UCN_FRAME_FLAG_ROUTE_EXTENSION |
+                                      UCN_FRAME_FLAG_PATH_ID |
+                                      UCN_FRAME_FLAG_E2E_PROTECTED) ==
+                UCN_MAX_FRAME_BYTES - UCN_FRAME_PATH_HEADER_SIZE - UCN_E2E_TAG_SIZE);
+    TEST_ASSERT(ucn_frame_max_payload(UINT8_C(0x80)) == 0U);
     return 0;
 }

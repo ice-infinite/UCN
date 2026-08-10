@@ -3,6 +3,7 @@
 #include "ucn/ucn.h"
 #include "ucn/ucn_frame.h"
 #include "ucn/ucn_node.h"
+#include "ucn/ucn_time.h"
 
 #define UCN_ROUTE_REQ_PAYLOAD_BYTES ((size_t)16U)
 #define UCN_ROUTE_REPLY_PAYLOAD_BYTES ((size_t)18U)
@@ -60,7 +61,6 @@ static ucn_result_t begin_route_discovery(ucn_node_t *node,
                                           uint32_t now_ms,
                                           bool is_candidate);
 static void expire_candidate_routes(ucn_node_t *node);
-static bool deadline_expired(uint32_t now_ms, uint32_t deadline_ms);
 static ucn_result_t send_path_route_error(ucn_node_t *node,
                                           ucn_link_t *upstream_link,
                                           ucn_node_id_t origin,
@@ -95,8 +95,25 @@ static void write_u16_be(uint8_t *data, uint16_t value)
 
 static uint16_t add_route_cost(uint16_t left, uint16_t right)
 {
-    return left > (uint16_t)(UINT16_MAX - right) ? UINT16_MAX :
-           (uint16_t)(left + right);
+    if (left == UCN_LINK_ROUTE_COST_UNKNOWN ||
+        right == UCN_LINK_ROUTE_COST_UNKNOWN) {
+        return UCN_LINK_ROUTE_COST_UNKNOWN;
+    }
+    return left > (uint16_t)(UCN_LINK_ROUTE_COST_MAX - right) ?
+               UCN_LINK_ROUTE_COST_MAX : (uint16_t)(left + right);
+}
+
+static bool route_cost_is_known(uint16_t route_cost)
+{
+    return route_cost != 0U && route_cost != UCN_LINK_ROUTE_COST_UNKNOWN;
+}
+
+static bool route_cost_is_better(uint16_t candidate_cost, uint16_t active_cost)
+{
+    if (!route_cost_is_known(candidate_cost)) {
+        return false;
+    }
+    return !route_cost_is_known(active_cost) || candidate_cost < active_cost;
 }
 
 static uint16_t route_epoch_from_request_id(uint32_t request_id)
@@ -113,7 +130,7 @@ static uint16_t link_route_cost(const ucn_link_t *link)
     (void)memset(&metrics, 0, sizeof(metrics));
     if (link != NULL && link->ops != NULL && link->ops->get_metrics != NULL &&
         link->ops->get_metrics(link, &metrics) == UCN_OK &&
-        metrics.route_cost_valid && metrics.route_cost != 0U) {
+        metrics.route_cost_valid && route_cost_is_known(metrics.route_cost)) {
         return metrics.route_cost;
     }
     return UCN_UNKNOWN_LINK_ROUTE_COST;
@@ -122,13 +139,13 @@ static uint16_t link_route_cost(const ucn_link_t *link)
 static bool route_is_expired(const ucn_node_t *node, const ucn_route_entry_t *route)
 {
     return !route->is_static &&
-           (int32_t)(node->now_ms - route->expires_at_ms) >= 0;
+           ucn_deadline_expired(node->now_ms, route->expires_at_ms);
 }
 
 static bool candidate_is_expired(const ucn_node_t *node,
                                  const ucn_candidate_route_t *candidate)
 {
-    return (int32_t)(node->now_ms - candidate->expires_at_ms) >= 0;
+    return ucn_deadline_expired(node->now_ms, candidate->expires_at_ms);
 }
 
 static bool cost_is_sufficiently_better(uint16_t active_cost,
@@ -138,6 +155,12 @@ static bool cost_is_sufficiently_better(uint16_t active_cost,
     uint32_t candidate_scaled;
     uint32_t active_scaled;
 
+    if (!route_cost_is_known(candidate_cost)) {
+        return false;
+    }
+    if (!route_cost_is_known(active_cost)) {
+        return true;
+    }
     if (candidate_cost >= active_cost) {
         return false;
     }
@@ -164,6 +187,7 @@ static ucn_link_t *find_direct_link(ucn_node_t *node,
     for (index = 0U; index < node->link_count; ++index) {
         ucn_link_t *link = node->links[index];
         ucn_link_t *selected;
+        uint16_t route_cost;
 
         if (link->peer_node_id != destination) {
             continue;
@@ -172,9 +196,10 @@ static ucn_link_t *find_direct_link(ucn_node_t *node,
         if (selected != link) {
             continue;
         }
-        if (link_route_cost(link) < best_direct_cost) {
+        route_cost = link_route_cost(link);
+        if (best_direct == NULL || route_cost_is_better(route_cost, best_direct_cost)) {
             best_direct = link;
-            best_direct_cost = link_route_cost(link);
+            best_direct_cost = route_cost;
         }
     }
 
@@ -224,14 +249,14 @@ static ucn_link_t *find_link_for_route_epoch(ucn_node_t *node,
                 return resolve_egress_link(node, route->egress_link);
             }
             if (route->previous_valid &&
-                !deadline_expired(node->now_ms, route->previous_expires_at_ms) &&
+                !ucn_deadline_expired(node->now_ms, route->previous_expires_at_ms) &&
                 route->previous_route_epoch == route_epoch) {
                 return resolve_egress_link(node, route->previous_egress_link);
             }
         } else if (route->route_epoch == 0U) {
             return resolve_egress_link(node, route->egress_link);
         } else if (route->previous_valid && route->previous_route_epoch == 0U &&
-                   !deadline_expired(node->now_ms, route->previous_expires_at_ms)) {
+                   !ucn_deadline_expired(node->now_ms, route->previous_expires_at_ms)) {
             return resolve_egress_link(node, route->previous_egress_link);
         }
     }
@@ -707,6 +732,7 @@ static bool frame_is_seen(const ucn_node_t *node, const ucn_frame_t *frame)
 
     for (index = 0U; index < UCN_SEEN_CACHE_SIZE; ++index) {
         if (node->seen[index].valid && node->seen[index].source == frame->source &&
+            node->seen[index].session_id == frame->session_id &&
             node->seen[index].sequence == frame->sequence) {
             return true;
         }
@@ -721,6 +747,7 @@ static void remember_frame(ucn_node_t *node, const ucn_frame_t *frame)
 
     slot->valid = true;
     slot->source = frame->source;
+    slot->session_id = frame->session_id;
     slot->sequence = frame->sequence;
     slot->best_route_request_cost = UINT16_MAX;
     node->next_seen_index = (node->next_seen_index + 1U) % UCN_SEEN_CACHE_SIZE;
@@ -734,6 +761,7 @@ static bool remember_better_route_request(ucn_node_t *node,
 
     for (index = 0U; index < UCN_SEEN_CACHE_SIZE; ++index) {
         if (node->seen[index].valid && node->seen[index].source == frame->source &&
+            node->seen[index].session_id == frame->session_id &&
             node->seen[index].sequence == frame->sequence) {
             if (route_cost >= node->seen[index].best_route_request_cost) {
                 return false;
@@ -745,15 +773,11 @@ static bool remember_better_route_request(ucn_node_t *node,
 
     node->seen[node->next_seen_index].valid = true;
     node->seen[node->next_seen_index].source = frame->source;
+    node->seen[node->next_seen_index].session_id = frame->session_id;
     node->seen[node->next_seen_index].sequence = frame->sequence;
     node->seen[node->next_seen_index].best_route_request_cost = route_cost;
     node->next_seen_index = (node->next_seen_index + 1U) % UCN_SEEN_CACHE_SIZE;
     return true;
-}
-
-static bool deadline_expired(uint32_t now_ms, uint32_t deadline_ms)
-{
-    return deadline_ms != 0U && (int32_t)(now_ms - deadline_ms) >= 0;
 }
 
 static bool take_control_token(ucn_node_t *node)
@@ -773,6 +797,121 @@ static bool take_control_token(ucn_node_t *node)
         return false;
     }
     --node->control_tokens;
+    return true;
+}
+
+static void note_control_rx_drop(ucn_node_t *node,
+                                 ucn_control_rx_budget_type_t type)
+{
+    if (type == UCN_CONTROL_RX_ROUTE_REQUEST) {
+        node->stats.route_request_rx_rate_dropped++;
+    } else if (type == UCN_CONTROL_RX_HEARTBEAT_REQUEST) {
+        node->stats.heartbeat_rx_rate_dropped++;
+    } else if (type == UCN_CONTROL_RX_PATH_TRACE_REQUEST) {
+        node->stats.path_trace_rx_rate_dropped++;
+    }
+}
+
+static ucn_control_rx_peer_budget_t *find_control_rx_peer_budget(
+    ucn_node_t *node,
+    ucn_node_id_t peer_node_id,
+    bool allocate)
+{
+    ucn_control_rx_peer_budget_t *free_slot = NULL;
+    size_t index;
+
+    for (index = 0U; index < UCN_MAX_NEIGHBORS; ++index) {
+        ucn_control_rx_peer_budget_t *slot = &node->control_rx_peer_budgets[index];
+
+        if (slot->occupied && slot->peer_node_id == peer_node_id) {
+            return slot;
+        }
+        if (!slot->occupied && free_slot == NULL) {
+            free_slot = slot;
+        }
+    }
+    if (!allocate || free_slot == NULL) {
+        return NULL;
+    }
+    (void)memset(free_slot, 0, sizeof(*free_slot));
+    free_slot->occupied = true;
+    free_slot->peer_node_id = peer_node_id;
+    free_slot->budgets[UCN_CONTROL_RX_ROUTE_REQUEST].tokens =
+        UCN_ROUTE_REQUEST_RX_TOKEN_BURST;
+    free_slot->budgets[UCN_CONTROL_RX_HEARTBEAT_REQUEST].tokens =
+        UCN_HEARTBEAT_RX_TOKEN_BURST;
+    free_slot->budgets[UCN_CONTROL_RX_PATH_TRACE_REQUEST].tokens =
+        UCN_PATH_TRACE_RX_TOKEN_BURST;
+    free_slot->budgets[UCN_CONTROL_RX_ROUTE_REQUEST].last_refill_ms = node->now_ms;
+    free_slot->budgets[UCN_CONTROL_RX_HEARTBEAT_REQUEST].last_refill_ms = node->now_ms;
+    free_slot->budgets[UCN_CONTROL_RX_PATH_TRACE_REQUEST].last_refill_ms = node->now_ms;
+    return free_slot;
+}
+
+static void release_control_rx_peer_budget(ucn_node_t *node,
+                                           ucn_node_id_t peer_node_id)
+{
+    ucn_control_rx_peer_budget_t *slot =
+        find_control_rx_peer_budget(node, peer_node_id, false);
+
+    if (slot != NULL) {
+        (void)memset(slot, 0, sizeof(*slot));
+    }
+}
+
+static bool take_control_rx_token(ucn_node_t *node,
+                                  const ucn_link_t *ingress_link,
+                                  ucn_control_rx_budget_type_t type)
+{
+    ucn_control_rx_peer_budget_t *peer_budget;
+    ucn_control_rx_budget_t *budget;
+    uint8_t burst;
+    uint32_t refill_ms;
+    uint32_t elapsed;
+    uint32_t refill_count;
+
+    if (type >= UCN_CONTROL_RX_BUDGET_TYPE_COUNT || ingress_link == NULL ||
+        ingress_link->peer_node_id == 0U ||
+        ingress_link->peer_node_id == UCN_NODE_BROADCAST) {
+        return false;
+    }
+    peer_budget = find_control_rx_peer_budget(node,
+                                               ingress_link->peer_node_id, true);
+    if (peer_budget == NULL) {
+        note_control_rx_drop(node, type);
+        return false;
+    }
+    budget = &peer_budget->budgets[type];
+    switch (type) {
+    case UCN_CONTROL_RX_ROUTE_REQUEST:
+        burst = UCN_ROUTE_REQUEST_RX_TOKEN_BURST;
+        refill_ms = UCN_ROUTE_REQUEST_RX_TOKEN_REFILL_MS;
+        break;
+    case UCN_CONTROL_RX_HEARTBEAT_REQUEST:
+        burst = UCN_HEARTBEAT_RX_TOKEN_BURST;
+        refill_ms = UCN_HEARTBEAT_RX_TOKEN_REFILL_MS;
+        break;
+    case UCN_CONTROL_RX_PATH_TRACE_REQUEST:
+        burst = UCN_PATH_TRACE_RX_TOKEN_BURST;
+        refill_ms = UCN_PATH_TRACE_RX_TOKEN_REFILL_MS;
+        break;
+    default:
+        return false;
+    }
+
+    elapsed = node->now_ms - budget->last_refill_ms;
+    refill_count = elapsed / refill_ms;
+    if (refill_count != 0U) {
+        const uint32_t new_tokens = (uint32_t)budget->tokens + refill_count;
+
+        budget->tokens = (uint8_t)(new_tokens > burst ? burst : new_tokens);
+        budget->last_refill_ms += refill_count * refill_ms;
+    }
+    if (budget->tokens == 0U) {
+        note_control_rx_drop(node, type);
+        return false;
+    }
+    --budget->tokens;
     return true;
 }
 
@@ -868,8 +1007,8 @@ static void expire_neighbor_candidates(ucn_node_t *node, uint32_t now_ms)
             ucn_neighbor_bearer_t *bearer = &entry->bearers[bearer_index];
 
             if (bearer->state == UCN_NEIGHBOR_BEARER_CANDIDATE &&
-                deadline_expired(now_ms, bearer->last_seen_ms +
-                                  UCN_NEIGHBOR_CANDIDATE_TIMEOUT_MS)) {
+                ucn_elapsed_at_least(now_ms, bearer->last_seen_ms,
+                                     UCN_NEIGHBOR_CANDIDATE_TIMEOUT_MS)) {
                 if (bearer->link != NULL && !link_is_registered(node, bearer->link)) {
                     bearer->link->peer_node_id = 0U;
                 }
@@ -965,8 +1104,8 @@ static void expire_dynamic_state(ucn_node_t *node, uint32_t now_ms)
         if (node->routes[index].valid && route_is_expired(node, &node->routes[index])) {
             node->routes[index].valid = false;
         } else if (node->routes[index].previous_valid &&
-                   deadline_expired(now_ms,
-                                    node->routes[index].previous_expires_at_ms)) {
+                   ucn_deadline_expired(now_ms,
+                                        node->routes[index].previous_expires_at_ms)) {
             node->routes[index].previous_valid = false;
             node->routes[index].previous_egress_link = NULL;
             node->routes[index].previous_route_epoch = 0U;
@@ -976,7 +1115,7 @@ static void expire_dynamic_state(ucn_node_t *node, uint32_t now_ms)
 
     for (index = 0U; index < UCN_MAX_ROUTE_DISCOVERIES; ++index) {
         if (node->discoveries[index].active &&
-            deadline_expired(now_ms, node->discoveries[index].deadline_ms)) {
+            ucn_deadline_expired(now_ms, node->discoveries[index].deadline_ms)) {
             node->discoveries[index].active = false;
         }
     }
@@ -1008,7 +1147,8 @@ static ucn_result_t learn_route(ucn_node_t *node,
                     node->routes[index].route_epoch = route_epoch;
                 }
                 node->routes[index].expires_at_ms =
-                    node->now_ms + UCN_ROUTE_ENTRY_LIFETIME_MS;
+                    ucn_deadline_from_now(node->now_ms,
+                                          UCN_ROUTE_ENTRY_LIFETIME_MS);
                 node->routes[index].last_refresh_started_ms = node->now_ms;
             }
             return UCN_OK;
@@ -1026,7 +1166,8 @@ static ucn_result_t learn_route(ucn_node_t *node,
     free_slot->is_static = false;
     free_slot->destination = destination;
     free_slot->egress_link = egress_link;
-    free_slot->expires_at_ms = node->now_ms + UCN_ROUTE_ENTRY_LIFETIME_MS;
+    free_slot->expires_at_ms =
+        ucn_deadline_from_now(node->now_ms, UCN_ROUTE_ENTRY_LIFETIME_MS);
     free_slot->last_used_at_ms = 0U;
     free_slot->last_refresh_started_ms = node->now_ms;
     free_slot->route_cost = route_cost;
@@ -1095,7 +1236,9 @@ static ucn_result_t learn_candidate_route(ucn_node_t *node,
             slot->hop_count = hop_count;
         }
         slot->originated_here = slot->originated_here || originated_here;
-        slot->expires_at_ms = node->now_ms + UCN_ROUTE_CANDIDATE_TIMEOUT_MS;
+        slot->expires_at_ms =
+            ucn_deadline_from_now(node->now_ms,
+                                  UCN_ROUTE_CANDIDATE_TIMEOUT_MS);
         return UCN_OK;
     }
 
@@ -1117,7 +1260,8 @@ static ucn_result_t learn_candidate_route(ucn_node_t *node,
     slot->destination = destination;
     slot->candidate_id = candidate_id;
     slot->egress_link = egress_link;
-    slot->expires_at_ms = node->now_ms + UCN_ROUTE_CANDIDATE_TIMEOUT_MS;
+    slot->expires_at_ms =
+        ucn_deadline_from_now(node->now_ms, UCN_ROUTE_CANDIDATE_TIMEOUT_MS);
     slot->route_cost = route_cost;
     slot->hop_count = hop_count;
     node->stats.candidate_routes_learned++;
@@ -1158,7 +1302,8 @@ static ucn_result_t activate_candidate_route(ucn_node_t *node,
         route->previous_valid = true;
         route->previous_egress_link = route->egress_link;
         route->previous_route_epoch = route->route_epoch;
-        route->previous_expires_at_ms = node->now_ms + UCN_ROUTE_EPOCH_GRACE_MS;
+        route->previous_expires_at_ms =
+            ucn_deadline_from_now(node->now_ms, UCN_ROUTE_EPOCH_GRACE_MS);
     } else {
         route->previous_valid = false;
         route->previous_egress_link = NULL;
@@ -1169,7 +1314,8 @@ static ucn_result_t activate_candidate_route(ucn_node_t *node,
     route->is_static = false;
     route->destination = destination;
     route->egress_link = candidate->egress_link;
-    route->expires_at_ms = node->now_ms + UCN_ROUTE_ENTRY_LIFETIME_MS;
+    route->expires_at_ms =
+        ucn_deadline_from_now(node->now_ms, UCN_ROUTE_ENTRY_LIFETIME_MS);
     route->last_used_at_ms = 0U;
     route->last_refresh_started_ms = node->now_ms;
     route->route_cost = candidate->route_cost;
@@ -1212,8 +1358,8 @@ static ucn_result_t start_due_route_refresh(ucn_node_t *node, uint32_t now_ms)
             UCN_ROUTE_ENTRY_LIFETIME_MS ||
             (uint32_t)(now_ms - route->last_refresh_started_ms) <
             UCN_ROUTE_REFRESH_MIN_INTERVAL_MS ||
-            (int32_t)(route->expires_at_ms - now_ms) >
-            (int32_t)UCN_ROUTE_REFRESH_ADVANCE_MS) {
+            !ucn_deadline_due_within(now_ms, route->expires_at_ms,
+                                     UCN_ROUTE_REFRESH_ADVANCE_MS)) {
             continue;
         }
         return begin_route_discovery(node, route->destination, now_ms, true);
@@ -1282,6 +1428,7 @@ static void remove_neighbor_entry(ucn_node_t *node, ucn_neighbor_entry_t *entry)
             break;
         }
     }
+    release_control_rx_peer_budget(node, entry->peer_node_id);
     for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
         ucn_link_t *link = entry->bearers[index].link;
 
@@ -1407,13 +1554,13 @@ static void maintain_neighbor_liveness(ucn_node_t *node, uint32_t now_ms)
                 continue;
             }
             if (bearer->state == UCN_NEIGHBOR_BEARER_ADMITTED &&
-                deadline_expired(now_ms, bearer->last_seen_ms +
-                                 UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS)) {
+                ucn_elapsed_at_least(now_ms, bearer->last_seen_ms,
+                                     UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS)) {
                 bearer->state = UCN_NEIGHBOR_BEARER_SUSPECT;
             }
             if (bearer->state == UCN_NEIGHBOR_BEARER_SUSPECT &&
-                deadline_expired(now_ms, bearer->last_seen_ms +
-                                 UCN_NEIGHBOR_REMOVE_TIMEOUT_MS)) {
+                ucn_elapsed_at_least(now_ms, bearer->last_seen_ms,
+                                     UCN_NEIGHBOR_REMOVE_TIMEOUT_MS)) {
                 bearer->state = UCN_NEIGHBOR_BEARER_DOWN;
                 if (entry->primary_bearer_index == bearer_index) {
                     entry->primary_bearer_index = UCN_NEIGHBOR_PRIMARY_BEARER_NONE;
@@ -1429,8 +1576,32 @@ static ucn_result_t allocate_sequence(ucn_node_t *node, ucn_sequence_t *sequence
     ucn_sequence_t next_sequence;
     ucn_result_t result;
 
-    if (node->next_sequence == 0U || node->next_sequence == UINT32_MAX) {
+    if (node->next_sequence == 0U) {
         return UCN_ERR_SECURITY;
+    }
+    if (node->next_sequence >= UCN_SEQUENCE_ROTATION_THRESHOLD) {
+        ucn_session_id_t new_session_id = 0U;
+        ucn_sequence_t rotated_sequence = 0U;
+
+        if (node->security_ops == NULL ||
+            node->security_ops->rotate_session == NULL) {
+            return UCN_ERR_SECURITY;
+        }
+        result = node->security_ops->rotate_session(node->security_context,
+                                                     node->session_id,
+                                                     &new_session_id,
+                                                     &rotated_sequence);
+        if (result != UCN_OK) {
+            return result;
+        }
+        if (new_session_id == 0U || new_session_id == node->session_id ||
+            rotated_sequence == 0U ||
+            rotated_sequence >= UCN_SEQUENCE_ROTATION_THRESHOLD) {
+            return UCN_ERR_SECURITY;
+        }
+        node->session_id = new_session_id;
+        node->next_sequence = rotated_sequence;
+        node->stats.session_rotations++;
     }
 
     *sequence = node->next_sequence;
@@ -1503,7 +1674,8 @@ static ucn_result_t queue_pending_q1(ucn_node_t *node,
     slot->occupied = true;
     slot->destination = destination;
     slot->message_type = message_type;
-    slot->deadline_ms = node->now_ms + UCN_PENDING_Q1_TIMEOUT_MS;
+    slot->deadline_ms =
+        ucn_deadline_from_now(node->now_ms, UCN_PENDING_Q1_TIMEOUT_MS);
     slot->payload_length = payload_length;
     if (payload_length != 0U) {
         (void)memcpy(slot->payload, payload, payload_length);
@@ -1522,7 +1694,7 @@ static ucn_result_t send_pending_q1_if_ready(ucn_node_t *node, uint32_t now_ms)
         if (!item->occupied) {
             continue;
         }
-        if (deadline_expired(now_ms, item->deadline_ms)) {
+        if (ucn_deadline_expired(now_ms, item->deadline_ms)) {
             item->occupied = false;
             node->stats.q1_route_wait_expired++;
             return UCN_ERR_TTL;
@@ -1721,6 +1893,7 @@ static ucn_result_t send_control_on_link(ucn_node_t *node,
     if (result != UCN_OK) {
         return result;
     }
+    frame.session_id = node->session_id;
     frame.payload = payload;
     frame.payload_length = payload_length;
     result = send_frame_on_link(node, link, &frame);
@@ -1752,13 +1925,7 @@ static ucn_result_t send_control_to_node(ucn_node_t *node,
 
 static uint32_t path_expires_at(const ucn_node_t *node, uint32_t lease_ms)
 {
-    uint32_t expires_at_ms;
-
-    if (node == NULL || lease_ms == 0U) {
-        return 0U;
-    }
-    expires_at_ms = node->now_ms + lease_ms;
-    return expires_at_ms == 0U ? 1U : expires_at_ms;
+    return node == NULL ? 0U : ucn_deadline_from_now(node->now_ms, lease_ms);
 }
 
 static ucn_result_t install_path_forward_entry(ucn_node_t *node,
@@ -1773,7 +1940,8 @@ static ucn_result_t install_path_forward_entry(ucn_node_t *node,
 
     if (node == NULL || owner == 0U || owner == UCN_NODE_BROADCAST ||
         owner_session_id == 0U || path_id == 0U || destination == 0U ||
-        destination == UCN_NODE_BROADCAST || lease_ms == 0U) {
+        destination == UCN_NODE_BROADCAST ||
+        !ucn_duration_is_valid(lease_ms)) {
         return UCN_ERR_ARGUMENT;
     }
 
@@ -1897,6 +2065,7 @@ static ucn_result_t send_path_trace_request_on_link(ucn_node_t *node,
     if (result != UCN_OK) {
         return result;
     }
+    frame.session_id = node->session_id;
     return send_frame_on_link(node, link, &frame);
 }
 
@@ -1924,6 +2093,7 @@ static ucn_result_t send_path_trace_reply_on_link(ucn_node_t *node,
     if (result != UCN_OK) {
         return result;
     }
+    frame.session_id = node->session_id;
     result = send_frame_on_link(node, link, &frame);
     if (result == UCN_OK) {
         node->stats.path_trace_replies_sent++;
@@ -1966,7 +2136,8 @@ static ucn_path_trace_reverse_t *find_path_trace_reverse(ucn_node_t *node,
     for (index = 0U; index < UCN_PATH_TRACE_REVERSE_DEPTH; ++index) {
         ucn_path_trace_reverse_t *entry = &node->path_trace_reverse[index];
 
-        if (entry->occupied && deadline_expired(node->now_ms, entry->expires_at_ms)) {
+        if (entry->occupied &&
+            ucn_deadline_expired(node->now_ms, entry->expires_at_ms)) {
             entry->occupied = false;
         }
         if (entry->occupied && entry->origin == origin &&
@@ -1990,7 +2161,8 @@ static ucn_path_trace_reverse_t *allocate_path_trace_reverse(
 
     if (existing != NULL) {
         existing->ingress_link = ingress_link;
-        existing->expires_at_ms = node->now_ms + UCN_PATH_TRACE_TIMEOUT_MS;
+        existing->expires_at_ms =
+            ucn_deadline_from_now(node->now_ms, UCN_PATH_TRACE_TIMEOUT_MS);
         return existing;
     }
     for (index = 0U; index < UCN_PATH_TRACE_REVERSE_DEPTH; ++index) {
@@ -2007,7 +2179,8 @@ static ucn_path_trace_reverse_t *allocate_path_trace_reverse(
     free_slot->origin = origin;
     free_slot->trace_id = trace_id;
     free_slot->ingress_link = ingress_link;
-    free_slot->expires_at_ms = node->now_ms + UCN_PATH_TRACE_TIMEOUT_MS;
+    free_slot->expires_at_ms =
+        ucn_deadline_from_now(node->now_ms, UCN_PATH_TRACE_TIMEOUT_MS);
     return free_slot;
 }
 
@@ -2017,14 +2190,16 @@ static void expire_path_trace_state(ucn_node_t *node, uint32_t now_ms)
 
     for (index = 0U; index < UCN_PATH_TRACE_REVERSE_DEPTH; ++index) {
         if (node->path_trace_reverse[index].occupied &&
-            deadline_expired(now_ms, node->path_trace_reverse[index].expires_at_ms)) {
+            ucn_deadline_expired(now_ms,
+                                 node->path_trace_reverse[index].expires_at_ms)) {
             node->path_trace_reverse[index].occupied = false;
         }
     }
     for (index = 0U; index < UCN_PATH_TRACE_PENDING_DEPTH; ++index) {
         ucn_path_trace_pending_t *pending = &node->path_trace_pending[index];
 
-        if (pending->occupied && deadline_expired(now_ms, pending->deadline_ms)) {
+        if (pending->occupied &&
+            ucn_deadline_expired(now_ms, pending->deadline_ms)) {
             ucn_path_trace_handler_t handler = pending->handler;
             void *context = pending->context;
             ucn_path_trace_result_t result;
@@ -2111,6 +2286,16 @@ static ucn_result_t handle_path_trace_request(ucn_node_t *node,
         read_u32_be(frame->payload + UCN_PATH_TRACE_NODE_IDS_OFFSET) != frame->source) {
         node->stats.path_trace_rejected++;
         return UCN_ERR_MALFORMED;
+    }
+    if (node->path_trace_authorize == NULL ||
+        !node->path_trace_authorize(node->path_trace_authorize_context,
+                                    frame->source)) {
+        node->stats.path_trace_rejected++;
+        return UCN_ERR_ACCESS;
+    }
+    if (!take_control_rx_token(node, ingress_link,
+                               UCN_CONTROL_RX_PATH_TRACE_REQUEST)) {
+        return UCN_ERR_NO_SPACE;
     }
     trace_id = read_u32_be(frame->payload + UCN_PATH_TRACE_TRACE_ID_OFFSET);
     if (!append_path_trace_node(frame, node->config.node_id, payload,
@@ -2268,6 +2453,7 @@ static ucn_result_t send_node_snapshot_reply_on_link(
     if (result != UCN_OK) {
         return result;
     }
+    frame.session_id = node->session_id;
     result = send_frame_on_link(node, link, &frame);
     if (result == UCN_OK) {
         node->stats.node_snapshot_replies_sent++;
@@ -2313,7 +2499,8 @@ static ucn_node_snapshot_reverse_t *find_node_snapshot_reverse(
     for (index = 0U; index < UCN_NODE_SNAPSHOT_REVERSE_DEPTH; ++index) {
         ucn_node_snapshot_reverse_t *entry = &node->node_snapshot_reverse[index];
 
-        if (entry->occupied && deadline_expired(node->now_ms, entry->expires_at_ms)) {
+        if (entry->occupied &&
+            ucn_deadline_expired(node->now_ms, entry->expires_at_ms)) {
             entry->occupied = false;
         }
         if (entry->occupied && entry->origin == origin && entry->query_id == query_id) {
@@ -2351,7 +2538,8 @@ static ucn_node_snapshot_reverse_t *allocate_node_snapshot_reverse(
     free_slot->origin = origin;
     free_slot->query_id = query_id;
     free_slot->ingress_link = ingress_link;
-    free_slot->expires_at_ms = node->now_ms + UCN_NODE_SNAPSHOT_TIMEOUT_MS;
+    free_slot->expires_at_ms =
+        ucn_deadline_from_now(node->now_ms, UCN_NODE_SNAPSHOT_TIMEOUT_MS);
     return free_slot;
 }
 
@@ -2381,10 +2569,15 @@ static bool queue_node_snapshot_reply(ucn_node_t *node,
     free_slot->origin = origin;
     free_slot->query_id = query_id;
     free_slot->egress_link = egress_link;
-    free_slot->due_at_ms = node->now_ms +
-        ((query_id ^ node->config.node_id) %
-         (UCN_NODE_SNAPSHOT_REPLY_JITTER_MS + UINT32_C(1)));
-    free_slot->expires_at_ms = node->now_ms + UCN_NODE_SNAPSHOT_TIMEOUT_MS;
+    {
+        uint32_t delay_ms = (query_id ^ node->config.node_id) %
+                            (UCN_NODE_SNAPSHOT_REPLY_JITTER_MS + UINT32_C(1));
+
+        free_slot->due_at_ms =
+            ucn_deadline_from_now(node->now_ms, delay_ms == 0U ? 1U : delay_ms);
+    }
+    free_slot->expires_at_ms =
+        ucn_deadline_from_now(node->now_ms, UCN_NODE_SNAPSHOT_TIMEOUT_MS);
     return true;
 }
 
@@ -2424,13 +2617,15 @@ static void expire_node_snapshot_state(ucn_node_t *node, uint32_t now_ms)
 
     for (index = 0U; index < UCN_NODE_SNAPSHOT_REVERSE_DEPTH; ++index) {
         if (node->node_snapshot_reverse[index].occupied &&
-            deadline_expired(now_ms, node->node_snapshot_reverse[index].expires_at_ms)) {
+            ucn_deadline_expired(
+                now_ms, node->node_snapshot_reverse[index].expires_at_ms)) {
             node->node_snapshot_reverse[index].occupied = false;
         }
     }
     for (index = 0U; index < UCN_NODE_SNAPSHOT_REPLY_QUEUE_DEPTH; ++index) {
         if (node->node_snapshot_replies[index].occupied &&
-            deadline_expired(now_ms, node->node_snapshot_replies[index].expires_at_ms)) {
+            ucn_deadline_expired(
+                now_ms, node->node_snapshot_replies[index].expires_at_ms)) {
             node->node_snapshot_replies[index].occupied = false;
             node->stats.node_snapshot_rejected++;
         }
@@ -2438,7 +2633,8 @@ static void expire_node_snapshot_state(ucn_node_t *node, uint32_t now_ms)
     for (index = 0U; index < UCN_NODE_SNAPSHOT_PENDING_DEPTH; ++index) {
         ucn_node_snapshot_pending_t *pending = &node->node_snapshot_pending[index];
 
-        if (pending->occupied && deadline_expired(now_ms, pending->deadline_ms)) {
+        if (pending->occupied &&
+            ucn_deadline_expired(now_ms, pending->deadline_ms)) {
             ucn_node_snapshot_result_t result;
             ucn_node_snapshot_handler_t handler = pending->handler;
             void *context = pending->context;
@@ -2473,7 +2669,8 @@ static ucn_result_t send_due_node_snapshot_reply(ucn_node_t *node,
         ucn_node_snapshot_reply_pending_t *pending = &node->node_snapshot_replies[index];
         ucn_result_t result;
 
-        if (!pending->occupied || !deadline_expired(now_ms, pending->due_at_ms)) {
+        if (!pending->occupied ||
+            !ucn_deadline_expired(now_ms, pending->due_at_ms)) {
             continue;
         }
         pending->occupied = false;
@@ -2698,7 +2895,8 @@ static void policy_diagnostic_build_reply(
     case UCN_POLICY_DIAGNOSTIC_FLOW: {
         const ucn_policy_flow_binding_t *entry = &node->policy_state.flows[index];
 
-        if (entry->occupied && !deadline_expired(node->now_ms, entry->expires_at_ms)) {
+        if (entry->occupied &&
+            !ucn_deadline_expired(node->now_ms, entry->expires_at_ms)) {
             const ucn_policy_path_entry_t *path =
                 ucn_node_find_policy_path(node, entry->local_path_id);
             ucn_link_t *active_bearer = path == NULL ? NULL :
@@ -2878,7 +3076,9 @@ static bool queue_policy_diagnostic_reply(ucn_node_t *node,
             (void)memset(entry, 0, sizeof(*entry));
             entry->occupied = true;
             entry->destination = destination;
-            entry->expires_at_ms = node->now_ms + UCN_POLICY_DIAGNOSTIC_TIMEOUT_MS;
+            entry->expires_at_ms =
+                ucn_deadline_from_now(node->now_ms,
+                                      UCN_POLICY_DIAGNOSTIC_TIMEOUT_MS);
             (void)memcpy(entry->payload, payload, sizeof(entry->payload));
             return true;
         }
@@ -2894,7 +3094,8 @@ static void expire_policy_diagnostic_state(ucn_node_t *node, uint32_t now_ms)
         ucn_policy_diagnostic_reply_pending_t *entry =
             &node->policy_diagnostic_replies[index];
 
-        if (entry->occupied && deadline_expired(now_ms, entry->expires_at_ms)) {
+        if (entry->occupied &&
+            ucn_deadline_expired(now_ms, entry->expires_at_ms)) {
             entry->occupied = false;
             node->stats.policy_diagnostic_rejected++;
         }
@@ -2903,7 +3104,8 @@ static void expire_policy_diagnostic_state(ucn_node_t *node, uint32_t now_ms)
         ucn_policy_diagnostic_pending_t *pending =
             &node->policy_diagnostic_pending[index];
 
-        if (pending->occupied && deadline_expired(now_ms, pending->deadline_ms)) {
+        if (pending->occupied &&
+            ucn_deadline_expired(now_ms, pending->deadline_ms)) {
             ucn_policy_diagnostic_result_t result;
             ucn_policy_diagnostic_handler_t handler = pending->handler;
             void *context = pending->context;
@@ -2949,6 +3151,7 @@ static ucn_result_t send_policy_diagnostic_frame_on_link(
     if (result != UCN_OK) {
         return result;
     }
+    frame.session_id = node->session_id;
     return send_frame_on_link(node, link, &frame);
 }
 
@@ -3320,6 +3523,12 @@ static ucn_result_t handle_heartbeat(ucn_node_t *node,
         return UCN_ERR_MALFORMED;
     }
 
+    if (frame->payload[0] == UCN_HEARTBEAT_REQUEST &&
+        !take_control_rx_token(node, ingress_link,
+                               UCN_CONTROL_RX_HEARTBEAT_REQUEST)) {
+        return UCN_ERR_NO_SPACE;
+    }
+
     touch_neighbor(node, ingress_link);
     node->stats.heartbeat_received++;
     if (frame->payload[0] == UCN_HEARTBEAT_ACK) {
@@ -3423,7 +3632,7 @@ static ucn_result_t send_due_path_probe(ucn_node_t *node, uint32_t now_ms)
         }
         if (candidate->probes_sent >= UCN_PATH_PROBE_REQUIRED_ACKS ||
             (candidate->next_probe_at_ms != 0U &&
-             !deadline_expired(now_ms, candidate->next_probe_at_ms))) {
+             !ucn_deadline_expired(now_ms, candidate->next_probe_at_ms))) {
             continue;
         }
 
@@ -3439,7 +3648,8 @@ static ucn_result_t send_due_path_probe(ucn_node_t *node, uint32_t now_ms)
                                       payload, (uint16_t)sizeof(payload));
         if (result == UCN_OK) {
             candidate->probes_sent++;
-            candidate->next_probe_at_ms = now_ms + UCN_PATH_PROBE_INTERVAL_MS;
+            candidate->next_probe_at_ms =
+                ucn_deadline_from_now(now_ms, UCN_PATH_PROBE_INTERVAL_MS);
             node->stats.path_probes_sent++;
         }
         return result;
@@ -3494,7 +3704,9 @@ static ucn_result_t handle_path_probe_ack(ucn_node_t *node,
     }
     if (candidate->probes_acked < UCN_PATH_PROBE_REQUIRED_ACKS) {
         candidate->probes_acked++;
-        candidate->expires_at_ms = node->now_ms + UCN_ROUTE_CANDIDATE_TIMEOUT_MS;
+        candidate->expires_at_ms =
+            ucn_deadline_from_now(node->now_ms,
+                                  UCN_ROUTE_CANDIDATE_TIMEOUT_MS);
         node->stats.path_probe_acks_received++;
     }
     return UCN_OK;
@@ -3925,7 +4137,8 @@ static ucn_result_t handle_path_install(ucn_node_t *node,
     next_hop = read_u32_be(frame->payload + 8U);
     lease_ms = read_u32_be(frame->payload + 12U);
     if (path_id == 0U || destination == 0U || destination == UCN_NODE_BROADCAST ||
-        next_hop == UCN_NODE_BROADCAST || lease_ms == 0U ||
+        next_hop == UCN_NODE_BROADCAST ||
+        !ucn_duration_is_valid(lease_ms) ||
         (next_hop == 0U && destination != node->config.node_id)) {
         return UCN_ERR_MALFORMED;
     }
@@ -4159,6 +4372,19 @@ ucn_result_t ucn_node_set_node_snapshot_authorizer(
     }
     node->node_snapshot_authorize = authorize;
     node->node_snapshot_authorize_context = context;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_node_set_path_trace_authorizer(
+    ucn_node_t *node,
+    ucn_path_trace_authorize_fn authorize,
+    void *context)
+{
+    if (node == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    node->path_trace_authorize = authorize;
+    node->path_trace_authorize_context = context;
     return UCN_OK;
 }
 
@@ -4510,7 +4736,8 @@ static ucn_result_t begin_route_discovery(ucn_node_t *node,
     slot->destination = destination;
     slot->request_id = node->next_route_request_id++;
     slot->started_at_ms = now_ms;
-    slot->deadline_ms = now_ms + UCN_ROUTE_REQUEST_TIMEOUT_MS;
+    slot->deadline_ms =
+        ucn_deadline_from_now(now_ms, UCN_ROUTE_REQUEST_TIMEOUT_MS);
     slot->is_candidate = is_candidate;
 
     write_u32_be(payload, node->config.node_id);
@@ -4532,6 +4759,7 @@ static ucn_result_t begin_route_discovery(ucn_node_t *node,
         slot->active = false;
         return result;
     }
+    frame.session_id = node->session_id;
     frame.payload = payload;
     frame.payload_length = (uint16_t)sizeof(payload);
 
@@ -4672,7 +4900,8 @@ ucn_result_t ucn_node_send_path_install(ucn_node_t *node,
     if (node == NULL || control_target == 0U ||
         control_target == UCN_NODE_BROADCAST || control_target == node->config.node_id ||
         path_id == 0U || destination == 0U || destination == UCN_NODE_BROADCAST ||
-        lease_ms == 0U || (next_hop == 0U && control_target != destination)) {
+        !ucn_duration_is_valid(lease_ms) ||
+        (next_hop == 0U && control_target != destination)) {
         return UCN_ERR_ARGUMENT;
     }
     if (node->security_ops == NULL || node->session_id == 0U) {
@@ -4789,6 +5018,7 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
     if (result != UCN_OK) {
         return result;
     }
+    frame.session_id = node->session_id;
     frame.payload = payload;
     frame.payload_length = payload_length;
     result = protect_outbound_business(node, &frame, ciphertext, auth_tag);
@@ -4898,6 +5128,7 @@ ucn_result_t ucn_node_send_path(ucn_node_t *node,
     if (result != UCN_OK) {
         return result;
     }
+    frame.session_id = node->session_id;
     frame.payload = payload;
     frame.payload_length = payload_length;
     result = protect_outbound_business(node, &frame, ciphertext, auth_tag);
@@ -5025,7 +5256,7 @@ static size_t auto_balance_active_flow_count(const ucn_node_t *node,
         const ucn_policy_flow_binding_t *flow = &node->policy_state.flows[index];
 
         if (flow->occupied && flow->local_path_id == local_path_id &&
-            !deadline_expired(node->now_ms, flow->expires_at_ms)) {
+            !ucn_deadline_expired(node->now_ms, flow->expires_at_ms)) {
             count++;
         }
     }
@@ -5038,30 +5269,28 @@ static uint32_t auto_balance_path_score(const ucn_node_t *node,
     const ucn_policy_path_entry_t *path =
         ucn_node_find_policy_path(node, local_path_id);
     const ucn_policy_link_quality_snapshot_t *quality;
-    uint32_t score = UCN_UNKNOWN_LINK_ROUTE_COST;
+    const uint32_t unknown_score_base = UINT32_MAX / 2U;
+    uint32_t score;
     size_t active_flows;
 
     if (path == NULL) {
         return UINT32_MAX;
     }
     quality = ucn_node_get_link_quality(node, path->egress_link);
-    if (quality != NULL && quality->route_cost_valid) {
-        score = quality->route_cost;
-    }
-    if (quality != NULL && quality->rtt_valid) {
-        score += quality->rtt_ewma_ms;
-    }
-    if (quality != NULL && quality->tx_failure_rate_valid) {
-        score += quality->tx_failure_ewma_per_mille;
-    }
-    if (quality != NULL && quality->queue_pressure_valid) {
-        score += quality->queue_pressure_ewma_per_mille;
-    }
-    if (score == 0U) {
-        score = 1U;
-    }
     active_flows = auto_balance_active_flow_count(node, local_path_id);
-    return score * (uint32_t)(active_flows + 1U);
+    if (quality == NULL || !quality->route_cost_valid ||
+        !route_cost_is_known(quality->route_cost)) {
+        return active_flows >= (size_t)(UINT32_MAX - unknown_score_base) ?
+                   UINT32_MAX : unknown_score_base + (uint32_t)active_flows;
+    }
+    {
+        const uint64_t weighted = (uint64_t)quality->route_cost *
+                                  (uint64_t)(active_flows + 1U);
+
+        score = weighted >= unknown_score_base ? unknown_score_base - 1U :
+                                                 (uint32_t)weighted;
+    }
+    return score;
 }
 
 static bool auto_balance_has_configured_path(
@@ -5460,7 +5689,8 @@ ucn_result_t ucn_node_request_path_trace(ucn_node_t *node,
     pending->occupied = true;
     pending->destination = destination;
     pending->trace_id = trace_id;
-    pending->deadline_ms = node->now_ms + UCN_PATH_TRACE_TIMEOUT_MS;
+    pending->deadline_ms =
+        ucn_deadline_from_now(node->now_ms, UCN_PATH_TRACE_TIMEOUT_MS);
     pending->handler = handler;
     pending->context = context;
 
@@ -5524,7 +5754,8 @@ ucn_result_t ucn_node_request_node_snapshot(
     pending->occupied = true;
     pending->result_limit = result_limit;
     pending->query_id = query_id;
-    pending->deadline_ms = node->now_ms + UCN_NODE_SNAPSHOT_TIMEOUT_MS;
+    pending->deadline_ms =
+        ucn_deadline_from_now(node->now_ms, UCN_NODE_SNAPSHOT_TIMEOUT_MS);
     pending->node_count = 1U;
     pending->entries[0].node_id = node->config.node_id;
     pending->entries[0].direct_link_count = (uint8_t)node->link_count;
@@ -5549,6 +5780,7 @@ ucn_result_t ucn_node_request_node_snapshot(
         pending->occupied = false;
         return result;
     }
+    frame.session_id = node->session_id;
 
     /* The origin also remembers its own flood so a loop cannot cause it to
      * become a responder or re-flood the same Query ID. */
@@ -5598,7 +5830,8 @@ ucn_result_t ucn_node_request_policy_diagnostic(
     pending->occupied = true;
     pending->destination = destination;
     pending->request_id = request_id;
-    pending->deadline_ms = node->now_ms + UCN_POLICY_DIAGNOSTIC_TIMEOUT_MS;
+    pending->deadline_ms =
+        ucn_deadline_from_now(node->now_ms, UCN_POLICY_DIAGNOSTIC_TIMEOUT_MS);
     pending->section = section;
     pending->index = index;
     pending->handler = handler;
@@ -5709,7 +5942,7 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
         return start_due_route_refresh(node, now_ms);
     }
 
-    if (deadline_expired(now_ms, item->deadline_ms)) {
+    if (ucn_deadline_expired(now_ms, item->deadline_ms)) {
         item->occupied = false;
         node->stats.tx_expired_dropped++;
         return UCN_ERR_TTL;
@@ -5799,6 +6032,10 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
         }
         if (frame.payload_length != UCN_ROUTE_REQ_PAYLOAD_BYTES) {
             return UCN_ERR_MALFORMED;
+        }
+        if (!take_control_rx_token(node, ingress_link,
+                                   UCN_CONTROL_RX_ROUTE_REQUEST)) {
+            return UCN_ERR_NO_SPACE;
         }
         if (!remember_better_route_request(node, &frame,
                                            read_u16_be(frame.payload + 12U))) {

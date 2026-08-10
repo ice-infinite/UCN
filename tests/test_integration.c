@@ -64,7 +64,7 @@ static const ucn_security_ops_t INTEGRATION_SECURITY_OPS = {
     integration_get_session,
     integration_authorize_tx,
     integration_authorize_rx,
-    NULL, NULL, NULL
+    NULL, NULL, NULL, NULL
 };
 
 static ucn_result_t integration_link_send(ucn_link_t *link,

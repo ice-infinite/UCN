@@ -49,6 +49,29 @@ static uint32_t read_u32_be(const uint8_t *input)
            (uint32_t)input[3];
 }
 
+size_t ucn_frame_max_payload(uint8_t flags)
+{
+    size_t header_size;
+    size_t overhead;
+
+    if ((flags & (uint8_t)~UCN_FRAME_KNOWN_FLAGS) != 0U ||
+        (((flags & UCN_FRAME_FLAG_PATH_ID) != 0U) &&
+         ((flags & UCN_FRAME_FLAG_ROUTE_EXTENSION) == 0U))) {
+        return 0U;
+    }
+    if ((flags & UCN_FRAME_FLAG_PATH_ID) != 0U) {
+        header_size = UCN_FRAME_PATH_HEADER_SIZE;
+    } else if ((flags & UCN_FRAME_FLAG_ROUTE_EXTENSION) != 0U) {
+        header_size = UCN_FRAME_ROUTE_HEADER_SIZE;
+    } else {
+        header_size = UCN_FRAME_HEADER_SIZE;
+    }
+    overhead = header_size +
+               (((flags & UCN_FRAME_FLAG_E2E_PROTECTED) != 0U) ?
+                    UCN_E2E_TAG_SIZE : 0U);
+    return overhead <= UCN_MAX_FRAME_BYTES ? UCN_MAX_FRAME_BYTES - overhead : 0U;
+}
+
 size_t ucn_frame_e2e_aad_size(void)
 {
     return UCN_E2E_AAD_BYTES;

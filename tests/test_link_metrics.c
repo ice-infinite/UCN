@@ -105,18 +105,21 @@ int test_link_metrics(void)
     (void)memset(&low_context, 0, sizeof(low_context));
     TEST_ASSERT(metrics_init_node(&direct_node, UINT32_C(10)) == 0);
     default_context.is_up = true;
-    high_context.is_up = true; high_context.metrics_valid = true; high_context.route_cost = 9U;
+    high_context.is_up = true; high_context.metrics_valid = true; high_context.route_cost = 2000U;
     low_context.is_up = true; low_context.metrics_valid = true; low_context.route_cost = 2U;
     metrics_setup_link(&default_link, &default_context, 1U, UINT32_C(11));
     metrics_setup_link(&high_cost_link, &high_context, 2U, UINT32_C(11));
     metrics_setup_link(&low_cost_link, &low_context, 3U, UINT32_C(11));
     TEST_ASSERT(ucn_node_register_link(&direct_node, &default_link) == UCN_OK);
     TEST_ASSERT(ucn_node_register_link(&direct_node, &high_cost_link) == UCN_OK);
-    TEST_ASSERT(ucn_node_register_link(&direct_node, &low_cost_link) == UCN_OK);
     TEST_ASSERT(ucn_node_send(&direct_node, UINT32_C(11), UCN_MSG_DATA_Q1,
                               UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);
     TEST_ASSERT(default_context.send_count == 0U);
-    TEST_ASSERT(high_context.send_count == 0U);
+    TEST_ASSERT(high_context.send_count == 1U);
+    TEST_ASSERT(low_context.send_count == 0U);
+    TEST_ASSERT(ucn_node_register_link(&direct_node, &low_cost_link) == UCN_OK);
+    TEST_ASSERT(ucn_node_send(&direct_node, UINT32_C(11), UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);
     TEST_ASSERT(low_context.send_count == 1U);
     default_context.metrics_valid = true;
     default_context.route_cost = 10U;
@@ -139,14 +142,14 @@ int test_link_metrics(void)
     TEST_ASSERT(metrics_init_node(&b, UINT32_C(2)) == 0);
     TEST_ASSERT(metrics_init_node(&c, UINT32_C(3)) == 0);
     TEST_ASSERT(metrics_init_node(&d, UINT32_C(4)) == 0);
-    cab.is_up = true; cab.metrics_valid = true; cab.route_cost = 30U;
-    cba.is_up = true; cba.metrics_valid = true; cba.route_cost = 30U;
-    cad.is_up = true; cad.metrics_valid = true; cad.route_cost = 1U;
-    cda.is_up = true; cda.metrics_valid = true; cda.route_cost = 1U;
-    cbc.is_up = true; cbc.metrics_valid = true; cbc.route_cost = 30U;
-    ccb.is_up = true; ccb.metrics_valid = true; ccb.route_cost = 30U;
-    cdc.is_up = true; cdc.metrics_valid = true; cdc.route_cost = 1U;
-    ccd.is_up = true; ccd.metrics_valid = true; ccd.route_cost = 1U;
+    cab.is_up = true; cab.metrics_valid = false;
+    cba.is_up = true; cba.metrics_valid = false;
+    cad.is_up = true; cad.metrics_valid = true; cad.route_cost = 2000U;
+    cda.is_up = true; cda.metrics_valid = true; cda.route_cost = 2000U;
+    cbc.is_up = true; cbc.metrics_valid = true; cbc.route_cost = 1U;
+    ccb.is_up = true; ccb.metrics_valid = true; ccb.route_cost = 1U;
+    cdc.is_up = true; cdc.metrics_valid = true; cdc.route_cost = 2000U;
+    ccd.is_up = true; ccd.metrics_valid = true; ccd.route_cost = 2000U;
     metrics_setup_link(&ab, &cab, 10U, UINT32_C(2));
     metrics_setup_link(&ba, &cba, 11U, UINT32_C(1));
     metrics_setup_link(&ad, &cad, 12U, UINT32_C(4));

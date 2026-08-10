@@ -75,6 +75,14 @@ static const ucn_link_ops_t BEARER_LINK_OPS = {
     bearer_link_metrics
 };
 
+static ucn_result_t bearer_step_with_peer_clock(ucn_node_t *node,
+                                                ucn_node_t *peer,
+                                                uint32_t now_ms)
+{
+    peer->now_ms = now_ms;
+    return ucn_node_step(node, now_ms);
+}
+
 static int bearer_init_node(ucn_node_t *node, ucn_node_id_t node_id)
 {
     ucn_config_t config;
@@ -320,9 +328,9 @@ int test_neighbor_quality(void)
 
     /* A small 5% Cost fluctuation is below the hysteresis threshold and
      * never schedules a quality Probe. */
-    TEST_ASSERT(ucn_node_step(&a, 500U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 1000U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 1500U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 500U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 1000U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 1500U) == UCN_OK);
     TEST_ASSERT(a.neighbors[0].bearers[a.neighbors[0].primary_bearer_index].link ==
                 &ab_primary);
     TEST_ASSERT(a.stats.bearer_quality_probes_sent == 0U);
@@ -332,13 +340,13 @@ int test_neighbor_quality(void)
     cab_backup.route_cost = 70U;
     cba_backup.route_cost = 70U;
     cba_backup.deliver = false;
-    TEST_ASSERT(ucn_node_step(&a, 2000U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 2500U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 3000U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 3100U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 3200U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 3300U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 3500U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 2000U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 2500U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 3000U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 3100U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 3200U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 3300U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 3500U) == UCN_OK);
     TEST_ASSERT(a.neighbors[0].bearers[a.neighbors[0].primary_bearer_index].link ==
                 &ab_primary);
     TEST_ASSERT(a.stats.bearer_quality_probes_sent ==
@@ -348,13 +356,13 @@ int test_neighbor_quality(void)
     /* After the candidate proves stable and receives the configured ACKs,
      * the next sampling point atomically moves the logical next hop. */
     cba_backup.deliver = true;
-    TEST_ASSERT(ucn_node_step(&a, 4000U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 4500U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 5000U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 5500U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 5600U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 5700U) == UCN_OK);
-    TEST_ASSERT(ucn_node_step(&a, 6000U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 4000U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 4500U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 5000U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 5500U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 5600U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 5700U) == UCN_OK);
+    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 6000U) == UCN_OK);
     TEST_ASSERT(a.neighbors[0].bearers[a.neighbors[0].primary_bearer_index].link ==
                 &ab_backup);
     TEST_ASSERT(a.stats.bearer_quality_probes_sent ==

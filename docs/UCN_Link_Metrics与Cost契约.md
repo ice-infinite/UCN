@@ -10,12 +10,12 @@
 
 | 指标 | 生产者 | 单位/范围 | 当前 Core 用途 |
 | --- | --- | --- | --- |
-| `route_cost` | Adapter | 正整数 UCN Cost，越小越好；`0` 或 `route_cost_valid=false` 为未知 | AODV-Lite 的逐跳可加基础代价与直连 Link 选择。 |
+| `route_cost` | Adapter | `1..UINT16_MAX-1` 的 UCN Cost，越小越好；`0`、`UINT16_MAX` 或 `route_cost_valid=false` 为未知 | AODV-Lite 的逐跳可加基础代价与直连 Link 选择。 |
 | `rtt_ms` | Adapter | 单跳往返 ms；`0..65535`，单独 `rtt_valid` | 以 500 ms 默认周期采样并 EWMA，仅供诊断和未来显式策略。 |
 | `tx_failure_per_mille` | Adapter | 本 Link 发送失败比，`0..1000`；超范围视为未知 | 采样/EWMA/诊断；当前不参与自动重绑。 |
 | `queue_pressure_per_mille` | Adapter | **Adapter 自己**的发送队列占用比，`0..1000`；超范围视为未知 | 采样/EWMA；当前 `AUTO_BALANCE` 仅用它的连续拥塞样本决定 Q1 Flow 是否重绑。 |
 
-“未知”只由每一项自己的 `*_valid=false` 表示；调用方应在调用旧 Adapter 前清零整个结构。Core 不把 `0` RTT、`0‰` 失败率或 `0‰` 队列压力误认为未知。
+指标接口中的“未知”由对应 `*_valid=false` 表示；Core 的内部/路由线值保留 `UINT16_MAX` 作为 Unknown 哨兵，正常有效 Cost 不得使用这个值。Known Cost 永远优先于 Unknown，即使 Known=2000 也不会被 Unknown 错误压过；只有全部候选都 Unknown 时，才按活动 Flow 数和稳定顺序回退。调用方应在调用旧 Adapter 前清零整个指标结构。Core 不把 `0` RTT、`0‰` 失败率或 `0‰` 队列压力误认为未知。
 
 ## 2. 防止重复惩罚的规则
 
@@ -28,7 +28,7 @@
 模式 B：Adapter 提供 composite_cost，Policy 不再读取被它已经包含的动态项
 ```
 
-v4 当前处于两者之前：没有把四项直接相加。它保留基础 `route_cost` 给路由发现，保留质量快照给诊断，并只用队列压力作 Q1 Flow 的“持续拥塞”触发条件。任何后续加权实现都必须先选择模式 A 或 B、写明权重/归一化和测试向量，不能隐式混用。
+v4 当前处于两者之前：没有把四项直接相加。`AUTO_BALANCE` 只用 Known 基础 Cost 与活动 Flow 数评分，Unknown 单独排序；质量快照保留给诊断，队列压力只作 Q1 Flow 的“持续拥塞”触发条件。任何后续加权实现都必须先选择模式 A 或 B、写明权重/归一化和测试向量，不能隐式混用。
 
 ## 3. Adapter 的实现要求
 
@@ -46,6 +46,6 @@ v4 当前处于两者之前：没有把四项直接相加。它保留基础 `rou
 
 ## 5. 当前验证与后续实机标定
 
-软件测试已覆盖：可选指标的 EWMA、采样间隔、未知指标、超过 `1000‰` 的非法值拒绝，以及 Link Down 导致 Policy Path Down。Route Refresh 也覆盖了持续 Q1 背景下取得维护槽。
+软件测试已覆盖：Known 2000 优于 Unknown、有效 Cost 饱和不撞入 Unknown 哨兵、极端 RTT/失败率不被裸加进 `AUTO_BALANCE`、可选指标 EWMA、采样间隔、超过 `1000‰` 的非法值拒绝，以及 Link Down 导致 Policy Path Down。Route Refresh 也覆盖了持续 Q1 背景下取得维护槽。
 
 尚未用真实 Wi-Fi/UART/CAN/LoRa 标定以下数据：不同介质窗口长度、`route_cost` 基础等级、真实 RTT/丢包/队列的相关性、拥塞阈值和 Flow 重绑收益。这些属于 S03/S06 的实机阶段；在日志和复现实验之前，不能把任何推荐 Cost 数值当作通用默认值。

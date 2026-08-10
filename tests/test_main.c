@@ -32,6 +32,10 @@ int main(void)
     result |= test_policy_diagnostic();
     result |= test_service();
     result |= test_service_bridge();
+    result |= test_control_budget();
+    result |= test_time();
+    result |= test_link_contract();
+    result |= test_stress();
 
     if (result == 0) {
         printf("All UCN tests passed.\n");

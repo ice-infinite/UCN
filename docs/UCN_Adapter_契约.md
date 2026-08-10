@@ -22,8 +22,8 @@ Core 不读取 MAC、RSSI、CAN ID、串口号、蓝牙连接句柄或 Linux soc
 1. 驱动 ISR 或 WiFi/BLE 回调不得执行 `ucn_node_receive()`、路由、准入 Provider 或应用回调。
 2. 回调只将完整 UCN 帧复制到**有上限**的驱动队列或 `ucn_adapter_rx_queue_t`。
 3. 单一协议任务调用 `ucn_adapter_rx_pump()`，再由它调用 `ucn_node_receive()`；Core 的 Node 状态因此不需要并发访问。
-4. Adapter 的 `send()` 只做当前 Link 的实际发送；它不得自行改写 UCN 源/目的 Node ID、TTL、序号或路由。
-5. 队列满时必须丢弃并计数，绝不能在回调中无限等待。Q0 的紧急业务策略由产品决定，但不能挤占未受限的 RAM。
+4. 生产 Adapter 的 `send()` 只允许做有界复制并写入固定 TX Queue，随后立即返回；不得等待 UART DMA、无线 ACK、LoRa 空口发送或 Socket 完整写完，也不得自行改写 UCN 源/目的 Node ID、TTL、序号或路由。仅测试用同步虚拟 Link 可以在调用栈内直接投递。
+5. TX Queue 满返回 `UCN_ERR_NO_SPACE`，Driver 已明确 Down 返回 `UCN_ERR_LINK_DOWN`；Core 对一次 `send()` 失败不在调用栈内自旋或重试。产品必须记录队列容量、队列满统计和 `send()` 最坏执行时间。RX 队列满也必须丢弃并计数，不能使用无上限 RAM。
 
 公共队列默认 `UCN_ADAPTER_RX_QUEUE_DEPTH=2`，占用约 `2 × UCN_MAX_FRAME_BYTES` 原始帧缓存（默认约 512 B），可在编译期设为 1。它可使用 `ucn_port_ops_t` 的临界区钩子保护并发访问；真正 ISR 中应优先使用 RTOS/驱动提供的 ISR 安全队列，再由任务转交给本接口。
 
@@ -73,7 +73,7 @@ physical address → Candidate Link (peer_node_id = 0)
 | 回调 | Adapter 必须做什么 | 不得做什么 |
 | --- | --- | --- |
 | `open` | 初始化/激活物理对端资源。 | 分配无上限资源或隐式信任对端。 |
-| `send` | 发送一个完整 UCN 帧；失败返回明确错误。 | 改写 UCN 帧的身份/路由字段。 |
+| `send` | 将一个完整 UCN 帧有界复制进固定 TX Queue；成功仅表示 Adapter 接受该副本。队列满返回 `UCN_ERR_NO_SPACE`，Driver Down 返回 `UCN_ERR_LINK_DOWN`。 | 等待物理发送完成、无限阻塞/重试，或改写 UCN 帧的身份/路由字段。 |
 | `poll_rx` | 可选：在非回调驱动中拉取原始帧并入队。 | 直接运行 Core 路由。 |
 | `get_status` | 返回 up/down、实际 MTU 和错误计数。 | 用“最后一次成功”伪造当前连通。 |
 | `get_metrics` | 可选：将介质质量归一成非零、越小越好的 `route_cost`。 | 将 RSSI/SNR/CAN 专有字段加入 UCN 帧。 |
@@ -103,7 +103,7 @@ UCN_MAX_FRAME_BYTES ≤ 该 Profile 中所有可用 Link 的有效 MTU
 
 ## 8. 已验证与未验证边界
 
-- 已验证：固定队列 FIFO/满队列计数、临界区钩子、物理地址到静态 Link 的冲突保护、未知 Link 数据拒绝、广播 HELLO 绑定 Node ID、开放策略自动准入、准入后的业务交付。
-- 未验证：ESP-IDF、ESP-NOW、FreeRTOS ISR、BLE、LoRa、UART、RS485、CAN/CAN-FD 的真实驱动、无线性能和实机资源占用。
+- 已验证：固定 RX 队列 FIFO/满队列计数、临界区钩子、物理地址到静态 Link 的冲突保护、未知 Link 数据拒绝、广播 HELLO 绑定 Node ID、开放策略自动准入、准入后的业务交付；软件契约测试确认 `send()` 的 `NO_SPACE/LINK_DOWN` 原样返回且 Core 不在同一调用中重试。
+- 未验证：ESP-IDF、ESP-NOW、FreeRTOS ISR、BLE、LoRa、UART、RS485、CAN/CAN-FD 生产 TX Queue 的真实 WCET、无线性能和实机资源占用。
 
 T14 才负责指定 ESP32/ESP-IDF 的实际 Adapter；T15 才接入生产身份 Provider、撤销/淘汰与压力验证。

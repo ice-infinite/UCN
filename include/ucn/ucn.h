@@ -2,6 +2,7 @@
 #define UCN_H
 
 #include "ucn/ucn_types.h"
+#include "ucn/ucn_time.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -229,6 +229,8 @@ ucn_result_t ucn_service_set_ready(ucn_service_router_t *router,
                                    bool ready)
 {
     const int binding_index = router == NULL ? -1 : ucn_service_find_binding(router, endpoint);
+    const ucn_service_binding_t *binding;
+    ucn_service_binding_state_t *state;
 
     if (router == NULL) {
         return UCN_ERR_ARGUMENT;
@@ -237,23 +239,39 @@ ucn_result_t ucn_service_set_ready(ucn_service_router_t *router,
         router->stats.unknown_endpoint++;
         return UCN_ERR_NOT_FOUND;
     }
-    router->binding_states[binding_index].ready = ready;
+    binding = &router->config.bindings[binding_index];
+    state = &router->binding_states[binding_index];
+    if (!ready) {
+        if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q0_FIFO) {
+            (void)memset(&router->q0_inboxes[state->q0_inbox_index], 0,
+                         sizeof(router->q0_inboxes[state->q0_inbox_index]));
+        } else {
+            (void)memset(&router->q1_inboxes[state->q1_inbox_index], 0,
+                         sizeof(router->q1_inboxes[state->q1_inbox_index]));
+        }
+        router->stats.binding_purges++;
+    }
+    state->ready = ready;
     return UCN_OK;
 }
 
-ucn_result_t ucn_service_send(ucn_service_router_t *router,
-                              ucn_node_id_t destination,
-                              ucn_service_id_t source_service_id,
-                              ucn_endpoint_t endpoint,
-                              ucn_traffic_class_t traffic_class,
-                              const uint8_t *payload,
-                              uint16_t payload_length)
+ucn_result_t ucn_service_send_ex(ucn_service_router_t *router,
+                                 ucn_node_id_t destination,
+                                 ucn_service_id_t source_service_id,
+                                 ucn_endpoint_t endpoint,
+                                 ucn_traffic_class_t traffic_class,
+                                 const uint8_t *payload,
+                                 uint16_t payload_length,
+                                 ucn_service_acceptance_t *acceptance)
 {
     const int binding_index = router == NULL ? -1 : ucn_service_find_binding(router, endpoint);
     const ucn_service_binding_t *binding;
     ucn_service_message_t message;
     ucn_result_t result;
 
+    if (acceptance != NULL) {
+        *acceptance = UCN_SERVICE_ACCEPTANCE_NONE;
+    }
     if (router == NULL || !ucn_service_id_is_valid(source_service_id) ||
         (payload_length > 0U && payload == NULL)) {
         return UCN_ERR_ARGUMENT;
@@ -281,6 +299,9 @@ ucn_result_t ucn_service_send(ucn_service_router_t *router,
         result = ucn_service_deliver_to_binding(router, (uint8_t)binding_index, &message);
         if (result == UCN_OK) {
             router->stats.local_delivered++;
+            if (acceptance != NULL) {
+                *acceptance = UCN_SERVICE_ACCEPTANCE_LOCAL_DELIVERED;
+            }
         }
         return result;
     }
@@ -308,7 +329,22 @@ ucn_result_t ucn_service_send(ucn_service_router_t *router,
         }
     }
     router->stats.remote_enqueued++;
+    if (acceptance != NULL) {
+        *acceptance = UCN_SERVICE_ACCEPTANCE_REMOTE_ENQUEUED;
+    }
     return UCN_OK;
+}
+
+ucn_result_t ucn_service_send(ucn_service_router_t *router,
+                              ucn_node_id_t destination,
+                              ucn_service_id_t source_service_id,
+                              ucn_endpoint_t endpoint,
+                              ucn_traffic_class_t traffic_class,
+                              const uint8_t *payload,
+                              uint16_t payload_length)
+{
+    return ucn_service_send_ex(router, destination, source_service_id, endpoint,
+                               traffic_class, payload, payload_length, NULL);
 }
 
 ucn_result_t ucn_service_deliver_remote(ucn_service_router_t *router,
@@ -375,6 +411,10 @@ ucn_result_t ucn_service_inbox_take(ucn_service_router_t *router,
         return UCN_ERR_ACCESS;
     }
     state = &router->binding_states[binding_index];
+    if (!state->ready) {
+        router->stats.not_ready++;
+        return UCN_ERR_NOT_FOUND;
+    }
     if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q0_FIFO) {
         result = ucn_service_q0_take(&router->q0_inboxes[state->q0_inbox_index], message);
     } else if (!router->q1_inboxes[state->q1_inbox_index].occupied) {
@@ -418,4 +458,74 @@ ucn_result_t ucn_service_remote_tx_take(ucn_service_router_t *router,
 const ucn_service_stats_t *ucn_service_get_stats(const ucn_service_router_t *router)
 {
     return router == NULL ? NULL : &router->stats;
+}
+
+ucn_result_t ucn_service_command_guard_encode(
+    const ucn_service_command_guard_t *guard,
+    uint8_t output[UCN_SERVICE_COMMAND_GUARD_BYTES])
+{
+    if (guard == NULL || output == NULL || guard->command_id == 0U ||
+        guard->valid_for_ms == 0U ||
+        !ucn_endpoint_is_static(guard->result_endpoint) || guard->flags != 0U) {
+        return UCN_ERR_ARGUMENT;
+    }
+    output[0] = (uint8_t)(guard->command_id >> 24U);
+    output[1] = (uint8_t)(guard->command_id >> 16U);
+    output[2] = (uint8_t)(guard->command_id >> 8U);
+    output[3] = (uint8_t)guard->command_id;
+    output[4] = (uint8_t)(guard->issued_at_ms >> 24U);
+    output[5] = (uint8_t)(guard->issued_at_ms >> 16U);
+    output[6] = (uint8_t)(guard->issued_at_ms >> 8U);
+    output[7] = (uint8_t)guard->issued_at_ms;
+    output[8] = (uint8_t)(guard->valid_for_ms >> 8U);
+    output[9] = (uint8_t)guard->valid_for_ms;
+    output[10] = guard->result_endpoint;
+    output[11] = guard->flags;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_service_command_guard_decode(
+    const uint8_t *payload,
+    size_t payload_length,
+    ucn_service_command_guard_t *guard)
+{
+    if (payload == NULL || guard == NULL ||
+        payload_length < UCN_SERVICE_COMMAND_GUARD_BYTES) {
+        return UCN_ERR_ARGUMENT;
+    }
+    guard->command_id = ((uint32_t)payload[0] << 24U) |
+                        ((uint32_t)payload[1] << 16U) |
+                        ((uint32_t)payload[2] << 8U) | (uint32_t)payload[3];
+    guard->issued_at_ms = ((uint32_t)payload[4] << 24U) |
+                          ((uint32_t)payload[5] << 16U) |
+                          ((uint32_t)payload[6] << 8U) | (uint32_t)payload[7];
+    guard->valid_for_ms = (uint16_t)(((uint16_t)payload[8] << 8U) |
+                                     (uint16_t)payload[9]);
+    guard->result_endpoint = payload[10];
+    guard->flags = payload[11];
+    if (guard->command_id == 0U || guard->valid_for_ms == 0U ||
+        !ucn_endpoint_is_static(guard->result_endpoint) || guard->flags != 0U) {
+        return UCN_ERR_MALFORMED;
+    }
+    return UCN_OK;
+}
+
+ucn_result_t ucn_service_command_guard_validate(
+    const ucn_service_command_guard_t *guard,
+    uint32_t now_ms,
+    bool has_last_command_id,
+    uint32_t last_command_id)
+{
+    if (guard == NULL || guard->command_id == 0U || guard->valid_for_ms == 0U ||
+        !ucn_endpoint_is_static(guard->result_endpoint) || guard->flags != 0U) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (has_last_command_id &&
+        (int32_t)(guard->command_id - last_command_id) <= 0) {
+        return UCN_ERR_REPLAY;
+    }
+    if ((uint32_t)(now_ms - guard->issued_at_ms) >= guard->valid_for_ms) {
+        return UCN_ERR_TTL;
+    }
+    return UCN_OK;
 }

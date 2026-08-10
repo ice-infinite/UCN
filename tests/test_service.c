@@ -82,10 +82,17 @@ static int test_service_local_qos_and_acl(void)
     uint8_t command;
     ucn_service_router_t router;
     ucn_service_message_t message;
+    ucn_service_acceptance_t acceptance = UCN_SERVICE_ACCEPTANCE_NONE;
     const ucn_service_stats_t *stats;
     uint8_t index;
 
     TEST_ASSERT(service_init(&router, UINT32_C(1)) == 0);
+    TEST_ASSERT(ucn_service_send_ex(&router, UINT32_C(1), TEST_SERVICE_SENSOR,
+                                    0x42U, UCN_TRAFFIC_Q1_REALTIME, &first, 1U,
+                                    &acceptance) == UCN_OK);
+    TEST_ASSERT(acceptance == UCN_SERVICE_ACCEPTANCE_LOCAL_DELIVERED);
+    TEST_ASSERT(ucn_service_inbox_take(&router, TEST_SERVICE_CONTROL, 0x42U,
+                                       &message) == UCN_OK);
     TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_SENSOR, 0x40U,
                                  UCN_TRAFFIC_Q1_REALTIME, &first, 1U) == UCN_OK);
     TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_SENSOR, 0x40U,
@@ -125,7 +132,7 @@ static int test_service_local_qos_and_acl(void)
                                        &message) == UCN_ERR_ACCESS);
     stats = ucn_service_get_stats(&router);
     TEST_ASSERT(stats != NULL && stats->local_delivered ==
-                (uint32_t)(2U + UCN_SERVICE_Q0_INBOX_DEPTH) &&
+                (uint32_t)(3U + UCN_SERVICE_Q0_INBOX_DEPTH) &&
                 stats->q1_overwrites == 1U && stats->q0_inbox_full == 1U &&
                 stats->local_acl_rejected == 1U && stats->not_ready == 1U);
     return 0;
@@ -141,10 +148,17 @@ static int test_service_remote_queue_and_inbound_guard(void)
     ucn_service_message_t message;
     ucn_frame_t frame;
     const ucn_service_stats_t *stats;
+    ucn_service_acceptance_t acceptance = UCN_SERVICE_ACCEPTANCE_NONE;
 
     TEST_ASSERT(service_init(&router_a, UINT32_C(1)) == 0);
     TEST_ASSERT(service_init(&router_b, UINT32_C(2)) == 0);
     TEST_ASSERT(service_init(&router_c, UINT32_C(3)) == 0);
+    TEST_ASSERT(ucn_service_send_ex(&router_a, UINT32_C(3), TEST_SERVICE_SENSOR,
+                                    0x42U, UCN_TRAFFIC_Q1_REALTIME, &q1_first, 1U,
+                                    &acceptance) == UCN_OK);
+    TEST_ASSERT(acceptance == UCN_SERVICE_ACCEPTANCE_REMOTE_ENQUEUED);
+    TEST_ASSERT(ucn_service_remote_tx_take(&router_a, &message) == UCN_OK &&
+                message.endpoint == 0x42U);
     TEST_ASSERT(ucn_service_send(&router_a, UINT32_C(3), TEST_SERVICE_SENSOR, 0x40U,
                                  UCN_TRAFFIC_Q1_REALTIME, &q1_first, 1U) == UCN_OK);
     TEST_ASSERT(ucn_service_send(&router_a, UINT32_C(3), TEST_SERVICE_SENSOR, 0x40U,
@@ -159,8 +173,8 @@ static int test_service_remote_queue_and_inbound_guard(void)
                 message.payload[0] == q1_latest && message.destination_node_id == UINT32_C(3));
     TEST_ASSERT(ucn_service_remote_tx_take(&router_a, &message) == UCN_ERR_NOT_FOUND);
     stats = ucn_service_get_stats(&router_a);
-    TEST_ASSERT(stats != NULL && stats->remote_enqueued == 3U &&
-                stats->remote_q1_overwrites == 1U && stats->remote_tx_reads == 2U);
+    TEST_ASSERT(stats != NULL && stats->remote_enqueued == 4U &&
+                stats->remote_q1_overwrites == 1U && stats->remote_tx_reads == 3U);
 
     for (uint8_t index = 0U; index < UCN_SERVICE_REMOTE_TX_Q0_DEPTH; ++index) {
         queue_value = (uint8_t)(20U + index);
@@ -204,6 +218,85 @@ static int test_service_remote_queue_and_inbound_guard(void)
     return 0;
 }
 
+static int test_service_restart_purges_inbox(void)
+{
+    uint8_t old_q1 = 1U;
+    uint8_t new_q1 = 2U;
+    uint8_t old_q0_a = 10U;
+    uint8_t old_q0_b = 11U;
+    uint8_t new_q0 = 12U;
+    ucn_service_router_t router;
+    ucn_service_message_t message;
+    const ucn_service_stats_t *stats;
+
+    TEST_ASSERT(service_init(&router, UINT32_C(1)) == 0);
+
+    TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_SENSOR, 0x43U,
+                                 UCN_TRAFFIC_Q1_REALTIME, &old_q1, 1U) == UCN_OK);
+    TEST_ASSERT(ucn_service_set_ready(&router, 0x43U, false) == UCN_OK);
+    TEST_ASSERT(ucn_service_inbox_take(&router, TEST_SERVICE_CONTROL, 0x43U,
+                                       &message) == UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_SENSOR, 0x43U,
+                                 UCN_TRAFFIC_Q1_REALTIME, &new_q1, 1U) ==
+                UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_service_set_ready(&router, 0x43U, true) == UCN_OK);
+    TEST_ASSERT(ucn_service_inbox_take(&router, TEST_SERVICE_CONTROL, 0x43U,
+                                       &message) == UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_SENSOR, 0x43U,
+                                 UCN_TRAFFIC_Q1_REALTIME, &new_q1, 1U) == UCN_OK);
+    TEST_ASSERT(ucn_service_inbox_take(&router, TEST_SERVICE_CONTROL, 0x43U,
+                                       &message) == UCN_OK &&
+                message.payload[0] == new_q1);
+
+    TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_CONTROL, 0x61U,
+                                 UCN_TRAFFIC_Q0_CRITICAL, &old_q0_a, 1U) == UCN_OK);
+    TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_CONTROL, 0x61U,
+                                 UCN_TRAFFIC_Q0_CRITICAL, &old_q0_b, 1U) == UCN_OK);
+    TEST_ASSERT(ucn_service_set_ready(&router, 0x61U, false) == UCN_OK);
+    TEST_ASSERT(ucn_service_inbox_take(&router, TEST_SERVICE_ACTUATOR, 0x61U,
+                                       &message) == UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_service_set_ready(&router, 0x61U, true) == UCN_OK);
+    TEST_ASSERT(ucn_service_inbox_take(&router, TEST_SERVICE_ACTUATOR, 0x61U,
+                                       &message) == UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_CONTROL, 0x61U,
+                                 UCN_TRAFFIC_Q0_CRITICAL, &new_q0, 1U) == UCN_OK);
+    TEST_ASSERT(ucn_service_inbox_take(&router, TEST_SERVICE_ACTUATOR, 0x61U,
+                                       &message) == UCN_OK &&
+                message.payload[0] == new_q0);
+
+    stats = ucn_service_get_stats(&router);
+    TEST_ASSERT(stats != NULL && stats->binding_purges == 2U && stats->not_ready == 3U);
+    return 0;
+}
+
+static int test_service_command_guard(void)
+{
+    uint8_t payload[UCN_SERVICE_COMMAND_GUARD_BYTES];
+    ucn_service_command_guard_t encoded = {
+        UINT32_C(7), UINT32_MAX - UINT32_C(5), 10U, 0x50U, 0U
+    };
+    ucn_service_command_guard_t decoded;
+
+    (void)memset(&decoded, 0, sizeof(decoded));
+    TEST_ASSERT(ucn_service_command_guard_encode(&encoded, payload) == UCN_OK);
+    TEST_ASSERT(ucn_service_command_guard_decode(payload, sizeof(payload),
+                                                  &decoded) == UCN_OK);
+    TEST_ASSERT(decoded.command_id == encoded.command_id &&
+                decoded.issued_at_ms == encoded.issued_at_ms &&
+                decoded.valid_for_ms == encoded.valid_for_ms &&
+                decoded.result_endpoint == encoded.result_endpoint);
+    TEST_ASSERT(ucn_service_command_guard_validate(&decoded, 3U, false, 0U) == UCN_OK);
+    TEST_ASSERT(ucn_service_command_guard_validate(&decoded, 4U, false, 0U) ==
+                UCN_ERR_TTL);
+    TEST_ASSERT(ucn_service_command_guard_validate(&decoded, 3U, true, 7U) ==
+                UCN_ERR_REPLAY);
+    TEST_ASSERT(ucn_service_command_guard_validate(&decoded, 3U, true, 6U) == UCN_OK);
+    payload[10] = UCN_MSG_DATA_Q0;
+    TEST_ASSERT(ucn_service_command_guard_decode(payload, sizeof(payload),
+                                                  &decoded) == UCN_ERR_MALFORMED);
+    return 0;
+}
+
 int test_service(void)
 {
     if (test_service_configuration() != 0) {
@@ -212,5 +305,11 @@ int test_service(void)
     if (test_service_local_qos_and_acl() != 0) {
         return 1;
     }
-    return test_service_remote_queue_and_inbound_guard();
+    if (test_service_remote_queue_and_inbound_guard() != 0) {
+        return 1;
+    }
+    if (test_service_restart_purges_inbox() != 0) {
+        return 1;
+    }
+    return test_service_command_guard();
 }
