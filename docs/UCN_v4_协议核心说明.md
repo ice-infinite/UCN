@@ -83,7 +83,7 @@ UCN 不会在每次业务发送前重新寻找完整路径。正常流程是“*
 
 当前已实现的是固定容量的 Active/Candidate 控制闭环和虚拟拓扑验证；Cost 的实机采样周期、抖动窗口、吞吐与切换丢包上限必须在具体 Adapter 和多板环境中测量后冻结。
 
-同一下一跳同时存在 WiFi/UART/CAN Bearer 时，T21.3 会先保持健康 Primary。候选 Bearer 只有比 Primary 低至少 20%、连续 3 个 500 ms 窗口成立，且在自己的直连 Link 上取得 2 次 `HEARTBEAT` ACK（最多 3 次、100 ms 间隔）才成为新的 Primary；硬 Down 仍直接切健康 Backup。该 Probe 不经中继、不改线格式，且 `ucn_node_step()` 会先处理 Q0/Q1 待发业务，避免 Probe 抢占 Q0。数值均为可覆盖的编译期宏。两块 S3 已实测 ESP-NOW 与 UART 以两个独立 Core Link 合并为同一 Neighbor；UART Cost 5 为 Primary、ESP-NOW Cost 10 为 Backup，远端 UART 停止后仍保留 Wi-Fi Neighbor，恢复后再合并。物理拔线切换时延、功耗、持续业务丢失/乱序与多跳仍须测量。
+同一下一跳同时存在 WiFi/UART/CAN Bearer 时，T21.3 会先保持健康 Primary。候选 Bearer 只有比 Primary 低至少 20%、连续 3 个 500 ms 窗口成立，且在自己的直连 Link 上取得 2 次 `HEARTBEAT` ACK（最多 3 次、100 ms 间隔）才成为新的 Primary；硬 Down 仍直接切健康 Backup。该 Probe 不经中继、不改线格式：它不会在每次业务发送时抢占 Q0/Q1，但连续业务达到默认 4 帧且 Probe 已到期时可使用一个必要维护槽，避免长期饥饿。数值均为可覆盖的编译期宏。两块 S3 已实测 ESP-NOW 与 UART 以两个独立 Core Link 合并为同一 Neighbor；UART Cost 5 为 Primary、ESP-NOW Cost 10 为 Backup，远端 UART 停止后仍保留 Wi-Fi Neighbor，恢复后再合并。物理拔线切换时延、功耗、持续业务丢失/乱序与多跳仍须测量。
 
 ## 6. 对外接口与对内接口的边界
 

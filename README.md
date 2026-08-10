@@ -13,7 +13,7 @@ Linux、ROS 2、MAVLink 或地面站可以作为普通 Host/Adapter 接入，但
 - Adapter 将物理地址和驱动回调转换为有界 RX 队列；协议任务中再执行路由和应用回调。
 - 按需路径追踪与低频节点快照诊断。节点快照默认拒绝远端请求，产品必须显式配置管理节点授权。
 
-仓库同时发布 Core 源码、单元/虚拟拓扑测试、CMake 配置，以及 `docs/` 下的架构、协议设计、任务表和项目操作记录。开始接入时先阅读 [UCN 使用与调用手册](docs/UCN_使用与调用手册.md)，需要追踪实际函数路径时进入 [UCN 调用关系树](docs/calltree/README.md)，再按需要阅读 [UCN v4 协议核心说明](docs/UCN_v4_协议核心说明.md)、完整架构和专题设计文档。
+仓库同时发布 Core 源码、单元/虚拟拓扑测试、CMake 配置，以及 `docs/` 下的架构、协议设计、任务表和项目操作记录。开始接入时先按运行环境阅读 [UCN 快速使用手册](docs/快速使用手册/README.md)，再阅读 [UCN 使用与调用手册](docs/UCN_使用与调用手册.md)；Adapter 实现者还必须遵守 [Link Metrics 与 Cost 契约](docs/UCN_Link_Metrics与Cost契约.md)。需要追踪实际函数路径时进入 [UCN 调用关系树](docs/calltree/README.md)，再按需要阅读 [UCN v4 协议核心说明](docs/UCN_v4_协议核心说明.md)、完整架构和专题设计文档。
 
 ## 目录
 
@@ -39,4 +39,4 @@ ctest --test-dir build --output-on-failure
 
 ## 使用边界
 
-UCN-Core 只依赖抽象 `Link` 和通用 `route_cost`。各 Adapter 自行处理 RSSI、SNR、丢包、Bus-Off、CRC 错误、超时等介质指标，并将平滑后的结果提供给 Core。真实驱动、产品身份、密钥管理和硬件资源评估由具体产品工程完成。
+UCN-Core 只依赖抽象 `Link` 和通用指标。各 Adapter 自行处理 RSSI、SNR、丢包、Bus-Off、CRC 错误、超时等介质细节，并按契约分别提供基础 `route_cost`、可选 RTT、发送失败率和 Adapter 队列压力。真实驱动、产品身份、密钥管理和硬件资源评估由具体产品工程完成。

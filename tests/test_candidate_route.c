@@ -119,7 +119,9 @@ int test_candidate_route(void)
     candidate_link_context_t contexts[8];
     candidate_receive_state_t received;
     ucn_send_request_t q0_request;
+    ucn_send_request_t q1_request;
     uint16_t initial_route_epoch;
+    uint32_t now_ms;
 
     (void)memset(&a, 0, sizeof(a)); (void)memset(&b, 0, sizeof(b));
     (void)memset(&c, 0, sizeof(c)); (void)memset(&d, 0, sizeof(d));
@@ -130,6 +132,7 @@ int test_candidate_route(void)
     (void)memset(contexts, 0, sizeof(contexts));
     (void)memset(&received, 0, sizeof(received));
     (void)memset(&q0_request, 0, sizeof(q0_request));
+    (void)memset(&q1_request, 0, sizeof(q1_request));
     TEST_ASSERT(candidate_init_node(&a, UINT32_C(1)) == 0);
     TEST_ASSERT(candidate_init_node(&b, UINT32_C(2)) == 0);
     TEST_ASSERT(candidate_init_node(&c, UINT32_C(3)) == 0);
@@ -180,10 +183,25 @@ int test_candidate_route(void)
     TEST_ASSERT(ucn_node_register_link(&c, &cd) == UCN_OK);
 
     /* A used route enters its refresh window 6 s before the 30 s validation
-     * deadline.  The scheduler must start a candidate discovery by itself. */
+     * deadline.  Keep Q1 busy through the window: on the fifth scheduling
+     * turn the due Route Refresh must preempt it rather than wait for idle. */
+    q1_request.destination = UINT32_C(3);
+    q1_request.message_type = UCN_MSG_DATA_Q1;
+    q1_request.traffic_class = UCN_TRAFFIC_Q1_REALTIME;
+    q1_request.delivery = UCN_DELIVERY_LATEST_VALUE;
+    q1_request.deadline_ms = UINT32_C(25000);
+    q1_request.payload = &first_payload;
+    q1_request.payload_length = 1U;
+    for (now_ms = UINT32_C(24096); now_ms < UINT32_C(24100); ++now_ms) {
+        TEST_ASSERT(ucn_node_enqueue(&a, &q1_request) == UCN_OK);
+        TEST_ASSERT(ucn_node_step(&a, now_ms) == UCN_OK);
+    }
+    TEST_ASSERT(ucn_node_enqueue(&a, &q1_request) == UCN_OK);
     TEST_ASSERT(ucn_node_step(&a, 24100U) == UCN_OK);
     TEST_ASSERT(a.stats.route_refreshes_started >= 2U);
+    TEST_ASSERT(a.stats.maintenance_preemptions >= 1U);
     TEST_ASSERT(a.stats.candidate_routes_learned >= 1U);
+    TEST_ASSERT(ucn_node_step(&a, 24100U) == UCN_OK);
     reset_send_counts(contexts, 8U);
     TEST_ASSERT(ucn_node_send(&a, UINT32_C(3), UCN_MSG_DATA_Q1,
                               UCN_TRAFFIC_Q1_REALTIME, &first_payload, 1U) == UCN_OK);

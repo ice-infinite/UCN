@@ -25,6 +25,14 @@ extern "C" {
 #define UCN_TX_Q1_DEPTH ((size_t)4U)
 #endif
 
+/* A due liveness/path maintenance control frame may use one scheduling slot
+ * after this many business transmissions.  It is not a periodic reservation:
+ * when no maintenance is due, Q0/Q1 continue without an injected frame.
+ * Snapshot and policy diagnostics never use this exception. */
+#ifndef UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE
+#define UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE ((uint8_t)4U)
+#endif
+
 #ifndef UCN_MAX_ROUTES
 #define UCN_MAX_ROUTES ((size_t)8U)
 #endif
@@ -83,6 +91,8 @@ extern "C" {
 
 typedef char ucn_path_probe_required_acks_must_be_positive[
     UCN_PATH_PROBE_REQUIRED_ACKS > 0U ? 1 : -1];
+typedef char ucn_business_tx_burst_before_maintenance_must_be_positive[
+    UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE > 0U ? 1 : -1];
 typedef char ucn_route_refresh_advance_must_fit_lifetime[
     UCN_ROUTE_REFRESH_ADVANCE_MS < UCN_ROUTE_ENTRY_LIFETIME_MS ? 1 : -1];
 typedef char ucn_route_switch_improvement_percent_must_be_less_than_100[
@@ -588,6 +598,7 @@ typedef struct ucn_node_stats {
     uint32_t tx_sent;
     uint32_t tx_expired_dropped;
     uint32_t tx_error_dropped;
+    uint32_t maintenance_preemptions;
     uint32_t rx_delivered;
     uint32_t route_requests_sent;
     uint32_t route_replies_sent;
@@ -727,6 +738,7 @@ struct ucn_node {
     uint32_t next_path_trace_id;
     uint32_t next_node_snapshot_id;
     uint32_t next_policy_diagnostic_id;
+    uint8_t business_tx_since_maintenance;
     uint8_t control_tokens;
     uint32_t control_last_refill_ms;
     uint8_t path_trace_tokens;

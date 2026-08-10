@@ -14,19 +14,33 @@ typedef struct ucn_link_status {
     uint32_t rx_errors;
 } ucn_link_status_t;
 
+#define UCN_LINK_METRIC_PER_MILLE_MAX ((uint16_t)1000U)
+
 /*
- * 由具体 Link 把 RSSI、SNR、重传、Bus-Off、CRC 错误或队列积压等
- * 归一成代价。数值越小表示越适合作为路由路径；未提供有效指标时 v3 Core
- * 使用保守的 UCN_UNKNOWN_LINK_ROUTE_COST，避免未知链路压过已测量路径。
+ * Link Metrics contract:
+ *
+ * - route_cost is a positive, additive base route cost in UCN cost units.
+ *   Smaller is preferred by AODV-Lite.  It may encode stable media/product
+ *   preference (for example a preferred wired Bearer), but MUST NOT include
+ *   the instantaneous RTT, failure-rate or queue-pressure samples reported
+ *   below.  A future multi-metric Policy can therefore combine each signal
+ *   exactly once.  route_cost_valid=false (or cost 0) means unknown.
+ * - rtt_ms is the direct Link round-trip sample, in whole milliseconds.
+ *   It is not an end-to-end routed-path RTT; zero is permitted for a
+ *   sub-millisecond/virtual Link sample.
+ * - tx_failure_per_mille is the Adapter's outbound Link failure ratio for
+ *   its declared sampling window, in [0, UCN_LINK_METRIC_PER_MILLE_MAX].
+ *   It is not an application or end-to-end delivery loss ratio.
+ * - queue_pressure_per_mille is the Adapter's own outbound queue occupancy
+ *   ratio in the same range.  It MUST NOT report UCN Core Q0/Q1 occupancy.
+ *
+ * Each valid bit controls only its own value; false is the sole unknown
+ * representation.  Callers zero-initialize this structure before invoking
+ * an older Adapter, preserving the original route-cost-only contract.
  */
 typedef struct ucn_link_metrics {
     bool route_cost_valid;
     uint16_t route_cost;
-    /* Optional Adapter-owned quality snapshot.  The Core never reads media
-     * specific values such as RSSI directly: an Adapter may expose a smoothed
-     * RTT, failure rate and bounded queue pressure alongside its composite
-     * route_cost.  Callers zero-initialize this structure before invoking an
-     * older Adapter, so the original two-field contract remains safe. */
     bool rtt_valid;
     uint16_t rtt_ms;
     bool tx_failure_rate_valid;

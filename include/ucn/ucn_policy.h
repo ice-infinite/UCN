@@ -64,7 +64,8 @@ typedef char ucn_policy_quality_ewma_alpha_must_be_valid[
 typedef char ucn_policy_balance_flow_lease_must_be_positive[
     UCN_POLICY_BALANCE_FLOW_LEASE_MS > 0U ? 1 : -1];
 typedef char ucn_policy_balance_queue_pressure_threshold_must_be_valid[
-    UCN_POLICY_BALANCE_QUEUE_PRESSURE_THRESHOLD_PER_MILLE <= 1000U ? 1 : -1];
+    UCN_POLICY_BALANCE_QUEUE_PRESSURE_THRESHOLD_PER_MILLE <=
+        UCN_LINK_METRIC_PER_MILLE_MAX ? 1 : -1];
 typedef char ucn_policy_balance_congestion_samples_must_be_positive[
     UCN_POLICY_BALANCE_CONGESTED_SAMPLE_LIMIT > 0U ? 1 : -1];
 

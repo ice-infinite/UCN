@@ -73,6 +73,77 @@ static void heartbeat_setup_link(ucn_link_t *link,
     context->deliver = true;
 }
 
+static int heartbeat_run_sustained_backlog(bool include_q0, bool include_q1)
+{
+    uint8_t payload = 0U;
+    uint32_t now_ms;
+    ucn_node_t a, b;
+    ucn_link_t ab, ba;
+    heartbeat_link_context_t cab, cba;
+    ucn_send_request_t request;
+
+    (void)memset(&a, 0, sizeof(a));
+    (void)memset(&b, 0, sizeof(b));
+    (void)memset(&ab, 0, sizeof(ab));
+    (void)memset(&ba, 0, sizeof(ba));
+    (void)memset(&cab, 0, sizeof(cab));
+    (void)memset(&cba, 0, sizeof(cba));
+    TEST_ASSERT(heartbeat_init_node(&a, UINT32_C(11)) == 0);
+    TEST_ASSERT(heartbeat_init_node(&b, UINT32_C(12)) == 0);
+    heartbeat_setup_link(&ab, &cab, 11U);
+    heartbeat_setup_link(&ba, &cba, 12U);
+    cab.peer = &b; cab.peer_ingress = &ba;
+    cba.peer = &a; cba.peer_ingress = &ab;
+    TEST_ASSERT(ucn_node_broadcast_hello(&a, &ab, 0U) == UCN_OK);
+    TEST_ASSERT(ucn_node_broadcast_hello(&b, &ba, 0U) == UCN_OK);
+
+    /* Establish the first heartbeat schedule.  The following loop keeps one
+     * or both business queues non-empty for a 30 s virtual-time equivalent. */
+    TEST_ASSERT(ucn_node_step(&a, 0U) == UCN_OK);
+    for (now_ms = 1U; now_ms <= UINT32_C(30000); ++now_ms) {
+        payload = (uint8_t)now_ms;
+        if (include_q0) {
+            ucn_result_t enqueue_result;
+
+            (void)memset(&request, 0, sizeof(request));
+            request.destination = UINT32_C(12);
+            request.message_type = UCN_MSG_DATA_Q0;
+            request.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
+            request.delivery = UCN_DELIVERY_BEST_EFFORT;
+            request.deadline_ms = now_ms + UINT32_C(100);
+            request.payload = &payload;
+            request.payload_length = 1U;
+            enqueue_result = ucn_node_enqueue(&a, &request);
+            /* A source offering one Q0 item on every scheduler turn is
+             * intentionally faster than a Link that also carries liveness
+             * control.  Fixed Q0 backpressure is therefore expected at a
+             * maintenance slot; it must not prevent the following service. */
+            TEST_ASSERT(enqueue_result == UCN_OK ||
+                        enqueue_result == UCN_ERR_NO_SPACE);
+        }
+        if (include_q1) {
+            (void)memset(&request, 0, sizeof(request));
+            request.destination = UINT32_C(12);
+            request.message_type = UCN_MSG_DATA_Q1;
+            request.traffic_class = UCN_TRAFFIC_Q1_REALTIME;
+            request.delivery = UCN_DELIVERY_LATEST_VALUE;
+            request.deadline_ms = now_ms + UINT32_C(100);
+            request.payload = &payload;
+            request.payload_length = 1U;
+            TEST_ASSERT(ucn_node_enqueue(&a, &request) == UCN_OK);
+        }
+        TEST_ASSERT(ucn_node_step(&a, now_ms) == UCN_OK);
+    }
+
+    TEST_ASSERT(a.stats.heartbeat_requests_sent >= 30U);
+    TEST_ASSERT(a.stats.maintenance_preemptions >= 30U);
+    TEST_ASSERT(a.stats.neighbor_suspected == 0U);
+    TEST_ASSERT(a.stats.neighbor_removed == 0U);
+    TEST_ASSERT(ucn_node_neighbor_count(&a, UCN_NEIGHBOR_ADMITTED) == 1U);
+    TEST_ASSERT(ucn_node_neighbor_count(&b, UCN_NEIGHBOR_ADMITTED) == 1U);
+    return 0;
+}
+
 int test_neighbor_heartbeat(void)
 {
     uint8_t payload = 0x5AU;
@@ -161,5 +232,8 @@ int test_neighbor_heartbeat(void)
     TEST_ASSERT(b.link_count == 1U);
     TEST_ASSERT(bc.peer_node_id == UINT32_C(3));
     TEST_ASSERT(ucn_node_neighbor_count(&b, UCN_NEIGHBOR_ADMITTED) == 1U);
+    TEST_ASSERT(heartbeat_run_sustained_backlog(false, true) == 0);
+    TEST_ASSERT(heartbeat_run_sustained_backlog(true, false) == 0);
+    TEST_ASSERT(heartbeat_run_sustained_backlog(true, true) == 0);
     return 0;
 }

@@ -154,7 +154,7 @@ UCN 没有全网总发送队列，也没有要求一条路径传完后另一条�
 | 两条路径共享中继 B | B 的协议任务按帧处理接收和转发；本地 Q0 队列优先于 Q1，因此共享 B 时会出现本地排队。 |
 | 多块 ESP-NOW 板共用同一 WiFi 信道 | 业务可同时被不同节点提交，但无线空口和每块板的无线电仍是共享资源；实际发送会竞争、退避或重试，高负载时表现为时延上升、队列积压或丢帧，而不是全网协议锁。 |
 
-当前 `ucn_node_step()` 每次只取一个本地 Q0 或 Q1 待发项，Q0 优先；只有业务队列暂时为空时，才依次处理等待路由的 Q1、到期 Heartbeat、Probe 和路由刷新。因而持续满载时 Heartbeat 可能延后；不过来自该邻居的任意有效业务或控制帧都会刷新 `last_seen`，不会只依赖单独的 Heartbeat。实际 ESP-NOW 的并发上限、空口占用和队列深度必须由 T14 实机压力测试测量，不能由该逻辑规则推导为吞吐承诺。
+当前 `ucn_node_step()` 每次只取一个本地业务项，Q0 仍优先且保持 FIFO。连续发送 `UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE`（默认 4）个业务项后，若 Heartbeat、Bearer/Path Probe 或 Route Refresh 已实际到期，则占用一个维护槽；未到期时不会插入控制帧，Snapshot/Policy Diagnostic 始终不抢占业务。因此持续满载不会再无限期饿死必要维护，但 Q0 在该单个维护槽会延后一轮。来自该邻居的任意有效业务或控制帧也会刷新 `last_seen`，不会只依赖单独的 Heartbeat。实际 ESP-NOW 的并发上限、空口占用、调度周期和队列深度必须由 S06/T22.7.2 实机压力测试测量，不能由该逻辑规则推导为吞吐承诺。
 
 ### 4.4 AODV-Lite 的限制
 
@@ -236,7 +236,7 @@ Core 不直接读取 WiFi RSSI、BLE RSSI、LoRa SNR 或 CAN 专有状态。每�
 
 每种介质都遵循同一条路径：`物理地址 → Candidate Link → 有界收包队列 → 协议任务 pump → Core`。驱动 ISR/WiFi 回调不直接运行路由或应用逻辑；Core 不保存 MAC、CAN ID、串口号或 socket。物理地址到 Link 的静态映射由 Adapter 管理，成功 HELLO 后才由 Core 写入 `peer_node_id`。
 
-当前“跨介质多跳转发”已由 Link + 通用 Cost 支持；T21.1～T21.4 还让同一 Node ID 的 WiFi/UART/CAN 等自动准入 Link 合并为一个固定 Bearer 集（默认最多两条），并在 Primary 明确 Down 后让下一帧使用健康 Backup。每条 Bearer 都独立经过 Provider 准入、Heartbeat 和 `last_seen`；全 Bearer Down 后才回收 Neighbor。健康 Primary 不因一次 Cost 波动改变：候选需低至少 20%、连续 3 个 500 ms 窗口成立，再在该候选 Bearer 上收到 2 次一跳 Heartbeat ACK（最多 3 次尝试）才切换。Probe 不新增线格式、不经中继，且仅在 Q0/Q1 待发业务为空时运行。Active/Previous Route 与 Candidate 都在业务、Probe、Activate 和中继转发时解析到当前 Primary：单 Bearer Down 不清动态路径；下游断链的 RERR 经当前 Backup 回传；全 Bearer Down 才清动态 Route/Candidate。静态 Route 有意保留给产品层恢复策略。Adapter 仍负责把 RSSI、错误、拥塞等平滑为通用 Cost。
+当前“跨介质多跳转发”已由 Link + 通用 Cost 支持；T21.1～T21.4 还让同一 Node ID 的 WiFi/UART/CAN 等自动准入 Link 合并为一个固定 Bearer 集（默认最多两条），并在 Primary 明确 Down 后让下一帧使用健康 Backup。每条 Bearer 都独立经过 Provider 准入、Heartbeat 和 `last_seen`；全 Bearer Down 后才回收 Neighbor。健康 Primary 不因一次 Cost 波动改变：候选需低至少 20%、连续 3 个 500 ms 窗口成立，再在该候选 Bearer 上收到 2 次一跳 Heartbeat ACK（最多 3 次尝试）才切换。Probe 不新增线格式、不经中继；当 Probe 到期且连续业务已达默认 4 个发送上限时，它获得一个必要维护槽，未到期时不会抢占业务。Active/Previous Route 与 Candidate 都在业务、Probe、Activate 和中继转发时解析到当前 Primary：单 Bearer Down 不清动态路径；下游断链的 RERR 经当前 Backup 回传；全 Bearer Down 才清动态 Route/Candidate。静态 Route 有意保留给产品层恢复策略。Adapter 仍负责把 RSSI、错误、拥塞等平滑为通用 Cost。
 
 ESP32 T21.6 正常诊断镜像已经让 ESP-NOW Peer Link 和 UART Link（ID `0x70`）各自携带 RX Queue、状态、Cost 与统计，直接进入同一个 Core；`DualMediaLink` 仅保留为 `legacy_dual` 回归对照，不能作为 Core Bearer 切换证据。两块 S3 已实测同一对端合并为 `count=2`，UART Cost 5 为 Primary、ESP-NOW Cost 10 为 Backup；B 临时改为 Wi-Fi-only 后 A 仍保留 Neighbor 并走 ESP-NOW，恢复 B 后自动回到两 Bearer。该控制实验尚不等于物理拔线、P50/P95 切换时延、丢失/乱序、功耗或三板 RERR 验收，因此仍不称为“无缝”多介质冗余。具体边界见 [多介质同对端主备 Link 建议](UCN_多介质同对端主备_Link_建议.md)。
 

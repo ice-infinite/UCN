@@ -31,7 +31,7 @@
   → adapter.ucn_adapter_rx_pump（有限帧数）
   → service.ucn_service_protocol_bridge_step（有限请求数）
   → node_runtime.ucn_node_step
-  → Q0 → Q1 → Pending Q1 → Heartbeat/Probe/诊断/路由刷新
+  → Q0/Q1/Pending Q1；连续业务达到上限且必要维护到期时插入一个维护槽；最后才是诊断
 ```
 
 “唯一 Protocol Task”是最重要的并发边界：业务 Task、驱动回调和 ISR 不直接并发访问 `ucn_node_t`。业务 Task 只调用 Service/Port；驱动 RX 回调只入 Adapter 固定队列。

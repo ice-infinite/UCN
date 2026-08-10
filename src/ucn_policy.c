@@ -302,12 +302,14 @@ void ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
         update_optional_ewma(&snapshot->tx_failure_rate_valid,
                              &snapshot->tx_failure_ewma_per_mille,
                              metrics.tx_failure_rate_valid &&
-                                 metrics.tx_failure_per_mille <= 1000U,
+                                 metrics.tx_failure_per_mille <=
+                                     UCN_LINK_METRIC_PER_MILLE_MAX,
                              metrics.tx_failure_per_mille);
         update_optional_ewma(&snapshot->queue_pressure_valid,
                              &snapshot->queue_pressure_ewma_per_mille,
                              metrics.queue_pressure_valid &&
-                                 metrics.queue_pressure_per_mille <= 1000U,
+                                 metrics.queue_pressure_per_mille <=
+                                     UCN_LINK_METRIC_PER_MILLE_MAX,
                              metrics.queue_pressure_per_mille);
         state->stats.quality_samples++;
     }

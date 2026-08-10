@@ -487,4 +487,5 @@ UCN 的表和队列均是编译期数组。产品根据 MCU RAM 调整上限后�
 - [T25 首版 Endpoint 与 Service 契约](UCN_T25_首版Endpoint与Service契约.md)：R1 业务 ABI 和 Payload 规则。
 - [T25 节点内任务通信详细执行方案](UCN_T25_节点内任务通信详细执行方案.md)：Router/Bridge/RTOS 边界。
 - [UCN 调用关系树](calltree/README.md)：按真实函数调用、回调和固定队列关系追踪运行路径。
+- [快速使用手册](快速使用手册/README.md)：裸机、通用 RTOS、FreeRTOS、Zephyr、NuttX、RT-Thread 的最小接入步骤与平台边界。
 - `include/ucn/`：最终以公开 API 声明和编译期配置为准；若本文与源码不一致，以源码为准并同步修订本文。

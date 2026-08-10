@@ -5607,6 +5607,37 @@ ucn_result_t ucn_node_request_policy_diagnostic(
     return UCN_OK;
 }
 
+static void note_business_transmission(ucn_node_t *node)
+{
+    if (node->business_tx_since_maintenance <
+        UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE) {
+        node->business_tx_since_maintenance++;
+    }
+}
+
+/* Only liveness and path/routing maintenance belongs here.  Snapshot and
+ * policy diagnostics remain best-effort background work and must not take a
+ * Q0/Q1 budget slot. */
+static ucn_result_t send_due_essential_maintenance(ucn_node_t *node,
+                                                    uint32_t now_ms)
+{
+    ucn_result_t result;
+
+    result = send_due_heartbeat(node, now_ms);
+    if (result != UCN_ERR_NOT_FOUND) {
+        return result;
+    }
+    result = send_due_bearer_quality_probe(node, now_ms);
+    if (result != UCN_ERR_NOT_FOUND) {
+        return result;
+    }
+    result = send_due_path_probe(node, now_ms);
+    if (result != UCN_ERR_NOT_FOUND) {
+        return result;
+    }
+    return start_due_route_refresh(node, now_ms);
+}
+
 ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
 {
     ucn_tx_item_t *item;
@@ -5634,21 +5665,30 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
         item = find_next_item(node->q1, UCN_TX_Q1_DEPTH);
     }
 
+    /* A permanently non-empty business queue must not indefinitely suppress
+     * neighbor liveness or path maintenance.  The burst counter saturates,
+     * therefore once a control action becomes due it gets a scheduling slot
+     * in this call.  Q0 remains FIFO and is delayed only by an actually-due
+     * essential maintenance action; diagnostics never preempt either queue. */
+    if (node->business_tx_since_maintenance >=
+        UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE) {
+        result = send_due_essential_maintenance(node, now_ms);
+        if (result != UCN_ERR_NOT_FOUND) {
+            node->business_tx_since_maintenance = 0U;
+            node->stats.maintenance_preemptions++;
+            return result;
+        }
+    }
+
     if (item == NULL) {
         result = send_pending_q1_if_ready(node, now_ms);
         if (result != UCN_ERR_NOT_FOUND) {
+            note_business_transmission(node);
             return result;
         }
-        result = send_due_heartbeat(node, now_ms);
+        result = send_due_essential_maintenance(node, now_ms);
         if (result != UCN_ERR_NOT_FOUND) {
-            return result;
-        }
-        result = send_due_bearer_quality_probe(node, now_ms);
-        if (result != UCN_ERR_NOT_FOUND) {
-            return result;
-        }
-        result = send_due_path_probe(node, now_ms);
-        if (result != UCN_ERR_NOT_FOUND) {
+            node->business_tx_since_maintenance = 0U;
             return result;
         }
         result = send_due_node_snapshot_reply(node, now_ms);
@@ -5683,6 +5723,7 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
                            item->payload,
                            (uint16_t)count);
     item->occupied = false;
+    note_business_transmission(node);
     if (result != UCN_OK) {
         node->stats.tx_error_dropped++;
     }

@@ -134,6 +134,25 @@ int test_policy(void)
     TEST_ASSERT(quality->tx_failure_ewma_per_mille == 65U);
     TEST_ASSERT(quality->queue_pressure_ewma_per_mille == 150U);
 
+    /* Link metrics use independent valid bits.  Out-of-range per-mille input
+     * is rejected as unknown instead of being silently folded into Policy
+     * quality, so an Adapter cannot turn a unit/configuration error into an
+     * exaggerated congestion decision. */
+    link_context.metrics.route_cost_valid = false;
+    link_context.metrics.rtt_valid = false;
+    link_context.metrics.tx_failure_rate_valid = true;
+    link_context.metrics.tx_failure_per_mille =
+        UCN_LINK_METRIC_PER_MILLE_MAX + 1U;
+    link_context.metrics.queue_pressure_valid = true;
+    link_context.metrics.queue_pressure_per_mille =
+        UCN_LINK_METRIC_PER_MILLE_MAX + 1U;
+    TEST_ASSERT(policy_step(&node,
+                            UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS * 2U) == 0);
+    quality = ucn_node_get_link_quality(&node, &link);
+    TEST_ASSERT(quality != NULL && !quality->route_cost_valid &&
+                !quality->rtt_valid && !quality->tx_failure_rate_valid &&
+                !quality->queue_pressure_valid);
+
     (void)memset(&policy, 0, sizeof(policy));
     policy.key.destination = UINT32_C(9);
     policy.key.endpoint = 0x40U;
@@ -225,13 +244,15 @@ int test_policy(void)
     stats = ucn_node_get_policy_stats(&node);
     TEST_ASSERT(stats != NULL && stats->policy_match_hits == 1U);
 
-    TEST_ASSERT(policy_step(&node, UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS + 200U) == 0);
+    TEST_ASSERT(policy_step(&node,
+                            UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS * 2U + 200U) ==
+                0);
     TEST_ASSERT(ucn_node_find_q1_flow(&node, UINT32_C(9), 0x40U) == NULL);
     stats = ucn_node_get_policy_stats(&node);
     TEST_ASSERT(stats != NULL && stats->flow_bindings_expired == UCN_MAX_POLICY_FLOWS);
 
     link_context.is_up = false;
-    TEST_ASSERT(policy_step(&node, UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS * 2U) == 0);
+    TEST_ASSERT(policy_step(&node, UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS * 3U) == 0);
     quality = ucn_node_get_link_quality(&node, &link);
     path_entry = ucn_node_find_policy_path(&node, 1U);
     TEST_ASSERT(quality != NULL && !quality->is_up);
