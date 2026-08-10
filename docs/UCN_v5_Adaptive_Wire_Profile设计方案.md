@@ -182,6 +182,8 @@ Inner E2E Envelope
 
 Inner Envelope、外层逐跳认证和 Gateway Directory 属于 Extended/Gateway 任务，不进入 v5 第一阶段小 Core。
 
+V5-04 已用 W0 A→B→C 专项测试冻结上述边界：A/C 使用测试 E2E Provider，B 只有授权/转发能力且 `open_calls=0`；B 保持 Wire Profile、规范地址、Session、Sequence、Length 和密文/Tag 原样转发。复用 W0 Tag 后把帧重编码为 W1，或修改 Destination/Length，测试 Provider 均失败；直接修改线上密文则由 CRC 或目标 Open 拒绝。这里的 Provider 明确不是生产密码实现，不能替代 S02 的身份、审计 AEAD、密钥与逐跳认证。
+
 ## 11. 每包自动选级
 
 节点能力上限不等于每包都使用最大 Profile，但自动选级分两个阶段：

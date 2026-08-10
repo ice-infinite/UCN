@@ -164,8 +164,8 @@ static ucn_result_t v3_link_send(ucn_link_t *link,
         if (ucn_frame_decode(modified, length, &decoded) != UCN_OK) {
             return UCN_ERR_MALFORMED;
         }
-        header_size = decoded.has_route_extension ? UCN_FRAME_ROUTE_HEADER_SIZE :
-                                                    UCN_FRAME_HEADER_SIZE;
+        header_size = ucn_frame_header_size_for_profile(decoded.wire_profile,
+                                                        decoded.flags);
         modified[header_size] ^= 0x01U;
         if (ucn_frame_encode(&decoded, reencoded, sizeof(reencoded),
                              &encoded_length) != UCN_OK) {
@@ -193,11 +193,18 @@ static const ucn_link_ops_t V3_LINK_OPS = {
 static int v3_init_node(ucn_node_t *node, ucn_node_id_t node_id)
 {
     ucn_config_t config;
+    ucn_result_t result;
 
-    config.network_id = UINT32_C(0x76543210);
+    config.network_id = UINT32_C(42);
     config.node_id = node_id;
     config.default_hop_limit = 4U;
-    return ucn_node_init(node, &config) == UCN_OK ? 0 : 1;
+    result = ucn_node_init(node, &config);
+    if (result != UCN_OK) {
+        return 1;
+    }
+    return ucn_node_set_wire_profiles(node, UCN_WIRE_PROFILE_W0_LOCAL,
+                                      UCN_WIRE_PROFILE_W0_LOCAL) == UCN_OK ?
+               0 : 1;
 }
 
 static void v3_receive(void *context, const ucn_frame_t *frame)
@@ -222,6 +229,13 @@ static int v3_test_frame_format(void)
     size_t aad_length_a = 0U;
     size_t aad_length_b = 0U;
     size_t index;
+    uint8_t plaintext[] = { 0x31U, 0x32U };
+    uint8_t ciphertext[sizeof(plaintext)];
+    uint8_t bound_tag[UCN_E2E_TAG_SIZE];
+    uint8_t opened[sizeof(plaintext)];
+    v3_provider_state_t provider = { 1U, 10U, 0x5CU, 0U, 0U };
+    ucn_frame_t bound;
+    ucn_frame_t tampered;
 
     for (index = 0U; index < sizeof(tag); ++index) {
         tag[index] = (uint8_t)index;
@@ -269,6 +283,42 @@ static int v3_test_frame_format(void)
     TEST_ASSERT(ucn_frame_decode(encoded, encoded_length, &decoded) == UCN_ERR_CRC);
     encoded[2] = 4U;
     TEST_ASSERT(ucn_frame_decode(encoded, encoded_length, &decoded) == UCN_ERR_VERSION);
+
+    (void)memset(&bound, 0, sizeof(bound));
+    bound.message_type = UCN_MSG_DATA_Q1;
+    bound.wire_profile = UCN_WIRE_PROFILE_W0_LOCAL;
+    bound.traffic_class = UCN_TRAFFIC_Q1_REALTIME;
+    bound.flags = UCN_FRAME_FLAG_E2E_PROTECTED;
+    bound.hop_limit = 4U;
+    bound.network_id = 42U;
+    bound.source = 1U;
+    bound.destination = 3U;
+    bound.sequence = 9U;
+    bound.session_id = 10U;
+    bound.payload = plaintext;
+    bound.payload_length = (uint16_t)sizeof(plaintext);
+    TEST_ASSERT(v3_seal(&provider, &bound, plaintext,
+                        (uint16_t)sizeof(plaintext), ciphertext,
+                        bound_tag) == UCN_OK);
+    TEST_ASSERT(v3_open(&provider, NULL, &bound, ciphertext,
+                        (uint16_t)sizeof(ciphertext), bound_tag, opened) == UCN_OK);
+    TEST_ASSERT(memcmp(opened, plaintext, sizeof(plaintext)) == 0);
+
+    tampered = bound;
+    tampered.wire_profile = UCN_WIRE_PROFILE_W1_EDGE;
+    TEST_ASSERT(v3_open(&provider, NULL, &tampered, ciphertext,
+                        (uint16_t)sizeof(ciphertext), bound_tag, opened) ==
+                UCN_ERR_SECURITY);
+    tampered = bound;
+    tampered.destination = 2U;
+    TEST_ASSERT(v3_open(&provider, NULL, &tampered, ciphertext,
+                        (uint16_t)sizeof(ciphertext), bound_tag, opened) ==
+                UCN_ERR_SECURITY);
+    tampered = bound;
+    tampered.payload_length = 1U;
+    TEST_ASSERT(v3_open(&provider, NULL, &tampered, ciphertext,
+                        (uint16_t)sizeof(ciphertext), bound_tag, opened) ==
+                UCN_ERR_SECURITY);
     return 0;
 }
 
@@ -344,6 +394,7 @@ static int v3_test_transparent_security(void)
     TEST_ASSERT(received.count == 2U && received.payload == payload &&
                 received.protected_frame);
     TEST_ASSERT(a_state.seal_calls == 2U && c_state.open_calls == 2U &&
+                b_state.open_calls == 0U &&
                 b.stats.e2e_protected_forwarded == 2U);
 
     cab.tamper_next = true;
