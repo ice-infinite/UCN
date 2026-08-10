@@ -13,7 +13,7 @@
  * mutate them outside the Core/Port owner and always compile every translation
  * unit with the same UCN_PROFILE and UCN_FEATURE_SERVICE definitions.
  */
-#define UCN_NODE_STORAGE_LAYOUT_VERSION UINT32_C(1)
+#define UCN_NODE_STORAGE_LAYOUT_VERSION UINT32_C(2)
 
 typedef struct ucn_endpoint_handler_entry {
     bool occupied;
@@ -189,21 +189,34 @@ typedef struct ucn_candidate_route {
     uint16_t route_epoch;
 } ucn_candidate_route_t;
 
-/* Volatile network duplicate suppression only.  This bounded ring is neither
- * a durable anti-replay window nor an authentication decision.  A production
- * Security Provider must own replay windows, persistent counters and session
- * rollback protection independently. */
-typedef struct ucn_seen_frame {
+/* Volatile network duplicate suppression only.  Each fixed Source/Session
+ * window accepts bounded reordering without retaining every frame.  It is
+ * neither durable anti-replay nor an authentication decision. */
+#if UCN_DUPLICATE_WINDOW_BITS == 64U
+typedef uint64_t ucn_duplicate_bitmap_t;
+#else
+typedef uint32_t ucn_duplicate_bitmap_t;
+#endif
+
+typedef struct ucn_duplicate_source_window {
     bool valid;
     ucn_node_id_t source;
-#if UCN_FEATURE_SECURITY
     ucn_session_id_t session_id;
-#endif
-    ucn_sequence_t sequence;
+    ucn_sequence_t highest_sequence;
+    ucn_duplicate_bitmap_t received_bitmap;
+    uint32_t last_observed_ms;
+} ucn_duplicate_source_window_t;
+
 #if UCN_FEATURE_DYNAMIC_MESH
+typedef struct ucn_rreq_cache_entry {
+    bool valid;
+    ucn_node_id_t origin;
+    ucn_session_id_t session_id;
+    uint32_t request_id;
     uint16_t best_route_request_cost;
+    uint32_t last_observed_ms;
+} ucn_rreq_cache_entry_t;
 #endif
-} ucn_seen_frame_t;
 
 struct ucn_node {
     ucn_config_t config;
@@ -244,8 +257,11 @@ struct ucn_node {
 #if UCN_FEATURE_PATH
     ucn_path_state_t path_state;
 #endif
-    ucn_seen_frame_t seen[UCN_SEEN_CACHE_SIZE];
-    size_t next_seen_index;
+    ucn_duplicate_source_window_t
+        duplicate_windows[UCN_DUPLICATE_SOURCE_WINDOWS];
+#if UCN_FEATURE_DYNAMIC_MESH
+    ucn_rreq_cache_entry_t rreq_cache[UCN_RREQ_CACHE_SIZE];
+#endif
     uint32_t now_ms;
 #if UCN_FEATURE_DYNAMIC_MESH
     uint32_t next_route_request_id;
@@ -281,8 +297,9 @@ struct ucn_node {
 #if UCN_FEATURE_SECURITY
     const ucn_security_ops_t *security_ops;
     void *security_context;
-    ucn_session_id_t session_id;
+    bool security_required;
 #endif
+    ucn_session_id_t session_id;
 #if UCN_FEATURE_DYNAMIC_MESH
     ucn_join_policy_t join_policy;
     ucn_neighbor_authorize_fn neighbor_authorize;

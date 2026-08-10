@@ -55,6 +55,11 @@ static int test_service_configuration(void)
     config.bindings = TEST_BINDINGS;
     config.binding_count = (uint8_t)(sizeof(TEST_BINDINGS) / sizeof(TEST_BINDINGS[0]));
     TEST_ASSERT(ucn_service_router_init(NULL, &config) == UCN_ERR_ARGUMENT);
+    config.local_node_id = 0U;
+    TEST_ASSERT(ucn_service_router_init(&router, &config) == UCN_ERR_ARGUMENT);
+    config.local_node_id = UCN_NODE_BROADCAST;
+    TEST_ASSERT(ucn_service_router_init(&router, &config) == UCN_ERR_ARGUMENT);
+    config.local_node_id = UINT32_C(1);
     config.binding_count = 0U;
     TEST_ASSERT(ucn_service_router_init(&router, &config) == UCN_ERR_ARGUMENT);
     config.binding_count = 1U;

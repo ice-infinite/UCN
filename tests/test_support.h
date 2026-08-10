@@ -19,6 +19,7 @@ int test_node(void);
 int test_virtual_link(void);
 int test_qos(void);
 int test_route(void);
+int test_duplicate_window(void);
 int test_aodv_lite(void);
 int test_security(void);
 int test_host_boundary(void);

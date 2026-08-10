@@ -293,6 +293,8 @@ UCN 不能像 FreeRTOS 内核那样小，因为它还要解决身份与路由；
 
 ```c
 ucn_node_init(&node, &config);
+ucn_node_set_security_required(&node, true); /* 产品也可编译期默认开启 */
+ucn_node_set_security(&node, &security_ops, security_context);
 ucn_node_set_join_policy(&node, UCN_JOIN_PROVIDER, authorize, context);
 ucn_node_set_security_policy(&node, &node_policy);
 ucn_node_set_endpoint_security_policy(&node, endpoint, &endpoint_policy);
@@ -304,6 +306,8 @@ ucn_node_request_policy_diagnostic(&node, manager_target, UCN_POLICY_DIAGNOSTIC_
 ucn_node_enqueue(&node, &request);  /* 或兼容的 ucn_node_send() */
 ucn_node_step(&node, now_ms);
 ```
+
+开发构建默认兼容明文联调；生产构建可定义 `UCN_SECURITY_REQUIRED_BY_DEFAULT=1`。Required 状态下，只有完整 Provider、有效 Session/Sequence 和禁止明文的 Node/Endpoint 策略全部就绪，`ucn_node_security_ready()` 才允许 Step/收发运行。该门禁防止漏配置静默降级，但不替代审计 AEAD、身份和密钥生命周期。
 
 - `ucn-core` 不创建线程、不调用 `malloc`、不依赖 Linux socket 或特定 RTOS。
 - 裸机主循环可周期调用 `ucn_node_step()`；FreeRTOS/Zephyr 可由端口层把 RX、TX、Timer 映射为任务或队列。
@@ -338,7 +342,9 @@ UCN_MAX_BEARERS_PER_NEIGHBOR // 同一 Neighbor 可接纳的物理 Bearer 数
 UCN_MAX_LINKS           // 已注册 Link 数量
 UCN_MAX_ROUTES          // Route Cache 条目数
 UCN_MAX_ROUTE_DISCOVERIES // 并发路由请求数
-UCN_SEEN_CACHE_SIZE     // 入站去重缓存
+UCN_DUPLICATE_SOURCE_WINDOWS // Source/Session 去重窗口数
+UCN_DUPLICATE_WINDOW_BITS // 每来源乱序/重复 Sequence 位图
+UCN_RREQ_CACHE_SIZE     // 独立 RREQ Request/Best Cost 状态
 UCN_MAX_PATH_FORWARD_ENTRIES // T22.2 固定 Path 转发表容量
 UCN_MAX_FRAME_BYTES     // Core 最大帧和单帧负载
 UCN_TX_Q0_DEPTH         // Q0 队列深度
@@ -361,7 +367,7 @@ UCN_ADAPTER_RX_QUEUE_DEPTH // 公共 Adapter 收包队列深度
 UCN_MAX_STEP_INTERVAL_MS // Protocol Task 两次 ucn_node_step() 的产品最大允许间隔
 ```
 
-`UCN_MAX_HOPS=16` 是当前固定协议上限，不是当前可覆盖的资源配置项。
+`UCN_MAX_HOPS` 默认 16，现已支持全工程统一编译期覆盖并限制在 1～254；当前软件与文档仍以 16 作为已验证默认值。仅扩大 Hop Limit 不代表 100 跳可用，超过 16 跳前还必须重新冻结累计 Cost 位宽/尺度、RREQ 超时与控制预算，并做长路径规模和实机验证。
 
 Protocol Task 同样是资源边界。Core 使用以下保守式把“每若干业务帧让出维护槽”换算成时间上界：`(UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE + 1) × UCN_MAX_STEP_INTERVAL_MS × UCN_MAX_NEIGHBORS × UCN_MAX_BEARERS_PER_NEIGHBOR`。默认值为 800 ms，叠加 1 s Heartbeat 后仍早于 3 s Suspect；不安全的组合在编译期失败关闭。Node 只保存三个固定统计字段观察实际 Step，不新增动态内存、线字段或网络流量。产品 Port 还必须冻结任务优先级、最大阻塞、Adapter/Bridge 预算并实测 Link `send()` WCET。
 

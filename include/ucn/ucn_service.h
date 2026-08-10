@@ -138,6 +138,10 @@ typedef struct ucn_service_binding {
 
 typedef struct ucn_service_router_config {
     ucn_node_id_t local_node_id;
+    /* Borrowed immutable table: it must remain valid and unchanged for the
+     * entire Router lifetime.  MCU products should normally use static const
+     * storage so the table can stay in read-only memory instead of being
+     * duplicated into every Router object. */
     const ucn_service_binding_t *bindings;
     uint8_t binding_count;
 } ucn_service_router_config_t;

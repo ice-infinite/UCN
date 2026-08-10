@@ -34,6 +34,8 @@ flowchart LR
 3. `ucn_link_t` 只处理一种实际传输介质。它报告 `is_up`、MTU 和通用质量 Cost；业务代码不传 MAC、UART 号、CAN ID 或中继地址。
 4. 多个本机业务任务使用 `ucn_service_router_t`：本机消息进入固定 Inbox，远端消息经 `ucn_service_protocol_bridge_t` 由 Protocol Task 发出。Router 中没有动态内存。
 5. Q0 命令入队成功不等于执行器已经执行。Q0 必须有本机失效安全；Q1 是 Latest Value，允许覆盖旧传感器值。
+6. 生产安全节点使用 Lite/Full，并定义 `UCN_SECURITY_REQUIRED_BY_DEFAULT=1` 或启动时调用 `ucn_node_set_security_required(..., true)`；只有 `ucn_node_security_ready()` 为真才进入协议循环。测试 Provider 不能替代生产 AEAD。
+7. Service Binding 是 Router 借用的只读表，必须使用全生命周期有效的存储，推荐 `static const`，不能传函数栈上的临时数组。
 
 ## 共同的最小构建输入
 

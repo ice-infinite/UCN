@@ -320,7 +320,7 @@ static void service_init(void)
 }
 ```
 
-Binding 是产品 ABI 的一部分。字段含义：`owner_service_id` 是唯一消费者；`max_payload_length` 和 `allowed_traffic_mask` 是硬边界；`allowed_local_source_mask` 只限制本机 Task 发起；`accept_remote` 决定是否接受远端帧；`enabled_at_boot` 决定启动后是否就绪；`require_remote_q0_validator` 要求 Bridge 在安装 handler 前找到对应 Validator，否则整体失败关闭。该标记只能用于可接收远端的 Q0 Binding。
+Binding 是产品 ABI 的一部分。Router 借用该数组而不复制，因此数组必须在 Router 整个生命周期内保持有效且不可修改；应像示例一样使用 `static const`，不能把函数栈上的临时数组传入。字段含义：`owner_service_id` 是唯一消费者；`max_payload_length` 和 `allowed_traffic_mask` 是硬边界；`allowed_local_source_mask` 只限制本机 Task 发起；`accept_remote` 决定是否接受远端帧；`enabled_at_boot` 决定启动后是否就绪；`require_remote_q0_validator` 要求 Bridge 在安装 handler 前找到对应 Validator，否则整体失败关闭。该标记只能用于可接收远端的 Q0 Binding。`local_node_id=0` 和广播 ID 都会被初始化拒绝。
 
 Validator 在 Core 完成安全/解密后、Router 入队前运行，返回非 `UCN_OK` 的帧不会进入 Inbox。固定 Replay helper 对当前 `(Source, Session, Endpoint)` 只接受递增命令 ID；认证 Session 轮换后，由产品 Security 逻辑调用 `ucn_service_bridge_replay_rotate_session()`，不能看到不同 Session 就自动切换。Replay 表满返回 `UCN_ERR_NO_SPACE`，不得动态扩容。`now_ms` 来自 Node 最近一次 Step，因此产品必须同时满足 Protocol Task 最大 Step 间隔。
 
@@ -557,6 +557,8 @@ Core 支持三层控制：
 - Endpoint 覆盖 `ucn_node_set_endpoint_security_policy()`；
 - 安全 Provider `ucn_node_set_security()` 提供持久序号、会话 ID、TX/RX ACL、是否保护、`seal()` 与 `open()`。
 
+开发构建默认允许先用明文联调。产品需要失败关闭时，应在全工程定义 `UCN_SECURITY_REQUIRED_BY_DEFAULT=1`，或初始化后立即调用 `ucn_node_set_security_required(&node, true)`；只有 `ucn_node_security_ready()` 返回真后才允许进入协议循环。Required 状态要求完整 Provider、非零 Session、持久 Sequence、TX/RX 授权、`seal/open`，并要求 Node 默认策略和所有 Endpoint 覆盖都禁止明文 TX/RX/Forward。配置未完成、策略退回明文或清除 Provider 后，`step/send/receive` 均返回 `UCN_ERR_SECURITY`。Nano 不含 Security Feature，不能作为强制生产安全 Profile。
+
 策略含义：
 
 | 项目 | 可选模式 |
@@ -615,6 +617,11 @@ UCN 的表和队列均是编译期数组。产品根据 MCU RAM 调整上限后�
 | `UCN_MAX_LINKS` | 4 | 一个 Node 可注册的 Link 数。 |
 | `UCN_MAX_NEIGHBORS` | 8 | Neighbor 槽数。 |
 | `UCN_MAX_BEARERS_PER_NEIGHBOR` | 2 | 同一 Neighbor 的介质数量。 |
+| `UCN_DUPLICATE_SOURCE_WINDOWS` | Nano/Lite/Full = 4/16/32 | 同时维护的 Source/Session 去重窗口。 |
+| `UCN_DUPLICATE_WINDOW_BITS` | Nano/Lite/Full = 32/32/64 bit | 每来源可容纳的乱序/重复 Sequence 范围。 |
+| `UCN_RREQ_CACHE_SIZE` | Lite/Full = 8/16 | 独立 RREQ Request ID/Best Cost 状态。 |
+| `UCN_MAX_HOPS` | 16 | 可覆盖为 1～254；超过 16 尚需单独长路径验收。 |
+| `UCN_SECURITY_REQUIRED_BY_DEFAULT` | 0 | 产品设为 1 时从 Node 初始化起失败关闭；Nano 不允许。 |
 | `UCN_MAX_ROUTE_POLICIES` / `UCN_MAX_POLICY_PATHS` / `UCN_MAX_POLICY_FLOWS` | 8 / 8 / 8 | 策略、路径和 Q1 Flow 固定表。 |
 | `UCN_SERVICE_MAX_BINDINGS` | 6 | R1 Service Binding 数。 |
 | Service Remote TX Q0/Q1 | 4 / 4 | 跨 Node 的 Router 待发送请求。 |

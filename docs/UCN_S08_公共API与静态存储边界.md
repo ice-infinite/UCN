@@ -40,17 +40,17 @@ static ucn_node_t g_node;
 4. Core 与白盒测试可以访问存储布局，但这些类型不构成稳定应用 ABI。
 5. `UCN_NODE_STORAGE_LAYOUT_VERSION` 只用于发现存储头布局代际，不是线协议版本，也不能代替一致的编译定义。
 
-## 3. Seen Cache 与安全 Replay Window
+## 3. 网络重复窗口与安全 Replay Window
 
 两者用途不同，不能互相替代：
 
 | 机制 | 当前保存键/状态 | 目的 | 掉电后要求 | 安全结论 |
 | --- | --- | --- | --- | --- |
-| Core Seen Cache | 有界环中的 Source、Session、Sequence，以及动态路由请求的最佳 Cost | 抑制网络重复转发和重复业务投递，避免环网放大 | 不持久化，可丢失 | 不是身份认证，也不是生产防重放 |
+| Core Duplicate Source Window | 固定 `(Source, Session)` 槽、最高 Sequence 和位图；动态 RREQ 的 Request Key/Best Cost 位于另一张固定表 | 抑制网络重复转发和重复业务投递，允许窗口内乱序一次交付，同时保留更低 Cost RREQ | 不持久化，可丢失 | 不是身份认证，也不是生产防重放 |
 | Security Provider Replay Window | 由产品按身份、Session/Key Epoch 和 Counter 维护 | 在认证/解密边界拒绝已接收、回退或撤销代际的数据 | 需要与单调 Counter、密钥和掉电恢复策略闭环 | 属于 S02 生产安全门禁 |
 | Service 高风险命令 Replay 表 | 可选固定 Source/Session/Endpoint/Command ID | 在业务 Validator 中拒绝重复或过期执行命令 | 由产品决定持久化和 Session 轮换 | 只保护该业务命令格式，不等价于全协议 Replay Window |
 
-因此，即使一个重复帧被 Seen Cache 丢弃，也不能据此宣称链路已认证；反过来，Security Provider 已认证的数据仍需要 Seen Cache 阻止合法重复包在 Mesh 中反复转发。
+因此，即使一个重复帧被 Duplicate Source Window 丢弃，也不能据此宣称链路已认证；反过来，Security Provider 已认证的数据仍需要网络重复窗口阻止合法重复包在 Mesh 中反复转发。
 
 ## 4. 小 MTU 与 Payload 边界
 
@@ -88,12 +88,12 @@ S08 继续沿用 S04 已实现的编译期门禁和实际 Payload helper：
 | 最小 MTU 33/50/64 B | 全部编译通过 |
 | 低一字节 32/49/63 B | 全部按预期编译拒绝 |
 | 三档公共 Node/Path/Policy 符号 | 每档 56 个，无缺失 |
-| Host `sizeof(ucn_node_t)` | Nano/Lite/Full 仍为 2640/5456/8136 B |
+| Host `sizeof(ucn_node_t)` | S22 后 Nano/Lite/Full 为 2648/5888/9400 B；Storage Layout Version=2 |
 | ESP32-S3 Full/Service ON 正常 Node | 构建成功，RAM 48124 B，Flash 600819 B |
 | ESP32-S3 Full/Service OFF UART Bench | 构建成功，RAM 22152 B，Flash 185947 B |
 | ESP-WROOM-32 Full/Service ON | 构建成功，RAM 50184 B，Flash 626803 B |
 
-头文件拆分不改变 v4 线格式、运行时内存大小、路由行为或公开函数符号。上述 ESP 数字是完整测试固件的构建尺寸，不是纯 Core 增量，也不证明运行时栈、Heap 或通信行为。
+S08 当时的头文件拆分不改变 v4 线格式或运行时对象；后续 S22 因去重/RREQ 状态重构主动将 Storage Layout Version 升到 2，并形成上述当前 Host 对象大小。公开 API 仍以不完整 `ucn_node_t` 隔离内部布局。上述旧 ESP 数字是 S22 前完整测试固件的历史构建尺寸，不是当前纯 Core 增量，也不证明运行时栈、Heap 或通信行为。
 
 ## 7. 未由本轮证明的内容
 

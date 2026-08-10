@@ -133,6 +133,7 @@ static ucn_result_t bearer_authorize(void *context,
     return link->link_id == provider->denied_link_id ? UCN_ERR_ACCESS : UCN_OK;
 }
 
+#if UCN_FEATURE_CANDIDATE_ROUTING
 static ucn_route_entry_t *bearer_find_dynamic_route(ucn_node_t *node,
                                                      ucn_node_id_t destination)
 {
@@ -147,6 +148,7 @@ static ucn_route_entry_t *bearer_find_dynamic_route(ucn_node_t *node,
     return NULL;
 }
 
+#if UCN_FEATURE_CANDIDATE_ROUTING
 static ucn_candidate_route_t *bearer_find_candidate_route(
     ucn_node_t *node,
     ucn_node_id_t destination)
@@ -161,6 +163,7 @@ static ucn_candidate_route_t *bearer_find_candidate_route(
     }
     return NULL;
 }
+#endif
 
 static ucn_route_entry_t *bearer_find_static_route(ucn_node_t *node,
                                                     ucn_node_id_t destination)
@@ -175,6 +178,7 @@ static ucn_route_entry_t *bearer_find_static_route(ucn_node_t *node,
     }
     return NULL;
 }
+#endif
 
 int test_neighbor_bearer(void)
 {
@@ -377,6 +381,7 @@ int test_neighbor_quality(void)
     return 0;
 }
 
+#if UCN_FEATURE_CANDIDATE_ROUTING
 int test_neighbor_route_bearer(void)
 {
     ucn_node_t a, b, c;
@@ -516,3 +521,4 @@ int test_neighbor_route_bearer(void)
                 UCN_ERR_LINK_DOWN);
     return 0;
 }
+#endif

@@ -25,6 +25,33 @@ nodes:
     notes:
       - Core 不内置生产 AEAD、密钥存储或身份库；Provider 可实现原子 Session/Key 轮换。
 
+  - id: security.ucn_node_set_security_required
+    symbol: ucn_node_set_security_required
+    type: function
+    file: src/ucn_node.c
+    layer: security
+    role: 在运行时启用或关闭失败关闭门禁；产品也可用 UCN_SECURITY_REQUIRED_BY_DEFAULT=1 从初始化起强制启用。
+    called_by:
+      - external.product_security_init
+    calls: []
+    notes:
+      - Nano 没有 Security Feature，required=true 返回配置错误；编译期强制安全的 Nano 直接构建失败。
+
+  - id: security.ucn_node_security_ready
+    symbol: ucn_node_security_ready
+    type: function
+    file: src/ucn_node.c
+    layer: security
+    role: 核对 Provider、Session、授权、seal/open 和 Node/Endpoint 禁止明文策略是否全部就绪。
+    called_by:
+      - node_runtime.ucn_node_step
+      - route.ucn_node_send
+      - node_runtime.ucn_node_receive
+      - external.product_security_init
+    calls: []
+    notes:
+      - Required 且未就绪时，协议 Step、发送和接收均返回 UCN_ERR_SECURITY；此检查不能证明 Provider 使用审计过的 AEAD。
+
   - id: security.allocate_sequence_static
     symbol: allocate_sequence
     type: function

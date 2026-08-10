@@ -105,9 +105,43 @@ static ucn_result_t security_rotate(void *context,
     return UCN_OK;
 }
 
+static ucn_result_t security_seal(void *context,
+                                  const ucn_frame_t *frame,
+                                  const uint8_t *plaintext,
+                                  uint16_t plaintext_length,
+                                  uint8_t *ciphertext,
+                                  uint8_t auth_tag[UCN_E2E_TAG_SIZE])
+{
+    (void)context;
+    (void)frame;
+    if (plaintext_length != 0U) {
+        (void)memcpy(ciphertext, plaintext, plaintext_length);
+    }
+    (void)memset(auth_tag, 0xA5, UCN_E2E_TAG_SIZE);
+    return UCN_OK;
+}
+
+static ucn_result_t security_open(void *context,
+                                  const ucn_link_t *ingress_link,
+                                  const ucn_frame_t *frame,
+                                  const uint8_t *ciphertext,
+                                  uint16_t ciphertext_length,
+                                  const uint8_t auth_tag[UCN_E2E_TAG_SIZE],
+                                  uint8_t *plaintext)
+{
+    (void)context;
+    (void)ingress_link;
+    (void)frame;
+    (void)auth_tag;
+    if (ciphertext_length != 0U) {
+        (void)memcpy(plaintext, ciphertext, ciphertext_length);
+    }
+    return UCN_OK;
+}
+
 static const ucn_security_ops_t TEST_SECURITY_OPS = {
     security_load, security_store, security_session, security_authorize_tx, security_authorize_rx,
-    NULL, NULL, NULL, security_rotate
+    NULL, security_seal, security_open, security_rotate
 };
 
 static ucn_result_t security_link_send(ucn_link_t *link,
@@ -153,7 +187,7 @@ static void security_rx(void *context, const ucn_frame_t *frame)
 int test_security(void)
 {
     uint8_t payload = 0x42U;
-    ucn_node_t a, a_after_reboot, b;
+    ucn_node_t a, a_after_reboot, b, gated;
     ucn_link_t ab, ba, reboot_ab;
     security_link_context_t cab, cba, creboot_ab;
     security_provider_state_t a_security = {
@@ -169,13 +203,29 @@ int test_security(void)
         .session_id = 0x77U,
         .fail_load = true
     };
+    security_provider_state_t gated_security = {
+        .next_sequence = 1U,
+        .session_id = 0x88U
+    };
     security_receive_state_t received;
     ucn_security_ops_t incomplete_ops = TEST_SECURITY_OPS;
     ucn_security_ops_t no_rotation_ops = TEST_SECURITY_OPS;
+    ucn_security_ops_t authorization_only_ops = TEST_SECURITY_OPS;
+    const ucn_security_policy_t production_policy = {
+        UCN_SECURITY_TX_E2E_PROTECTED,
+        UCN_SECURITY_RX_ENCRYPTED_ONLY,
+        UCN_SECURITY_FORWARD_OPAQUE_E2E_ONLY
+    };
+    const ucn_security_policy_t insecure_endpoint_policy = {
+        UCN_SECURITY_TX_PLAIN,
+        UCN_SECURITY_RX_BOTH,
+        UCN_SECURITY_FORWARD_PLAIN_AND_OPAQUE_E2E
+    };
 
     (void)memset(&a, 0, sizeof(a));
     (void)memset(&a_after_reboot, 0, sizeof(a_after_reboot));
     (void)memset(&b, 0, sizeof(b));
+    (void)memset(&gated, 0, sizeof(gated));
     (void)memset(&ab, 0, sizeof(ab));
     (void)memset(&ba, 0, sizeof(ba));
     (void)memset(&reboot_ab, 0, sizeof(reboot_ab));
@@ -185,10 +235,39 @@ int test_security(void)
     (void)memset(&received, 0, sizeof(received));
     TEST_ASSERT(security_init_node(&a, UINT32_C(1)) == 0);
     TEST_ASSERT(security_init_node(&b, UINT32_C(2)) == 0);
+    TEST_ASSERT(security_init_node(&gated, UINT32_C(3)) == 0);
+    TEST_ASSERT(ucn_node_security_ready(&gated));
+    TEST_ASSERT(ucn_node_set_security_required(&gated, true) == UCN_OK);
+    TEST_ASSERT(!ucn_node_security_ready(&gated));
+    TEST_ASSERT(ucn_node_step(&gated, 1U) == UCN_ERR_SECURITY);
+    TEST_ASSERT(ucn_node_send(&gated, UINT32_C(4), UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) ==
+                UCN_ERR_SECURITY);
+    authorization_only_ops.seal = NULL;
+    authorization_only_ops.open = NULL;
+    TEST_ASSERT(ucn_node_set_security(&gated, &authorization_only_ops,
+                                      &gated_security) == UCN_ERR_SECURITY);
+    TEST_ASSERT(ucn_node_set_security(&gated, &TEST_SECURITY_OPS,
+                                      &gated_security) == UCN_OK);
+    TEST_ASSERT(!ucn_node_security_ready(&gated));
+    TEST_ASSERT(ucn_node_step(&gated, 2U) == UCN_ERR_SECURITY);
+    TEST_ASSERT(ucn_node_set_security_policy(&gated, &production_policy) == UCN_OK);
+    TEST_ASSERT(ucn_node_security_ready(&gated));
+    TEST_ASSERT(ucn_node_set_endpoint_security_policy(
+                    &gated, (ucn_endpoint_t)0x40U,
+                    &insecure_endpoint_policy) == UCN_OK);
+    TEST_ASSERT(!ucn_node_security_ready(&gated));
+    TEST_ASSERT(ucn_node_set_endpoint_security_policy(
+                    &gated, (ucn_endpoint_t)0x40U, NULL) == UCN_OK);
+    TEST_ASSERT(ucn_node_security_ready(&gated));
+    TEST_ASSERT(ucn_node_step(&gated, 3U) == UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_node_set_security(&gated, NULL, NULL) == UCN_OK);
+    TEST_ASSERT(!ucn_node_security_ready(&gated));
     incomplete_ops.authorize_rx = NULL;
     TEST_ASSERT(ucn_node_set_security(&a, &incomplete_ops, &a_security) == UCN_ERR_ARGUMENT);
     TEST_ASSERT(ucn_node_set_security(&a, &TEST_SECURITY_OPS, &bad_security) == UCN_ERR_SECURITY);
     TEST_ASSERT(ucn_node_set_security(&a, &TEST_SECURITY_OPS, &a_security) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_plain_session_id(&a, UINT32_C(9)) == UCN_ERR_CONFIG);
     TEST_ASSERT(ucn_node_set_security(&b, &TEST_SECURITY_OPS, &b_security) == UCN_OK);
 
     ab.ops = &SECURITY_LINK_OPS; ab.context = &cab; ab.link_id = 1U;
@@ -238,7 +317,7 @@ int test_security(void)
      * explicit Provider rollover it fails closed; Provider failure also keeps
      * the old state.  A successful atomic rollover starts the new Session at
      * Sequence 1, which the receiver accepts even though old Session/1 is in
-     * its Seen Cache. */
+     * its duplicate source window. */
     a_security.fail_store = false;
     a_security.next_sequence = UCN_SEQUENCE_ROTATION_THRESHOLD;
     a_after_reboot.next_sequence = UCN_SEQUENCE_ROTATION_THRESHOLD;

@@ -3,6 +3,7 @@ description: ucn_node_t 的初始化、收包总入口、业务转发与单线�
 entry: node_runtime.ucn_node_step
 source_files:
   - src/ucn_node.c
+  - src/ucn_duplicate_internal.h
 
 nodes:
   - id: node_runtime.ucn_node_init
@@ -105,18 +106,27 @@ nodes:
     called_by:
       - adapter.ucn_adapter_rx_pump
     calls:
+      - target: security.ucn_node_security_ready
+        type: direct
+        reason: Required 配置未完成时不解码、不处理或转发入站帧。
       - target: frame.ucn_frame_decode
         type: direct
         reason: 先验证线格式、版本、长度和 CRC。
       - target: security.validate_inbound_business_security
         type: direct
         reason: 执行 Provider 授权、端点安全策略、必要时解密。
+      - target: node_runtime.ucn_duplicate_accept_frame_static
+        type: direct
+        reason: 非 RREQ 帧按 Source/Session Sequence 位图拒绝重复和窗口外旧帧。
       - target: neighbor.handle_hello_static
         type: direct
         reason: HELLO 是未注册 Link 唯一可先处理的控制帧。
       - target: neighbor.touch_neighbor_static
         type: direct
         reason: 已准入 Link 的有效入站活动刷新 liveness。
+      - target: route.rreq_cache_classify_commit_static
+        type: direct
+        reason: RREQ 独立执行格式校验、New/Better/Replay 分类、Peer Token 与成功后 Best Cost 提交。
       - target: route.handle_route_request_static
         type: direct
         reason: 处理/泛洪 RREQ 并学习反向路径。
@@ -184,6 +194,19 @@ nodes:
     notes:
       - Link send 成功只代表本介质接受该帧；端到端业务执行需由上层结果 Endpoint/确认协议表达。
 
+  - id: node_runtime.ucn_duplicate_accept_frame_static
+    symbol: ucn_duplicate_accept_frame
+    type: function
+    file: src/ucn_duplicate_internal.h
+    layer: core
+    role: 在固定 Source/Session 槽中滑动 32/64 bit Sequence 位图；窗口内乱序可补收，重复/过旧拒绝，活跃来源表满失败关闭。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls: []
+    notes:
+      - Session=0 兼容开发网络，但重启复用 Sequence 在 60 s 窗口过期前按 Replay 处理。
+      - 这是易失网络去重，不是认证或生产 Security Replay Window。
+
   - id: node_runtime.ucn_node_step
     symbol: ucn_node_step
     type: scheduler
@@ -194,6 +217,9 @@ nodes:
       - external.protocol_task_iteration
       - node_runtime.protocol_task_mainloop
     calls:
+      - target: security.ucn_node_security_ready
+        type: direct
+        reason: Required 配置未完成时不运行维护或业务调度。
       - target: neighbor.maintain_neighbor_liveness_static
         type: direct
         reason: 超时状态、单/全 Bearer Down 和动态回收。

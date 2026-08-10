@@ -5,6 +5,8 @@
 #include "ucn/ucn_node_storage.h"
 #include "ucn/ucn_time.h"
 
+#include "ucn_duplicate_internal.h"
+
 #define UCN_ROUTE_REQ_PAYLOAD_BYTES ((size_t)16U)
 #define UCN_ROUTE_REPLY_PAYLOAD_BYTES ((size_t)18U)
 #define UCN_ROUTE_ERROR_PAYLOAD_BYTES ((size_t)4U)
@@ -700,6 +702,16 @@ static bool security_policy_is_valid(const ucn_security_policy_t *policy)
            policy->forward_mode <= UCN_SECURITY_FORWARD_TERMINAL_ONLY;
 }
 
+static bool security_policy_is_production_ready(
+    const ucn_security_policy_t *policy)
+{
+    return security_policy_is_valid(policy) &&
+           policy->tx_mode != UCN_SECURITY_TX_PLAIN &&
+           policy->rx_mode == UCN_SECURITY_RX_ENCRYPTED_ONLY &&
+           policy->forward_mode !=
+               UCN_SECURITY_FORWARD_PLAIN_AND_OPAQUE_E2E;
+}
+
 static ucn_endpoint_security_policy_entry_t *find_endpoint_security_policy(
     ucn_node_t *node,
     ucn_endpoint_t endpoint)
@@ -742,58 +754,61 @@ static bool dispatch_endpoint(ucn_node_t *node, const ucn_frame_t *frame)
     return true;
 }
 
-static bool frame_is_seen(const ucn_node_t *node, const ucn_frame_t *frame)
+typedef enum ucn_rreq_cache_classification {
+    UCN_RREQ_CACHE_NEW = 0,
+    UCN_RREQ_CACHE_BETTER,
+    UCN_RREQ_CACHE_REPLAY,
+    UCN_RREQ_CACHE_FULL
+} ucn_rreq_cache_classification_t;
+
+static ucn_rreq_cache_classification_t classify_route_request(
+    ucn_node_t *node,
+    const ucn_frame_t *frame,
+    uint16_t route_cost,
+    size_t *slot_index)
 {
+    const uint32_t request_id = read_u32_be(frame->payload + 8U);
+    size_t reusable_index = UCN_RREQ_CACHE_SIZE;
     size_t index;
 
-    for (index = 0U; index < UCN_SEEN_CACHE_SIZE; ++index) {
-        if (node->seen[index].valid && node->seen[index].source == frame->source &&
-            node->seen[index].session_id == frame->session_id &&
-            node->seen[index].sequence == frame->sequence) {
-            return true;
+    for (index = 0U; index < UCN_RREQ_CACHE_SIZE; ++index) {
+        const ucn_rreq_cache_entry_t *slot = &node->rreq_cache[index];
+
+        if (slot->valid && slot->origin == frame->source &&
+            slot->session_id == frame->session_id &&
+            slot->request_id == request_id) {
+            *slot_index = index;
+            return route_cost < slot->best_route_request_cost ?
+                   UCN_RREQ_CACHE_BETTER : UCN_RREQ_CACHE_REPLAY;
+        }
+        if ((!slot->valid ||
+             ucn_elapsed_at_least(node->now_ms, slot->last_observed_ms,
+                                  UCN_RREQ_CACHE_TIMEOUT_MS)) &&
+            reusable_index == UCN_RREQ_CACHE_SIZE) {
+            reusable_index = index;
         }
     }
 
-    return false;
+    if (reusable_index == UCN_RREQ_CACHE_SIZE) {
+        return UCN_RREQ_CACHE_FULL;
+    }
+    *slot_index = reusable_index;
+    return UCN_RREQ_CACHE_NEW;
 }
 
-static void remember_frame(ucn_node_t *node, const ucn_frame_t *frame)
+static void commit_route_request(ucn_node_t *node,
+                                 const ucn_frame_t *frame,
+                                 uint16_t route_cost,
+                                 size_t slot_index)
 {
-    ucn_seen_frame_t *slot = &node->seen[node->next_seen_index];
+    ucn_rreq_cache_entry_t *slot = &node->rreq_cache[slot_index];
 
     slot->valid = true;
-    slot->source = frame->source;
+    slot->origin = frame->source;
     slot->session_id = frame->session_id;
-    slot->sequence = frame->sequence;
-    slot->best_route_request_cost = UINT16_MAX;
-    node->next_seen_index = (node->next_seen_index + 1U) % UCN_SEEN_CACHE_SIZE;
-}
-
-static bool remember_better_route_request(ucn_node_t *node,
-                                          const ucn_frame_t *frame,
-                                          uint16_t route_cost)
-{
-    size_t index;
-
-    for (index = 0U; index < UCN_SEEN_CACHE_SIZE; ++index) {
-        if (node->seen[index].valid && node->seen[index].source == frame->source &&
-            node->seen[index].session_id == frame->session_id &&
-            node->seen[index].sequence == frame->sequence) {
-            if (route_cost >= node->seen[index].best_route_request_cost) {
-                return false;
-            }
-            node->seen[index].best_route_request_cost = route_cost;
-            return true;
-        }
-    }
-
-    node->seen[node->next_seen_index].valid = true;
-    node->seen[node->next_seen_index].source = frame->source;
-    node->seen[node->next_seen_index].session_id = frame->session_id;
-    node->seen[node->next_seen_index].sequence = frame->sequence;
-    node->seen[node->next_seen_index].best_route_request_cost = route_cost;
-    node->next_seen_index = (node->next_seen_index + 1U) % UCN_SEEN_CACHE_SIZE;
-    return true;
+    slot->request_id = read_u32_be(frame->payload + 8U);
+    slot->best_route_request_cost = route_cost;
+    slot->last_observed_ms = node->now_ms;
 }
 
 static bool take_control_token(ucn_node_t *node)
@@ -1766,6 +1781,9 @@ static ucn_result_t send_frame_on_link(ucn_node_t *node,
     size_t encoded_length = 0U;
     ucn_result_t result;
 
+    if (!ucn_node_security_ready(node)) {
+        return UCN_ERR_SECURITY;
+    }
     if (node->security_ops != NULL) {
         result = node->security_ops->authorize_tx(node->security_context, frame);
         if (result != UCN_OK) {
@@ -3991,6 +4009,42 @@ static void invalidate_route_to(ucn_node_t *node, ucn_node_id_t destination)
     clear_discovery(node, destination);
 }
 
+static ucn_result_t validate_route_request_frame(ucn_node_t *node,
+                                                 ucn_link_t *ingress_link,
+                                                 const ucn_frame_t *frame)
+{
+    ucn_node_id_t origin;
+    ucn_node_id_t target;
+    uint32_t request_id;
+    bool is_candidate;
+
+    if (frame->payload_length != UCN_ROUTE_REQ_PAYLOAD_BYTES) {
+        return UCN_ERR_MALFORMED;
+    }
+    origin = read_u32_be(frame->payload);
+    target = read_u32_be(frame->payload + 4U);
+    request_id = read_u32_be(frame->payload + 8U);
+    is_candidate =
+        (frame->payload[15] & UCN_ROUTE_REQ_FLAG_CANDIDATE) != 0U;
+    if (origin != frame->source || origin == 0U || target == 0U ||
+        target == UCN_NODE_BROADCAST || request_id == 0U ||
+        (frame->payload[15] & (uint8_t)~UCN_ROUTE_REQ_FLAG_CANDIDATE) != 0U) {
+        return UCN_ERR_MALFORMED;
+    }
+#if !UCN_FEATURE_CANDIDATE_ROUTING
+    (void)node;
+    (void)ingress_link;
+    if (is_candidate) {
+        return UCN_ERR_CONFIG;
+    }
+#else
+    if (is_candidate && !link_is_candidate_eligible(node, ingress_link)) {
+        return UCN_ERR_ACCESS;
+    }
+#endif
+    return UCN_OK;
+}
+
 static ucn_result_t handle_route_request(ucn_node_t *node,
                                          ucn_link_t *ingress_link,
                                          const ucn_frame_t *frame)
@@ -4003,30 +4057,16 @@ static ucn_result_t handle_route_request(ucn_node_t *node,
     bool is_candidate;
     ucn_result_t result;
 
-    if (frame->payload_length != UCN_ROUTE_REQ_PAYLOAD_BYTES) {
-        return UCN_ERR_MALFORMED;
+    result = validate_route_request_frame(node, ingress_link, frame);
+    if (result != UCN_OK) {
+        return result;
     }
-
     origin = read_u32_be(frame->payload);
     target = read_u32_be(frame->payload + 4U);
     request_id = read_u32_be(frame->payload + 8U);
     route_cost = read_u16_be(frame->payload + 12U);
     hop_count = frame->payload[14];
     is_candidate = (frame->payload[15] & UCN_ROUTE_REQ_FLAG_CANDIDATE) != 0U;
-    if (origin != frame->source || origin == 0U || target == 0U ||
-        target == UCN_NODE_BROADCAST || request_id == 0U ||
-        (frame->payload[15] & (uint8_t)~UCN_ROUTE_REQ_FLAG_CANDIDATE) != 0U) {
-        return UCN_ERR_MALFORMED;
-    }
-#if !UCN_FEATURE_CANDIDATE_ROUTING
-    if (is_candidate) {
-        return UCN_ERR_CONFIG;
-    }
-#else
-    if (is_candidate && !link_is_candidate_eligible(node, ingress_link)) {
-        return UCN_ERR_ACCESS;
-    }
-#endif
 
 #if UCN_FEATURE_CANDIDATE_ROUTING
     result = is_candidate ?
@@ -4534,6 +4574,56 @@ ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config)
     node->security_policy.tx_mode = UCN_SECURITY_TX_PLAIN;
     node->security_policy.rx_mode = UCN_SECURITY_RX_BOTH;
     node->security_policy.forward_mode = UCN_SECURITY_FORWARD_PLAIN_AND_OPAQUE_E2E;
+    node->security_required = UCN_SECURITY_REQUIRED_BY_DEFAULT != 0;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_node_set_plain_session_id(ucn_node_t *node,
+                                           ucn_session_id_t session_id)
+{
+    if (node == NULL || session_id == 0U) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (node->security_ops != NULL) {
+        return UCN_ERR_CONFIG;
+    }
+    node->session_id = session_id;
+    return UCN_OK;
+}
+
+bool ucn_node_security_ready(const ucn_node_t *node)
+{
+    size_t index;
+
+    if (node == NULL) {
+        return false;
+    }
+    if (!node->security_required) {
+        return true;
+    }
+    if (node->security_ops == NULL || node->session_id == 0U ||
+        node->security_ops->authorize_tx == NULL ||
+        node->security_ops->authorize_rx == NULL ||
+        node->security_ops->seal == NULL || node->security_ops->open == NULL ||
+        !security_policy_is_production_ready(&node->security_policy)) {
+        return false;
+    }
+    for (index = 0U; index < UCN_MAX_ENDPOINT_SECURITY_POLICIES; ++index) {
+        if (node->endpoint_security_policies[index].occupied &&
+            !security_policy_is_production_ready(
+                &node->endpoint_security_policies[index].policy)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+ucn_result_t ucn_node_set_security_required(ucn_node_t *node, bool required)
+{
+    if (node == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    node->security_required = required;
     return UCN_OK;
 }
 
@@ -4560,6 +4650,9 @@ ucn_result_t ucn_node_set_security(ucn_node_t *node,
         ops->get_session_id == NULL || ops->authorize_tx == NULL ||
         ops->authorize_rx == NULL || ((ops->seal == NULL) != (ops->open == NULL))) {
         return UCN_ERR_ARGUMENT;
+    }
+    if (node->security_required && (ops->seal == NULL || ops->open == NULL)) {
+        return UCN_ERR_SECURITY;
     }
 
     result = ops->load_next_sequence(context, &next_sequence);
@@ -5295,6 +5388,9 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
     if (node == NULL || destination == 0U ||
         (payload_length != 0U && payload == NULL)) {
         return UCN_ERR_ARGUMENT;
+    }
+    if (!ucn_node_security_ready(node)) {
+        return UCN_ERR_SECURITY;
     }
 
     if (traffic_class != UCN_TRAFFIC_Q0_CRITICAL &&
@@ -6122,7 +6218,11 @@ ucn_result_t ucn_node_request_node_snapshot(
 
     /* The origin also remembers its own flood so a loop cannot cause it to
      * become a responder or re-flood the same Query ID. */
-    remember_frame(node, &frame);
+    result = ucn_duplicate_accept_frame(node, &frame);
+    if (result != UCN_OK) {
+        pending->occupied = false;
+        return result;
+    }
     result = forward_node_snapshot_request(node, NULL, &frame);
     if (result != UCN_OK) {
         pending->occupied = false;
@@ -6243,6 +6343,9 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
 
     if (node == NULL) {
         return UCN_ERR_ARGUMENT;
+    }
+    if (!ucn_node_security_ready(node)) {
+        return UCN_ERR_SECURITY;
     }
 
     /* Observe before any early return so every valid Protocol Task iteration
@@ -6416,6 +6519,9 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
     if (node == NULL || ingress_link == NULL || data == NULL) {
         return UCN_ERR_ARGUMENT;
     }
+    if (!ucn_node_security_ready(node)) {
+        return UCN_ERR_SECURITY;
+    }
 
     result = ucn_frame_decode(data, length, &frame);
     if (result != UCN_OK) {
@@ -6474,10 +6580,10 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
     }
 
     if (frame.message_type == UCN_MSG_HELLO) {
-        if (frame_is_seen(node, &frame)) {
-            return UCN_ERR_REPLAY;
+        result = ucn_duplicate_accept_frame(node, &frame);
+        if (result != UCN_OK) {
+            return result;
         }
-        remember_frame(node, &frame);
         return handle_hello(node, ingress_link, &frame);
     }
 
@@ -6493,28 +6599,44 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
     }
 
     if (frame.message_type == UCN_MSG_ROUTE_REQ) {
+        ucn_rreq_cache_classification_t classification;
+        size_t rreq_slot = 0U;
+        uint16_t route_cost;
+
         if (frame.destination != UCN_NODE_BROADCAST) {
             return UCN_ERR_MALFORMED;
         }
         if (frame.payload_length != UCN_ROUTE_REQ_PAYLOAD_BYTES) {
             return UCN_ERR_MALFORMED;
         }
+        result = validate_route_request_frame(node, ingress_link, &frame);
+        if (result != UCN_OK) {
+            return result;
+        }
+        route_cost = read_u16_be(frame.payload + 12U);
+        classification = classify_route_request(node, &frame, route_cost,
+                                                &rreq_slot);
+        if (classification == UCN_RREQ_CACHE_REPLAY) {
+            node->stats.route_request_replayed++;
+            return UCN_ERR_REPLAY;
+        }
+        if (classification == UCN_RREQ_CACHE_FULL) {
+            node->stats.route_request_cache_full++;
+            return UCN_ERR_NO_SPACE;
+        }
         if (!take_control_rx_token(node, ingress_link,
                                    UCN_CONTROL_RX_ROUTE_REQUEST)) {
             return UCN_ERR_NO_SPACE;
         }
-        if (!remember_better_route_request(node, &frame,
-                                           read_u16_be(frame.payload + 12U))) {
-            return UCN_ERR_REPLAY;
-        }
+        commit_route_request(node, &frame, route_cost, rreq_slot);
         touch_neighbor(node, ingress_link);
         return handle_route_request(node, ingress_link, &frame);
     }
 
-    if (frame_is_seen(node, &frame)) {
-        return UCN_ERR_REPLAY;
+    result = ucn_duplicate_accept_frame(node, &frame);
+    if (result != UCN_OK) {
+        return result;
     }
-    remember_frame(node, &frame);
 
     if (frame.message_type == UCN_MSG_HEARTBEAT) {
         return handle_heartbeat(node, ingress_link, &frame);

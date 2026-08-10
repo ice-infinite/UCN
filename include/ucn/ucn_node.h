@@ -12,6 +12,21 @@
 extern "C" {
 #endif
 
+/* Product builds may force the fail-closed gate on from Node initialization,
+ * so an omitted runtime call cannot silently leave the deployment in the
+ * development-compatible plain mode. */
+#ifndef UCN_SECURITY_REQUIRED_BY_DEFAULT
+#define UCN_SECURITY_REQUIRED_BY_DEFAULT 0
+#endif
+
+#if UCN_SECURITY_REQUIRED_BY_DEFAULT != 0 && \
+    UCN_SECURITY_REQUIRED_BY_DEFAULT != 1
+#error "UCN_SECURITY_REQUIRED_BY_DEFAULT must be 0 or 1"
+#endif
+#if UCN_SECURITY_REQUIRED_BY_DEFAULT && !UCN_FEATURE_SECURITY
+#error "A security-required product must use Lite or Full"
+#endif
+
 #ifndef UCN_MAX_LINKS
 #define UCN_MAX_LINKS ((size_t)4U)
 #endif
@@ -58,8 +73,48 @@ extern "C" {
 #define UCN_MAX_ROUTES ((size_t)8U)
 #endif
 
+#ifndef UCN_DUPLICATE_SOURCE_WINDOWS
+#ifdef UCN_SEEN_CACHE_SIZE
+#define UCN_DUPLICATE_SOURCE_WINDOWS UCN_SEEN_CACHE_SIZE
+#elif UCN_PROFILE == UCN_PROFILE_NANO
+#define UCN_DUPLICATE_SOURCE_WINDOWS ((size_t)4U)
+#elif UCN_PROFILE == UCN_PROFILE_LITE
+#define UCN_DUPLICATE_SOURCE_WINDOWS ((size_t)16U)
+#else
+#define UCN_DUPLICATE_SOURCE_WINDOWS ((size_t)32U)
+#endif
+#endif
+
+#ifndef UCN_DUPLICATE_WINDOW_BITS
+#if UCN_PROFILE == UCN_PROFILE_FULL
+#define UCN_DUPLICATE_WINDOW_BITS 64U
+#else
+#define UCN_DUPLICATE_WINDOW_BITS 32U
+#endif
+#endif
+
+#ifndef UCN_DUPLICATE_SOURCE_TIMEOUT_MS
+#define UCN_DUPLICATE_SOURCE_TIMEOUT_MS UINT32_C(60000)
+#endif
+
+/* Compatibility alias for products that sized the old Seen ring.  The new
+ * value counts Source/Session windows, not individual frames. */
 #ifndef UCN_SEEN_CACHE_SIZE
-#define UCN_SEEN_CACHE_SIZE ((size_t)8U)
+#define UCN_SEEN_CACHE_SIZE UCN_DUPLICATE_SOURCE_WINDOWS
+#endif
+
+#if UCN_FEATURE_DYNAMIC_MESH
+#ifndef UCN_RREQ_CACHE_SIZE
+#if UCN_PROFILE == UCN_PROFILE_FULL
+#define UCN_RREQ_CACHE_SIZE ((size_t)16U)
+#else
+#define UCN_RREQ_CACHE_SIZE ((size_t)8U)
+#endif
+#endif
+
+#ifndef UCN_RREQ_CACHE_TIMEOUT_MS
+#define UCN_RREQ_CACHE_TIMEOUT_MS UINT32_C(5000)
+#endif
 #endif
 
 #ifndef UCN_MAX_ROUTE_DISCOVERIES
@@ -310,6 +365,11 @@ typedef char ucn_unknown_route_cost_must_use_reserved_sentinel[
 #if UCN_FEATURE_DYNAMIC_MESH
 typedef char ucn_dynamic_mesh_control_must_fit_frame[
     UCN_MAX_FRAME_BYTES >= UCN_DYNAMIC_MESH_MIN_FRAME_BYTES ? 1 : -1];
+typedef char ucn_rreq_cache_must_not_be_empty[
+    UCN_RREQ_CACHE_SIZE > 0U ? 1 : -1];
+typedef char ucn_rreq_cache_timeout_must_be_valid[
+    UCN_RREQ_CACHE_TIMEOUT_MS > 0U &&
+            UCN_RREQ_CACHE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS ? 1 : -1];
 typedef char ucn_control_token_burst_must_be_positive[
     UCN_CONTROL_TOKEN_BURST > 0U ? 1 : -1];
 typedef char ucn_control_token_refill_must_be_positive[
@@ -323,6 +383,13 @@ typedef char ucn_heartbeat_rx_token_burst_must_be_positive[
 typedef char ucn_heartbeat_rx_token_refill_must_be_positive[
     UCN_HEARTBEAT_RX_TOKEN_REFILL_MS > 0U ? 1 : -1];
 #endif
+typedef char ucn_duplicate_source_windows_must_not_be_empty[
+    UCN_DUPLICATE_SOURCE_WINDOWS > 0U ? 1 : -1];
+typedef char ucn_duplicate_window_bits_must_be_32_or_64[
+    UCN_DUPLICATE_WINDOW_BITS == 32U || UCN_DUPLICATE_WINDOW_BITS == 64U ? 1 : -1];
+typedef char ucn_duplicate_source_timeout_must_be_valid[
+    UCN_DUPLICATE_SOURCE_TIMEOUT_MS > 0U &&
+            UCN_DUPLICATE_SOURCE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS ? 1 : -1];
 #if UCN_FEATURE_DIAGNOSTICS
 typedef char ucn_path_trace_rx_token_burst_must_be_positive[
     UCN_PATH_TRACE_RX_TOKEN_BURST > 0U ? 1 : -1];
@@ -715,6 +782,8 @@ typedef struct ucn_node_stats {
     uint32_t max_probe_service_delay_ms;
 #endif
     uint32_t rx_delivered;
+    uint32_t duplicate_frames_dropped;
+    uint32_t duplicate_source_window_full;
 #if UCN_FEATURE_DYNAMIC_MESH
     uint32_t route_requests_sent;
     uint32_t route_replies_sent;
@@ -745,6 +814,8 @@ typedef struct ucn_node_stats {
 #if UCN_FEATURE_DYNAMIC_MESH
     uint32_t control_budget_dropped;
     uint32_t route_request_rx_rate_dropped;
+    uint32_t route_request_replayed;
+    uint32_t route_request_cache_full;
     uint32_t heartbeat_rx_rate_dropped;
     uint32_t path_trace_rx_rate_dropped;
     uint32_t q1_route_wait_queued;
@@ -797,6 +868,18 @@ typedef struct ucn_node_stats {
 } ucn_node_stats_t;
 
 ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config);
+/* Plain deployments should set a non-zero boot/session value before network
+ * traffic so a reboot cannot reuse an old Source/Session sequence window.
+ * A Security Provider replaces this value with its authenticated Session. */
+ucn_result_t ucn_node_set_plain_session_id(ucn_node_t *node,
+                                           ucn_session_id_t session_id);
+/* Development remains compatible by default.  When required=true, Lite/Full
+ * refuse protocol traffic until a Provider with authorization, persistent
+ * sequence/session state and seal/open callbacks is installed, and the Node
+ * plus every Endpoint override forbids plain TX/RX/forwarding.  This gate
+ * cannot prove that the product's cryptography is audited. */
+ucn_result_t ucn_node_set_security_required(ucn_node_t *node, bool required);
+bool ucn_node_security_ready(const ucn_node_t *node);
 ucn_result_t ucn_node_set_security(ucn_node_t *node,
                                    const ucn_security_ops_t *ops,
                                    void *context);

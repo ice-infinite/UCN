@@ -17,6 +17,12 @@ static void budget_write_u32(uint8_t *data, uint32_t value)
     data[3] = (uint8_t)value;
 }
 
+static void budget_write_u16(uint8_t *data, uint16_t value)
+{
+    data[0] = (uint8_t)(value >> 8U);
+    data[1] = (uint8_t)value;
+}
+
 static ucn_result_t budget_link_send(ucn_link_t *link,
                                      const uint8_t *frame,
                                      size_t length)
@@ -46,12 +52,14 @@ static const ucn_link_ops_t BUDGET_LINK_OPS = {
     NULL, budget_link_send, NULL, budget_link_status, NULL, NULL
 };
 
+#if UCN_FEATURE_DIAGNOSTICS
 static bool budget_trace_authorize(void *context, ucn_node_id_t requester)
 {
     const bool *allow = (const bool *)context;
 
     return *allow && requester == UINT32_C(2);
 }
+#endif
 
 static ucn_result_t budget_inject(ucn_node_t *node,
                                   ucn_link_t *ingress,
@@ -77,9 +85,12 @@ int test_control_budget(void)
     ucn_frame_t frame;
     uint8_t heartbeat[8] = { 1U, 0U, 0U, 0U, 0U, 0U, 0U, 0U };
     uint8_t route_request[16] = { 0U };
+#if UCN_FEATURE_DIAGNOSTICS
     uint8_t trace[UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES + sizeof(ucn_node_id_t)] = { 0U };
     bool allow_trace = false;
+#endif
     uint32_t index;
+    uint32_t duplicate_frames_before_rreq;
 
     (void)memset(&node, 0, sizeof(node));
     (void)memset(&ingress, 0, sizeof(ingress));
@@ -133,6 +144,7 @@ int test_control_budget(void)
     node.now_ms = UCN_HEARTBEAT_RX_TOKEN_REFILL_MS;
     frame.sequence++;
     TEST_ASSERT(budget_inject(&node, &ingress, &frame) == UCN_OK);
+    duplicate_frames_before_rreq = node.stats.duplicate_frames_dropped;
 
     (void)memset(&frame, 0, sizeof(frame));
     budget_write_u32(route_request, UINT32_C(2));
@@ -145,15 +157,38 @@ int test_control_budget(void)
     frame.destination = UCN_NODE_BROADCAST;
     frame.payload = route_request;
     frame.payload_length = (uint16_t)sizeof(route_request);
-    for (index = 0U; index < UCN_ROUTE_REQUEST_RX_TOKEN_BURST; ++index) {
+    budget_write_u16(route_request + 12U, 100U);
+    budget_write_u32(route_request + 8U, UINT32_C(1));
+    frame.sequence = UINT32_C(100);
+    TEST_ASSERT(budget_inject(&node, &ingress, &frame) == UCN_OK);
+    for (index = 0U; index < 3U; ++index) {
+        frame.sequence++;
+        TEST_ASSERT(budget_inject(&node, &ingress, &frame) == UCN_ERR_REPLAY);
+    }
+    TEST_ASSERT(node.stats.route_request_replayed == 3U);
+    TEST_ASSERT(node.stats.duplicate_frames_dropped ==
+                duplicate_frames_before_rreq);
+    for (index = 1U; index < UCN_ROUTE_REQUEST_RX_TOKEN_BURST; ++index) {
         budget_write_u32(route_request + 8U, index + 1U);
-        frame.sequence = UINT32_C(100) + index;
+        frame.sequence++;
         TEST_ASSERT(budget_inject(&node, &ingress, &frame) == UCN_OK);
     }
     budget_write_u32(route_request + 8U, UINT32_C(100));
     frame.sequence++;
     TEST_ASSERT(budget_inject(&node, &ingress, &frame) == UCN_ERR_NO_SPACE);
     TEST_ASSERT(node.stats.route_request_rx_rate_dropped == 1U);
+
+    /* A better copy is classified before the Token but committed only after
+     * the Token succeeds.  Exhaustion must not poison the Best Cost state. */
+    budget_write_u32(route_request + 8U, UINT32_C(1));
+    budget_write_u16(route_request + 12U, 50U);
+    frame.sequence++;
+    TEST_ASSERT(budget_inject(&node, &ingress, &frame) == UCN_ERR_NO_SPACE);
+    TEST_ASSERT(node.stats.route_request_rx_rate_dropped == 2U);
+    node.now_ms += UCN_ROUTE_REQUEST_RX_TOKEN_REFILL_MS;
+    TEST_ASSERT(budget_inject(&node, &ingress, &frame) == UCN_OK);
+
+    budget_write_u16(route_request + 12U, 100U);
     budget_write_u32(route_request, UINT32_C(3));
     budget_write_u32(route_request + 8U, UINT32_C(101));
     frame.source = UINT32_C(3);
@@ -165,6 +200,7 @@ int test_control_budget(void)
     frame.sequence++;
     TEST_ASSERT(budget_inject(&node, &ingress, &frame) == UCN_OK);
 
+#if UCN_FEATURE_DIAGNOSTICS
     (void)memset(&frame, 0, sizeof(frame));
     budget_write_u32(trace, UINT32_C(1));
     trace[4] = 1U;
@@ -195,5 +231,6 @@ int test_control_budget(void)
     node.now_ms += UCN_PATH_TRACE_RX_TOKEN_REFILL_MS;
     frame.sequence++;
     TEST_ASSERT(budget_inject(&node, &ingress, &frame) == UCN_OK);
+#endif
     return 0;
 }

@@ -146,7 +146,9 @@ int test_adapter(void)
     conflicting_context.is_up = true;
 
     TEST_ASSERT(ucn_node_init(&node, &config) == UCN_OK);
+#if UCN_FEATURE_DYNAMIC_MESH
     TEST_ASSERT(ucn_node_set_join_policy(&node, UCN_JOIN_OPEN, NULL, NULL) == UCN_OK);
+#endif
     TEST_ASSERT(ucn_adapter_address_is_valid(&ADDRESS_A));
     TEST_ASSERT(ucn_adapter_address_equal(&ADDRESS_A, &ADDRESS_A));
     TEST_ASSERT(!ucn_adapter_address_equal(&ADDRESS_A, &ADDRESS_B));
@@ -162,6 +164,7 @@ int test_adapter(void)
 
     TEST_ASSERT(ucn_adapter_rx_queue_init(&queue, &ADAPTER_PORT_OPS,
                                           &lock_state) == UCN_OK);
+#if UCN_FEATURE_DYNAMIC_MESH
     TEST_ASSERT(adapter_encode_frame(UCN_MSG_DATA_Q1, config.network_id,
                                      UINT32_C(1), config.node_id, 0U, 1U,
                                      encoded, &encoded_length) == UCN_OK);
@@ -192,6 +195,20 @@ int test_adapter(void)
     TEST_ASSERT(receive_state.count == 1U);
     TEST_ASSERT(receive_state.source == UINT32_C(1));
     TEST_ASSERT(lock_state.enter_count == lock_state.exit_count);
+#else
+    candidate_link.peer_node_id = UINT32_C(1);
+    TEST_ASSERT(ucn_node_register_link(&node, &candidate_link) == UCN_OK);
+    ucn_node_set_rx_handler(&node, adapter_receive_callback, &receive_state);
+    TEST_ASSERT(adapter_encode_frame(UCN_MSG_DATA_Q1, config.network_id,
+                                     UINT32_C(1), config.node_id, 0U, 1U,
+                                     encoded, &encoded_length) == UCN_OK);
+    TEST_ASSERT(ucn_adapter_rx_enqueue(&queue, &candidate_link, encoded,
+                                       encoded_length) == UCN_OK);
+    TEST_ASSERT(ucn_adapter_rx_pump(&queue, &node, 1U, &pumped) == UCN_OK);
+    TEST_ASSERT(pumped == 1U && receive_state.count == 1U);
+    TEST_ASSERT(receive_state.source == UINT32_C(1));
+    TEST_ASSERT(lock_state.enter_count == lock_state.exit_count);
+#endif
 
     TEST_ASSERT(ucn_adapter_rx_queue_init(&overflow_queue, NULL, NULL) == UCN_OK);
     for (index = 0U; index < UCN_ADAPTER_RX_QUEUE_DEPTH; ++index) {

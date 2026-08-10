@@ -11,9 +11,10 @@ int main(void)
     result |= test_virtual_link();
     result |= test_qos();
     result |= test_route();
+    result |= test_duplicate_window();
+#if UCN_FEATURE_DYNAMIC_MESH
     result |= test_aodv_lite();
     result |= test_security();
-    result |= test_host_boundary();
     result |= test_integration();
     result |= test_link_metrics();
     result |= test_neighbor_lifecycle();
@@ -21,11 +22,12 @@ int main(void)
     result |= test_neighbor_heartbeat();
     result |= test_neighbor_bearer();
     result |= test_neighbor_quality();
+#if UCN_FEATURE_CANDIDATE_ROUTING
     result |= test_neighbor_route_bearer();
-    result |= test_endpoint();
     result |= test_candidate_route();
-    result |= test_adapter();
+#endif
     result |= test_adapter_hello();
+#if UCN_FEATURE_DIAGNOSTICS
     result |= test_protocol_version();
     result |= test_path_trace();
     result |= test_node_snapshot();
@@ -33,15 +35,22 @@ int main(void)
     result |= test_path_management_budget();
     result |= test_policy();
     result |= test_policy_diagnostic();
-#if UCN_FEATURE_SERVICE
-    result |= test_service();
-    result |= test_service_bridge();
 #endif
     result |= test_control_budget();
     result |= test_time();
     result |= test_link_contract();
     result |= test_stress();
+#if UCN_PROFILE == UCN_PROFILE_FULL
     result |= test_dynamic_stress();
+#endif
+#endif
+    result |= test_host_boundary();
+    result |= test_endpoint();
+    result |= test_adapter();
+#if UCN_FEATURE_SERVICE
+    result |= test_service();
+    result |= test_service_bridge();
+#endif
     result |= test_profile();
     result |= test_public_headers();
     result |= test_node_storage_header();

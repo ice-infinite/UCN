@@ -66,6 +66,9 @@ nodes:
       - node_runtime.ucn_node_step
       - policy_path.send_endpoint_pinned_static
     calls:
+      - target: security.ucn_node_security_ready
+        type: direct
+        reason: 生产安全 Required 但配置未完整时，在任何查路/发送前失败关闭。
       - target: route.route_lookup_helpers_static
         type: direct
         reason: 解析直接或缓存 Route 的 egress Link。
@@ -148,6 +151,19 @@ nodes:
       - target: route.route_request_helpers_static
         type: direct
         reason: 非目标 Node 向健康邻居继续受限泛洪。
+
+  - id: route.rreq_cache_classify_commit_static
+    symbol: validate_route_request_frame/classify_route_request/commit_route_request
+    type: internal_group
+    file: src/ucn_node.c
+    layer: routing
+    role: 用独立固定 RREQ 表保存 (Origin, Session, Request ID) 的 Best Cost，并按 Peek→Token→Commit 避免重复包耗尽合法 Token 或失败请求污染状态。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls: []
+    notes:
+      - 同 Cost/更差请求返回 Replay且不申请 RREQ RX Token；New/Better 只有取得 Token后才提交。
+      - 该表与普通业务的 Source/Session Sequence 位图窗口完全分离。
 
   - id: route.handle_route_reply_static
     symbol: handle_route_reply

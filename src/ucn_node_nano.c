@@ -6,6 +6,8 @@
 #include "ucn/ucn_node_storage.h"
 #include "ucn/ucn_time.h"
 
+#include "ucn_duplicate_internal.h"
+
 #if UCN_PROFILE != UCN_PROFILE_NANO
 #error "ucn_node_nano.c is only for the Nano profile"
 #endif
@@ -34,28 +36,19 @@ static ucn_result_t nano_link_status(const ucn_link_t *link,
     return link->ops->get_status(link, status);
 }
 
-static bool nano_link_is_usable(const ucn_link_t *link)
-{
-    ucn_link_status_t status;
-
-    return nano_link_status(link, &status) == UCN_OK && status.is_up;
-}
-
 static ucn_link_t *nano_find_link(ucn_node_t *node,
                                   ucn_node_id_t destination)
 {
     size_t index;
 
     for (index = 0U; index < node->link_count; ++index) {
-        if (node->links[index]->peer_node_id == destination &&
-            nano_link_is_usable(node->links[index])) {
+        if (node->links[index]->peer_node_id == destination) {
             return node->links[index];
         }
     }
     for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
         if (node->routes[index].valid &&
-            node->routes[index].destination == destination &&
-            nano_link_is_usable(node->routes[index].egress_link)) {
+            node->routes[index].destination == destination) {
             return node->routes[index].egress_link;
         }
     }
@@ -75,32 +68,6 @@ static ucn_endpoint_handler_entry_t *nano_find_endpoint_handler(
         }
     }
     return NULL;
-}
-
-static bool nano_frame_seen(const ucn_node_t *node, const ucn_frame_t *frame)
-{
-    size_t index;
-
-    for (index = 0U; index < UCN_SEEN_CACHE_SIZE; ++index) {
-        if (node->seen[index].valid &&
-            node->seen[index].source == frame->source &&
-            node->seen[index].sequence == frame->sequence) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void nano_remember_frame(ucn_node_t *node, const ucn_frame_t *frame)
-{
-    ucn_seen_frame_t *slot =
-        &node->seen[node->next_seen_index % UCN_SEEN_CACHE_SIZE];
-
-    (void)memset(slot, 0, sizeof(*slot));
-    slot->valid = true;
-    slot->source = frame->source;
-    slot->sequence = frame->sequence;
-    node->next_seen_index = (node->next_seen_index + 1U) % UCN_SEEN_CACHE_SIZE;
 }
 
 static ucn_sequence_t nano_allocate_sequence(ucn_node_t *node)
@@ -208,6 +175,29 @@ ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config)
     node->next_sequence = 1U;
     node->next_queue_order = 1U;
     return UCN_OK;
+}
+
+ucn_result_t ucn_node_set_plain_session_id(ucn_node_t *node,
+                                           ucn_session_id_t session_id)
+{
+    if (node == NULL || session_id == 0U) {
+        return UCN_ERR_ARGUMENT;
+    }
+    node->session_id = session_id;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_node_set_security_required(ucn_node_t *node, bool required)
+{
+    if (node == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    return required ? UCN_ERR_CONFIG : UCN_OK;
+}
+
+bool ucn_node_security_ready(const ucn_node_t *node)
+{
+    return node != NULL;
 }
 
 ucn_result_t ucn_node_set_security(ucn_node_t *node,
@@ -443,12 +433,16 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
     if (node == NULL || destination == 0U ||
         destination == UCN_NODE_BROADCAST ||
         destination == node->config.node_id ||
-        (traffic_class != UCN_TRAFFIC_Q0_CRITICAL &&
-         traffic_class != UCN_TRAFFIC_Q1_REALTIME) ||
         ucn_message_type_is_control(message_type) ||
-        (payload == NULL && payload_length != 0U) ||
-        payload_length > ucn_frame_max_payload(0U)) {
+        (payload == NULL && payload_length != 0U)) {
         return UCN_ERR_ARGUMENT;
+    }
+    if (traffic_class != UCN_TRAFFIC_Q0_CRITICAL &&
+        traffic_class != UCN_TRAFFIC_Q1_REALTIME) {
+        return UCN_ERR_UNSUPPORTED;
+    }
+    if (payload_length > ucn_frame_max_payload(0U)) {
+        return UCN_ERR_TOO_LARGE;
     }
     link = nano_find_link(node, destination);
     if (link == NULL) {
@@ -462,6 +456,7 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
     frame.source = node->config.node_id;
     frame.destination = destination;
     frame.sequence = nano_allocate_sequence(node);
+    frame.session_id = node->session_id;
     frame.payload = payload;
     frame.payload_length = payload_length;
     return nano_send_frame(node, link, &frame);
@@ -493,26 +488,24 @@ ucn_result_t ucn_node_enqueue(ucn_node_t *node,
         request->destination == UCN_NODE_BROADCAST ||
         request->destination == node->config.node_id ||
         (request->payload == NULL && request->payload_length != 0U) ||
-        request->payload_length > UCN_MAX_PAYLOAD_BYTES ||
-        (request->traffic_class != UCN_TRAFFIC_Q0_CRITICAL &&
-         request->traffic_class != UCN_TRAFFIC_Q1_REALTIME)) {
+        ucn_message_type_is_control(request->message_type)) {
         return UCN_ERR_ARGUMENT;
+    }
+    if (request->traffic_class != UCN_TRAFFIC_Q0_CRITICAL &&
+        request->traffic_class != UCN_TRAFFIC_Q1_REALTIME) {
+        return UCN_ERR_UNSUPPORTED;
+    }
+    if (request->payload_length > UCN_MAX_PAYLOAD_BYTES) {
+        return UCN_ERR_TOO_LARGE;
     }
     if (request->delivery != UCN_DELIVERY_BEST_EFFORT &&
         request->delivery != UCN_DELIVERY_LATEST_VALUE &&
         request->delivery != UCN_DELIVERY_RETRY_ON_BACKPRESSURE) {
         return UCN_ERR_ARGUMENT;
     }
-    if (request->traffic_class == UCN_TRAFFIC_Q0_CRITICAL &&
-        request->delivery == UCN_DELIVERY_LATEST_VALUE) {
-        return UCN_ERR_ARGUMENT;
-    }
-    if (request->traffic_class == UCN_TRAFFIC_Q1_REALTIME &&
-        request->delivery != UCN_DELIVERY_LATEST_VALUE) {
-        return UCN_ERR_ARGUMENT;
-    }
     if (request->delivery == UCN_DELIVERY_RETRY_ON_BACKPRESSURE &&
-        request->deadline_ms == 0U) {
+        (request->traffic_class != UCN_TRAFFIC_Q0_CRITICAL ||
+         request->deadline_ms == 0U)) {
         return UCN_ERR_ARGUMENT;
     }
     queue = request->traffic_class == UCN_TRAFFIC_Q0_CRITICAL ?
@@ -659,13 +652,13 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
                         UCN_FRAME_FLAG_DIAGNOSTIC)) != 0U) {
         return UCN_ERR_CONFIG;
     }
-    if (nano_frame_seen(node, &frame)) {
-        return UCN_OK;
+    result = ucn_duplicate_accept_frame(node, &frame);
+    if (result != UCN_OK) {
+        return result;
     }
-    nano_remember_frame(node, &frame);
     if (frame.destination == node->config.node_id) {
         delivered = nano_dispatch_endpoint(node, &frame);
-        if (node->rx_handler != NULL) {
+        if (!delivered && node->rx_handler != NULL) {
             node->rx_handler(node->rx_context, &frame);
             delivered = true;
         }

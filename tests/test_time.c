@@ -14,8 +14,12 @@ int test_time(void)
     ucn_node_t node;
     ucn_node_t step_node;
     ucn_node_t wrap_step_node;
+#if UCN_FEATURE_PATH
     ucn_path_state_t path_state;
+#endif
+#if UCN_FEATURE_POLICY
     ucn_policy_state_t policy_state;
+#endif
     ucn_config_t config;
 
     TEST_ASSERT(!ucn_duration_is_valid(0U));
@@ -85,16 +89,23 @@ int test_time(void)
     node.routes[0].valid = true;
     node.routes[0].destination = UINT32_C(2);
     node.routes[0].expires_at_ms = ucn_deadline_from_now(base_ms, 10U);
+#if UCN_FEATURE_DIAGNOSTICS
     node.path_trace_reverse[0].occupied = true;
     node.path_trace_reverse[0].expires_at_ms =
         ucn_deadline_from_now(base_ms, 10U);
+#endif
     (void)ucn_node_step(&node, 3U);
     TEST_ASSERT(node.routes[0].valid);
+#if UCN_FEATURE_DIAGNOSTICS
     TEST_ASSERT(node.path_trace_reverse[0].occupied);
+#endif
     (void)ucn_node_step(&node, 4U);
     TEST_ASSERT(!node.routes[0].valid);
+#if UCN_FEATURE_DIAGNOSTICS
     TEST_ASSERT(!node.path_trace_reverse[0].occupied);
+#endif
 
+#if UCN_FEATURE_PATH
     (void)memset(&path_state, 0, sizeof(path_state));
     path_state.entries[0].occupied = true;
     path_state.entries[0].expires_at_ms = ucn_deadline_from_now(base_ms, 10U);
@@ -102,7 +113,9 @@ int test_time(void)
     TEST_ASSERT(path_state.entries[0].occupied);
     ucn_path_expire(&path_state, 4U);
     TEST_ASSERT(!path_state.entries[0].occupied && path_state.stats.expired == 1U);
+#endif
 
+#if UCN_FEATURE_POLICY
     (void)memset(&policy_state, 0, sizeof(policy_state));
     policy_state.flows[0].occupied = true;
     policy_state.flows[0].expires_at_ms = ucn_deadline_from_now(base_ms, 10U);
@@ -111,5 +124,6 @@ int test_time(void)
     ucn_policy_expire_flows(&policy_state, 4U);
     TEST_ASSERT(!policy_state.flows[0].occupied &&
                 policy_state.stats.flow_bindings_expired == 1U);
+#endif
     return 0;
 }

@@ -32,7 +32,12 @@ typedef char ucn_max_frame_must_fit_header[
 
 #define UCN_MAX_PAYLOAD_BYTES (UCN_MAX_FRAME_BYTES - UCN_FRAME_HEADER_SIZE)
 #define UCN_NODE_BROADCAST UINT32_C(0xFFFFFFFF)
+#ifndef UCN_MAX_HOPS
 #define UCN_MAX_HOPS ((uint8_t)16U)
+#endif
+
+typedef char ucn_max_hops_must_be_1_to_254[
+    UCN_MAX_HOPS >= 1U && UCN_MAX_HOPS <= 254U ? 1 : -1];
 
 typedef uint32_t ucn_node_id_t;
 typedef uint32_t ucn_network_id_t;

@@ -62,16 +62,18 @@ GCC 严格构建已验证 33/50/64 B 分别可编译；32/49/63 B 分别按预�
 
 | Profile | `sizeof(ucn_node_t)` | 相对 Full | 静态库 `.text` 合计 | 相对 Full |
 | --- | ---: | ---: | ---: | ---: |
-| Nano | 2,640 B | -67.6% | 13,904 B | -87.0% |
-| Lite | 5,456 B | -32.9% | 50,308 B | -52.9% |
-| Full | 8,136 B | 基线 | 106,704 B | 基线 |
+| Nano | 2,648 B | -71.8% | 13,132 B | -88.1% |
+| Lite | 5,888 B | -37.4% | 52,120 B | -52.6% |
+| Full | 9,400 B | 基线 | 109,900 B | 基线 |
+
+该表已同步到 S22 完成后的当前代码。S22 前的历史基线为 Node `2640/5456/8136 B`、`.text` `13904/50308/106704 B`；本轮按 Profile 增加有界 Source/Session 位图窗口和独立 RREQ Cache，详见[S22 稳定化修复报告](UCN_S22_重复抑制与稳定化修复报告.md)。
 
 这些数字不是 MCU ELF 的最终 Flash/RAM：目标 ABI、编译器、LTO、表深度、`UCN_MAX_FRAME_BYTES` 和产品静态实例数都会改变结果。目标板必须另外报告 ELF 段、静态对象、运行时栈高水位和 Heap；不能把 Host `.a` 直接写成 ESP32/STM32 Flash。
 
 ## 7. 软件验证证据
 
-- Nano：三节点 A→B→C 静态 Route/Endpoint 交付；动态寻路和 Security 返回 `UCN_ERR_CONFIG`。
-- Lite：三节点未知目的地 AODV-Lite 发现、RREP 建表和 Endpoint 交付；Candidate Refresh、Path、Policy、Diagnostic 返回 `UCN_ERR_CONFIG`。
+- Nano：直接运行 Frame/QoS/静态 Route/Endpoint/Adapter RX/Service/去重行为；动态寻路和 Security 返回 `UCN_ERR_CONFIG`。
+- Lite：直接运行 AODV/RERR、Neighbor/HELLO/Heartbeat、多 Bearer、安全 Provider、Control Budget、Stress；Candidate/Path/Policy/Diagnostic 返回 `UCN_ERR_CONFIG`。
 - API 完整性：头文件声明的 56 个 `ucn_node_*`/`ucn_path_*`/`ucn_policy_*` 符号在 Nano、Lite、Full 静态库中均存在；低档 Profile 不会在链接阶段才暴露缺失能力。
 - Full：现有完整单元、虚拟拓扑、动态压力和 Profile 测试全部通过。
 - Service：Nano/OFF 证明源码可移除；Lite/ON 证明正交组合可初始化 Router；Full/OFF 与 Full/ON 均可构建测试。
@@ -83,6 +85,6 @@ GCC 严格构建已验证 33/50/64 B 分别可编译；32/49/63 B 分别按预�
 - ESP32-S3、ESP-WROOM-32、STM32 等目标编译器下的独立 ELF 段与 Map 对比。
 - 各 Profile 的协议 Task 栈高水位、Heap 最低值、CPU 占用与功耗。
 - Lite/Full 在真实 Wi-Fi/UART/CAN 多板环境的入网、断链、吞吐和时延。
-- 根据具体 MCU RAM 重新下调 Queue、Neighbor、Route、Seen 等固定表深度。
+- 根据具体 MCU RAM 重新下调 Queue、Neighbor、Route、Source/Session Window、RREQ Cache 等固定表深度。
 
 所以 S04 的“代码与软件验证”已闭环；S08 已进一步完成公共 API/静态存储边界，目标板绝对资源和实机行为继续按 S06/S07 的硬件门禁执行。

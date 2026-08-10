@@ -40,7 +40,7 @@ A
   └─ 固定结果数组按 Node ID 去重；窗口结束后一次回调 COMPLETE 或 TRUNCATED
 ```
 
-请求在每个节点由既有 Seen Cache 按 `(source, sequence)` 去重，因此有环网络中每个节点只首次处理和转发一次。中继不需要到 A 的普通 Route Cache：只保存本次请求来自的上一跳。Reverse 项在超时后自动回收，并可承载多个下游 Reply，不能像单次 `PATH_TRACE_REPLY` 一样首包后立即释放。
+请求在每个节点由固定 Duplicate Source Window 按 `(source, session, sequence)` 去重，因此有环网络中每个节点只首次处理和转发一次。中继不需要到 A 的普通 Route Cache：只保存本次请求来自的上一跳。Reverse 项在超时后自动回收，并可承载多个下游 Reply，不能像单次 `PATH_TRACE_REPLY` 一样首包后立即释放。
 
 ## 4. 固定资源、调度和权限
 

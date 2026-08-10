@@ -84,10 +84,10 @@ if(UCN_BUILD_SCALE_SIM AND NOT UCN_PROFILE_UPPER STREQUAL "NANO")
     )
 endif()
 
-if(UCN_BUILD_TESTS AND UCN_PROFILE_UPPER STREQUAL "FULL")
+if(UCN_BUILD_TESTS)
     enable_testing()
 
-    add_executable(ucn_tests
+    set(UCN_TEST_SOURCES
         tests/test_main.c
         tests/test_core.c
         tests/test_frame.c
@@ -95,35 +95,48 @@ if(UCN_BUILD_TESTS AND UCN_PROFILE_UPPER STREQUAL "FULL")
         tests/test_virtual_link.c
         tests/test_qos.c
         tests/test_route.c
-        tests/test_aodv_lite.c
-        tests/test_security.c
+        tests/test_duplicate_window.c
         tests/test_host_boundary.c
-        tests/test_integration.c
-        tests/test_link_metrics.c
-        tests/test_neighbor_lifecycle.c
-        tests/test_hello_join.c
-        tests/test_neighbor_heartbeat.c
-        tests/test_neighbor_bearer.c
         tests/test_endpoint.c
-        tests/test_candidate_route.c
         tests/test_adapter.c
-        tests/test_adapter_hello.c
-        tests/test_v3.c
-        tests/test_path_trace.c
-        tests/test_node_snapshot.c
-        tests/test_path_control.c
-        tests/test_path_management_budget.c
-        tests/test_policy.c
-        tests/test_policy_diagnostic.c
-        tests/test_control_budget.c
-        tests/test_time.c
-        tests/test_link_contract.c
-        tests/test_stress.c
-        tests/test_dynamic_stress.c
         tests/test_profile.c
         tests/test_public_headers.c
         tests/test_node_storage_header.c
     )
+
+    if(NOT UCN_PROFILE_UPPER STREQUAL "NANO")
+        list(APPEND UCN_TEST_SOURCES
+            tests/test_aodv_lite.c
+            tests/test_security.c
+            tests/test_integration.c
+            tests/test_link_metrics.c
+            tests/test_neighbor_lifecycle.c
+            tests/test_hello_join.c
+            tests/test_neighbor_heartbeat.c
+            tests/test_neighbor_bearer.c
+            tests/test_adapter_hello.c
+            tests/test_control_budget.c
+            tests/test_time.c
+            tests/test_link_contract.c
+            tests/test_stress.c
+        )
+    endif()
+
+    if(UCN_PROFILE_UPPER STREQUAL "FULL")
+        list(APPEND UCN_TEST_SOURCES
+            tests/test_candidate_route.c
+            tests/test_v3.c
+            tests/test_path_trace.c
+            tests/test_node_snapshot.c
+            tests/test_path_control.c
+            tests/test_path_management_budget.c
+            tests/test_policy.c
+            tests/test_policy_diagnostic.c
+            tests/test_dynamic_stress.c
+        )
+    endif()
+
+    add_executable(ucn_tests ${UCN_TEST_SOURCES})
 
     if(UCN_FEATURE_SERVICE)
         target_sources(ucn_tests PRIVATE
@@ -139,30 +152,6 @@ if(UCN_BUILD_TESTS AND UCN_PROFILE_UPPER STREQUAL "FULL")
     )
 
     add_test(NAME ucn_tests COMMAND ucn_tests)
-    if(TARGET ucn_scale_sim)
-        add_test(NAME ucn_scale_smoke COMMAND ucn_scale_sim
-            --nodes 8
-            --ticks 20
-            --warmup-ticks 40
-            --drain-ticks 120
-            --traffic two-hop
-            --quiet
-        )
-    endif()
-elseif(UCN_BUILD_TESTS)
-    enable_testing()
-
-    add_executable(ucn_profile_tests
-        tests/test_profile_main.c
-        tests/test_profile.c
-        tests/test_public_headers.c
-        tests/test_node_storage_header.c
-    )
-    target_link_libraries(ucn_profile_tests PRIVATE ucn_core)
-    target_compile_options(ucn_profile_tests PRIVATE
-        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
-    )
-    add_test(NAME ucn_profile_tests COMMAND ucn_profile_tests)
     if(TARGET ucn_scale_sim)
         add_test(NAME ucn_scale_smoke COMMAND ucn_scale_sim
             --nodes 8

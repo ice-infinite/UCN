@@ -185,7 +185,7 @@ ucn_result_t ucn_service_router_init(ucn_service_router_t *router,
 
     if (router == NULL || config == NULL || config->bindings == NULL ||
         config->binding_count == 0U || config->binding_count > UCN_SERVICE_MAX_BINDINGS ||
-        config->local_node_id == UCN_NODE_BROADCAST) {
+        config->local_node_id == 0U || config->local_node_id == UCN_NODE_BROADCAST) {
         return UCN_ERR_ARGUMENT;
     }
 
