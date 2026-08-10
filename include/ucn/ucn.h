@@ -1,6 +1,7 @@
 #ifndef UCN_H
 #define UCN_H
 
+#include "ucn/ucn_profile.h"
 #include "ucn/ucn_types.h"
 #include "ucn/ucn_time.h"
 

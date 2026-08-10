@@ -12,7 +12,7 @@ nodes:
     layer: routing
     role: 新业务 API：仅用目的 Node、静态 Endpoint、QoS 和 Payload 发数据。
     called_by:
-      - service.ucn_service_protocol_bridge_step
+      - service.bridge_submit_static
       - external.single_context_application
     calls:
       - target: core.ucn_endpoint_is_static

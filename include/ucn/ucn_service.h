@@ -52,6 +52,9 @@ extern "C" {
  * overhead.  issued_at_ms is meaningful only inside a product-defined shared
  * 32-bit millisecond time domain. */
 #define UCN_SERVICE_COMMAND_GUARD_BYTES ((size_t)12U)
+/* Optional business Result Endpoint payload prefix.  It is not a transport
+ * ACK and is present only when a product chooses to report a command stage. */
+#define UCN_SERVICE_RESULT_HEADER_BYTES ((size_t)8U)
 
 typedef char ucn_service_payload_must_fit_core_frame[
     UCN_SERVICE_MAX_PAYLOAD_BYTES <= UCN_MAX_PAYLOAD_BYTES ? 1 : -1];
@@ -76,6 +79,30 @@ typedef enum ucn_service_acceptance {
     UCN_SERVICE_ACCEPTANCE_REMOTE_ENQUEUED = 2
 } ucn_service_acceptance_t;
 
+/* Stable asynchronous-stage vocabulary.  Only the first two stages are
+ * returned synchronously by ucn_service_send_ex().  LINK_QUEUE_ACCEPTED is a
+ * local Bridge/Core/Link admission event.  The two REMOTE stages require an
+ * explicit business Result Endpoint message and are never inferred from
+ * UCN_OK or from the transport itself. */
+typedef enum ucn_service_async_stage {
+    UCN_SERVICE_STAGE_NONE = 0,
+    UCN_SERVICE_STAGE_LOCAL_INBOXED = 1,
+    UCN_SERVICE_STAGE_REMOTE_ROUTER_QUEUED = 2,
+    UCN_SERVICE_STAGE_LINK_QUEUE_ACCEPTED = 3,
+    UCN_SERVICE_STAGE_REMOTE_INBOXED = 4,
+    UCN_SERVICE_STAGE_REMOTE_EXECUTED = 5
+} ucn_service_async_stage_t;
+
+/* Minimal product-neutral status carried by the optional Result Endpoint
+ * header.  detail_code is left to the product ABI. */
+typedef enum ucn_service_result_status {
+    UCN_SERVICE_RESULT_ACCEPTED = 0,
+    UCN_SERVICE_RESULT_SUCCEEDED = 1,
+    UCN_SERVICE_RESULT_REJECTED = 2,
+    UCN_SERVICE_RESULT_FAILED = 3,
+    UCN_SERVICE_RESULT_EXPIRED = 4
+} ucn_service_result_status_t;
+
 typedef struct ucn_service_command_guard {
     uint32_t command_id;
     uint32_t issued_at_ms;
@@ -83,6 +110,13 @@ typedef struct ucn_service_command_guard {
     ucn_endpoint_t result_endpoint;
     uint8_t flags;
 } ucn_service_command_guard_t;
+
+typedef struct ucn_service_result_header {
+    uint32_t command_id;
+    ucn_service_async_stage_t stage;
+    ucn_service_result_status_t status;
+    uint16_t detail_code;
+} ucn_service_result_header_t;
 
 /* One static Endpoint has one local owner in R1.  A source Service mask is
  * checked only for local Fast-Path/outbound calls; remote source authority
@@ -96,6 +130,10 @@ typedef struct ucn_service_binding {
     uint32_t allowed_local_source_mask;
     bool accept_remote;
     bool enabled_at_boot;
+    /* Fail closed at Bridge handler installation unless this remote Q0
+     * Endpoint has a product Validator.  Local Fast Path intentionally
+     * bypasses the Bridge; the owning execution Task must still validate. */
+    bool require_remote_q0_validator;
 } ucn_service_binding_t;
 
 typedef struct ucn_service_router_config {
@@ -219,6 +257,11 @@ ucn_result_t ucn_service_remote_tx_take(ucn_service_router_t *router,
 
 const ucn_service_stats_t *ucn_service_get_stats(const ucn_service_router_t *router);
 
+/* Maps the synchronous ownership result onto the shared stage vocabulary.
+ * NONE and invalid values map to UCN_SERVICE_STAGE_NONE. */
+ucn_service_async_stage_t ucn_service_acceptance_stage(
+    ucn_service_acceptance_t acceptance);
+
 ucn_result_t ucn_service_command_guard_encode(
     const ucn_service_command_guard_t *guard,
     uint8_t output[UCN_SERVICE_COMMAND_GUARD_BYTES]);
@@ -234,6 +277,23 @@ ucn_result_t ucn_service_command_guard_validate(
     uint32_t now_ms,
     bool has_last_command_id,
     uint32_t last_command_id);
+
+/* Optional business Result Endpoint header.  REMOTE_INBOXED is valid only
+ * with ACCEPTED; REMOTE_EXECUTED requires a terminal status.  Encoding is
+ * fixed big-endian and does not alter the UCN v4 frame header. */
+ucn_result_t ucn_service_result_header_encode(
+    const ucn_service_result_header_t *header,
+    uint8_t output[UCN_SERVICE_RESULT_HEADER_BYTES]);
+ucn_result_t ucn_service_result_header_decode(
+    const uint8_t *payload,
+    size_t payload_length,
+    ucn_service_result_header_t *header);
+/* Correlation is deliberately stateless: the product owns timeout/pending
+ * command storage.  Source Node/session checks remain product policy. */
+bool ucn_service_result_matches_command(
+    const ucn_service_command_guard_t *command,
+    ucn_endpoint_t received_endpoint,
+    const ucn_service_result_header_t *result);
 
 #ifdef __cplusplus
 }

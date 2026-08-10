@@ -1,6 +1,6 @@
 # UCN 协议分层与配置档案
 
-> 状态：**UCN v4 C99 Core 源码快照（2026-08-09）**；真实 Adapter、生产 AEAD Provider 和多板 Path 实机资源报告仍待接入。
+> 状态：**UCN v4 C99 Core 源码快照（2026-08-10）**；Nano/Lite/Full 源码裁剪已完成软件验证，真实 Adapter、生产 AEAD Provider 和各 Profile 的目标板资源报告仍待接入。
 > 日期：2026-08-04  
 > 关联文档：[UCN 整体架构设计](UCN_整体架构设计.md)
 
@@ -30,6 +30,18 @@ UCN-Host      只有 Linux、地面站、ROS2 等外部主机使用
 | `UCN-Extended` | Coordinator、资源更充足的网关、少数主控 MCU。 | 服务发现、组播、时间同步、Q2 可靠传输、可控分片和诊断。 | Linux 特有 API、ROS2、图形化界面和无限大缓存。 |
 | `UCN-Host` | Linux、地面站、ROS2/AI 计算机。 | 将现有主机业务受控映射到 UCN，提供运维、日志和大数据能力。 | 作为 MCU 网络的必经路由、唯一身份中心或唯一 Coordinator。 |
 
+### 2.1 Core 内部的编译期 Feature Profile
+
+Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个节点上的编译档案**，两者不能混为一谈。
+
+| `UCN_PROFILE` | Core 能力 | 典型节点 | 自动 Mesh |
+| --- | --- | --- | --- |
+| `NANO` | Frame、Link、Adapter RX Queue、Endpoint、Q0/Q1、静态直连和静态 Route。 | 资源很小且拓扑预配置的传感器/执行器。 | 否 |
+| `LITE` | Nano + HELLO/准入、Neighbor/Heartbeat、多 Bearer、AODV-Lite/RERR、最小 Security Provider。 | 普通 MCU Mesh 节点与中继。 | 是 |
+| `FULL` | Lite + Candidate、显式 Path、Policy/Balance、Path Trace、Node Snapshot、Policy Diagnostic。 | 主控、复杂中继、诊断或多路径节点。 | 是 |
+
+`UCN_FEATURE_SERVICE` 独立控制节点内 Service Router/Bridge。Nano 使用独立 `ucn_node_nano.c`；Lite/Full 使用动态 Node；非 Full 不编译 Path/Policy 源文件，高级 API 由固定 Stub 返回 `UCN_ERR_CONFIG`。因此这是对象字段和源文件级裁剪，不是仅关闭运行时分支。最小帧上限分别为 Nano 33 B、Lite 50 B、Full 64 B；默认 Service 开启时最低为 64 B。详见 [S04 Feature Profile 与资源报告](UCN_S04_Feature_Profile与资源报告.md)。
+
 ## 3. UCN-Core：MCU 自组网最小闭环
 
 ### 3.1 Core 模块与当前状态
@@ -55,7 +67,7 @@ UCN-Host      只有 Linux、地面站、ROS2 等外部主机使用
 | 路由 | `ROUTE_REQ`、`ROUTE_REPLY`、`ROUTE_ERROR` | 已处理。 |
 | 健康 | `HEARTBEAT` | 已处理：一跳 8 B 请求/ACK 和邻居状态机；`LINK_STATE` 尚未定义为线协议消息。 |
 | 路径验证 | `PATH_PROBE`、`PATH_PROBE_ACK`、`PATH_ACTIVATE`、`PATH_ACTIVATE_ACK` | 已处理为 v4 控制面；Activate/ACK 载荷为 Candidate ID + Route Epoch，业务按 Epoch 查 Current/Previous。 |
-| Path 控制 | `PATH_INSTALL`、`PATH_REVOKE` | 已处理：固定 `{Path ID, Destination, Next Hop, Lease}` / `{Path ID, Destination}`，同时需要 Provider 和显式控制面授权；普通 Endpoint 尚未自动采用。 |
+| Path 控制 | `PATH_INSTALL`、`PATH_REVOKE` | 已处理：固定 `{Path ID, Destination, Next Hop, Lease}` / `{Path ID, Destination}`，依次需要 Provider、显式控制面授权和按 `(Source, Session)` 的固定管理预算；同源换 Bearer 不会重置预算。 |
 | 按需诊断 | `PATH_TRACE_REQ`、`PATH_TRACE_REPLY` | 已处理：`DIAGNOSTIC=0x04`、逐跳 Node ID、固定 Pending/Reverse 表和回调结果；只查当前 Cache，不触发 RREQ，也不锁定业务路径。 |
 | 按需诊断 | `NODE_SNAPSHOT_REQ`、`NODE_SNAPSHOT_REPLY` | 已处理：受限泛洪、短期 Reverse、随机短延迟 Reply、源端固定结果表与默认拒绝 ACL；不常驻保存全网节点或拓扑。 |
 | 按需诊断 | `POLICY_DIAGNOSTIC_REQ`、`POLICY_DIAGNOSTIC_REPLY` | 已处理：受授权单 Node 查询、三页 Summary 或一个固定 Policy/Path/Flow/quality 槽位、8 B 请求/32 B 回复、独立 Token 与 Pending/Reply 固定表；普通业务帧零额外字段。 |
@@ -63,7 +75,7 @@ UCN-Host      只有 Linux、地面站、ROS2 等外部主机使用
 
 Core 只需要单播、受限广播和有限多跳。组播、服务调用、文件传输和任意长度分片不是 Core 的前置条件。
 
-`ROUTE_REQ`/`ROUTE_REPLY` 的控制载荷携带累计 `route_cost` 与 hop 数；非 Candidate `ROUTE_REPLY` 还带 2 B Route Epoch。Link 未上报质量时使用保守未知 Cost（默认 1000）；因此 WiFi、BLE、LoRa、CAN、UART 的质量指标必须先由各自 Adapter 归一化，不能把 RSSI 等无线字段写入共同线协议。
+`ROUTE_REQ`/`ROUTE_REPLY` 的控制载荷携带累计 `route_cost` 与 hop 数；非 Candidate `ROUTE_REPLY` 还带 2 B Route Epoch。Link 未上报质量时使用保留 Unknown 哨兵 `UINT16_MAX`，Known Cost 累加最多饱和到 `UINT16_MAX-1`；因此 WiFi、BLE、LoRa、CAN、UART 的质量指标必须先由各自 Adapter 归一化，不能把 RSSI 等无线字段写入共同线协议。
 
 ### 3.3 Core 的资源纪律
 
@@ -83,6 +95,10 @@ UCN_MAX_CANDIDATE_ROUTES
 UCN_MAX_ENDPOINT_SECURITY_POLICIES
 UCN_PATH_TRACE_PENDING_DEPTH
 UCN_PATH_TRACE_REVERSE_DEPTH
+UCN_PATH_CONTROL_RX_SOURCE_DEPTH
+UCN_PATH_CONTROL_RX_TOKEN_BURST
+UCN_PATH_CONTROL_RX_TOKEN_REFILL_MS
+UCN_PATH_CONTROL_RX_SOURCE_IDLE_MS
 UCN_PATH_TRACE_TIMEOUT_MS
 UCN_NODE_SNAPSHOT_MAX_RESULTS
 UCN_NODE_SNAPSHOT_PENDING_DEPTH
@@ -95,9 +111,12 @@ UCN_POLICY_DIAGNOSTIC_REPLY_QUEUE_DEPTH
 UCN_POLICY_DIAGNOSTIC_TIMEOUT_MS
 UCN_POLICY_DIAGNOSTIC_TOKEN_REFILL_MS
 UCN_ADAPTER_RX_QUEUE_DEPTH
+UCN_MAX_STEP_INTERVAL_MS
 ```
 
 上述宏当前定义在公共头文件中，可由构建参数覆盖；`UCN_MAX_HOPS=16` 是当前固定协议上限。实际产品需按 MCU 的 RAM、Flash、Link MTU、节点数和安全算法测量后冻结。
+
+`UCN_MAX_STEP_INTERVAL_MS` 不是协议线字段，而是 Product Port 的调度 Profile。Core 将它与业务 Burst、最大 Neighbor、每 Neighbor Bearer 数换算成保守维护服务上界，并要求 Heartbeat 间隔加该上界严格早于 Suspect 门限。默认 10 ms 档案得到 800 ms；将 Step 放宽到 50 ms 会在当前默认资源档案下编译失败。运行时只用固定计数记录最大 Gap/违规，实际任务抢占和 Link `send()` WCET 仍需目标板测量。
 
 Core 禁止以下实现方式：
 
@@ -108,6 +127,8 @@ Core 禁止以下实现方式：
 - 把 Host 是否在线作为节点转发条件。
 
 任务间消息同样采用固定表/固定队列：一个 MCU 只维护一个 Node/邻居/路由实例；本机目标由后续 T25 Service/Task Adapter 直接投递，不生成 UCN 帧。它是产品 Port 层，不是额外的路由协议或 Node 身份；详见[节点内任务通信建议](UCN_节点内任务通信建议.md)。
+
+远端高风险 Q0 使用 `UCN_SERVICE_BRIDGE_MAX_VALIDATORS` 个固定 Validator 槽；可选防重放状态使用 `UCN_SERVICE_BRIDGE_REPLAY_DEPTH` 个固定槽。两者均由产品编译档案确定、无动态扩容，也不改变 v4 线格式或普通 Payload。Binding 要求强制 Validator 而产品未注册时，Bridge handler 安装失败关闭。
 
 ### 3.4 Core 在没有 Linux 时怎样运行
 

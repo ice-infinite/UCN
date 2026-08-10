@@ -129,6 +129,9 @@ nodes:
       - target: policy_path.handle_path_install_static
         type: direct
         reason: 已授权时安装逐跳 Path 转发表。
+      - target: policy_path.handle_path_revoke_static
+        type: direct
+        reason: 已授权且管理源预算允许时撤销逐跳 Path 转发表。
       - target: diagnostic.control_handlers
         type: direct
         reason: 分派 Trace、Snapshot、Policy Diagnostic 控制帧。
@@ -186,7 +189,7 @@ nodes:
     type: scheduler
     file: src/ucn_node.c
     layer: core
-    role: 唯一 Protocol Task 的有界维护与发送调度入口。
+    role: 唯一 Protocol Task 的有界维护与发送调度入口；同时观测相邻 Step 的实际时间间隔。
     called_by:
       - external.protocol_task_iteration
       - node_runtime.protocol_task_mainloop
@@ -221,6 +224,10 @@ nodes:
     notes:
       - 连续 `UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE`（默认 4）个业务发送后，真正到期的必要维护可取得一个槽位；Q0 仍 FIFO，Snapshot/Policy Diagnostic 不抢占业务。
       - 调度顺序为 Q0 → Q1 / Pending Q1；必要维护在业务空闲时立即检查，或在到期且达到连续业务上限时插入；诊断始终在上述工作后。
+      - 显式 `RETRY_ON_BACKPRESSURE` 的 Q0 只在 `NO_SPACE` 时保留原槽；等待下一次尝试期间不让 Q1 越序，但到期的必要维护仍可运行。
+      - 第一次 Step 只建立时间基线；之后以回绕安全的无符号差值更新 `last_step_ms`、`max_step_gap_ms`、`step_interval_violations`。
+      - Heartbeat 与 Bearer/Path Probe 成功发送时，同时更新相对到期时刻的最大服务延迟统计，供目标板日志观测。
+      - 产品 `UCN_MAX_STEP_INTERVAL_MS` 与 Burst/Neighbor/Bearer 上限共同形成保守维护服务上界；侵入 Suspect 窗口的 Profile 在编译期拒绝。
       - 每次只消费一个普通 TX 项；产品循环需持续调用，不能在业务 Task 中替代它。
 
   - id: node_runtime.send_due_essential_maintenance_static
@@ -257,9 +264,9 @@ nodes:
       - target: adapter.ucn_adapter_rx_pump
         type: direct
         reason: 将驱动 RX 固定副本交给 Node。
-      - target: service.ucn_service_protocol_bridge_step
+      - target: service.ucn_service_protocol_bridge_step_at
         type: direct
-        reason: 将业务 Task 的 Remote TX 有界送入 Core。
+        reason: 用本轮同一 now_ms 将 Remote TX 或固定 Pending Q0 有界送入 Core。
       - target: node_runtime.ucn_node_step
         type: direct
         reason: 执行唯一 Node 调度。

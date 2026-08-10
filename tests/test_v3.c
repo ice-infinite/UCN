@@ -4,6 +4,11 @@
 #include "ucn/ucn_frame.h"
 #include "ucn/ucn_node.h"
 
+/* The historical filename is retained so old failure logs remain searchable.
+ * This suite exercises the current v4 wire/security behavior and the explicit
+ * rejection of older protocol versions; "v3" prefixes below are test-local
+ * fixture names, not production API or current-version claims. */
+
 typedef struct v3_provider_state {
     ucn_sequence_t next_sequence;
     ucn_session_id_t session_id;
@@ -418,7 +423,7 @@ static int v3_test_q1_wait_bounds(void)
     return 0;
 }
 
-int test_v3(void)
+int test_protocol_version(void)
 {
     int result = 0;
 

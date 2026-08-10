@@ -24,6 +24,8 @@ config PRODUCT_UCN_RX_DEPTH
 ## 2. 静态线程和对象
 
 ```c
+#include "ucn/ucn_node_storage.h"
+
 static rt_thread_t g_protocol_thread;
 static rt_uint8_t g_protocol_stack[PRODUCT_UCN_PROTOCOL_STACK_SIZE];
 static struct rt_mutex g_router_lock;
@@ -112,3 +114,7 @@ Adapter 将 `rt_device_read()`、UART DMA、CAN 接收或无线模块回调转�
 2. 以两节点 Q1 Endpoint 验证端到端收发，再分别测本机 Fast Path 和远端 Q0。
 3. 人为使 DMA ring、Adapter RX、Router Q0/Q1、远端 TX 和事件通知满，确认只有有界丢弃/覆盖与统计，无线程阻塞/死锁。
 4. 记录 `rt_thread` 栈余量、CPU、堆状态（即使 UCN 不申请 Heap）、Link 错误与失联时执行器本地安全行为。
+
+## 7. S16 Protocol Thread 时限
+
+产品配置需冻结 `UCN_MAX_STEP_INTERVAL_MS`、线程优先级、最大 IPC 等待 tick、Adapter Pump/Bridge 预算和 Link `send()` WCET。Protocol Thread 应采用小于最大 Step 的周期/超时唤醒，不能永久挂在信号量上。持续负载时读取 `max_step_gap_ms`、`step_interval_violations` 并校验 Heartbeat/Probe 仍在产品上界内；当前尚无 RT-Thread 实机数据。

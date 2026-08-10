@@ -1,7 +1,7 @@
 # UCN 整体架构设计：MCU 自组网优先
 
-> 状态：**UCN v4 C99 Core 源码快照（2026-08-09）**；C99 虚拟拓扑、两块 ESP32-S3 的独立 ESP-NOW+UART 双 Bearer 准入/恢复控制实验已验证；生产密码库、物理拔线时延和多跳实机仍待验证。
-> 日期：2026-08-09
+> 状态：**UCN v4 C99 Core 源码快照（2026-08-10）**；C99 虚拟拓扑、Nano/Lite/Full 软件裁剪和两块 ESP32-S3 的独立 ESP-NOW+UART 双 Bearer 准入/恢复控制实验已验证；各 Profile 的目标板资源、生产密码库、物理拔线时延和多跳实机仍待验证。
+> 日期：2026-08-10
 > 目标：以 MCU 为主体完成安全自组网；Linux 仅作为兼容接入端；协议小而可裁剪；资源占用由目标硬件配置决定。
 
 ## 1. 架构结论
@@ -20,6 +20,8 @@ Linux、ROS2、PX4/MAVLink、地面站与 AI 系统可以通过 `UCN-Host` 接�
 | 无 Linux 也能自组网 | `UCN-Core` 在 MCU 上独立完成安全、邻居、AODV-Lite 路由和转发。 |
 | 足够简洁 | Core 只保留自组网闭环；服务目录、分片、时间同步、大数据和桥接全部是可选模块。 |
 | MCU 资源可控 | 无堆内存、无无限表项、无隐藏后台线程；当前由公共头文件中的编译期宏或构建参数配置，目标板专用 `ucn_config.h` 尚未建立。 |
+
+四个方向不是要求所有 MCU 都编译完整功能。S04 已把网络能力冻结为真正的编译期 Profile：`Nano` 只保留静态直连/静态 Route，`Lite` 增加 HELLO、Neighbor、Heartbeat、AODV-Lite 和最小 Security Provider，`Full` 再增加 Candidate、Path、Policy/Balance 和按需诊断。`UCN_FEATURE_SERVICE` 与三档正交；关闭的状态字段和源文件不会进入目标，而不是仅在运行时禁用。完整能力表、最小 MTU 和 Host 裁剪证据见 [S04 Feature Profile 与资源报告](UCN_S04_Feature_Profile与资源报告.md)。
 
 当系统需要接入 ROS2、PX4/MAVLink、地面站或 AI 时，采用“上层应用 → 受控 Bridge → UCN-Host → MCU Mesh”的关系；详细的系统级边界见 [UCN × ROS2 协同整体架构](UCN_ROS2协同整体架构.md)。
 
@@ -40,7 +42,7 @@ UCN 负责的是“不同 MCU 节点如何安全地组成一个网络并通信�
 flowchart TB
     subgraph MCU_NET["MCU 自组网：协议默认运行位置"]
         APP["飞控 / 电机 / 传感器任务"]
-    SERVICE["Service Router + Protocol Bridge<br/>固定 Endpoint、本机 Inbox/Remote TX（T25.2 已实现）"]
+    SERVICE["Service Router + Protocol Bridge<br/>固定 Inbox/Remote TX + 远端 Q0 Validator"]
         API["当前 C API<br/>ucn_node_* / ucn_adapter_*"]
         subgraph CORE["UCN-Core"]
             PKT["Packet<br/>短帧、地址、序号、TTL"]
@@ -63,7 +65,9 @@ flowchart TB
 
 `UCN-Core` 不依赖 `Extended` 或 `Host`。因此图中的 Host 不存在时，MCU 网络仍是完整网络。
 
-## 4. UCN-Core：所有 MCU 必须具备的最小闭环
+## 4. UCN-Core：按节点角色裁剪的 MCU 闭环
+
+`UCN-Core` 表示不依赖 Linux 的协议实现边界，不再表示每个节点必须携带所有自组网能力。参与自动 Mesh 的节点至少选择 Lite；只处在预配置静态网络中的小型 Sensor/Actuator 可选择 Nano；需要候选换路、显式 Path、负载均衡或管理诊断的节点选择 Full。不同 Profile 是否允许混网必须由产品冻结共同线格式和能力边界，不能假设 Nano 会处理 Lite/Full 的动态控制面。
 
 ### 4.1 模块职责与当前实现状态
 
@@ -74,7 +78,7 @@ flowchart TB
 | Session & Replay | 可注入 Provider 的会话 ID、发送序号持久化、TX/RX 授权、固定 `seal/open`、30 B 不可变 AAD（Path 帧含 Path ID）、明文/受保护策略和入站去重缓存。 | 生产 AEAD、密钥轮换、完整重放窗口与产品 ACL 表。 |
 | Route / Forwarding | 固定 Active/Candidate 表、受限 AODV-Lite、RREQ/RREP/RERR、`PATH_PROBE/ACK`、携带 Candidate ID + Epoch 的 `PATH_ACTIVATE/ACK`、TTL、断链清表、保守 Link Cost；业务按 `(destination, route_epoch)` 区分 Current/Previous，默认 1 s grace。 | 自动业务重发、全网拓扑。 |
 | Core QoS | Q0/Q1 固定队列、deadline、`best_effort`、`latest_value`；Endpoint Q1 首包固定 4 槽/1 s 等待并合并同 `(destination, Endpoint)`。 | Q2/Q3、可靠确认、分片。 |
-| Node 内任务通信 | 当前 Core 命中 Endpoint 后仍在协议任务上下文调用固定回调；Core 外 T25.2 已有固定 Router、本机 Inbox、Remote TX、Bridge 与统计。 | T25.3 Endpoint→FreeRTOS Inbox/任务通知、产品任务生命周期与板级验收；详见[节点内任务通信建议](UCN_节点内任务通信建议.md)。 |
+| Node 内任务通信 | Core 外已有固定 Router、本机 Inbox、Remote TX、Bridge、FreeRTOS 静态事件通知；高风险远端 Q0 可在入队前强制产品 Validator，并使用固定 Replay 表。 | 产品执行器、真实 Task 时延/失联安全与板级验收；详见[节点内任务通信建议](UCN_节点内任务通信建议.md)。 |
 | Health | 8 B 一跳 `HEARTBEAT` 请求/ACK、业务帧刷新存活、`ADMITTED → SUSPECT → REMOVED`、路由/Link 槽回收。 | `LINK_STATE` 线协议消息、对应用的统一失联事件、介质专用 Profile 实机标定。 |
 
 ### 4.2 报文类型与处理状态
@@ -92,6 +96,8 @@ Core 只需支持：单播、受限广播、有限跳转发和小尺寸应用负
 ### 4.2.1 一个 Node 内的多个任务（T25.3 ESP32 Port 已构建；实机待验收）
 
 一个 MCU 对网络只暴露一个 Node ID；IMU、控制、舵机、电源等任务以静态 Endpoint/Service 挂载在该 Node 内。T25.3 已把 Core 外 Service Router 与独立 Protocol Bridge 接入 ESP32：目标为本机时直接投递固定 Router Inbox，目标为远端时只写固定 Remote TX Queue；只有 Arduino `loopTask` 有界地将其交给 Core 寻路和发送。FreeRTOS 静态 Queue 只传 1 B Endpoint 唤醒事件，业务 Payload 不会被二次排队。因此本机消息不产生帧、空口、寻路或额外心跳。
+
+高风险远端 Q0 Binding 可强制要求产品 Validator：Core 完成安全/解密后，Bridge 在 Router 上锁与复制前传入完整 Frame、Source、Session、Endpoint、Payload 和当前 Node 时间；拒绝项不会进入 Inbox。可选 Replay 表使用固定容量，Session 切换必须由认证产品逻辑显式轮换。普通 Q1 和本机 Fast Path不承担这项开销，执行 Task 始终保留第二次产品安全检查。
 
 `ucn_node_t` 仍由单一协议任务拥有。Endpoint 回调只应完成无阻塞固定副本投递和任务通知，不能在协议任务中执行耗时控制、PWM、FOC 或传感器业务。当前 Port 已编译，但真实 Task 高水位、Q0/Q1 和时延仍未测量；详细队列、QoS、Payload 所有权和测试门禁见[节点内任务通信建议](UCN_节点内任务通信建议.md)。
 
@@ -173,7 +179,7 @@ UCN 没有全网总发送队列，也没有要求一条路径传完后另一条�
 
 当前 Active/Candidate 解决的是“同一目标 Node 的自动换路”，不是“不同业务固定走不同路径”或“多路径同时分担”。T22.1 已在 `ucn_node_t` 中加入固定 Policy、当地 Path、Q1 Flow 和 Link 质量快照表；默认上限为 8/8/8/4，均可按 RAM Profile 编译期调整。Policy 按 `(destination, Endpoint[, traffic_class])` 精确或 traffic-class 通配匹配；未配置业务仍保持原有 `AUTO_BEST`。它已提供 `ucn_node_set_route_policy()`、`ucn_node_set_policy_path()`、`ucn_node_bind_q1_flow()` 和质量/统计查询 API。
 
-T22.2 已引入真正的线上 Path ID，但它与 T22.1 的本地 `local_path_id` 仍不是同一个概念。Path 业务帧使用 40 B 头，表项以 `(源 Node、源 Session、Path ID、目标)` 识别，并在每一跳保存固定的“下一跳/egress 或终端”关系。默认每节点最多 8 项，租约到期自动回收；中继只按表转发，端到端密文只由目标解密。远程安装、更新、撤销既要通过 Security Provider，也必须通过显式 Path 控制面授权回调；没有该回调默认拒绝。Path ID 纳入端到端保护 AAD，Path 范围 RERR 仅回收故障 P1，不会误清 P2。
+T22.2 已引入真正的线上 Path ID，但它与 T22.1 的本地 `local_path_id` 仍不是同一个概念。Path 业务帧使用 40 B 头，表项以 `(源 Node、源 Session、Path ID、目标)` 识别，并在每一跳保存固定的“下一跳/egress 或终端”关系。默认每节点最多 8 项，租约到期自动回收；中继只按表转发，端到端密文只由目标解密。远程安装、更新、撤销依次通过 Security Provider、显式 Path 控制面授权回调和按认证 `(源 Node、源 Session)` 的固定管理预算；没有授权回调默认拒绝，同源改变 Bearer 不会刷新 Token。Path ID 纳入端到端保护 AAD，Path 范围 RERR 仅回收故障 P1，不会误清 P2。
 
 T22.3 将 Policy 的 Primary/Backup 本地句柄绑定到已经验证的线上 Path ID，并接入 `ucn_node_send_endpoint()`。`PINNED_STRICT` 只发送 Primary，任何失败都直接返回；`PINNED_FAILOVER` 仅在 Link Down 或 Path 不存在时标记该本地 Path Down 并尝试 Backup，Cost、队列抖动、背压和 Security 错误均不会触发切换。Primary/Backup 都不可用时，只有配置显式允许的 Q1 才会进入既有 RREQ/等待槽；这代表该次业务已经允许退回普通 Route，Q0 永不自动寻路。
 
@@ -182,7 +188,7 @@ T22.5 进一步把两层选择接起来：Path 表保留安装时的 egress Link
 后续策略执行边界如下：
 
 - `PINNED_FAILOVER` 已使业务正常固定在指定 Primary Path；只有 Link Down、Path RERR/不存在等硬故障才切到 Backup 或按策略寻路，Cost 的短时优劣不触发切换。
-- `AUTO_BALANCE` 已实现但默认不配置：只接受精确 Q1 Policy，Primary/可选 Backup 构成最多两条已验证 Path 成员。每个 `(destination, Endpoint, Q1)` 在固定 Flow 表中默认租约 2 s；首次或租约过期时按平滑 Cost、RTT、失败率、队列压力和已有 Flow 数选择成员，同一 Flow 租约内不逐帧换路。
+- `AUTO_BALANCE` 已实现但默认不配置：只接受精确 Q1 Policy，Primary/可选 Backup 构成最多两条已验证 Path 成员。每个 `(destination, Endpoint, Q1)` 在固定 Flow 表中默认租约 2 s；首次或租约过期时按 Known 基础 Cost ×（已有 Flow 数 + 1）选择成员，Unknown 不优于 Known。RTT/失败率不进入裸评分，持续 Adapter Queue Pressure 只独立触发拥塞重绑；同一 Flow 租约内不逐帧换路。
 - Path Down 会使受影响 Flow 只重绑一次到另一健康成员；默认连续 3 个 500 ms 队列压力样本达到 800‰ 才视为持续拥塞并重绑。Q0、自动 Discovery、帧复制和带宽聚合均不属于该能力；实际门限可按 MCU Profile 覆写，尚未完成实机标定。
 - 真正的端到端指定路径需要短小 `Path ID` 和受认证的路径安装/撤销控制面，中继仅按 Path ID 转发。现有 `route_epoch` 只用于 Current/Previous 切换，不能充当 Path ID。
 
@@ -220,7 +226,7 @@ T22.5 进一步把两层选择接起来：Path 表保留安装时的 egress Link
 
 ### 4.5 Link Cost：跨介质质量选路
 
-Core 不直接读取 WiFi RSSI、BLE RSSI、LoRa SNR 或 CAN 专有状态。每个 Link 可选上报一个统一的非零 `route_cost`，值越小表示越适合参与路由；未上报有效指标时 v4 回退为保守 `UCN_UNKNOWN_LINK_ROUTE_COST=1000`，不会压过已测量的低 Cost 链路。
+Core 不直接读取 WiFi RSSI、BLE RSSI、LoRa SNR 或 CAN 专有状态。每个 Link 可选上报一个统一的非零 `route_cost`，值越小表示越适合参与路由；未上报有效指标时 v4 使用保留哨兵 `UCN_UNKNOWN_LINK_ROUTE_COST=UINT16_MAX`。任何 Known Cost 都优于 Unknown，Known 累加饱和在 `UINT16_MAX-1`，不会撞入 Unknown。
 
 | Link 类型 | Adapter 可映射为 `route_cost` 的输入 | 不能直接写入 Core 的原因 |
 | --- | --- | --- |
@@ -307,7 +313,7 @@ ucn_node_step(&node, now_ms);
 
 ```text
 UCN/
-├── include/ucn/       types、frame、link、neighbor、security、adapter、node API
+├── include/ucn/       公共 API；Node owner 另选 node_storage 静态布局
 ├── src/               ucn_core.c、ucn_frame.c、ucn_adapter.c、ucn_node.c
 ├── tests/             单元测试、虚拟 Link、路由、Adapter、集成模拟
 ├── docs/              架构、任务表、操作记录、Adapter 契约
@@ -315,6 +321,8 @@ UCN/
 ```
 
 当前源码以小型平铺目录组织；未创建 `host/`、`extended/` 或具体厂商 `transport/` 目录。后续新增真实 Adapter 时可按介质拆分目录，但不能使 Host、ROS2 或 Linux 反向成为 Core 的编译依赖。
+
+`ucn_node.h` 只公开不完整 `ucn_node_t`、配置/结果/统计和函数声明。只有唯一 Protocol Task 的所有者、Core 实现与明确白盒测试包含 `ucn_node_storage.h` 取得完整固定布局。这个拆分不引入堆分配：Node 仍可静态实例化，但业务 Task 和 Adapter 不再依赖 Route、Queue、Seen 等内部字段位置。
 
 ## 8. RAM 与 Flash：按目标硬件配置，不写死一个数字
 
@@ -350,9 +358,12 @@ UCN_POLICY_DIAGNOSTIC_REPLY_QUEUE_DEPTH // 目标按需策略回复槽
 UCN_POLICY_DIAGNOSTIC_TOKEN_REFILL_MS // 独立诊断限频
 UCN_ROUTE_EPOCH_GRACE_MS // 旧 Epoch 保留窗口
 UCN_ADAPTER_RX_QUEUE_DEPTH // 公共 Adapter 收包队列深度
+UCN_MAX_STEP_INTERVAL_MS // Protocol Task 两次 ucn_node_step() 的产品最大允许间隔
 ```
 
 `UCN_MAX_HOPS=16` 是当前固定协议上限，不是当前可覆盖的资源配置项。
+
+Protocol Task 同样是资源边界。Core 使用以下保守式把“每若干业务帧让出维护槽”换算成时间上界：`(UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE + 1) × UCN_MAX_STEP_INTERVAL_MS × UCN_MAX_NEIGHBORS × UCN_MAX_BEARERS_PER_NEIGHBOR`。默认值为 800 ms，叠加 1 s Heartbeat 后仍早于 3 s Suspect；不安全的组合在编译期失败关闭。Node 只保存三个固定统计字段观察实际 Step，不新增动态内存、线字段或网络流量。产品 Port 还必须冻结任务优先级、最大阻塞、Adapter/Bridge 预算并实测 Link `send()` WCET。
 
 Core RAM 的构成应可计算而非猜测：
 

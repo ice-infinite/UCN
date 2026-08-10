@@ -16,6 +16,10 @@
 ## 2. 按静态方式建立对象
 
 ```cpp
+extern "C" {
+#include "ucn/ucn_node_storage.h"
+}
+
 static ucn_node_t g_node{};
 static ucn_service_router_t g_router{};
 static ucn_service_protocol_bridge_t g_bridge{};
@@ -74,9 +78,11 @@ static void ucn_protocol_task(void *argument)
         uint8_t bridged = 0U;
 
         product_drain_driver_rx(); /* 完整帧进入 Adapter RX Queue。 */
+        const uint32_t now_ms = product_monotonic_ms();
         (void)ucn_adapter_rx_pump(&g_rx_queue, &g_node, 4U, &pumped);
-        (void)ucn_service_protocol_bridge_step(&g_bridge, 2U, &bridged);
-        (void)ucn_node_step(&g_node, product_monotonic_ms());
+        (void)ucn_service_protocol_bridge_step_at(&g_bridge, now_ms,
+                                                   2U, &bridged);
+        (void)ucn_node_step(&g_node, now_ms);
         vTaskDelay(pdMS_TO_TICKS(1U));
     }
 }
@@ -113,11 +119,18 @@ static ucn_result_t send_servo(ucn_node_id_t destination,
 
 若目标是本 Node，`send()` 直接进入 Router Inbox；若是远端 Node，它进入 Remote TX，下一次 Bridge Step 才交给 Core。`UCN_OK` 只代表本机 Router 接受，不是远端执行确认。
 
+如产品需要处理 Adapter TX Queue 的短暂 `UCN_ERR_NO_SPACE`，可在初始化时调用 `ucn_service_protocol_bridge_set_q0_backpressure_policy()`，为 Bridge 启用一个固定 Pending Q0 槽。它只对 Q0、只在固定次数/间隔/超时内重试；默认关闭，Q1 仍是 Latest Value。可用 `ucn_service_protocol_bridge_set_outbound_observer()` 接收一次最终本机提交结果，但 `UCN_OK` 仍不代表远端已入 Inbox 或已执行。完整示例和语义见 [UCN 使用与调用手册](../UCN_使用与调用手册.md#75-可选-q0-本机背压重试)。
+
 ## 6. 从 ESP32 参考复制时必须改的部分
 
 - 将 `UCN_TEST_SERVICE_*` 宏替换为产品 Profile 宏，按实测栈、事件 Queue 和 Bridge 预算配置。
 - 将 ESP32 `portMUX_TYPE` 替换为目标芯片可用于短临界区的机制；不能在 ISR 使用会阻塞的 mutex。
 - 保留“Router Inbox 是 Payload 唯一副本”与“Bridge 只由 Protocol Task 调用”。
+- Bridge 和 Node Step 使用同一个单调 `now_ms`；若启用 Q0 背压策略，必须根据产品控制周期设置有限 Retry/Interval/Timeout，不能照抄示例后跳过实测。
 - 监控 `UcnServiceFreeRtosPortStats`、Router、Bridge、Adapter 和 Node 统计；还要用目标平台工具测任务 High Water Mark、Heap 和 CPU 占用。
 
 先在两节点以 Q1 小包验证，再测本机/远端 Q0、事件队列满、物理断链与执行器本地超时安全。当前 ESP32 参考的具体实机结论不能自动外推到其他 FreeRTOS 板子。
+
+## 7. S16 Protocol Task 时限
+
+ESP32 参考端把 Arduino `loopTask` 作为唯一 Protocol Task，并冻结最低优先级 1、最大 Block 1 ms、Wi-Fi/UART Pump 各 4 帧、Bridge 2 条、`UCN_MAX_STEP_INTERVAL_MS=10`。移植时必须按目标板重新测量这些值和 Link `send()` WCET；启动日志与周期统计应包含 `max_step_gap_ms`、`step_interval_violations`。不要把业务 Task 的 50 ms Queue Wait 复制给 Protocol Task。

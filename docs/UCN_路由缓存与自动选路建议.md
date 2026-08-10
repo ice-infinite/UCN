@@ -21,6 +21,7 @@
 | --- | --- |
 | 路径发现 | 应用显式调用 `ucn_node_discover_route()`；`ucn_node_send()` 不会自动发现或缓存等待寻路的业务帧。 |
 | 路径选择 | RREQ 从 `cost=0` 开始，逐 Link 累加 `route_cost`；同一 RREQ 的较低 Cost 副本可替换较高 Cost 副本。 |
+| RREP 度量 | 目标从 `cost=0/hop=0` 回包；每个返回节点按 ingress 对应的目标方向 Link 累加，故缓存字段表示“当前节点到目标”的剩余 Cost/Hop，而不是把源端总 Cost 复制给所有中继。 |
 | 直连多 Link | 每次发送比较同一 Peer 的直接 Link Cost，选较小者。 |
 | 多跳缓存 | 每个目标只保存一个 `destination → egress_link` 动态路由，默认 30 秒到期。 |
 | 断链 | 发送发现 `Link Down` 时立即清除相关动态路由，并向上游发送 `ROUTE_ERROR`。 |
@@ -51,7 +52,7 @@
 
 当前 C99 Core 使用固定 `ucn_candidate_route_t` 表保存 `(destination, candidate_id) → egress_link`，RREQ/RREP 的末字节标识 Candidate，`PATH_PROBE/ACK` 载荷为 12 B，`PATH_ACTIVATE/ACK` 载荷为 **6 B**（Candidate ID + Route Epoch）。后台仅在路由已使用、距 30 s 验证期不足 6 s、距上次刷新至少 5 s 时启动一次刷新；候选必须比 Active 至少低 20% Cost，并收到 3 个 ACK 才激活。
 
-已验证“候选失败不覆盖 Active、Q0 先于 Probe、成功后经中继激活新 Active、动态业务携带 Epoch 且新旧路径可在 grace 内区分”。v4 默认将 Current/Previous 保留窗口设为 1 s，未知 Cost 为保守 1000，RREQ/Probe/Activate/Heartbeat 使用固定源端 Token；仍未实现 Cost 抖动窗口和实机标定，因此不能称为绝对无丢包切换。
+已验证“候选失败不覆盖 Active、Q0 先于 Probe、成功后经中继激活新 Active、动态业务携带 Epoch 且新旧路径可在 grace 内区分”。v4 默认将 Current/Previous 保留窗口设为 1 s，Unknown Cost 使用 `UINT16_MAX` 保留哨兵且不优于 Known，RREQ/Probe/Activate/Heartbeat 使用固定源端 Token；仍未实现 Cost 抖动窗口和实机标定，因此不能称为绝对无丢包切换。
 
 ## 4. 建议的路由状态模型
 
@@ -107,6 +108,8 @@
 这里的“测试数据”必须是 Core 控制面的 `PATH_PROBE/PATH_PROBE_ACK`，而不是重复发送真实电机命令、参数写入或普通业务包。探测帧应包含 `candidate_id`、探测序号、时间戳/nonce 和目的地身份校验；目标只回 ACK，不交给业务回调，避免副作用与重复执行。
 
 候选路径使用 `candidate_id`，普通动态业务使用 `route_epoch`。v4 以 `ROUTE_EXTENSION=0x01` 选择 36 B 头：中继按 `(destination, route_epoch)` 选 Current 或 Previous 出口，Previous 到期即释放；RREP 也携带初始 Epoch，使首次动态路径不依赖“无标识”的业务帧。v3 帧会被显式拒绝，不能静默混用。
+
+无环检查也必须按这条实际转发规则执行：从源端活动 Route 的 Epoch 出发，后续节点只能使用同 Epoch 的 Current 或未过期 Previous；直接邻居终止路径。不能把不同 Epoch 的缓存项简单拼成一条链后误判为转发环。
 
 “无缝”在协议层的含义应是：旧路径在候选验证期不中断，新帧在切换点走新路径。已经提交给旧 Link 驱动的帧不会迁移，仍可能出现少量乱序或单帧丢失；Q1 接收方必须依据业务序号/时间戳丢弃过期值，Q2 则依靠 ACK 与去重保证一次执行。
 

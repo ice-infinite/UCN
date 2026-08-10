@@ -40,14 +40,16 @@ static bool ucn_service_binding_is_valid(const ucn_service_binding_t *binding)
         !ucn_service_id_is_valid(binding->owner_service_id) ||
         binding->max_payload_length == 0U ||
         binding->max_payload_length > UCN_SERVICE_MAX_PAYLOAD_BYTES ||
-        binding->allowed_local_source_mask == 0U) {
+        binding->allowed_local_source_mask == 0U ||
+        (binding->require_remote_q0_validator && !binding->accept_remote)) {
         return false;
     }
     if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q0_FIFO) {
         return binding->allowed_traffic_mask == q0_mask;
     }
     if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q1_LATEST) {
-        return binding->allowed_traffic_mask == q1_mask;
+        return binding->allowed_traffic_mask == q1_mask &&
+               !binding->require_remote_q0_validator;
     }
     return false;
 }
@@ -460,6 +462,18 @@ const ucn_service_stats_t *ucn_service_get_stats(const ucn_service_router_t *rou
     return router == NULL ? NULL : &router->stats;
 }
 
+ucn_service_async_stage_t ucn_service_acceptance_stage(
+    ucn_service_acceptance_t acceptance)
+{
+    if (acceptance == UCN_SERVICE_ACCEPTANCE_LOCAL_DELIVERED) {
+        return UCN_SERVICE_STAGE_LOCAL_INBOXED;
+    }
+    if (acceptance == UCN_SERVICE_ACCEPTANCE_REMOTE_ENQUEUED) {
+        return UCN_SERVICE_STAGE_REMOTE_ROUTER_QUEUED;
+    }
+    return UCN_SERVICE_STAGE_NONE;
+}
+
 ucn_result_t ucn_service_command_guard_encode(
     const ucn_service_command_guard_t *guard,
     uint8_t output[UCN_SERVICE_COMMAND_GUARD_BYTES])
@@ -528,4 +542,71 @@ ucn_result_t ucn_service_command_guard_validate(
         return UCN_ERR_TTL;
     }
     return UCN_OK;
+}
+
+static bool ucn_service_result_header_is_valid(
+    const ucn_service_result_header_t *header)
+{
+    if (header == NULL || header->command_id == 0U) {
+        return false;
+    }
+    if (header->stage == UCN_SERVICE_STAGE_REMOTE_INBOXED) {
+        return header->status == UCN_SERVICE_RESULT_ACCEPTED;
+    }
+    if (header->stage != UCN_SERVICE_STAGE_REMOTE_EXECUTED) {
+        return false;
+    }
+    return header->status >= UCN_SERVICE_RESULT_SUCCEEDED &&
+           header->status <= UCN_SERVICE_RESULT_EXPIRED;
+}
+
+ucn_result_t ucn_service_result_header_encode(
+    const ucn_service_result_header_t *header,
+    uint8_t output[UCN_SERVICE_RESULT_HEADER_BYTES])
+{
+    if (!ucn_service_result_header_is_valid(header) || output == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    output[0] = (uint8_t)(header->command_id >> 24U);
+    output[1] = (uint8_t)(header->command_id >> 16U);
+    output[2] = (uint8_t)(header->command_id >> 8U);
+    output[3] = (uint8_t)header->command_id;
+    output[4] = (uint8_t)header->stage;
+    output[5] = (uint8_t)header->status;
+    output[6] = (uint8_t)(header->detail_code >> 8U);
+    output[7] = (uint8_t)header->detail_code;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_service_result_header_decode(
+    const uint8_t *payload,
+    size_t payload_length,
+    ucn_service_result_header_t *header)
+{
+    if (payload == NULL || header == NULL ||
+        payload_length < UCN_SERVICE_RESULT_HEADER_BYTES) {
+        return UCN_ERR_ARGUMENT;
+    }
+    header->command_id = ((uint32_t)payload[0] << 24U) |
+                         ((uint32_t)payload[1] << 16U) |
+                         ((uint32_t)payload[2] << 8U) | (uint32_t)payload[3];
+    header->stage = (ucn_service_async_stage_t)payload[4];
+    header->status = (ucn_service_result_status_t)payload[5];
+    header->detail_code = (uint16_t)(((uint16_t)payload[6] << 8U) |
+                                     (uint16_t)payload[7]);
+    return ucn_service_result_header_is_valid(header) ? UCN_OK : UCN_ERR_MALFORMED;
+}
+
+bool ucn_service_result_matches_command(
+    const ucn_service_command_guard_t *command,
+    ucn_endpoint_t received_endpoint,
+    const ucn_service_result_header_t *result)
+{
+    return command != NULL && result != NULL &&
+           command->command_id != 0U &&
+           command->valid_for_ms != 0U && command->flags == 0U &&
+           ucn_endpoint_is_static(command->result_endpoint) &&
+           received_endpoint == command->result_endpoint &&
+           result->command_id == command->command_id &&
+           ucn_service_result_header_is_valid(result);
 }

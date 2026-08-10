@@ -370,6 +370,9 @@ int test_neighbor_quality(void)
                 (uint32_t)UCN_BEARER_QUALITY_PROBE_REQUIRED_ACKS);
     TEST_ASSERT(a.stats.bearer_quality_probe_acks_received ==
                 UCN_BEARER_QUALITY_PROBE_REQUIRED_ACKS);
+    TEST_ASSERT(a.stats.max_probe_service_delay_ms > 0U &&
+                a.stats.max_probe_service_delay_ms <=
+                UCN_MAINTENANCE_SERVICE_BOUND_MS);
     TEST_ASSERT(a.stats.bearer_quality_switches == 1U);
     return 0;
 }

@@ -131,11 +131,14 @@ ucn_service_protocol_bridge_init(&g_bridge, &g_service_router, &g_node);
 ucn_service_protocol_bridge_install_endpoint_handlers(&g_bridge);
 
 /* Protocol Task 主循环：每轮上限由产品 Profile 冻结。 */
-ucn_service_protocol_bridge_step(&g_bridge, APP_SERVICE_TX_BUDGET, NULL);
+ucn_service_protocol_bridge_step_at(&g_bridge, now_ms,
+                                    APP_SERVICE_TX_BUDGET, NULL);
 ucn_node_step(&g_node, now_ms);
 ```
 
-Bridge 会拒绝覆盖其他组件已占用的 Endpoint handler；每次最多取出 `max_requests` 个请求，且继承 Router 的 Q0 优先。被 Core 拒绝的已出队请求不在 Bridge 隐式重试：Q0 的无路由/Link Down 是显式失败，Q1 的受限寻路与 Pending 仍完全由 Core 决定。Endpoint handler 的原有类型不返回错误，因此目标 Router 的未就绪/队列满会计入 Bridge/Router 本机统计，而不会伪造成对源端的业务 ACK；可靠确认留给后续独立能力。
+S16 后，这个循环还必须满足产品时间契约：`UCN_MAX_STEP_INTERVAL_MS` 默认 10 ms，Adapter Pump 和 Bridge 都只能处理固定预算，任何 Sleep/Queue Wait/Link `send()` 的最坏阻塞都必须纳入一次迭代。Core 按 `(BUSINESS_BURST + 1) × MAX_STEP × MAX_NEIGHBORS × MAX_BEARERS` 给出保守维护上界，并在其与 Heartbeat 叠加后侵入 Suspect 门限时编译失败关闭。Port 应记录 Step 最大 Gap/违规与 Heartbeat/Probe 最大服务延迟；真实任务优先级、抢占和 Link WCET 必须逐板测量。
+
+Bridge 会拒绝覆盖其他组件已占用的 Endpoint handler；每次最多取出 `max_requests` 个请求，且继承 Router 的 Q0 优先。默认 Policy 下，被 Core 拒绝的已出队请求不重试；S15 允许产品显式配置一个固定 Pending Q0，只对本机 Adapter 队列的 `UCN_ERR_NO_SPACE` 按次数、间隔和超时有限重试。Q0 的无路由/Link Down 仍立即失败，Q1 的受限寻路与 Pending 仍完全由 Core 决定。Endpoint handler 的原有类型不返回错误，因此目标 Router 的未就绪/队列满会计入 Bridge/Router 本机统计，而不会伪造成对源端的业务 ACK；可靠确认留给后续独立能力。
 
 T25.3 为 Bridge 增加了可选、仍保持纯 C 的 `set_inbound_hooks()`：产品 Port 可在 Router 的短复制/出队临界区前后进入/退出自己的锁，并在投递完成、已退出锁后收到观察回调。该接口不包含 FreeRTOS 类型、不创建对象、也不影响帧格式；没有安装 hook 的 C99 产品仍保持 T25.2 原行为。
 
@@ -168,6 +171,7 @@ typedef struct {
     uint32_t allowed_local_source_mask; /* 本机 Fast Path / 远端发送 ACL */
     bool accept_remote;                 /* 是否接收已由 Core 验证的远端业务帧 */
     bool enabled_at_boot;
+    bool require_remote_q0_validator;   /* 远端 Q0 入队前必须有产品 Validator */
 } ucn_service_binding_t;
 ```
 
@@ -178,6 +182,7 @@ typedef struct {
 - 绑定表项应当静态 const；Router 只保存 `ready`、统计和 Inbox 状态等固定运行时状态。
 - `endpoint` 必须位于现有静态范围 `0x40..0xBF`；控制帧和诊断帧不能绑定给业务 Task。
 - 接收数据的长度、QoS 与投递模式必须和表项匹配，不匹配立即拒绝并计数。
+- `require_remote_q0_validator` 只允许用于 `accept_remote=true` 的 Q0；缺少对应 Validator 时 Bridge handler 安装整体失败。
 
 这样可以先保证所有权、延迟和 RAM 上界清楚。一个 Endpoint 多消费者的自动扇出会在后续“发布表”阶段独立加入，首版不含隐式复制。
 
@@ -211,7 +216,8 @@ Task A
 Task A -> Remote TX Request Queue -> Protocol Task
       -> ucn_node_send_endpoint()
       -> 现有 Q0/Q1、Security、Policy、Route Cache、Link
-      -> 目标 Node Endpoint callback -> 目标 Router -> 目标 Service Inbox
+      -> 目标 Node Endpoint callback -> 可选/强制产品 Validator
+      -> 目标 Router -> 目标 Service Inbox
 ```
 
 这里“直连”或“已缓存路径”只是 Core 的路由结果；T25 不自行选 WiFi、UART 或 CAN，也不绕过已实现的 Policy/Path/Bearer 逻辑。
@@ -237,6 +243,7 @@ Protocol Task 仍负责“是否寻路、如何转发、是否加密、何时失
 | 顺序 | 保序 | 只保证最新样本，不保证全部历史样本 |
 | 等待方式 | 发送方 API 不阻塞 | 发送方 API 不阻塞 |
 | 网络未知路由 | 不等 RREQ；调用方转本地安全逻辑 | 可按已有 Core 策略受限等待/合并 |
+| 本机 Adapter TX Queue 瞬时满 | 默认立即失败；可显式启用一个固定 Pending 槽和有界 `NO_SPACE` 重试 | 不积压旧值，继续 Latest Value |
 
 关键区别是：**Q1 覆盖是有意的实时策略，不是“丢包被隐藏”；Q0 满队列必须是显式故障。**
 
@@ -309,6 +316,7 @@ Service Router 静态 RAM
 
 ```text
 Core Endpoint callback
+  -> 高风险远端 Q0: product Validator(frame/source/session/endpoint/payload/now)
   -> ucn_service_deliver_remote(router, frame)
   -> 按 frame.message_type 查 Service Binding
   -> 校验 QoS/长度/本机策略
@@ -389,7 +397,9 @@ Task 重启不能等价于 Node 离网：Node ID、邻居、路由和 Link 全�
 
 ### T25.2：与现有 Core 的协议任务桥接（已完成）
 
-已新增 `ucn_service_bridge.h/.c` 与 `test_service_bridge.c`。Bridge 初始化时核对 Router/Node 的本 Node ID 一致；安装前预检 Endpoint handler 所有权和固定槽位，拒绝覆盖其他组件。Protocol Task 每轮最多调用 `ucn_service_protocol_bridge_step()` 指定次数；其只在当前 Task 中调用现有 `ucn_node_send_endpoint()`。目标 Endpoint callback 只调用 `ucn_service_deliver_remote()` 并记录本机投递结果。
+已新增 `ucn_service_bridge.h/.c` 与 `test_service_bridge.c`。Bridge 初始化时核对 Router/Node 的本 Node ID 一致；安装前预检 Endpoint handler 所有权、固定槽位，以及所有 `require_remote_q0_validator` Binding 是否已经注册产品 Validator，拒绝部分安装或覆盖其他组件。Protocol Task 每轮最多调用 `ucn_service_protocol_bridge_step()` 指定次数；其只在当前 Task 中调用现有 `ucn_node_send_endpoint()`。目标 Endpoint callback 对强制或已注册的 Endpoint 先执行 Validator，接受后才调用 `ucn_service_deliver_remote()`；拒绝帧只记录统计/Observer，不进入 Inbox。
+
+S18 还提供产品可选的固定 Replay 表。它保留当前 `(Source Node, Source Session, Endpoint)` 与最后命令 ID；同源同 Endpoint 的 Session 改变默认失败关闭，只有 Security 已认证后由产品显式轮换才重置命令序号，旧 Session 不能自动切回。该 helper 不规定 Payload 必须使用 12 B Command Guard；R1 ESP32 示例继续解析既有 16 B 电机/舵机 ABI，并在消费 Task 再检查一次，本机 Fast Path 因此也不会绕过执行安全。
 
 **模拟测试：**
 
@@ -424,6 +434,24 @@ loopTask(唯一 Node owner) --Bridge--> Core / Link
 
 **未完成的实机门禁：**尚未上传新固件，未验证启动日志、Task 高水位、真实 Q0/Q1、事件 Queue 满、断链本地安全或端到端时延。它们属于 T25.4。
 
+### S15：Q0 Bridge 背压所有权补强（代码/软件测试已完成）
+
+Bridge 新增默认关闭的 `ucn_service_protocol_bridge_set_q0_backpressure_policy()`、一个固定 Pending Q0 槽、显式时钟的 `step_at()` 和 final-only Outbound Observer。启用后，已经从 Router 取出的 Q0 在 Link 返回瞬时 `NO_SPACE` 时仍由 Bridge 持有；下一条 Router Q0/Q1 不会越过它。次数耗尽、Deadline、`LINK_DOWN` 或其他终止错误会释放槽并只报告一次最终结果。Observer 的 `UCN_OK` 仅表示本机 Link Queue 接受，不表示目标 Inbox 或执行器已确认。
+
+Core 队列也支持显式 `UCN_DELIVERY_RETRY_ON_BACKPRESSURE`，仅允许 Q0 且要求非零绝对 Deadline；默认上限为 3 次重试、5 ms 间隔。等待期间必要 Heartbeat/Probe/Route Refresh 仍可执行，Q1 语义不变。
+
+**软件证据：**`test_link_contract.c` 覆盖恢复、耗尽、终止错误、Deadline 与最终 Drop 唯一性；`test_service_bridge.c` 覆盖 Pending FIFO、恢复/耗尽/终止/过期和 Observer 单次回调；`test_neighbor_heartbeat.c` 覆盖持续背压下 Heartbeat 与邻居不误离网。Debug、Release、64 B、Bearer=1 CTest 均 `1/1` 通过。当前完整 ESP 固件构建值为 S3 RAM `47,692 B`/Flash `596,463 B`，WROOM RAM `49,832 B`/Flash `622,943 B`；这些绝对值不能当成纯 S15 增量。
+
+**仍未完成：**真实 Wi-Fi/UART Queue 满/恢复、精确重试间隔、Link `send()` WCET、端到端时延和执行器失联安全仍归 T25.4/S06/S07 实机验收。
+
+### S20：异步阶段与业务结果关联（代码/软件测试已完成）
+
+Service 统一使用 `LOCAL_INBOXED → REMOTE_ROUTER_QUEUED → LINK_QUEUE_ACCEPTED → REMOTE_INBOXED → REMOTE_EXECUTED`。`send_ex()` 只能同步证明前两项；Bridge 结构化 Outbound Event 只能证明第三项或本机最终失败；后两项必须由目标产品在 Command Guard 指定的 Result Endpoint 主动返回。
+
+可选结果 Payload 使用 8 B 大端头：Command ID、远端 Stage、结果 Status 和 16 bit 产品 Detail。目标 Inbox 通知只允许 `REMOTE_INBOXED+ACCEPTED`，执行结果只允许 `REMOTE_EXECUTED+SUCCEEDED/REJECTED/FAILED/EXPIRED`。源端匹配 Command ID 与实际 Endpoint，同时自行核对 Source Node/Session 和产品 Deadline。
+
+该能力不增加普通消息字段、Router Pending 表或通用 ACK。目标 Validator 在入 Inbox 前拒绝时不会自动回包；源端可能已经得到本机 `LINK_QUEUE_ACCEPTED`，但最终应因没有业务结果而由产品固定等待表判超时。完整 API 与流程见 [S20 异步阶段与业务结果关联](UCN_S20_异步阶段与业务结果关联.md)。
+
 ### T25.4：两板及多板集成
 
 在两块 ESP32-S3 上用真实 Adapter 运行：本机 IMU→Control→Servo 与远端 IMU/Q1、远端 Control/Q0 并行。随后扩展到多 MCU，验证跨中继路径。
@@ -449,7 +477,7 @@ loopTask(唯一 Node owner) --Bridge--> Core / Link
 | Local Q0 | 连续控制命令、消费者变慢、队列满 | FIFO 保序；满时显式 `NO_SPACE`；无静默覆盖。 |
 | Local Q1 | 高频 IMU、消费者较慢 | 只保留最新样本；覆盖计数增长；不会无限堆积。 |
 | Local 隔离 | 本机 IMU 与远端 Link 断开 | 本机 Control 继续取最新本机样本；不调用 Link。 |
-| Remote TX | 多任务同时发远端 Q0/Q1 | 固定队列有界；Protocol Task 独占 Core；背压可见。 |
+| Remote TX | 多任务同时发远端 Q0/Q1 | 固定队列有界；Protocol Task 独占 Core；默认背压立即失败，可选 Q0 Pending 仅有限重试且最终状态可观察。 |
 | 三节点 | A→B→C 的 Endpoint 发送 | B 不运行 C 的业务回调；C Inbox 获得数据。 |
 | 安全 | 加密端点通过中继 | 只有目标 C 在安全处理后投递；中继不解密。 |
 | 重启 | 某 Service 未就绪/重启 | Node 仍入网；投递拒绝或按配置处理；Q0 本地安全动作成立。 |

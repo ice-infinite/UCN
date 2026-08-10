@@ -1,6 +1,6 @@
 #include <string.h>
 
-#include "ucn/ucn_node.h"
+#include "ucn/ucn_node_storage.h"
 #include "ucn/ucn_time.h"
 
 static bool policy_node_id_is_valid(ucn_node_id_t node_id)

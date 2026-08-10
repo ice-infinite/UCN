@@ -49,8 +49,27 @@ physical address → Candidate Link (peer_node_id = 0)
 | `ucn_adapter_find_peer()` | 由收到的物理地址找 Candidate/已知 Link。 |
 | `ucn_adapter_rx_enqueue()` | 复制一帧到固定队列；满时返回 `UCN_ERR_NO_SPACE` 并计数。 |
 | `ucn_adapter_rx_pump()` | 在协议任务中 FIFO 出队、调用 Core；格式/安全/准入失败也会出队并记 `rejected_by_core`，不会堵塞后续帧。 |
+| `ucn_adapter_hello_scheduler_init()` | 为一个 Adapter 初始化固定状态的 HELLO 调度器；Port 随机 Seed 与非零 Adapter Token 共同形成独立序列。 |
+| `ucn_adapter_hello_scheduler_step()` | 在 Protocol Task 中推进 Initial Jitter、有限 Fast Retry、指数 Backoff 和准入后 Slow/Stop；到期只返回一次 `hello_due`。 |
+| `ucn_adapter_hello_scheduler_restart()` | Adapter 重启时用新的 Port Seed 重建初始抖动；不会动态分配或形成无限快速重试。 |
 
 `ucn_node_broadcast_hello()` 用于完全未知 Node ID 时的物理广播；`ucn_node_probe_neighbor()` 用于 Adapter 已知对端 Node ID 时的定向 HELLO。广播 HELLO 只做一跳身份发现，Core 不转发、也不交给应用。
+
+### 3.1 S17 HELLO 调度契约
+
+HELLO 的发送时机属于 Adapter，不进入 `ucn_node_t`。每个动态发现介质持有一个 `ucn_adapter_hello_scheduler_t`，从产品 Port 取得一次随机 Seed，并配置不同的非零 `adapter_token`；即使 WiFi 与 UART 同时启动，也不会共用一个全局 Deadline。状态路径为：
+
+```text
+INITIAL_JITTER
+  → 最多 max_fast_retries 次 FAST_RETRY
+  → BACKOFF（指数增长到固定上限）
+  → 本 Adapter 出现已准入 Bearer：ADMITTED_SLOW 或 ADMITTED_STOP
+  → 本 Adapter 不再有已准入 Bearer：重新进入 INITIAL_JITTER
+```
+
+`SLOW` 在准入后先按 Fast Retry 间隔发一次互相确认 HELLO，随后才进入低频恢复广播；Heartbeat 负责已准入邻居的存活判断。动态广播介质通常应使用 `SLOW`，因为 `STOP` 可能让只完成单向 HELLO 的对端等不到回包；`STOP` 只适合静态预准入、外部保证双向发现或其他明确产品流程。静态 CAN/UART 点对点 Profile 可以把 `enabled=false`，但必须由产品配置完成 Link 注册、Peer Node ID 与准入，不能把“关闭 HELLO”误解成还能自动发现。
+
+所有间隔必须在 `1..INT32_MAX ms`，重试抖动最大 500‰，配置还会检查抖动后的最坏间隔。Scheduler 每次到期先安装下一个 Deadline 再返回，不自旋、不睡眠、不发送帧；调用方只在 `hello_due=true` 时调用该 Adapter 对应 Link 的 `ucn_node_broadcast_hello()`。一个 Scheduler 是固定小对象，没有队列、malloc 或随节点数增长的状态。
 
 ## 4. 标准 Adapter 流程
 
@@ -59,10 +78,11 @@ physical address → Candidate Link (peer_node_id = 0)
   → 建立静态 Link 池 + 物理地址绑定表 + 有界收包队列
   → 发现物理端点（MAC / 总线地址 / 已建立连接）
   → 分配 Candidate Link，peer_node_id = 0
-  → 周期性物理广播 HELLO（或收到对端 HELLO）
+  → Adapter HELLO Scheduler：初始抖动、有限快重试、指数退避
+  → 到期才物理广播 HELLO（或收到对端 HELLO）
   → 收包回调：find/bind Link → enqueue(frame)
   → 协议任务：pump → Core 校验 HELLO → Provider/策略准入
-  → 成功：Admitted Link 可参与 DATA、RREQ/RREP、转发
+  → 成功：Admitted Link 可参与 DATA、RREQ/RREP、转发；HELLO 转 Slow/Stop
   → 链路掉线：Adapter 更新 get_status/metrics；后续 T15 决定移除、重试与审计策略
 ```
 

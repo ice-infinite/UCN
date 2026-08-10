@@ -95,6 +95,9 @@ int test_link_metrics(void)
     ucn_link_t ab, ba, ad, da, bc, cb, dc, cd;
     metrics_link_context_t cab, cba, cad, cda, cbc, ccb, cdc, ccd;
     metrics_receive_state_t received;
+    const ucn_route_entry_t *a_to_c = NULL;
+    const ucn_route_entry_t *d_to_c = NULL;
+    size_t route_index;
 
     (void)memset(&direct_node, 0, sizeof(direct_node));
     (void)memset(&default_link, 0, sizeof(default_link));
@@ -173,6 +176,24 @@ int test_link_metrics(void)
     ucn_node_set_rx_handler(&c, metrics_rx, &received);
     TEST_ASSERT(ucn_node_discover_route(&a, UINT32_C(3), 100U) == UCN_OK);
     TEST_ASSERT(!ucn_node_route_pending(&a, UINT32_C(3)));
+    for (route_index = 0U; route_index < UCN_MAX_ROUTES; ++route_index) {
+        if (a.routes[route_index].valid &&
+            a.routes[route_index].destination == UINT32_C(3)) {
+            a_to_c = &a.routes[route_index];
+        }
+        if (d.routes[route_index].valid &&
+            d.routes[route_index].destination == UINT32_C(3)) {
+            d_to_c = &d.routes[route_index];
+        }
+    }
+    /* RREP Cost/Hop is target-rooted: every return hop extends the metric
+     * advertised by its downstream neighbor.  This keeps a same-Epoch route
+     * strictly decreasing toward the target instead of copying one total
+     * origin-to-target value into every relay. */
+    TEST_ASSERT(a_to_c != NULL && a_to_c->route_cost == UINT16_C(4000) &&
+                a_to_c->hop_count == 2U);
+    TEST_ASSERT(d_to_c != NULL && d_to_c->route_cost == UINT16_C(2000) &&
+                d_to_c->hop_count == 1U);
     cab.send_count = 0U; cad.send_count = 0U;
     TEST_ASSERT(ucn_node_send(&a, UINT32_C(3), UCN_MSG_DATA_Q1,
                               UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);

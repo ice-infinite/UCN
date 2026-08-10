@@ -16,6 +16,8 @@ Protocol Task 只需要一个；它不是网络中心，其他 MCU 仍各自运�
 ## 2. 静态对象与锁
 
 ```c
+#include "ucn/ucn_node_storage.h"
+
 static ucn_node_t g_node;
 static ucn_service_router_t g_router;
 static ucn_service_protocol_bridge_t g_bridge;
@@ -121,3 +123,7 @@ ucn_result_t product_service_send(ucn_node_id_t destination,
 3. 验证远端 Q1/Q0 经 Bridge 收发；中继 Node 不应投递无关业务。
 4. 强制填满驱动队列、Router Inbox、Remote TX 和事件队列，检查有界丢弃/覆盖和统计，不允许死锁。
 5. 最后测栈余量、Heap、断链时 Q0 本地安全、真实时延/丢失/乱序。
+
+## 7. S16 Protocol Task 时限
+
+冻结该 Task 的最低优先级、`UCN_MAX_STEP_INTERVAL_MS`、最大 Queue Wait/Sleep、每轮 Adapter Pump/Bridge 预算和 Link `send()` WCET。不要用无限等待的消息队列驱动 Protocol Task；可用小于最大 Step 的超时或周期唤醒。运行时记录 `max_step_gap_ms`、`step_interval_violations`，并在压力测试中同时检查 Heartbeat/Probe 延迟。

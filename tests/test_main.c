@@ -1,4 +1,5 @@
 #include "test_support.h"
+#include "ucn/ucn_profile.h"
 
 int main(void)
 {
@@ -24,18 +25,26 @@ int main(void)
     result |= test_endpoint();
     result |= test_candidate_route();
     result |= test_adapter();
-    result |= test_v3();
+    result |= test_adapter_hello();
+    result |= test_protocol_version();
     result |= test_path_trace();
     result |= test_node_snapshot();
     result |= test_path_control();
+    result |= test_path_management_budget();
     result |= test_policy();
     result |= test_policy_diagnostic();
+#if UCN_FEATURE_SERVICE
     result |= test_service();
     result |= test_service_bridge();
+#endif
     result |= test_control_budget();
     result |= test_time();
     result |= test_link_contract();
     result |= test_stress();
+    result |= test_dynamic_stress();
+    result |= test_profile();
+    result |= test_public_headers();
+    result |= test_node_storage_header();
 
     if (result == 0) {
         printf("All UCN tests passed.\n");

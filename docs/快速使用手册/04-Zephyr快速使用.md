@@ -50,7 +50,7 @@ flowchart LR
 ```c
 #include <zephyr/kernel.h>
 #include "ucn/ucn_adapter.h"
-#include "ucn/ucn_node.h"
+#include "ucn/ucn_node_storage.h"
 
 K_THREAD_STACK_DEFINE(g_ucn_stack, CONFIG_APP_UCN_PROTOCOL_STACK_SIZE);
 static struct k_thread g_ucn_thread;
@@ -102,3 +102,7 @@ Zephyr Port 需要三个静态对象：一个 `k_mutex` 保护 Router 短拷贝�
 2. 驱动 RX ring 满时必须显式丢弃/计数，Protocol Thread 不得堆积或阻塞。
 3. 加入 Service 后验证本机 Fast Path、远端 Bridge、Q0/Q1 语义和线程所有权。
 4. 记录 `k_thread_stack_space_get()`、队列高水位、Link 错误与 Node/Router/Bridge 统计；完成后再接安全 Provider、Path 和负载均衡。
+
+## 7. S16 Protocol Thread 时限
+
+用 Kconfig/Product Profile 冻结 `UCN_MAX_STEP_INTERVAL_MS`、线程优先级、最大 `k_poll()`/`k_sleep()` 超时、RX Pump/Bridge 预算与 Link `send()` WCET。线程必须周期唤醒，不能只等业务事件。压力测试记录 `max_step_gap_ms`、`step_interval_violations` 和 Heartbeat/Probe 延迟；仓库当前没有 Zephyr Port 实测结果。

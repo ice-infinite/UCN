@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "test_support.h"
+#include "ucn/ucn_frame.h"
 #include "ucn/ucn_node.h"
 
 typedef struct heartbeat_link_context {
@@ -8,6 +9,7 @@ typedef struct heartbeat_link_context {
     ucn_link_t *peer_ingress;
     bool is_up;
     bool deliver;
+    bool backpressure_q0;
     uint32_t close_count;
 } heartbeat_link_context_t;
 
@@ -16,6 +18,13 @@ static ucn_result_t heartbeat_link_send(ucn_link_t *link,
                                         size_t length)
 {
     heartbeat_link_context_t *context = (heartbeat_link_context_t *)link->context;
+    ucn_frame_t decoded;
+
+    if (context->backpressure_q0 &&
+        ucn_frame_decode(frame, length, &decoded) == UCN_OK &&
+        decoded.message_type == UCN_MSG_DATA_Q0) {
+        return UCN_ERR_NO_SPACE;
+    }
 
     if (!context->deliver) {
         return UCN_OK;
@@ -181,6 +190,174 @@ static int heartbeat_run_wraparound_lifecycle(void)
     return 0;
 }
 
+static int heartbeat_run_sustained_q0_backpressure(void)
+{
+    uint8_t payload = 0U;
+    uint32_t now_ms;
+    ucn_node_t a, b;
+    ucn_link_t ab, ba;
+    heartbeat_link_context_t cab, cba;
+    ucn_send_request_t request;
+
+    (void)memset(&a, 0, sizeof(a));
+    (void)memset(&b, 0, sizeof(b));
+    (void)memset(&ab, 0, sizeof(ab));
+    (void)memset(&ba, 0, sizeof(ba));
+    (void)memset(&cab, 0, sizeof(cab));
+    (void)memset(&cba, 0, sizeof(cba));
+    TEST_ASSERT(heartbeat_init_node(&a, UINT32_C(31)) == 0);
+    TEST_ASSERT(heartbeat_init_node(&b, UINT32_C(32)) == 0);
+    heartbeat_setup_link(&ab, &cab, 31U);
+    heartbeat_setup_link(&ba, &cba, 32U);
+    cab.peer = &b; cab.peer_ingress = &ba;
+    cba.peer = &a; cba.peer_ingress = &ab;
+    TEST_ASSERT(ucn_node_broadcast_hello(&a, &ab, 0U) == UCN_OK);
+    TEST_ASSERT(ucn_node_broadcast_hello(&b, &ba, 0U) == UCN_OK);
+    TEST_ASSERT(ucn_node_step(&a, 0U) == UCN_OK);
+    cab.backpressure_q0 = true;
+
+    for (now_ms = 1U; now_ms <= UINT32_C(5000); ++now_ms) {
+        ucn_result_t enqueue_result;
+        ucn_result_t step_result;
+
+        payload = (uint8_t)now_ms;
+        b.now_ms = now_ms;
+        (void)memset(&request, 0, sizeof(request));
+        request.destination = UINT32_C(32);
+        request.message_type = UCN_MSG_DATA_Q0;
+        request.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
+        request.delivery = UCN_DELIVERY_RETRY_ON_BACKPRESSURE;
+        request.deadline_ms = now_ms + UINT32_C(200);
+        request.payload = &payload;
+        request.payload_length = 1U;
+        enqueue_result = ucn_node_enqueue(&a, &request);
+        TEST_ASSERT(enqueue_result == UCN_OK ||
+                    enqueue_result == UCN_ERR_NO_SPACE);
+        step_result = ucn_node_step(&a, now_ms);
+        TEST_ASSERT(step_result == UCN_OK ||
+                    step_result == UCN_ERR_NO_SPACE ||
+                    step_result == UCN_ERR_NOT_FOUND ||
+                    step_result == UCN_ERR_TTL);
+    }
+
+    TEST_ASSERT(a.stats.q0_backpressure_retries > 0U);
+    TEST_ASSERT(a.stats.q0_backpressure_exhausted > 0U);
+    TEST_ASSERT(a.stats.heartbeat_requests_sent >= 5U);
+    TEST_ASSERT(a.stats.neighbor_suspected == 0U &&
+                a.stats.neighbor_removed == 0U);
+    TEST_ASSERT(ucn_node_neighbor_count(&a, UCN_NEIGHBOR_ADMITTED) == 1U);
+    return 0;
+}
+
+static int heartbeat_run_multi_bearer_service_bound(void)
+{
+    const uint32_t heartbeat_due_ms = UCN_HEARTBEAT_INTERVAL_MS;
+    const uint32_t test_end_ms =
+        heartbeat_due_ms + UCN_MAINTENANCE_SERVICE_BOUND_MS;
+    uint8_t payload = 0U;
+    uint32_t now_ms;
+    size_t link_index = 0U;
+    size_t neighbor_index;
+    ucn_node_t node;
+    ucn_link_t links[UCN_MAX_LINKS];
+    heartbeat_link_context_t contexts[UCN_MAX_LINKS];
+    ucn_send_request_t request;
+
+    (void)memset(&node, 0, sizeof(node));
+    (void)memset(links, 0, sizeof(links));
+    (void)memset(contexts, 0, sizeof(contexts));
+    TEST_ASSERT(heartbeat_init_node(&node, UINT32_C(41)) == 0);
+    TEST_ASSERT(UCN_MAINTENANCE_SERVICE_BOUND_MS ==
+                (uint32_t)(
+                    ((uint64_t)UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE + 1U) *
+                    UCN_MAX_STEP_INTERVAL_MS * UCN_MAX_NEIGHBORS *
+                    UCN_MAX_BEARERS_PER_NEIGHBOR));
+    TEST_ASSERT((uint64_t)UCN_HEARTBEAT_INTERVAL_MS +
+                    UCN_MAINTENANCE_SERVICE_BOUND_MS <
+                UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS);
+
+    /* Populate as many real Link slots as this Profile permits.  The default
+     * profile becomes two Neighbors with two Bearers; Bearer=1 becomes four
+     * Neighbors with one Bearer.  This tests the scheduler, not HELLO/Join. */
+    for (neighbor_index = 0U;
+         neighbor_index < UCN_MAX_NEIGHBORS && link_index < UCN_MAX_LINKS;
+         ++neighbor_index) {
+        ucn_neighbor_entry_t *entry = &node.neighbors[neighbor_index];
+        size_t bearer_index;
+
+        entry->state = UCN_NEIGHBOR_ADMITTED;
+        entry->peer_node_id = (ucn_node_id_t)(UINT32_C(100) + neighbor_index);
+        entry->primary_bearer_index = 0U;
+        entry->bearer_quality_sampled = true;
+        entry->last_bearer_quality_sample_ms = 0U;
+        for (bearer_index = 0U;
+             bearer_index < UCN_MAX_BEARERS_PER_NEIGHBOR &&
+             link_index < UCN_MAX_LINKS;
+             ++bearer_index, ++link_index) {
+            ucn_neighbor_bearer_t *bearer = &entry->bearers[bearer_index];
+
+            heartbeat_setup_link(&links[link_index], &contexts[link_index],
+                                 (uint8_t)(link_index + 1U));
+            contexts[link_index].deliver = false;
+            links[link_index].peer_node_id = entry->peer_node_id;
+            TEST_ASSERT(ucn_node_register_link(&node, &links[link_index]) ==
+                        UCN_OK);
+            bearer->state = UCN_NEIGHBOR_BEARER_ADMITTED;
+            bearer->link = &links[link_index];
+            bearer->last_seen_ms = 0U;
+            bearer->heartbeat_sent = true;
+            bearer->last_heartbeat_sent_ms = 0U;
+            entry->bearer_count++;
+        }
+    }
+    TEST_ASSERT(link_index == UCN_MAX_LINKS);
+    TEST_ASSERT(ucn_node_step(&node, 0U) == UCN_ERR_NOT_FOUND);
+
+    for (now_ms = UCN_MAX_STEP_INTERVAL_MS;
+         now_ms <= test_end_ms;
+         now_ms += UCN_MAX_STEP_INTERVAL_MS) {
+        ucn_result_t enqueue_result;
+
+        payload = (uint8_t)now_ms;
+        (void)memset(&request, 0, sizeof(request));
+        request.destination = node.neighbors[0].peer_node_id;
+        request.message_type = UCN_MSG_DATA_Q0;
+        request.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
+        request.delivery = UCN_DELIVERY_BEST_EFFORT;
+        request.deadline_ms = ucn_deadline_from_now(now_ms, UINT32_C(500));
+        request.payload = &payload;
+        request.payload_length = 1U;
+        enqueue_result = ucn_node_enqueue(&node, &request);
+        TEST_ASSERT(enqueue_result == UCN_OK ||
+                    enqueue_result == UCN_ERR_NO_SPACE);
+        TEST_ASSERT(ucn_node_step(&node, now_ms) == UCN_OK);
+    }
+
+    TEST_ASSERT(node.stats.heartbeat_requests_sent == link_index);
+    TEST_ASSERT(node.stats.maintenance_preemptions >= link_index);
+    TEST_ASSERT(node.stats.max_step_gap_ms == UCN_MAX_STEP_INTERVAL_MS);
+    TEST_ASSERT(node.stats.step_interval_violations == 0U);
+    TEST_ASSERT(node.stats.max_heartbeat_service_delay_ms > 0U &&
+                node.stats.max_heartbeat_service_delay_ms <=
+                UCN_MAINTENANCE_SERVICE_BOUND_MS);
+    for (neighbor_index = 0U; neighbor_index < UCN_MAX_NEIGHBORS;
+         ++neighbor_index) {
+        size_t bearer_index;
+        const ucn_neighbor_entry_t *entry = &node.neighbors[neighbor_index];
+
+        for (bearer_index = 0U; bearer_index < entry->bearer_count;
+             ++bearer_index) {
+            const uint32_t sent_ms =
+                entry->bearers[bearer_index].last_heartbeat_sent_ms;
+
+            TEST_ASSERT(sent_ms >= heartbeat_due_ms && sent_ms <= test_end_ms);
+        }
+    }
+    TEST_ASSERT(node.stats.neighbor_suspected == 0U &&
+                node.stats.neighbor_removed == 0U);
+    return 0;
+}
+
 int test_neighbor_heartbeat(void)
 {
     uint8_t payload = 0x5AU;
@@ -272,6 +449,8 @@ int test_neighbor_heartbeat(void)
     TEST_ASSERT(heartbeat_run_sustained_backlog(false, true) == 0);
     TEST_ASSERT(heartbeat_run_sustained_backlog(true, false) == 0);
     TEST_ASSERT(heartbeat_run_sustained_backlog(true, true) == 0);
+    TEST_ASSERT(heartbeat_run_sustained_q0_backpressure() == 0);
+    TEST_ASSERT(heartbeat_run_multi_bearer_service_bound() == 0);
     TEST_ASSERT(heartbeat_run_wraparound_lifecycle() == 0);
     return 0;
 }

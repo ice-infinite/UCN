@@ -42,6 +42,7 @@ nodes:
         reason: destination 为远端时按 Q0 FIFO 或 Q1 Latest Value 保存 Remote TX。
     outputs:
       - ucn_service_send_ex 以 LOCAL_DELIVERED/REMOTE_ENQUEUED 明确副本所在边界。
+      - ucn_service_acceptance_stage 将二者映射为 LOCAL_INBOXED/REMOTE_ROUTER_QUEUED。
       - UCN_ERR_NO_SPACE/ACCESS/NOT_FOUND 表示本机 Router 拒绝，业务必须处理。
     notes:
       - 本函数不调用 Link、Node、路由或加密；调用返回后 Payload 可复用。
@@ -59,6 +60,19 @@ nodes:
     calls: []
     notes:
       - 不改变所有 Service Message 的固定结构；跨 Node issued_at 依赖产品共享时间域。
+
+  - id: service.result_header_helpers
+    symbol: ucn_service_result_header_encode/decode/result_matches_command
+    type: module
+    file: src/ucn_service.c
+    layer: service
+    role: 为业务 Result Endpoint 提供可选 8 B 阶段结果头和 Command ID/Endpoint 无状态关联。
+    called_by:
+      - external.application_service_task
+    calls: []
+    notes:
+      - 只允许 REMOTE_INBOXED+ACCEPTED 或 REMOTE_EXECUTED+终态。
+      - 不建立通用 ACK、重传、Pending 表或计时器；Source/Session/Deadline 归产品固定状态。
 
   - id: service.ucn_service_deliver_remote
     symbol: ucn_service_deliver_remote
@@ -96,7 +110,7 @@ nodes:
     layer: service
     role: 仅供 Bridge 取出一个待发远端请求，严格 Q0 优先于 Q1。
     called_by:
-      - service.ucn_service_protocol_bridge_step
+      - service.ucn_service_protocol_bridge_step_at
     calls: []
 
   - id: service.ucn_service_protocol_bridge_init
@@ -109,12 +123,38 @@ nodes:
       - external.product_service_init
     calls: []
 
+  - id: service.ucn_service_protocol_bridge_set_validator
+    symbol: ucn_service_protocol_bridge_set_validator
+    type: function
+    file: src/ucn_service_bridge.c
+    layer: service
+    role: 在 Endpoint handler 安装前，用固定槽注册或移除产品远端入站 Validator。
+    called_by:
+      - external.product_service_init
+    calls: []
+    notes:
+      - 高风险 Q0 Binding 缺少匹配 Validator 时，后续 handler 安装整体失败关闭。
+      - handler 安装后拒绝修改，避免运行期门禁漂移。
+
+  - id: service.replay_helpers
+    symbol: ucn_service_bridge_replay_init/accept_command/rotate_session
+    type: module
+    file: src/ucn_service_bridge.c
+    layer: service
+    role: 产品 Validator 可选使用的固定防重放表与显式认证 Session 轮换。
+    called_by:
+      - external.product_service_validator
+    calls: []
+    notes:
+      - 同源同 Endpoint 的不同 Session 默认拒绝；只有认证产品逻辑可显式轮换。
+      - 表满返回 NO_SPACE，不分配动态内存。
+
   - id: service.ucn_service_protocol_bridge_install_endpoint_handlers
     symbol: ucn_service_protocol_bridge_install_endpoint_handlers
     type: function
     file: src/ucn_service_bridge.c
     layer: service
-    role: 为所有静态 Binding 注册唯一 Endpoint handler，拒绝覆盖第三方 handler。
+    role: 预检强制 Validator、handler 所有权和容量后，为全部静态 Binding 注册唯一 Endpoint handler。
     called_by:
       - external.product_service_init
     calls:
@@ -127,10 +167,13 @@ nodes:
     type: callback
     file: src/ucn_service_bridge.c
     layer: service
-    role: Node Endpoint handler 回调；短临界区内投递 Router，解锁后可通知产品 Port。
+    role: Node Endpoint handler 回调；先执行产品 Validator，接受后才在短临界区内投递 Router。
     called_by:
       - node_runtime.dispatch_endpoint_static
     calls:
+      - target: external.product_service_validator
+        type: callback
+        reason: 在 Router 加锁/复制前校验完整 Frame、Source、Session、Endpoint、Payload 与当前时间。
       - target: service.ucn_service_deliver_remote
         type: direct
         reason: 将远端业务帧投递给本机 owner Service。
@@ -139,24 +182,97 @@ nodes:
         reason: FreeRTOS Port 可在 Router 解锁后发送 Endpoint 事件 token。
     notes:
       - 回调运行在 Protocol Task；不得在其中执行耗时业务逻辑或重入 Node。
+      - Validator 拒绝不会进入 Inbox；本机 Fast Path 不经过此回调，执行 Task 必须二次检查。
 
   - id: service.ucn_service_protocol_bridge_step
     symbol: ucn_service_protocol_bridge_step
     type: function
     file: src/ucn_service_bridge.c
     layer: service
-    role: Protocol Task 每轮最多取 max_requests 个 Remote TX，调用 Endpoint API 送入 Core。
+    role: 兼容包装；使用 Node 最近一次 now_ms 调用显式时钟版本。
     called_by:
+      - external.legacy_protocol_task
+    calls:
+      - target: service.ucn_service_protocol_bridge_step_at
+        type: direct
+        reason: 保留旧 API，同时复用 S15 的 Pending/Deadline 状态机。
+
+  - id: service.ucn_service_protocol_bridge_set_q0_backpressure_policy
+    symbol: ucn_service_protocol_bridge_set_q0_backpressure_policy
+    type: function
+    file: src/ucn_service_bridge.c
+    layer: service
+    role: 启用或关闭一个固定 Pending Q0 的 NO_SPACE 有界重试策略。
+    called_by:
+      - external.product_service_init
+    calls: []
+    notes:
+      - 默认关闭；只接受非零次数、合法间隔/超时，且 Pending 占用时拒绝修改。
+      - 不改变 Q1，不创建远端 ACK，也不重发已被 Link 接受的帧。
+
+  - id: service.ucn_service_protocol_bridge_set_outbound_observer
+    symbol: ucn_service_protocol_bridge_set_outbound_observer
+    type: function
+    file: src/ucn_service_bridge.c
+    layer: service
+    role: 注册一次最终本机提交结果观察；中间 NO_SPACE 不通知。
+    called_by:
+      - external.product_service_init
+    calls: []
+
+  - id: service.ucn_service_protocol_bridge_set_outbound_event_observer
+    symbol: ucn_service_protocol_bridge_set_outbound_event_observer
+    type: function
+    file: src/ucn_service_bridge.c
+    layer: service
+    role: 注册结构化本机最终提交事件，区分接受、立即背压拒绝、重试耗尽、过期和终止失败。
+    called_by:
+      - external.product_service_init
+    calls: []
+    notes:
+      - 可与兼容 Observer 同时安装；两者各自只在最终状态调用一次。
+      - 只有 UCN_OK 事件带 LINK_QUEUE_ACCEPTED Stage；失败 Stage 为 NONE。
+
+  - id: service.ucn_service_protocol_bridge_step_at
+    symbol: ucn_service_protocol_bridge_step_at
+    type: function
+    file: src/ucn_service_bridge.c
+    layer: service
+    role: Protocol Task 每轮在显式 now_ms 下有限处理 Remote TX 或 Bridge-owned Pending Q0。
+    called_by:
+      - service.ucn_service_protocol_bridge_step
       - node_runtime.protocol_task_mainloop
     calls:
       - target: service.ucn_service_remote_tx_take
         type: queue
-        reason: 以 Q0 优先顺序取出 Router 拥有的固定副本。
+        reason: 无 Pending 时以 Q0 优先顺序取出 Router 拥有的固定副本。
+      - target: service.bridge_submit_static
+        type: direct
+        reason: 提交一次，并按结果完成或保留唯一 Pending Q0。
+    notes:
+      - Pending 未到重试时间时 processed 可为 0；其存在期间不取后续 Router Q0/Q1，保持 Q0 FIFO。
+      - 只对 Q0 的 UCN_ERR_NO_SPACE 重试；Deadline、次数耗尽和终止错误只完成一次。
+
+  - id: service.bridge_submit_static
+    symbol: ucn_service_protocol_bridge_submit/complete_outbound
+    type: module
+    file: src/ucn_service_bridge.c
+    layer: service
+    role: 调用 Core Endpoint API，并维护最终接受/失败、互斥统计和 final-only Observer。
+    called_by:
+      - service.ucn_service_protocol_bridge_step_at
+    calls:
       - target: route.ucn_node_send_endpoint
         type: direct
         reason: 复用普通跨 MCU 路由、Policy、Path 和安全路径。
+      - target: external.service_bridge_outbound_observer
+        type: callback
+        reason: 仅在本机提交最终接受、耗尽、终止或过期时通知产品。
+      - target: external.service_bridge_outbound_event_observer
+        type: callback
+        reason: 同一最终点提供结构化本机 Outcome；中间 NO_SPACE 不通知。
     notes:
-      - Core 拒绝的项不在 Bridge 自动重试；Q0 失败保持显式，Q1 的 Route Pending 语义归 Core。
+      - 两种 Observer 的 UCN_OK 只表示 LINK_QUEUE_ACCEPTED，不是 REMOTE_INBOXED/REMOTE_EXECUTED。
 
   - id: service.freertos_port_send
     symbol: UcnServiceFreeRtosPort.send

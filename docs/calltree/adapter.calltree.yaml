@@ -72,6 +72,36 @@ nodes:
     notes:
       - Core 拒绝帧只增加 rejected_by_core 统计；Pump 本身继续处理有界数量帧。
 
+  - id: adapter.ucn_adapter_hello_scheduler_step
+    symbol: ucn_adapter_hello_scheduler_step
+    type: function
+    file: src/ucn_adapter.c
+    layer: adapter
+    role: 在一个 Adapter 的固定状态中推进 HELLO 初始抖动、有限快重试、指数退避和准入后低频/停止。
+    called_by:
+      - external.protocol_task_iteration
+    calls:
+      - target: adapter.hello_scheduler_helpers_static
+        type: direct
+        reason: 生成 Token 加盐的确定性抖动并安装 wrap-safe Deadline。
+    outputs:
+      - 到期时只返回一次 hello_due；调用方再选择该 Adapter 的 Link 发送 HELLO。
+    notes:
+      - 状态属于 Adapter，不进入 Node/Core，也不动态分配内存。
+      - Heartbeat 负责已准入邻居存活；动态发现介质通常选择 ADMITTED_SLOW。
+
+  - id: adapter.hello_scheduler_helpers_static
+    symbol: hello_scheduler_helpers
+    type: module
+    file: src/ucn_adapter.c
+    layer: adapter
+    role: 校验固定 Profile、以 Port Seed 和 Adapter Token 生成独立序列，并计算有上限的重试 Deadline。
+    called_by:
+      - adapter.ucn_adapter_hello_scheduler_step
+      - external.adapter_init
+      - external.adapter_restart
+    calls: []
+
   - id: adapter.address_helpers_static
     symbol: address_helpers
     type: module

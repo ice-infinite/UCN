@@ -39,6 +39,7 @@ Linux、ROS 2、地面站可以通过一个 Link/Adapter 作为普通 Node 接�
 | Link/Bearer | UART、ESP-NOW、CAN 等如何发收、MTU、对端身份 | 一个 Neighbor 可有多个 Bearer；业务不直接选择物理介质。 |
 | 安全策略 | 哪些 Endpoint 可明文/必须端到端保护/允许何种转发 | Core 只提供 Provider 边界，密钥、身份和 AEAD 必须由产品实现。 |
 | 路由策略 | 自动、固定、主备或 Q1 均衡 | 默认 `AUTO_BEST`；固定路径和均衡仅在已安装、已验证 Path 后启用。 |
+| Protocol Task 时限 | 最大 Step 间隔、最大 Block、每轮 Pump/Bridge 预算、Link `send()` WCET | `UCN_MAX_STEP_INTERVAL_MS` 默认 10 ms；产品必须用自己的节点/Bearer 上限通过维护上界门禁。 |
 
 ## 3. 模块与“该由谁调用”速查
 
@@ -106,7 +107,7 @@ R1 已冻结的业务 Endpoint 如下。Payload 按文档约定采用 big-endian
 
 ```c
 #include "ucn/ucn.h"
-#include "ucn/ucn_node.h"
+#include "ucn/ucn_node_storage.h"
 
 static ucn_node_t g_node;
 
@@ -122,6 +123,10 @@ static void protocol_init(void)
     (void)ucn_node_init(&g_node, &config);
 }
 ```
+
+只有静态分配并独占 Node 的 Protocol Task 所在 `.c/.cpp` 文件需要包含
+`ucn_node_storage.h`。业务任务、Adapter 声明和只传递 `ucn_node_t *` 的模块应
+只包含 `ucn_node.h`；存储头中的字段是实现布局，不是应用 ABI，禁止直接读写。
 
 `node_id` 不是入网后临时分配的地址；它是设备稳定身份。可让首次启动写入 Flash，或在每块板的产品配置中固定。更换同一板的物理链路不应改变 Node ID。
 
@@ -170,10 +175,22 @@ void protocol_task_iteration(uint32_t now_ms)
     uint8_t processed = 0U;
 
     (void)ucn_adapter_rx_pump(&g_uart_rx_queue, &g_node, 4U, &pumped);
-    (void)ucn_service_protocol_bridge_step(&g_service_bridge, 2U, &processed);
+    (void)ucn_service_protocol_bridge_step_at(&g_service_bridge,
+                                               now_ms,
+                                               2U,
+                                               &processed);
     (void)ucn_node_step(&g_node, now_ms);
 }
 ```
+
+该循环不是“尽量快即可”，而是产品时限契约。默认 Full Profile：
+
+```text
+maintenance_bound = (4 + 1) × 10 ms × 8 Neighbor × 2 Bearer = 800 ms
+1 s Heartbeat + 800 ms < 3 s Suspect
+```
+
+构建会拒绝侵入 Suspect 窗口的配置。产品还必须冻结 Protocol Task 优先级、最大 Sleep/Block、每个 Adapter Pump 数量、Bridge 数量和 Link `send()` 最坏执行时间。运行时通过 `ucn_node_get_stats()` 观察 `last_step_ms`、`max_step_gap_ms`、`step_interval_violations`、`max_heartbeat_service_delay_ms`、`max_probe_service_delay_ms`；第一次 Step 不算 Gap，计时支持 `uint32_t` 回绕。出现违规时 Node 继续调度并报警，产品不得用“停止协议任务”处理已经发生的超时。
 
 对于发现型无线 Adapter，在受控周期调用 `ucn_node_broadcast_hello(&g_node, link, now_ms)`；收到物理层新对端后，由 Adapter 映射地址到 Candidate Link，再通过 `ucn_node_observe_neighbor()` / `ucn_node_probe_neighbor()` 进入准入流程。不要每收到一个业务包就全网广播 HELLO。
 
@@ -222,7 +239,7 @@ if (rc != UCN_OK) {
 | `UCN_OK` | 表示本机 Core/Link 已接受本次发送，不表示对端业务一定已经执行。 |
 | `UCN_ERR_LINK_DOWN` | 当前可用路径不可发送；Q0 进入本地安全策略，Q1 等下一周期新值。 |
 | `UCN_ERR_NOT_FOUND` | 没有当前 Route/Path；Q1 可由 Core 开始受限寻路，Q0 不等待。 |
-| `UCN_ERR_NO_SPACE` | 固定表或队列满；按 QoS 做统计、降采样或限流，不能无限重试。 |
+| `UCN_ERR_NO_SPACE` | 固定表或队列满；默认是最终失败。只有产品显式选择 S15 的 Q0 有界背压策略时，才按固定次数、间隔和 Deadline 做本机提交重试；仍禁止无限重试。 |
 | `UCN_ERR_TOO_LARGE` / `UCN_ERR_ARGUMENT` | ABI 或配置错误，修正调用方。 |
 | `UCN_ERR_SECURITY` / `UCN_ERR_ACCESS` / `UCN_ERR_REPLAY` | 安全策略或认证失败；记录审计事件，不能退回明文重发。 |
 
@@ -242,16 +259,49 @@ Router 本身不依赖 FreeRTOS。当前 ESP32 工程在其上提供 `UcnService
 
 ```c
 static const ucn_service_binding_t g_bindings[] = {
-    { 0x40U, UCN_SERVICE_ID_SENSOR,  24U,
-      UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q1_REALTIME),
-      UCN_SERVICE_SOURCE_MASK(UCN_SERVICE_ID_SENSOR), true, true },
-    { 0x60U, UCN_SERVICE_ID_ACTUATOR, 16U,
-      UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q0_CRITICAL),
-      UCN_SERVICE_SOURCE_MASK(UCN_SERVICE_ID_CONTROL), true, true },
+    { .endpoint = 0x40U,
+      .owner_service_id = UCN_SERVICE_ID_CONTROL,
+      .max_payload_length = 24U,
+      .allowed_traffic_mask = UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q1_REALTIME),
+      .delivery_mode = UCN_SERVICE_DELIVERY_Q1_LATEST,
+      .allowed_local_source_mask = UCN_SERVICE_SOURCE_MASK(UCN_SERVICE_ID_SENSOR),
+      .accept_remote = true,
+      .enabled_at_boot = true,
+      .require_remote_q0_validator = false },
+    { .endpoint = 0x60U,
+      .owner_service_id = UCN_SERVICE_ID_ACTUATOR,
+      .max_payload_length = 16U,
+      .allowed_traffic_mask = UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q0_CRITICAL),
+      .delivery_mode = UCN_SERVICE_DELIVERY_Q0_FIFO,
+      .allowed_local_source_mask = UCN_SERVICE_SOURCE_MASK(UCN_SERVICE_ID_CONTROL),
+      .accept_remote = true,
+      .enabled_at_boot = true,
+      .require_remote_q0_validator = true },
 };
 
 static ucn_service_router_t g_router;
 static ucn_service_protocol_bridge_t g_service_bridge;
+static ucn_service_bridge_replay_state_t g_command_replay;
+
+static ucn_result_t validate_motor_command(
+    void *context, const ucn_frame_t *frame,
+    ucn_node_id_t source, ucn_session_id_t session,
+    ucn_endpoint_t endpoint, const uint8_t *payload,
+    uint16_t payload_length, uint32_t now_ms)
+{
+    ucn_service_bridge_replay_state_t *replay = context;
+    uint32_t command_id;
+
+    (void)frame;
+    (void)now_ms; /* 没有共享时钟时，用本机 watchdog，不比较两块 MCU 的 uptime。 */
+    if (session == 0U || payload_length != 16U ||
+        !product_motor_fields_are_safe(payload, payload_length)) {
+        return UCN_ERR_SECURITY;
+    }
+    command_id = product_read_command_id(payload);
+    return ucn_service_bridge_replay_accept_command(
+        replay, source, session, endpoint, command_id);
+}
 
 static void service_init(void)
 {
@@ -261,13 +311,20 @@ static void service_init(void)
         .binding_count = (uint8_t)(sizeof(g_bindings) / sizeof(g_bindings[0])),
     };
 
+    ucn_service_bridge_replay_init(&g_command_replay);
     (void)ucn_service_router_init(&g_router, &router_config);
     (void)ucn_service_protocol_bridge_init(&g_service_bridge, &g_router, &g_node);
+    (void)ucn_service_protocol_bridge_set_validator(
+        &g_service_bridge, 0x60U, validate_motor_command, &g_command_replay);
     (void)ucn_service_protocol_bridge_install_endpoint_handlers(&g_service_bridge);
 }
 ```
 
-Binding 是产品 ABI 的一部分。字段含义：`owner_service_id` 是唯一消费者；`max_payload_length` 和 `allowed_traffic_mask` 是硬边界；`allowed_local_source_mask` 只限制本机 Task 发起；`accept_remote` 决定是否接受远端帧；`enabled_at_boot` 决定启动后是否就绪。若 Task 还未创建，使用 `ucn_service_set_ready()` 显式切换。
+Binding 是产品 ABI 的一部分。字段含义：`owner_service_id` 是唯一消费者；`max_payload_length` 和 `allowed_traffic_mask` 是硬边界；`allowed_local_source_mask` 只限制本机 Task 发起；`accept_remote` 决定是否接受远端帧；`enabled_at_boot` 决定启动后是否就绪；`require_remote_q0_validator` 要求 Bridge 在安装 handler 前找到对应 Validator，否则整体失败关闭。该标记只能用于可接收远端的 Q0 Binding。
+
+Validator 在 Core 完成安全/解密后、Router 入队前运行，返回非 `UCN_OK` 的帧不会进入 Inbox。固定 Replay helper 对当前 `(Source, Session, Endpoint)` 只接受递增命令 ID；认证 Session 轮换后，由产品 Security 逻辑调用 `ucn_service_bridge_replay_rotate_session()`，不能看到不同 Session 就自动切换。Replay 表满返回 `UCN_ERR_NO_SPACE`，不得动态扩容。`now_ms` 来自 Node 最近一次 Step，因此产品必须同时满足 Protocol Task 最大 Step 间隔。
+
+Validator 不规定 Payload ABI：可使用 12 B Command Guard，也可以解析产品已有的 16 B 电机命令。它只拦截远端帧，本机 Fast Path 仍由执行 Task 二次检查模式、范围、有效期、互锁和本地 watchdog。若 Task 还未创建，使用 `ucn_service_set_ready()` 显式切换。
 
 ### 7.3 从业务 Task 发送
 
@@ -297,7 +354,7 @@ const ucn_result_t rc = g_service_port.send(destination_node_id,
 
 `send()` 成功只代表 Router 接受并复制了 Payload。需要明确区分时调用 `ucn_service_send_ex()`：它返回的 Acceptance 是 `LOCAL_DELIVERED` 或 `REMOTE_ENQUEUED`；后者仍可能在 Bridge/Core/Link 阶段失败，不是端到端 ACK。对 Q0 命令，业务层必须保留本地失效保护，不能把“入队成功”当作执行器已经动作的确认。
 
-Task 停机/重启前调用 `ucn_service_set_ready(..., false)`：Router 会清空对应 Q0 FIFO/Q1 Latest，重启后不会恢复执行旧命令。高风险 Q0 可按需在业务 Payload 前加 12 B `ucn_service_command_guard`，由消费者检查 `command_id`、有效期和结果 Endpoint；跨节点时间戳只有在产品提供共享时间域时才有意义。
+Task 停机/重启前调用 `ucn_service_set_ready(..., false)`：Router 会清空对应 Q0 FIFO/Q1 Latest，重启后不会恢复执行旧命令。高风险 Q0 可按需在业务 Payload 前加 12 B `ucn_service_command_guard`，但这不是强制线格式；Validator 与消费者分别检查命令 ID、有效期、结果 Endpoint 和产品安全状态。跨节点时间戳只有在产品提供共享时间域时才有意义。
 
 ### 7.4 从业务 Task 接收
 
@@ -309,6 +366,111 @@ while (g_service_port.inbox_take(UCN_SERVICE_ID_CONTROL, 0x40U, &message) == UCN
 ```
 
 Port 的 `event_take()` 只是一字节的“可能有消息”通知：收到通知后必须循环 `inbox_take()` 读空，因为 Q1 可能在通知之间覆盖成最新值。Q0 Inbox 是 FIFO；满时显式返回/计数。Q1 Inbox 是 Latest Value；覆盖旧值是预期行为。
+
+### 7.5 可选 Q0 本机背压重试
+
+默认 Bridge 仍是一次提交：Router Remote TX 出队后，如果 Core/Link 返回 `UCN_ERR_NO_SPACE`，该次提交立即失败。只有产品确认“这是固定 Adapter TX Queue 的瞬时背压”时，才启用一个固定 Pending Q0 槽：
+
+```c
+static void outbound_final(void *context,
+                           const ucn_service_message_t *message,
+                           ucn_result_t final_result)
+{
+    /* 回调返回后 message 指针不再归调用方持有；需要长期保存时只复制 ID/结果。 */
+    product_record_local_submit(message->destination_node_id,
+                                message->endpoint,
+                                final_result);
+}
+
+static ucn_result_t service_enable_bounded_q0_retry(void)
+{
+    const ucn_service_bridge_q0_backpressure_policy_t policy = {
+        .max_retries = 3U,
+        .retry_interval_ms = UINT32_C(5),
+        .timeout_ms = UINT32_C(30),
+    };
+    ucn_result_t rc;
+
+    rc = ucn_service_protocol_bridge_set_outbound_observer(
+        &g_service_bridge, outbound_final, NULL);
+    if (rc != UCN_OK) {
+        return rc;
+    }
+    return ucn_service_protocol_bridge_set_q0_backpressure_policy(
+        &g_service_bridge, &policy);
+}
+```
+
+Protocol Task 应传入同一个单调时钟：
+
+```c
+const uint32_t now_ms = product_monotonic_ms();
+uint8_t processed = 0U;
+
+(void)ucn_service_protocol_bridge_step_at(&g_service_bridge,
+                                           now_ms,
+                                           2U,
+                                           &processed);
+(void)ucn_node_step(&g_node, now_ms);
+```
+
+行为边界：
+
+- 只重试 Q0 的 `UCN_ERR_NO_SPACE`；`LINK_DOWN`、无路由、安全拒绝、参数错误等立即终结；
+- Pending 存在时不再从 Router 取下一条 Q0/Q1，因此原 Q0 不会被后来消息越序；等待重试到期的调用可以返回 `processed=0`；
+- Observer 只在最终接受、耗尽、终止失败或过期时调用一次，中间 `NO_SPACE` 不回调；
+- Observer 的 `UCN_OK` 只表示 `LINK_QUEUE_ACCEPTED`，不是 `REMOTE_INBOXED` 或 `REMOTE_EXECUTED`；关键命令仍用 Result Endpoint/Command ID 闭环；
+- 传 `NULL` 给 `set_q0_backpressure_policy()` 可恢复默认一次提交；Pending 仍被占用时禁止改 Policy；
+- Q1 不使用该机制，继续保持 Latest Value。
+
+### 7.6 区分本机提交与远端执行结果
+
+统一阶段依次为 `LOCAL_INBOXED`、`REMOTE_ROUTER_QUEUED`、`LINK_QUEUE_ACCEPTED`、`REMOTE_INBOXED`、`REMOTE_EXECUTED`。前两项由 `ucn_service_send_ex()` 返回的 Acceptance 经 `ucn_service_acceptance_stage()` 映射；第三项由 Bridge 本机最终 Observer 确认；后两项只能由业务 Result Endpoint 确认。
+
+需要区分立即背压拒绝、重试耗尽、过期和终止失败时，使用结构化接口：
+
+```c
+static void outbound_event(
+    void *context,
+    const ucn_service_message_t *message,
+    const ucn_service_bridge_outbound_event_t *event)
+{
+    (void)context;
+    product_record_local_submit(message->destination_node_id,
+                                message->endpoint,
+                                event->stage,
+                                event->outcome,
+                                event->result);
+}
+
+(void)ucn_service_protocol_bridge_set_outbound_event_observer(
+    &g_service_bridge, outbound_event, NULL);
+```
+
+关键命令继续使用可选 12 B Command Guard。目标要报告远端阶段时，在 Guard 指定的 Result Endpoint 返回可选 8 B `ucn_service_result_header_t`；源端用 `ucn_service_result_header_decode()` 和 `ucn_service_result_matches_command()` 核对 Command ID 与实际 Endpoint。`REMOTE_INBOXED` 只允许 `ACCEPTED`；`REMOTE_EXECUTED` 可为 `SUCCEEDED/REJECTED/FAILED/EXPIRED`，`detail_code` 由产品 ABI 冻结。
+
+UCN 不为此建立通用 Pending/ACK 表。产品必须用固定容量命令等待表管理目标 Node、Session 和 Deadline：目标 Validator 在入 Inbox 前拒绝时不会自动回包，源端会看到 `LINK_QUEUE_ACCEPTED` 后业务超时；执行 Task 主动拒绝时则应返回 `REMOTE_EXECUTED + REJECTED`。完整契约见 [S20 异步阶段与业务结果关联](UCN_S20_异步阶段与业务结果关联.md)。
+
+### 7.7 直接使用 Core 的背压重试
+
+不经过 Service、直接调用 Core 队列的单 Task/裸机产品，也必须显式选择该语义并提供绝对 Deadline：
+
+```c
+const uint32_t now_ms = product_monotonic_ms();
+const ucn_send_request_t request = {
+    .destination = destination_node_id,
+    .message_type = UCN_MSG_DATA_Q0,
+    .traffic_class = UCN_TRAFFIC_Q0_CRITICAL,
+    .delivery = UCN_DELIVERY_RETRY_ON_BACKPRESSURE,
+    .deadline_ms = ucn_deadline_from_now(now_ms, UINT32_C(30)),
+    .payload = payload,
+    .payload_length = payload_length,
+};
+
+(void)ucn_node_enqueue(&g_node, &request);
+```
+
+Core Profile 默认最多重试 `UCN_Q0_BACKPRESSURE_MAX_RETRIES=3` 次、间隔 `UCN_Q0_BACKPRESSURE_RETRY_INTERVAL_MS=5 ms`。它保留原 Q0 FIFO 槽，等待期间只允许必要 Heartbeat/Probe/Route Refresh 维护取得机会；这仍只是本机队列准入重试，不重传已经被 Link 接受的帧。
 
 ## 8. 自动发现、入网、路由与多个 Bearer
 
@@ -349,6 +511,10 @@ Adapter 的 Cost 必须来自真实可解释指标。`route_cost` 越低越优�
 4. 源 Node 用 `ucn_node_set_policy_path()` 把本地句柄、已认证 `wire_path_id`、目的 Node、首跳 Link 关联，并设 `verified=true`；
 5. 用 `ucn_node_set_route_policy()` 为一个精确的 `(destination, endpoint, traffic_class)` 绑定策略；
 6. 业务继续调用原来的 `ucn_node_send_endpoint()` / Service `send()`，无需把路径号传给每次业务调用。
+
+远端 `PATH_INSTALL/PATH_REVOKE` 的接收顺序固定为 Security Provider、产品 Path Authorizer、认证管理源预算、最后才修改 Path 表。默认最多跟踪 4 个活动管理源，每个来源的 INSTALL/REVOKE 各允许突发 4 次并按 1 s/Token 恢复；来源身份是 `(source Node, source Session)`，不包含 Link，所以切换 Wi-Fi/UART Bearer 不能绕过。产品可用 `UCN_PATH_CONTROL_RX_SOURCE_DEPTH`、`UCN_PATH_CONTROL_RX_TOKEN_BURST`、`UCN_PATH_CONTROL_RX_TOKEN_REFILL_MS`、`UCN_PATH_CONTROL_RX_SOURCE_IDLE_MS` 按 MCU RAM 和管理频率调整。Session 更新必须先由产品 Security 接受；旧 Session 吊销仍是 Security Provider 的责任。
+
+调试时读取 `ucn_node_get_stats()`：`path_*_authorization_rejected` 表示 Security/产品授权拒绝，`path_*_budget_rejected` 表示对应操作 Token 耗尽，`path_control_budget_source_full` 表示活动管理源槽已满，`path_install_table_full` 才表示真正的 Path 转发表已满。以上拒绝均发生在 Path 表写入前。
 
 ```c
 ucn_policy_path_config_t p1 = {

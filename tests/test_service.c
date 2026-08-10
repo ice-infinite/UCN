@@ -18,17 +18,17 @@ enum {
 
 static const ucn_service_binding_t TEST_BINDINGS[] = {
     { 0x40U, TEST_SERVICE_CONTROL, 24U, TEST_Q1_MASK,
-      UCN_SERVICE_DELIVERY_Q1_LATEST, TEST_MASK_SENSOR, true, true },
+      UCN_SERVICE_DELIVERY_Q1_LATEST, TEST_MASK_SENSOR, true, true, false },
     { 0x42U, TEST_SERVICE_CONTROL, 16U, TEST_Q1_MASK,
-      UCN_SERVICE_DELIVERY_Q1_LATEST, TEST_MASK_SENSOR, true, true },
+      UCN_SERVICE_DELIVERY_Q1_LATEST, TEST_MASK_SENSOR, true, true, false },
     { 0x43U, TEST_SERVICE_CONTROL, 12U, TEST_Q1_MASK,
-      UCN_SERVICE_DELIVERY_Q1_LATEST, TEST_MASK_SENSOR, true, true },
+      UCN_SERVICE_DELIVERY_Q1_LATEST, TEST_MASK_SENSOR, true, true, false },
     { 0x50U, TEST_SERVICE_CONTROL, 16U, TEST_Q1_MASK,
-      UCN_SERVICE_DELIVERY_Q1_LATEST, TEST_MASK_POWER, true, true },
+      UCN_SERVICE_DELIVERY_Q1_LATEST, TEST_MASK_POWER, true, true, false },
     { 0x60U, TEST_SERVICE_ACTUATOR, 16U, TEST_Q0_MASK,
-      UCN_SERVICE_DELIVERY_Q0_FIFO, TEST_MASK_CONTROL, true, true },
+      UCN_SERVICE_DELIVERY_Q0_FIFO, TEST_MASK_CONTROL, true, true, false },
     { 0x61U, TEST_SERVICE_ACTUATOR, 16U, TEST_Q0_MASK,
-      UCN_SERVICE_DELIVERY_Q0_FIFO, TEST_MASK_CONTROL, true, true }
+      UCN_SERVICE_DELIVERY_Q0_FIFO, TEST_MASK_CONTROL, true, true, false }
 };
 
 static int service_init(ucn_service_router_t *router, ucn_node_id_t local_node_id)
@@ -67,6 +67,13 @@ static int test_service_configuration(void)
     TEST_ASSERT(ucn_service_router_init(&router, &config) == UCN_ERR_CONFIG);
     bindings[0] = TEST_BINDINGS[0];
     bindings[0].max_payload_length = (uint16_t)(UCN_SERVICE_MAX_PAYLOAD_BYTES + 1U);
+    TEST_ASSERT(ucn_service_router_init(&router, &config) == UCN_ERR_CONFIG);
+    bindings[0] = TEST_BINDINGS[0];
+    bindings[0].require_remote_q0_validator = true;
+    TEST_ASSERT(ucn_service_router_init(&router, &config) == UCN_ERR_CONFIG);
+    bindings[0] = TEST_BINDINGS[4];
+    bindings[0].accept_remote = false;
+    bindings[0].require_remote_q0_validator = true;
     TEST_ASSERT(ucn_service_router_init(&router, &config) == UCN_ERR_CONFIG);
     bindings[0] = TEST_BINDINGS[0];
     bindings[1] = TEST_BINDINGS[0];
@@ -297,6 +304,73 @@ static int test_service_command_guard(void)
     return 0;
 }
 
+static int test_service_async_result_contract(void)
+{
+    uint8_t payload[UCN_SERVICE_RESULT_HEADER_BYTES + 1U];
+    const ucn_service_command_guard_t command = {
+        UINT32_C(0x10203040), UINT32_C(100), 50U, 0x50U, 0U
+    };
+    ucn_service_result_header_t encoded = {
+        UINT32_C(0x10203040), UCN_SERVICE_STAGE_REMOTE_INBOXED,
+        UCN_SERVICE_RESULT_ACCEPTED, UINT16_C(0x1234)
+    };
+    ucn_service_result_header_t decoded;
+    ucn_service_command_guard_t invalid_command;
+
+    TEST_ASSERT(ucn_service_acceptance_stage(
+                    UCN_SERVICE_ACCEPTANCE_LOCAL_DELIVERED) ==
+                UCN_SERVICE_STAGE_LOCAL_INBOXED);
+    TEST_ASSERT(ucn_service_acceptance_stage(
+                    UCN_SERVICE_ACCEPTANCE_REMOTE_ENQUEUED) ==
+                UCN_SERVICE_STAGE_REMOTE_ROUTER_QUEUED);
+    TEST_ASSERT(ucn_service_acceptance_stage(UCN_SERVICE_ACCEPTANCE_NONE) ==
+                UCN_SERVICE_STAGE_NONE);
+
+    (void)memset(payload, 0, sizeof(payload));
+    (void)memset(&decoded, 0, sizeof(decoded));
+    TEST_ASSERT(ucn_service_result_header_encode(&encoded, payload) == UCN_OK);
+    payload[UCN_SERVICE_RESULT_HEADER_BYTES] = 0xA5U;
+    TEST_ASSERT(ucn_service_result_header_decode(payload, sizeof(payload),
+                                                  &decoded) == UCN_OK);
+    TEST_ASSERT(decoded.command_id == encoded.command_id &&
+                decoded.stage == UCN_SERVICE_STAGE_REMOTE_INBOXED &&
+                decoded.status == UCN_SERVICE_RESULT_ACCEPTED &&
+                decoded.detail_code == UINT16_C(0x1234));
+    TEST_ASSERT(ucn_service_result_matches_command(
+                    &command, command.result_endpoint, &decoded));
+    TEST_ASSERT(!ucn_service_result_matches_command(&command, 0x51U, &decoded));
+    invalid_command = command;
+    invalid_command.flags = 1U;
+    TEST_ASSERT(!ucn_service_result_matches_command(
+                    &invalid_command, command.result_endpoint, &decoded));
+    decoded.command_id++;
+    TEST_ASSERT(!ucn_service_result_matches_command(
+                    &command, command.result_endpoint, &decoded));
+
+    encoded.stage = UCN_SERVICE_STAGE_REMOTE_EXECUTED;
+    encoded.status = UCN_SERVICE_RESULT_REJECTED;
+    encoded.detail_code = UINT16_C(7);
+    TEST_ASSERT(ucn_service_result_header_encode(&encoded, payload) == UCN_OK);
+    TEST_ASSERT(ucn_service_result_header_decode(
+                    payload, UCN_SERVICE_RESULT_HEADER_BYTES, &decoded) == UCN_OK);
+    TEST_ASSERT(decoded.stage == UCN_SERVICE_STAGE_REMOTE_EXECUTED &&
+                decoded.status == UCN_SERVICE_RESULT_REJECTED &&
+                decoded.detail_code == UINT16_C(7));
+
+    encoded.stage = UCN_SERVICE_STAGE_LOCAL_INBOXED;
+    TEST_ASSERT(ucn_service_result_header_encode(&encoded, payload) ==
+                UCN_ERR_ARGUMENT);
+    payload[4] = (uint8_t)UCN_SERVICE_STAGE_REMOTE_INBOXED;
+    payload[5] = (uint8_t)UCN_SERVICE_RESULT_SUCCEEDED;
+    TEST_ASSERT(ucn_service_result_header_decode(
+                    payload, UCN_SERVICE_RESULT_HEADER_BYTES, &decoded) ==
+                UCN_ERR_MALFORMED);
+    TEST_ASSERT(ucn_service_result_header_decode(
+                    payload, UCN_SERVICE_RESULT_HEADER_BYTES - 1U, &decoded) ==
+                UCN_ERR_ARGUMENT);
+    return 0;
+}
+
 int test_service(void)
 {
     if (test_service_configuration() != 0) {
@@ -311,5 +385,6 @@ int test_service(void)
     if (test_service_restart_purges_inbox() != 0) {
         return 1;
     }
-    return test_service_command_guard();
+    return test_service_command_guard() |
+           test_service_async_result_contract();
 }

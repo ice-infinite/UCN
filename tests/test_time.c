@@ -12,6 +12,8 @@ int test_time(void)
     const uint32_t base_ms = UINT32_MAX - UINT32_C(5);
     uint32_t deadline;
     ucn_node_t node;
+    ucn_node_t step_node;
+    ucn_node_t wrap_step_node;
     ucn_path_state_t path_state;
     ucn_policy_state_t policy_state;
     ucn_config_t config;
@@ -43,6 +45,37 @@ int test_time(void)
     TEST_ASSERT(!ucn_elapsed_at_least(2U, UINT32_MAX - UINT32_C(3), 7U));
     TEST_ASSERT(ucn_elapsed_at_least(3U, UINT32_MAX - UINT32_C(3), 7U));
     TEST_ASSERT(!ucn_elapsed_at_least(3U, 3U, 0U));
+
+    /* The first Step establishes the observation baseline.  Exactly the
+     * configured maximum is legal; only a larger gap increments violations. */
+    (void)memset(&step_node, 0, sizeof(step_node));
+    config.network_id = UINT32_C(0x12345678);
+    config.node_id = UINT32_C(10);
+    config.default_hop_limit = 4U;
+    TEST_ASSERT(ucn_node_init(&step_node, &config) == UCN_OK);
+    (void)ucn_node_step(&step_node, 0U);
+    TEST_ASSERT(step_node.stats.last_step_ms == 0U &&
+                step_node.stats.max_step_gap_ms == 0U &&
+                step_node.stats.step_interval_violations == 0U);
+    (void)ucn_node_step(&step_node, UCN_MAX_STEP_INTERVAL_MS);
+    TEST_ASSERT(step_node.stats.last_step_ms == UCN_MAX_STEP_INTERVAL_MS &&
+                step_node.stats.max_step_gap_ms == UCN_MAX_STEP_INTERVAL_MS &&
+                step_node.stats.step_interval_violations == 0U);
+    (void)ucn_node_step(&step_node,
+                        UCN_MAX_STEP_INTERVAL_MS * UINT32_C(2) + UINT32_C(1));
+    TEST_ASSERT(step_node.stats.max_step_gap_ms ==
+                    UCN_MAX_STEP_INTERVAL_MS + UINT32_C(1) &&
+                step_node.stats.step_interval_violations == 1U);
+
+    /* Unsigned elapsed time keeps the same contract across millis() wrap. */
+    (void)memset(&wrap_step_node, 0, sizeof(wrap_step_node));
+    config.node_id = UINT32_C(11);
+    TEST_ASSERT(ucn_node_init(&wrap_step_node, &config) == UCN_OK);
+    (void)ucn_node_step(&wrap_step_node, UINT32_MAX - UINT32_C(3));
+    (void)ucn_node_step(&wrap_step_node, UINT32_C(4));
+    TEST_ASSERT(wrap_step_node.stats.last_step_ms == 4U &&
+                wrap_step_node.stats.max_step_gap_ms == 8U &&
+                wrap_step_node.stats.step_interval_violations == 0U);
 
     (void)memset(&node, 0, sizeof(node));
     config.network_id = UINT32_C(0x12345678);

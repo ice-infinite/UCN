@@ -86,9 +86,28 @@ nodes:
       - target: policy_path.path_control_helpers_static
         type: callback
         reason: 调用产品 Path 控制授权回调。
+      - target: policy_path.path_control_budget_helpers_static
+        type: direct
+        reason: 授权成功后按认证 Source/Session 消耗 INSTALL Token。
       - target: policy_path.path_control_helpers_static
         type: direct
         reason: 写入固定 Path 转发表。
+
+  - id: policy_path.handle_path_revoke_static
+    symbol: handle_path_revoke
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 验证 PATH_REVOKE 权限与 Payload，在独立预算允许后幂等撤销 Path 表项。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: policy_path.path_control_helpers_static
+        type: callback
+        reason: 调用产品 Path 控制授权回调。
+      - target: policy_path.path_control_budget_helpers_static
+        type: direct
+        reason: 授权成功后按认证 Source/Session 消耗 REVOKE Token。
 
   - id: policy_path.send_endpoint_pinned_static
     symbol: send_endpoint_pinned
@@ -137,13 +156,13 @@ nodes:
     type: function
     file: src/ucn_node.c
     layer: routing
-    role: 综合平滑 Cost、可选 RTT、失败率、队列压力和活跃 Flow 数选择最低分 Path。
+    role: 按 Known 基础 Cost 乘以活跃 Flow 数加一选择最低分 Path；Unknown 不优于 Known。
     called_by:
       - policy_path.send_endpoint_auto_balance_static
     calls:
       - target: policy_path.quality_query_helpers_static
         type: direct
-        reason: 读取 Node step 更新的固定质量快照。
+        reason: 读取基础 Cost；RTT/失败率不进入裸评分，持续队列压力只单独触发拥塞重绑。
 
   - id: policy_path.ucn_policy_refresh_link_quality
     symbol: ucn_policy_refresh_link_quality
@@ -206,6 +225,20 @@ nodes:
       - target: policy_path.ucn_path_install
         type: direct
         reason: 写入固定 Path 转发表。
+
+  - id: policy_path.path_control_budget_helpers_static
+    symbol: find_path_control_source_budget/take_path_control_source_token
+    type: module
+    file: src/ucn_node.c
+    layer: routing
+    role: 在双重授权后、Path 写入前，以固定 Source/Session 表分别限制 INSTALL 与 REVOKE。
+    called_by:
+      - policy_path.handle_path_install_static
+      - policy_path.handle_path_revoke_static
+    calls: []
+    notes:
+      - 键不含 ingress Link，同源改变 Bearer 不能绕过；默认 4 源槽且 60 s 惰性回收。
+      - 同源新 Session 仅在 Security 与产品 Authorizer 已接受后重置预算；旧 Session 吊销属于产品 Security。
 
   - id: policy_path.policy_path_send_helpers_static
     symbol: send_endpoint_on_policy_path

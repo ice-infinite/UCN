@@ -81,6 +81,8 @@ UCN 不会在每次业务发送前重新寻找完整路径。正常流程是“*
 
 `route_cost` 是跨介质的统一抽象：WiFi Adapter 可以综合 RSSI、丢包、重试；CAN Adapter 可以综合错误、拥塞或 Bus-Off；UART 可以综合 CRC、超时和队列压力。采样、平滑和防抖属于 Adapter，Core 只比较最终 Cost，因此不会把 WiFi 特有逻辑带入 CAN/UART。
 
+RREQ 从源端 `Cost=0/Hop=0` 出发并逐跳累加，用于在同一次发现中比较源到目标的候选；目标返回 RREP 时重新从 `Cost=0/Hop=0` 开始，每个返回节点按自己的目标方向 Link 累加，因此 Route Cache 中的 `route_cost/hop_count` 表示“本节点到目标”的剩余代价。业务转发还必须匹配同一个 `route_epoch`；不同 Epoch 的两条表项即使静态画出来互指，也不是同一帧能够执行的转发环。
+
 当前已实现的是固定容量的 Active/Candidate 控制闭环和虚拟拓扑验证；Cost 的实机采样周期、抖动窗口、吞吐与切换丢包上限必须在具体 Adapter 和多板环境中测量后冻结。
 
 同一下一跳同时存在 WiFi/UART/CAN Bearer 时，T21.3 会先保持健康 Primary。候选 Bearer 只有比 Primary 低至少 20%、连续 3 个 500 ms 窗口成立，且在自己的直连 Link 上取得 2 次 `HEARTBEAT` ACK（最多 3 次、100 ms 间隔）才成为新的 Primary；硬 Down 仍直接切健康 Backup。该 Probe 不经中继、不改线格式：它不会在每次业务发送时抢占 Q0/Q1，但连续业务达到默认 4 帧且 Probe 已到期时可使用一个必要维护槽，避免长期饥饿。数值均为可覆盖的编译期宏。两块 S3 已实测 ESP-NOW 与 UART 以两个独立 Core Link 合并为同一 Neighbor；UART Cost 5 为 Primary、ESP-NOW Cost 10 为 Backup，远端 UART 停止后仍保留 Wi-Fi Neighbor，恢复后再合并。物理拔线切换时延、功耗、持续业务丢失/乱序与多跳仍须测量。

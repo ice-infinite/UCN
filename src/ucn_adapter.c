@@ -1,6 +1,145 @@
 #include <string.h>
 
 #include "ucn/ucn_adapter.h"
+#include "ucn/ucn_time.h"
+
+#if UCN_FEATURE_DYNAMIC_MESH
+static bool hello_interval_with_jitter_is_valid(uint32_t interval_ms,
+                                                uint16_t jitter_permille)
+{
+    uint64_t worst_case_ms;
+
+    if (!ucn_duration_is_valid(interval_ms) ||
+        jitter_permille > UCN_ADAPTER_HELLO_MAX_RETRY_JITTER_PERMILLE) {
+        return false;
+    }
+    worst_case_ms = (uint64_t)interval_ms *
+                    (uint64_t)(1000U + jitter_permille);
+    return worst_case_ms <=
+           (uint64_t)UCN_MAX_SAFE_DURATION_MS * UINT64_C(1000);
+}
+
+static bool hello_config_is_valid(const ucn_adapter_hello_config_t *config)
+{
+    if (config == NULL) {
+        return false;
+    }
+    if (!config->enabled) {
+        return true;
+    }
+    if (config->admitted_policy != UCN_ADAPTER_HELLO_ADMITTED_POLICY_SLOW &&
+        config->admitted_policy != UCN_ADAPTER_HELLO_ADMITTED_POLICY_STOP) {
+        return false;
+    }
+    if (!ucn_duration_is_valid(config->initial_jitter_min_ms) ||
+        !ucn_duration_is_valid(config->initial_jitter_max_ms) ||
+        config->initial_jitter_max_ms < config->initial_jitter_min_ms ||
+        config->retry_jitter_permille >
+            UCN_ADAPTER_HELLO_MAX_RETRY_JITTER_PERMILLE ||
+        !hello_interval_with_jitter_is_valid(config->backoff_initial_ms,
+                                             config->retry_jitter_permille) ||
+        !hello_interval_with_jitter_is_valid(config->backoff_max_ms,
+                                             config->retry_jitter_permille) ||
+        config->backoff_max_ms < config->backoff_initial_ms) {
+        return false;
+    }
+    if ((config->max_fast_retries != 0U ||
+         config->admitted_policy == UCN_ADAPTER_HELLO_ADMITTED_POLICY_SLOW) &&
+        !hello_interval_with_jitter_is_valid(config->fast_retry_interval_ms,
+                                             config->retry_jitter_permille)) {
+        return false;
+    }
+    return config->admitted_policy != UCN_ADAPTER_HELLO_ADMITTED_POLICY_SLOW ||
+           hello_interval_with_jitter_is_valid(
+               config->admitted_slow_interval_ms,
+               config->retry_jitter_permille);
+}
+
+static uint32_t hello_random_next(ucn_adapter_hello_scheduler_t *scheduler)
+{
+    uint32_t value = scheduler->random_state;
+
+    value ^= value << 13U;
+    value ^= value >> 17U;
+    value ^= value << 5U;
+    if (value == 0U) {
+        value = UINT32_C(0x6D2B79F5);
+    }
+    scheduler->random_state = value;
+    return value;
+}
+
+static void hello_seed(ucn_adapter_hello_scheduler_t *scheduler,
+                       uint32_t random_seed)
+{
+    uint32_t value = random_seed ^ scheduler->adapter_token ^
+                     UINT32_C(0x9E3779B9);
+
+    if (value == 0U) {
+        value = UINT32_C(0xA341316C);
+    }
+    scheduler->random_state = value;
+    (void)hello_random_next(scheduler);
+}
+
+static uint32_t hello_initial_delay(ucn_adapter_hello_scheduler_t *scheduler)
+{
+    const uint32_t minimum = scheduler->config.initial_jitter_min_ms;
+    const uint32_t range = scheduler->config.initial_jitter_max_ms - minimum + 1U;
+
+    return minimum + hello_random_next(scheduler) % range;
+}
+
+static uint32_t hello_retry_delay(ucn_adapter_hello_scheduler_t *scheduler,
+                                  uint32_t interval_ms)
+{
+    const uint32_t span_ms = (uint32_t)(
+        ((uint64_t)interval_ms * scheduler->config.retry_jitter_permille) /
+        UINT64_C(1000));
+    uint32_t offset_range;
+
+    if (span_ms == 0U) {
+        return interval_ms;
+    }
+    offset_range = span_ms * 2U + 1U;
+    return interval_ms - span_ms + hello_random_next(scheduler) % offset_range;
+}
+
+static void hello_schedule_initial(ucn_adapter_hello_scheduler_t *scheduler,
+                                   uint32_t now_ms)
+{
+    scheduler->state = UCN_ADAPTER_HELLO_INITIAL_JITTER;
+    scheduler->fast_retries_sent = 0U;
+    scheduler->backoff_interval_ms = scheduler->config.backoff_initial_ms;
+    scheduler->next_hello_ms =
+        ucn_deadline_from_now(now_ms, hello_initial_delay(scheduler));
+}
+
+static void hello_schedule_retry(ucn_adapter_hello_scheduler_t *scheduler,
+                                 uint32_t now_ms,
+                                 uint32_t interval_ms)
+{
+    scheduler->next_hello_ms = ucn_deadline_from_now(
+        now_ms, hello_retry_delay(scheduler, interval_ms));
+}
+
+static void hello_enter_admitted(ucn_adapter_hello_scheduler_t *scheduler,
+                                 uint32_t now_ms)
+{
+    if (scheduler->config.admitted_policy ==
+        UCN_ADAPTER_HELLO_ADMITTED_POLICY_STOP) {
+        scheduler->state = UCN_ADAPTER_HELLO_ADMITTED_STOP;
+        scheduler->next_hello_ms = 0U;
+        scheduler->stats.admitted_stop_transitions++;
+        return;
+    }
+
+    scheduler->state = UCN_ADAPTER_HELLO_ADMITTED_SLOW;
+    hello_schedule_retry(scheduler, now_ms,
+                         scheduler->config.fast_retry_interval_ms);
+    scheduler->stats.admitted_slow_transitions++;
+}
+#endif
 
 static void queue_enter(ucn_adapter_rx_queue_t *queue)
 {
@@ -177,3 +316,137 @@ const ucn_adapter_rx_stats_t *ucn_adapter_rx_get_stats(
 {
     return queue == NULL ? NULL : &queue->stats;
 }
+
+#if UCN_FEATURE_DYNAMIC_MESH
+ucn_result_t ucn_adapter_hello_scheduler_init(
+    ucn_adapter_hello_scheduler_t *scheduler,
+    const ucn_adapter_hello_config_t *config,
+    uint32_t adapter_token,
+    uint32_t random_seed,
+    uint32_t now_ms)
+{
+    if (scheduler == NULL || !hello_config_is_valid(config) ||
+        adapter_token == 0U) {
+        return UCN_ERR_ARGUMENT;
+    }
+
+    (void)memset(scheduler, 0, sizeof(*scheduler));
+    scheduler->config = *config;
+    scheduler->adapter_token = adapter_token;
+    scheduler->initialized = true;
+    hello_seed(scheduler, random_seed);
+    if (!config->enabled) {
+        scheduler->state = UCN_ADAPTER_HELLO_DISABLED;
+        return UCN_OK;
+    }
+    hello_schedule_initial(scheduler, now_ms);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_adapter_hello_scheduler_restart(
+    ucn_adapter_hello_scheduler_t *scheduler,
+    uint32_t random_seed,
+    uint32_t now_ms)
+{
+    if (scheduler == NULL || !scheduler->initialized) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (!scheduler->config.enabled) {
+        scheduler->state = UCN_ADAPTER_HELLO_DISABLED;
+        scheduler->next_hello_ms = 0U;
+        return UCN_OK;
+    }
+
+    hello_seed(scheduler, random_seed);
+    hello_schedule_initial(scheduler, now_ms);
+    scheduler->stats.discovery_restarts++;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_adapter_hello_scheduler_step(
+    ucn_adapter_hello_scheduler_t *scheduler,
+    uint32_t now_ms,
+    bool adapter_has_admitted_peer,
+    bool *hello_due)
+{
+    if (scheduler == NULL || !scheduler->initialized || hello_due == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    *hello_due = false;
+    if (scheduler->state == UCN_ADAPTER_HELLO_DISABLED) {
+        return UCN_OK;
+    }
+
+    if (adapter_has_admitted_peer) {
+        if (scheduler->state != UCN_ADAPTER_HELLO_ADMITTED_SLOW &&
+            scheduler->state != UCN_ADAPTER_HELLO_ADMITTED_STOP) {
+            hello_enter_admitted(scheduler, now_ms);
+        }
+        if (scheduler->state == UCN_ADAPTER_HELLO_ADMITTED_STOP ||
+            !ucn_deadline_expired(now_ms, scheduler->next_hello_ms)) {
+            return UCN_OK;
+        }
+
+        *hello_due = true;
+        scheduler->stats.hellos_due++;
+        hello_schedule_retry(scheduler, now_ms,
+                             scheduler->config.admitted_slow_interval_ms);
+        return UCN_OK;
+    }
+
+    if (scheduler->state == UCN_ADAPTER_HELLO_ADMITTED_SLOW ||
+        scheduler->state == UCN_ADAPTER_HELLO_ADMITTED_STOP) {
+        hello_schedule_initial(scheduler, now_ms);
+        scheduler->stats.discovery_restarts++;
+        return UCN_OK;
+    }
+    if (!ucn_deadline_expired(now_ms, scheduler->next_hello_ms)) {
+        return UCN_OK;
+    }
+
+    *hello_due = true;
+    scheduler->stats.hellos_due++;
+    if (scheduler->state == UCN_ADAPTER_HELLO_INITIAL_JITTER) {
+        if (scheduler->config.max_fast_retries == 0U) {
+            scheduler->state = UCN_ADAPTER_HELLO_BACKOFF;
+            hello_schedule_retry(scheduler, now_ms,
+                                 scheduler->backoff_interval_ms);
+        } else {
+            scheduler->state = UCN_ADAPTER_HELLO_FAST_RETRY;
+            hello_schedule_retry(scheduler, now_ms,
+                                 scheduler->config.fast_retry_interval_ms);
+        }
+        return UCN_OK;
+    }
+    if (scheduler->state == UCN_ADAPTER_HELLO_FAST_RETRY) {
+        scheduler->fast_retries_sent++;
+        if (scheduler->fast_retries_sent >=
+            scheduler->config.max_fast_retries) {
+            scheduler->state = UCN_ADAPTER_HELLO_BACKOFF;
+            hello_schedule_retry(scheduler, now_ms,
+                                 scheduler->backoff_interval_ms);
+        } else {
+            hello_schedule_retry(scheduler, now_ms,
+                                 scheduler->config.fast_retry_interval_ms);
+        }
+        return UCN_OK;
+    }
+
+    if (scheduler->backoff_interval_ms >=
+        scheduler->config.backoff_max_ms / 2U) {
+        scheduler->backoff_interval_ms = scheduler->config.backoff_max_ms;
+    } else {
+        scheduler->backoff_interval_ms *= 2U;
+    }
+    hello_schedule_retry(scheduler, now_ms,
+                         scheduler->backoff_interval_ms);
+    return UCN_OK;
+}
+
+const ucn_adapter_hello_stats_t *ucn_adapter_hello_scheduler_get_stats(
+    const ucn_adapter_hello_scheduler_t *scheduler)
+{
+    return scheduler == NULL || !scheduler->initialized ? NULL :
+                                                            &scheduler->stats;
+}
+#endif

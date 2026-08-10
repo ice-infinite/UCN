@@ -35,7 +35,7 @@
 | 入网 | Candidate Link、双向 `HELLO`、Manual/Open/Provider 准入、Candidate 5 s 超时，以及 `ADMITTED → SUSPECT → REMOVED`/动态 Link 槽回收。 | 入网随机退避、令牌桶、真实 Adapter 地址池。 |
 | 离网发现 | Driver Down 立即清动态路径；无驱动事件时一跳 Heartbeat/认证业务刷新存活，默认 3 s SUSPECT、4 s REMOVED。 | 按介质/功耗冻结实机 Profile。 |
 | 多跳路由 | Active/Candidate 固定表、初始 RREP Epoch、Current/Previous Route Epoch 和默认 1 s grace。 | 实机窗口标定。 |
-| 最优路径 | 已使用路由在刷新窗口发受限 Candidate RREQ；候选至少低 20% Cost，经 3 次 Probe/ACK 才 Activate；未知 Cost 默认 1000。 | Adapter Cost 抖动连续窗口和实机门限。 |
+| 最优路径 | 已使用路由在刷新窗口发受限 Candidate RREQ；候选至少低 20% Cost，经 3 次 Probe/ACK 才 Activate；Unknown 使用 `UINT16_MAX` 保留哨兵且不优于 Known。 | Adapter Cost 抖动连续窗口和实机门限。 |
 | 切换 | 旧 Active 持续承载业务直到 Activate ACK；Activate/ACK 携带 Epoch，旧出口在 grace 内可按 Epoch 转发。 | 已交给驱动的帧不迁移；仍不承诺零乱序/零丢失。 |
 | 控制面保护 | RREQ/Probe/Activate/Heartbeat 有固定源端 Token、最小间隔、固定统计和队列上限。 | HELLO 随机退避、每 Adapter/每 Link 空口配额。 |
 | 路径诊断 | `PATH_TRACE_REQ/REPLY` 逐跳记录 Node ID，固定 Pending/Reverse 表反向返回，独立低频 Token；仅查询当前 Cache，不触发 RREQ。 | 三板 Trace 时延/断链/重组网、产品 Trace ACL 与拓扑保密策略。 |
@@ -132,6 +132,8 @@ NO_ROUTE ── RREQ/RREP ──> ACTIVE
 | `GRACE` | 切换后旧 `route_epoch` 的短暂保留窗口，只服务已在途旧帧；超时必须释放。 |
 | `INVALID` | Link Down、RERR、安全拒绝、验证过期等明确故障后立即不可用。 |
 
+首次 AODV 路径的度量分两个方向计算：RREQ 从源端零值逐跳累加以选择候选，RREP 从目标零值逐跳返回，使每个中继缓存的 Cost/Hop 都是自身到目标的剩余值。业务帧再以 `route_epoch` 选择 Current/Previous；无环判定必须在同一 Epoch 内进行。
+
 ### 4.3 固定资源原则
 
 新增能力只能增加固定数组，不能引入链表、堆、无限重传表或完整拓扑图。建议的配置形态如下，具体数量由 RAM 测试冻结：
@@ -210,7 +212,7 @@ Task A → Service Router
        └─ 远端 Node + Endpoint → Protocol Task → UCN Core → 路由/Link
 ```
 
-当前 v4 Core 仍只具备协议任务上下文的固定 Endpoint 回调；T25.1 已在 Core 外实现纯 C `ucn_service` Router，T25.2 已以独立 Bridge 让唯一 Protocol Task 有界地将 Remote TX 交给 Core，且将目标 Endpoint callback 投递回 Router。T25.3 才接 FreeRTOS Queue/任务通知。整个 T25 均保持 Core 无 RTOS 依赖、静态表和静态队列；Q1 使用按 Endpoint 的 Latest Value Inbox，Q0 使用有界 FIFO，舵机的 PWM/限位/超时安全始终在本机任务完成。任务重启不得触发 Node 离网；Service 未就绪、Endpoint 未注册或 Inbox 满必须显式失败/计数。Endpoint callback 没有端到端 ACK 返回值，因此目标 Service 拒绝只能记本机统计，可靠确认留给后续独立能力。完整设计与测试门禁见[节点内任务通信建议](UCN_节点内任务通信建议.md)。
+当前 v4 已在 Core 外实现纯 C `ucn_service` Router、唯一 Protocol Task Bridge 和 ESP32 FreeRTOS 静态事件 Port。整个 T25 保持 Core 无 RTOS 依赖、静态表和静态队列；Q1 使用按 Endpoint 的 Latest Value Inbox，Q0 使用有界 FIFO。远端高风险 Q0 可由 Binding 强制要求产品 Validator，在 Router 入队前检查完整 Frame 与业务 Payload；可选固定 Replay 表按 Source/Session/Endpoint 去重，认证 Session 轮换必须显式发生。Validator 不强迫所有业务使用 12 B Guard，本机 Fast Path 与执行器的 PWM/限位/超时安全仍由本机 Task 二次检查。任务重启不得触发 Node 离网；Service 未就绪、Endpoint 未注册、Validator 拒绝或 Inbox 满必须显式失败/计数。Endpoint callback 没有端到端 ACK 返回值，因此目标 Service 拒绝只能记本机统计，远端执行确认使用业务结果 Endpoint。完整设计与测试门禁见[节点内任务通信建议](UCN_节点内任务通信建议.md)。
 
 ### 4.5 按需安全策略与透明加密转发（T15）
 
@@ -473,7 +475,7 @@ Adapter 内部可以读取 RSSI、SNR、重传率、ACK 丢失、CRC、队列积
 → T18 邻居健康判断 → T17 是否需要候选发现 → Probe 验证 → 切换
 ```
 
-未知/无效指标不能长期以最小默认 Cost 压过已测量链路。v4 已以 `UCN_UNKNOWN_LINK_ROUTE_COST=1000` 表示保守未知 Cost，并由测试覆盖。
+未知/无效指标不能长期以普通数值参与排序或压过已测量链路。v4 已以 `UCN_UNKNOWN_LINK_ROUTE_COST=UINT16_MAX` 表示 Unknown，Known Cost 永远优先且累计最多饱和到 `UINT16_MAX-1`，并由测试覆盖。
 
 ### 7.2 初始 Profile（均待实机标定）
 

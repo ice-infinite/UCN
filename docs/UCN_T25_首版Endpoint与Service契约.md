@@ -141,6 +141,8 @@ R1 只为 T25.1 的纯 C Router 冻结一组**测试默认值**；不同 MCU 可
 | Remote TX Q1 深度 | 4 | 远端状态/传感器请求槽。 |
 | 每个 Q0 Inbox 深度 | 4 | `MOTOR0`、`SERVO0` 各自 FIFO。 |
 | 每个 Q1 Inbox 深度 | 1 | 每个 Endpoint 一个 Latest 槽。 |
+| Bridge Validator 槽 | 2 | 对应 `MOTOR0/SERVO0` 两个远端高风险 Q0；安装前静态注册。 |
+| 可选 Replay 深度 | 4 | 产品持有的 `(Source, Session, Endpoint)` 固定槽；表满失败关闭。 |
 | 首版 Payload 所有权 | 固定副本 | 禁止保存调用者裸指针。 |
 
 这不是对所有目标板的 RAM 承诺。T25.3 的 ESP32 Port 已完成静态构建：S3 A/B 各为 47,180 B RAM / 594,783 B Flash，WROOM 为 49,320 B / 621,271 B；尚未上传，因此 Heap、Protocol Task 栈和各业务 Task 栈高水位仍需 T25.4 实测。RAM 紧张的最小 Profile 可以先缩减为 4 个 Binding、Q0=2、Q1=2、Payload=24 B，但只能删除未使用的 Endpoint，不能截断已冻结 ABI。
@@ -148,12 +150,15 @@ R1 只为 T25.1 的纯 C Router 冻结一组**测试默认值**；不同 MCU 可
 ## 6. 安全和失联安全边界
 
 - `0x60`、`0x61` 在生产节点应由既有 Endpoint Security Policy 配置为受保护/受 ACL 控制；目前生产 AEAD 与产品 ACL 表仍属于 T15，不将测试明文 Profile 写成安全结论。
+- `0x60`、`0x61` 的 Binding 必须设置 `require_remote_q0_validator=true`，并在 Bridge 安装 handler 前注册产品 Validator。Validator 按本节既有 16 B ABI 检查长度、命令序号、有效期、模式/掩码、标志和数值范围；拒绝发生在 Router 入队前，不给 R1 额外增加 12 B 前缀。
+- 生产 Security 提供非零认证 Session 时，可使用固定 Replay 表；同源同 Endpoint 的 Session 变化必须由认证逻辑显式轮换，不能因收到新值而自动信任。当前 ESP 明文测试档案的 Session=0 只能证明格式校验和可编译接入，不能证明防重放。
 - 本机 Fast Path 不产生网络密文，但 T25.1 预留 `source Service -> Endpoint` 静态 ACL 位置；首版最小规则是 `SENSOR/POWER` 不得向执行器 Endpoint 发送。
 - ACTUATOR 必须独立检查模式、范围、标志、序号与 `valid_for_ms`，并在超时/未就绪/队列满/远端不可达时进入本机安全状态。UCN 的 Q0 只保证有界投递，不替代硬件互锁、PWM 限幅或 FOC 安全闭环。
 - Q1 传感器状态的损失或覆盖不能自动触发旧值重放；CONTROL 应按本地接收时间检测数据新鲜度。
 - Task 进入 `ready=false` 时，Router 会清空该 Binding 的 Q0 FIFO/Q1 Latest；未 ready 时不能读取旧消息，重新 ready 后只接受新消息。
 - `ucn_service_send_ex()` 可区分 `LOCAL_DELIVERED` 与 `REMOTE_ENQUEUED`；后者只表示本机 Router 拥有副本，不表示 Bridge/Core/Link 已接受，更不表示远端执行。
 - 高风险 Q0 可选用 12 B `ucn_service_command_guard` 业务前缀（`command_id/issued_at_ms/valid_for_ms/result_endpoint`）。它不增加所有 Service 消息的固定 RAM；跨 Node 使用 `issued_at_ms` 时必须由产品提供共享时间域，否则应使用产品自己的 Generation/Lease 规则，不能假定两块 MCU 的启动时钟天然同步。
+- 需要报告命令阶段时，Result Endpoint 可选使用 8 B `ucn_service_result_header`：Command ID 与实际 Endpoint 共同关联原命令；只允许 `REMOTE_INBOXED+ACCEPTED` 或 `REMOTE_EXECUTED+SUCCEEDED/REJECTED/FAILED/EXPIRED`。目标 Validator 的入队前拒绝不自动生成结果，源端仍由产品固定等待表和 Deadline 判超时。
 
 ## 7. T25.1 的直接实现输入
 

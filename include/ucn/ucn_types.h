@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 typedef char ucn_max_frame_must_fit_header[
-    UCN_MAX_FRAME_BYTES >= UCN_FRAME_HEADER_SIZE ? 1 : -1];
+    UCN_MAX_FRAME_BYTES >= (UCN_FRAME_HEADER_SIZE + 1U) ? 1 : -1];
 
 #define UCN_MAX_PAYLOAD_BYTES (UCN_MAX_FRAME_BYTES - UCN_FRAME_HEADER_SIZE)
 #define UCN_NODE_BROADCAST UINT32_C(0xFFFFFFFF)
@@ -67,7 +67,11 @@ typedef enum ucn_traffic_class {
 
 typedef enum ucn_delivery_semantic {
     UCN_DELIVERY_BEST_EFFORT = 0,
-    UCN_DELIVERY_LATEST_VALUE = 1
+    UCN_DELIVERY_LATEST_VALUE = 1,
+    /* Q0 queue ownership is retained only while a local Link TX queue reports
+     * transient UCN_ERR_NO_SPACE.  This is bounded admission retry, not a
+     * remote delivery guarantee or an end-to-end retransmission mode. */
+    UCN_DELIVERY_RETRY_ON_BACKPRESSURE = 2
 } ucn_delivery_semantic_t;
 
 typedef enum ucn_message_type {

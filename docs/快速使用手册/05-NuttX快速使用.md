@@ -28,6 +28,10 @@ CONFIG_PRODUCT_UCN_SERVICE_Q0_DEPTH=4
 以下是 pthread 逻辑骨架。产品负责按 NuttX 版本设置任务优先级、静态/可测量栈和启动入口：
 
 ```c
+#include "ucn/ucn_node_storage.h"
+
+static ucn_node_t g_node;
+
 static void *ucn_protocol_main(void *argument)
 {
     (void)argument;
@@ -94,3 +98,7 @@ static void nuttx_adapter_drain_rx_frames(void)
 2. 验证驱动 RX ring、Adapter Queue、Router Inbox 满时的丢弃/覆盖统计。
 3. 加入 pthread Service 后验证线程所有权、远端 Bridge 与中继不投递业务。
 4. 量测每个线程的栈、CPU、FD/驱动错误和断链 Q0 本地安全；再接多 Bearer、策略 Path 与实机多跳。
+
+## 7. S16 Protocol Thread 时限
+
+在板级配置中冻结 `UCN_MAX_STEP_INTERVAL_MS`、pthread 优先级/调度策略、最大 poll/sem wait、RX Pump/Bridge 预算和每个设备 `send()` WCET。Protocol Thread 必须有周期超时，不能永久阻塞等待 FD。运行时导出 `max_step_gap_ms` 与 `step_interval_violations`；当前文档是接入模板，不代表已有 NuttX 板级时延证据。

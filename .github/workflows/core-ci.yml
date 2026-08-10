@@ -33,6 +33,32 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  feature-profiles:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: NANO
+            service: OFF
+          - profile: LITE
+            service: ON
+          - profile: FULL
+            service: ON
+    name: profile-${{ matrix.profile }}-service-${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build-profile
+          -DCMAKE_BUILD_TYPE=Release
+          -DUCN_PROFILE=${{ matrix.profile }}
+          -DUCN_FEATURE_SERVICE=${{ matrix.service }}
+      - name: Build
+        run: cmake --build build-profile --parallel 2
+      - name: Test
+        run: ctest --test-dir build-profile --output-on-failure
+
   sanitizers:
     runs-on: ubuntu-latest
     name: asan-ubsan

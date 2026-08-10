@@ -1,6 +1,7 @@
 #ifndef UCN_NODE_H
 #define UCN_NODE_H
 
+#include "ucn/ucn_profile.h"
 #include "ucn/ucn_link.h"
 #include "ucn/ucn_endpoint.h"
 #include "ucn/ucn_neighbor.h"
@@ -32,6 +33,25 @@ extern "C" {
  * Snapshot and policy diagnostics never use this exception. */
 #ifndef UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE
 #define UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE ((uint8_t)4U)
+#endif
+
+/* Product/Port scheduling contract.  The sole Protocol Task must call
+ * ucn_node_step() at least this often even when there is no RX or business
+ * traffic.  Runtime overruns are observed; an unsafe compile-time maintenance
+ * bound is rejected below. */
+#ifndef UCN_MAX_STEP_INTERVAL_MS
+#define UCN_MAX_STEP_INTERVAL_MS UINT32_C(10)
+#endif
+
+/* Optional Q0 local-admission retry.  A request must explicitly select
+ * UCN_DELIVERY_RETRY_ON_BACKPRESSURE and provide a non-zero absolute
+ * deadline.  Only UCN_ERR_NO_SPACE is retried; every other error is final. */
+#ifndef UCN_Q0_BACKPRESSURE_MAX_RETRIES
+#define UCN_Q0_BACKPRESSURE_MAX_RETRIES ((uint8_t)3U)
+#endif
+
+#ifndef UCN_Q0_BACKPRESSURE_RETRY_INTERVAL_MS
+#define UCN_Q0_BACKPRESSURE_RETRY_INTERVAL_MS UINT32_C(5)
 #endif
 
 #ifndef UCN_MAX_ROUTES
@@ -90,14 +110,26 @@ extern "C" {
 #define UCN_ROUTE_EPOCH_GRACE_MS UINT32_C(1000)
 #endif
 
+#if UCN_FEATURE_CANDIDATE_ROUTING
 typedef char ucn_path_probe_required_acks_must_be_positive[
     UCN_PATH_PROBE_REQUIRED_ACKS > 0U ? 1 : -1];
+#endif
 typedef char ucn_business_tx_burst_before_maintenance_must_be_positive[
     UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE > 0U ? 1 : -1];
+typedef char ucn_q0_backpressure_max_retries_must_be_positive[
+    UCN_Q0_BACKPRESSURE_MAX_RETRIES > 0U ? 1 : -1];
+typedef char ucn_q0_backpressure_retry_interval_must_be_valid[
+    UCN_Q0_BACKPRESSURE_RETRY_INTERVAL_MS > 0U &&
+            UCN_Q0_BACKPRESSURE_RETRY_INTERVAL_MS <= INT32_MAX ?
+        1 : -1];
+#if UCN_FEATURE_DYNAMIC_MESH
 typedef char ucn_route_refresh_advance_must_fit_lifetime[
     UCN_ROUTE_REFRESH_ADVANCE_MS < UCN_ROUTE_ENTRY_LIFETIME_MS ? 1 : -1];
+#endif
+#if UCN_FEATURE_CANDIDATE_ROUTING
 typedef char ucn_route_switch_improvement_percent_must_be_less_than_100[
     UCN_ROUTE_SWITCH_IMPROVEMENT_PERCENT < 100U ? 1 : -1];
+#endif
 
 #ifndef UCN_UNKNOWN_LINK_ROUTE_COST
 #define UCN_UNKNOWN_LINK_ROUTE_COST UCN_LINK_ROUTE_COST_UNKNOWN
@@ -136,6 +168,22 @@ typedef char ucn_unknown_route_cost_must_use_reserved_sentinel[
 #define UCN_PATH_TRACE_RX_TOKEN_REFILL_MS UINT32_C(1000)
 #endif
 
+/* Authenticated PATH_INSTALL/PATH_REVOKE writes use a source/session budget
+ * that is independent from the ingress Link.  This prevents one admitted
+ * management source from bypassing the write-rate bound by changing Bearer. */
+#ifndef UCN_PATH_CONTROL_RX_SOURCE_DEPTH
+#define UCN_PATH_CONTROL_RX_SOURCE_DEPTH ((size_t)4U)
+#endif
+#ifndef UCN_PATH_CONTROL_RX_TOKEN_BURST
+#define UCN_PATH_CONTROL_RX_TOKEN_BURST ((uint8_t)4U)
+#endif
+#ifndef UCN_PATH_CONTROL_RX_TOKEN_REFILL_MS
+#define UCN_PATH_CONTROL_RX_TOKEN_REFILL_MS UINT32_C(1000)
+#endif
+#ifndef UCN_PATH_CONTROL_RX_SOURCE_IDLE_MS
+#define UCN_PATH_CONTROL_RX_SOURCE_IDLE_MS UINT32_C(60000)
+#endif
+
 #ifndef UCN_PENDING_Q1_DEPTH
 #define UCN_PENDING_Q1_DEPTH ((size_t)4U)
 #endif
@@ -160,11 +208,17 @@ typedef char ucn_unknown_route_cost_must_use_reserved_sentinel[
          ((UCN_MAX_FRAME_BYTES - UCN_FRAME_HEADER_SIZE - \
            UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES) / sizeof(ucn_node_id_t)) : \
          0U)
+#if UCN_FEATURE_DIAGNOSTICS
 #define UCN_PATH_TRACE_MAX_NODES \
     ((size_t)(UCN_PATH_TRACE_NODE_CAPACITY_BY_FRAME < \
                       ((size_t)UCN_MAX_HOPS + 1U) ? \
                   UCN_PATH_TRACE_NODE_CAPACITY_BY_FRAME : \
                   ((size_t)UCN_MAX_HOPS + 1U)))
+#else
+/* Keep disabled-profile API types valid without allocating diagnostic state
+ * inside ucn_node_t.  Calls are provided by the explicit CONFIG stubs. */
+#define UCN_PATH_TRACE_MAX_NODES ((size_t)1U)
+#endif
 
 #ifndef UCN_PATH_TRACE_PENDING_DEPTH
 #define UCN_PATH_TRACE_PENDING_DEPTH ((size_t)2U)
@@ -230,6 +284,8 @@ typedef char ucn_unknown_route_cost_must_use_reserved_sentinel[
 #define UCN_POLICY_DIAGNOSTIC_REQUEST_PAYLOAD_BYTES ((size_t)8U)
 #define UCN_POLICY_DIAGNOSTIC_REPLY_PAYLOAD_BYTES ((size_t)32U)
 #define UCN_POLICY_DIAGNOSTIC_RECORD_BYTES ((size_t)24U)
+#define UCN_DYNAMIC_MESH_MIN_FRAME_BYTES \
+    (UCN_FRAME_HEADER_SIZE + (size_t)18U)
 
 #ifndef UCN_POLICY_DIAGNOSTIC_PENDING_DEPTH
 #define UCN_POLICY_DIAGNOSTIC_PENDING_DEPTH ((size_t)2U)
@@ -251,6 +307,9 @@ typedef char ucn_unknown_route_cost_must_use_reserved_sentinel[
 #define UCN_POLICY_DIAGNOSTIC_TOKEN_REFILL_MS UINT32_C(1000)
 #endif
 
+#if UCN_FEATURE_DYNAMIC_MESH
+typedef char ucn_dynamic_mesh_control_must_fit_frame[
+    UCN_MAX_FRAME_BYTES >= UCN_DYNAMIC_MESH_MIN_FRAME_BYTES ? 1 : -1];
 typedef char ucn_control_token_burst_must_be_positive[
     UCN_CONTROL_TOKEN_BURST > 0U ? 1 : -1];
 typedef char ucn_control_token_refill_must_be_positive[
@@ -263,15 +322,12 @@ typedef char ucn_heartbeat_rx_token_burst_must_be_positive[
     UCN_HEARTBEAT_RX_TOKEN_BURST > 0U ? 1 : -1];
 typedef char ucn_heartbeat_rx_token_refill_must_be_positive[
     UCN_HEARTBEAT_RX_TOKEN_REFILL_MS > 0U ? 1 : -1];
+#endif
+#if UCN_FEATURE_DIAGNOSTICS
 typedef char ucn_path_trace_rx_token_burst_must_be_positive[
     UCN_PATH_TRACE_RX_TOKEN_BURST > 0U ? 1 : -1];
 typedef char ucn_path_trace_rx_token_refill_must_be_positive[
     UCN_PATH_TRACE_RX_TOKEN_REFILL_MS > 0U ? 1 : -1];
-typedef char ucn_pending_q1_timeout_must_be_positive[
-    UCN_PENDING_Q1_TIMEOUT_MS > 0U ? 1 : -1];
-typedef char ucn_sequence_rotation_threshold_must_leave_valid_range[
-    UCN_SEQUENCE_ROTATION_THRESHOLD > 1U &&
-            UCN_SEQUENCE_ROTATION_THRESHOLD < UINT32_MAX ? 1 : -1];
 typedef char ucn_path_trace_must_fit_two_node_ids[
     UCN_MAX_FRAME_BYTES >= UCN_PATH_TRACE_MIN_FRAME_BYTES &&
             UCN_PATH_TRACE_MAX_NODES >= 2U ? 1 : -1];
@@ -303,6 +359,26 @@ typedef char ucn_policy_diagnostic_token_burst_must_be_positive[
     UCN_POLICY_DIAGNOSTIC_TOKEN_BURST > 0U ? 1 : -1];
 typedef char ucn_policy_diagnostic_token_refill_must_be_positive[
     UCN_POLICY_DIAGNOSTIC_TOKEN_REFILL_MS > 0U ? 1 : -1];
+#endif
+#if UCN_FEATURE_PATH
+typedef char ucn_path_control_rx_source_depth_must_be_positive[
+    UCN_PATH_CONTROL_RX_SOURCE_DEPTH > 0U ? 1 : -1];
+typedef char ucn_path_control_rx_token_burst_must_be_positive[
+    UCN_PATH_CONTROL_RX_TOKEN_BURST > 0U ? 1 : -1];
+typedef char ucn_path_control_rx_token_refill_must_be_positive[
+    UCN_PATH_CONTROL_RX_TOKEN_REFILL_MS > 0U ? 1 : -1];
+typedef char ucn_path_control_rx_source_idle_must_be_positive[
+    UCN_PATH_CONTROL_RX_SOURCE_IDLE_MS > 0U ? 1 : -1];
+#endif
+#if UCN_FEATURE_DYNAMIC_MESH
+typedef char ucn_pending_q1_timeout_must_be_positive[
+    UCN_PENDING_Q1_TIMEOUT_MS > 0U ? 1 : -1];
+#endif
+#if UCN_FEATURE_SECURITY
+typedef char ucn_sequence_rotation_threshold_must_leave_valid_range[
+    UCN_SEQUENCE_ROTATION_THRESHOLD > 1U &&
+            UCN_SEQUENCE_ROTATION_THRESHOLD < UINT32_MAX ? 1 : -1];
+#endif
 
 #ifndef UCN_MAX_NEIGHBORS
 #define UCN_MAX_NEIGHBORS ((size_t)8U)
@@ -333,6 +409,18 @@ typedef char ucn_policy_diagnostic_token_refill_must_be_positive[
 #define UCN_BEARER_QUALITY_SAMPLE_INTERVAL_MS UINT32_C(500)
 #endif
 
+/* Conservative S16 service bound: one actually-due maintenance action may
+ * follow each business burst, and the scheduler may need to visit every
+ * configured Neighbor/Bearer slot.  It intentionally overestimates products
+ * whose UCN_MAX_LINKS is smaller than that product. */
+#define UCN_MAINTENANCE_SERVICE_BOUND_CALC_MS \
+    (UINT64_C(1) * \
+     ((uint64_t)UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE + UINT64_C(1)) * \
+     (uint64_t)UCN_MAX_STEP_INTERVAL_MS * (uint64_t)UCN_MAX_NEIGHBORS * \
+     (uint64_t)UCN_MAX_BEARERS_PER_NEIGHBOR)
+#define UCN_MAINTENANCE_SERVICE_BOUND_MS \
+    ((uint32_t)UCN_MAINTENANCE_SERVICE_BOUND_CALC_MS)
+
 #ifndef UCN_BEARER_QUALITY_STABLE_SAMPLES
 #define UCN_BEARER_QUALITY_STABLE_SAMPLES ((uint8_t)3U)
 #endif
@@ -349,6 +437,7 @@ typedef char ucn_policy_diagnostic_token_refill_must_be_positive[
 #define UCN_BEARER_QUALITY_PROBE_INTERVAL_MS UINT32_C(100)
 #endif
 
+#if UCN_FEATURE_DYNAMIC_MESH
 typedef char ucn_neighbor_remove_must_follow_suspect[
     UCN_NEIGHBOR_REMOVE_TIMEOUT_MS > UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS ? 1 : -1];
 typedef char ucn_bearer_switch_improvement_percent_must_be_less_than_100[
@@ -364,20 +453,44 @@ typedef char ucn_bearer_quality_probe_attempts_must_cover_acks[
     UCN_BEARER_QUALITY_PROBE_REQUIRED_ACKS ? 1 : -1];
 typedef char ucn_bearer_quality_probe_interval_must_be_positive[
     UCN_BEARER_QUALITY_PROBE_INTERVAL_MS > 0U ? 1 : -1];
+typedef char ucn_max_step_interval_must_be_wrap_safe[
+    UCN_MAX_STEP_INTERVAL_MS > 0U &&
+            UCN_MAX_STEP_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS ?
+        1 : -1];
+typedef char ucn_maintenance_service_bound_must_fit_u32[
+    UCN_MAINTENANCE_SERVICE_BOUND_CALC_MS <= UINT32_MAX ? 1 : -1];
+typedef char ucn_maintenance_service_bound_must_precede_suspect[
+    UINT64_C(1) * UCN_HEARTBEAT_INTERVAL_MS +
+                UCN_MAINTENANCE_SERVICE_BOUND_CALC_MS <
+            UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS ?
+        1 : -1];
+#endif
 typedef char ucn_node_relative_durations_must_be_wrap_safe[
+    UCN_Q0_BACKPRESSURE_RETRY_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+#if UCN_FEATURE_DYNAMIC_MESH
     UCN_ROUTE_ENTRY_LIFETIME_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_ROUTE_REQUEST_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_ROUTE_REQUEST_MIN_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_ROUTE_REFRESH_ADVANCE_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_ROUTE_REFRESH_MIN_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
-    UCN_ROUTE_CANDIDATE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
-    UCN_PATH_PROBE_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_ROUTE_EPOCH_GRACE_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_CONTROL_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_ROUTE_REQUEST_RX_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_HEARTBEAT_RX_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
-    UCN_PATH_TRACE_RX_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_PENDING_Q1_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_NEIGHBOR_CANDIDATE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_HEARTBEAT_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_NEIGHBOR_REMOVE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_BEARER_QUALITY_SAMPLE_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_BEARER_QUALITY_PROBE_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+#endif
+#if UCN_FEATURE_CANDIDATE_ROUTING
+    UCN_ROUTE_CANDIDATE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_PATH_PROBE_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+#endif
+#if UCN_FEATURE_DIAGNOSTICS
+    UCN_PATH_TRACE_RX_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_PATH_TRACE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_PATH_TRACE_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_NODE_SNAPSHOT_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
@@ -385,12 +498,12 @@ typedef char ucn_node_relative_durations_must_be_wrap_safe[
     UCN_NODE_SNAPSHOT_REPLY_JITTER_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_POLICY_DIAGNOSTIC_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_POLICY_DIAGNOSTIC_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
-    UCN_NEIGHBOR_CANDIDATE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
-    UCN_HEARTBEAT_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
-    UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
-    UCN_NEIGHBOR_REMOVE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
-    UCN_BEARER_QUALITY_SAMPLE_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
-    UCN_BEARER_QUALITY_PROBE_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS ? 1 : -1];
+#endif
+#if UCN_FEATURE_PATH
+    UCN_PATH_CONTROL_RX_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_PATH_CONTROL_RX_SOURCE_IDLE_MS <= UCN_MAX_SAFE_DURATION_MS &&
+#endif
+    UCN_MAX_STEP_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS ? 1 : -1];
 
 #ifndef UCN_MAX_ENDPOINT_HANDLERS
 #define UCN_MAX_ENDPOINT_HANDLERS ((size_t)8U)
@@ -402,39 +515,11 @@ typedef char ucn_node_relative_durations_must_be_wrap_safe[
 
 typedef struct ucn_node ucn_node_t;
 
+/* API-only declaration.  Include ucn_node_storage.h only in the Protocol Task
+ * owner translation unit that must allocate ucn_node_t statically. */
+
 typedef void (*ucn_rx_handler_t)(void *context, const ucn_frame_t *frame);
 typedef void (*ucn_endpoint_rx_handler_t)(void *context, const ucn_frame_t *frame);
-
-typedef struct ucn_endpoint_handler_entry {
-    bool occupied;
-    ucn_endpoint_t endpoint;
-    ucn_endpoint_rx_handler_t handler;
-    void *context;
-} ucn_endpoint_handler_entry_t;
-
-typedef struct ucn_endpoint_security_policy_entry {
-    bool occupied;
-    ucn_endpoint_t endpoint;
-    ucn_security_policy_t policy;
-} ucn_endpoint_security_policy_entry_t;
-
-typedef enum ucn_control_rx_budget_type {
-    UCN_CONTROL_RX_ROUTE_REQUEST = 0,
-    UCN_CONTROL_RX_HEARTBEAT_REQUEST = 1,
-    UCN_CONTROL_RX_PATH_TRACE_REQUEST = 2,
-    UCN_CONTROL_RX_BUDGET_TYPE_COUNT = 3
-} ucn_control_rx_budget_type_t;
-
-typedef struct ucn_control_rx_budget {
-    uint8_t tokens;
-    uint32_t last_refill_ms;
-} ucn_control_rx_budget_t;
-
-typedef struct ucn_control_rx_peer_budget {
-    bool occupied;
-    ucn_node_id_t peer_node_id;
-    ucn_control_rx_budget_t budgets[UCN_CONTROL_RX_BUDGET_TYPE_COUNT];
-} ucn_control_rx_peer_budget_t;
 
 typedef struct ucn_send_request {
     ucn_node_id_t destination;
@@ -445,27 +530,6 @@ typedef struct ucn_send_request {
     const uint8_t *payload;
     uint16_t payload_length;
 } ucn_send_request_t;
-
-typedef struct ucn_tx_item {
-    bool occupied;
-    ucn_node_id_t destination;
-    uint8_t message_type;
-    ucn_traffic_class_t traffic_class;
-    ucn_delivery_semantic_t delivery;
-    uint32_t deadline_ms;
-    uint32_t order;
-    uint16_t payload_length;
-    uint8_t payload[UCN_MAX_PAYLOAD_BYTES];
-} ucn_tx_item_t;
-
-typedef struct ucn_pending_q1_item {
-    bool occupied;
-    ucn_node_id_t destination;
-    uint8_t message_type;
-    uint32_t deadline_ms;
-    uint16_t payload_length;
-    uint8_t payload[UCN_MAX_PAYLOAD_BYTES];
-} ucn_pending_q1_item_t;
 
 typedef enum ucn_path_trace_status {
     UCN_PATH_TRACE_STATUS_OK = 0,
@@ -484,23 +548,6 @@ typedef struct ucn_path_trace_result {
 
 typedef void (*ucn_path_trace_handler_t)(void *context,
                                          const ucn_path_trace_result_t *result);
-
-typedef struct ucn_path_trace_pending {
-    bool occupied;
-    ucn_node_id_t destination;
-    uint32_t trace_id;
-    uint32_t deadline_ms;
-    ucn_path_trace_handler_t handler;
-    void *context;
-} ucn_path_trace_pending_t;
-
-typedef struct ucn_path_trace_reverse {
-    bool occupied;
-    ucn_node_id_t origin;
-    uint32_t trace_id;
-    ucn_link_t *ingress_link;
-    uint32_t expires_at_ms;
-} ucn_path_trace_reverse_t;
 
 typedef enum ucn_node_snapshot_status {
     UCN_NODE_SNAPSHOT_STATUS_COMPLETE = 0,
@@ -543,7 +590,8 @@ typedef bool (*ucn_policy_diagnostic_authorize_fn)(void *context,
  * Provider and this explicit product authorization hook accept them. */
 typedef enum ucn_path_control_operation {
     UCN_PATH_CONTROL_INSTALL = 0,
-    UCN_PATH_CONTROL_REVOKE = 1
+    UCN_PATH_CONTROL_REVOKE = 1,
+    UCN_PATH_CONTROL_OPERATION_COUNT = 2
 } ucn_path_control_operation_t;
 
 typedef ucn_result_t (*ucn_path_control_authorize_fn)(
@@ -554,35 +602,6 @@ typedef ucn_result_t (*ucn_path_control_authorize_fn)(
     ucn_path_id_t path_id,
     ucn_node_id_t destination,
     ucn_node_id_t next_hop);
-
-typedef struct ucn_node_snapshot_pending {
-    bool occupied;
-    bool truncated;
-    uint8_t result_limit;
-    uint32_t query_id;
-    uint32_t deadline_ms;
-    uint8_t node_count;
-    ucn_node_snapshot_entry_t entries[UCN_NODE_SNAPSHOT_MAX_RESULTS];
-    ucn_node_snapshot_handler_t handler;
-    void *context;
-} ucn_node_snapshot_pending_t;
-
-typedef struct ucn_node_snapshot_reverse {
-    bool occupied;
-    ucn_node_id_t origin;
-    uint32_t query_id;
-    ucn_link_t *ingress_link;
-    uint32_t expires_at_ms;
-} ucn_node_snapshot_reverse_t;
-
-typedef struct ucn_node_snapshot_reply_pending {
-    bool occupied;
-    ucn_node_id_t origin;
-    uint32_t query_id;
-    ucn_link_t *egress_link;
-    uint32_t due_at_ms;
-    uint32_t expires_at_ms;
-} ucn_node_snapshot_reply_pending_t;
 
 typedef enum ucn_policy_diagnostic_section {
     /* Index selects one of three fixed pages, each containing six counters. */
@@ -677,31 +696,26 @@ typedef struct ucn_policy_diagnostic_result {
 typedef void (*ucn_policy_diagnostic_handler_t)(
     void *context, const ucn_policy_diagnostic_result_t *result);
 
-typedef struct ucn_policy_diagnostic_pending {
-    bool occupied;
-    bool sent;
-    ucn_node_id_t destination;
-    uint32_t request_id;
-    uint32_t deadline_ms;
-    ucn_policy_diagnostic_section_t section;
-    uint8_t index;
-    ucn_policy_diagnostic_handler_t handler;
-    void *context;
-} ucn_policy_diagnostic_pending_t;
-
-typedef struct ucn_policy_diagnostic_reply_pending {
-    bool occupied;
-    ucn_node_id_t destination;
-    uint32_t expires_at_ms;
-    uint8_t payload[UCN_POLICY_DIAGNOSTIC_REPLY_PAYLOAD_BYTES];
-} ucn_policy_diagnostic_reply_pending_t;
-
 typedef struct ucn_node_stats {
     uint32_t tx_sent;
     uint32_t tx_expired_dropped;
     uint32_t tx_error_dropped;
+    uint32_t q0_backpressure_retries;
+    uint32_t q0_backpressure_exhausted;
+    uint32_t q0_backpressure_expired;
+    uint32_t q0_backpressure_terminal_failed;
+#if UCN_FEATURE_DYNAMIC_MESH
     uint32_t maintenance_preemptions;
+#endif
+    uint32_t last_step_ms;
+    uint32_t max_step_gap_ms;
+    uint32_t step_interval_violations;
+#if UCN_FEATURE_DYNAMIC_MESH
+    uint32_t max_heartbeat_service_delay_ms;
+    uint32_t max_probe_service_delay_ms;
+#endif
     uint32_t rx_delivered;
+#if UCN_FEATURE_DYNAMIC_MESH
     uint32_t route_requests_sent;
     uint32_t route_replies_sent;
     uint32_t route_errors_sent;
@@ -714,19 +728,29 @@ typedef struct ucn_node_stats {
     uint32_t neighbor_suspected;
     uint32_t neighbor_removed;
     uint32_t route_refreshes_started;
+#endif
+#if UCN_FEATURE_CANDIDATE_ROUTING
     uint32_t candidate_routes_learned;
     uint32_t path_probes_sent;
     uint32_t path_probe_acks_received;
     uint32_t route_switches;
     uint32_t candidate_rejected;
+#endif
+#if UCN_FEATURE_DYNAMIC_MESH
     uint32_t route_epoch_rejected;
+#endif
+#if UCN_FEATURE_SECURITY
     uint32_t e2e_protected_forwarded;
+#endif
+#if UCN_FEATURE_DYNAMIC_MESH
     uint32_t control_budget_dropped;
     uint32_t route_request_rx_rate_dropped;
     uint32_t heartbeat_rx_rate_dropped;
     uint32_t path_trace_rx_rate_dropped;
     uint32_t q1_route_wait_queued;
     uint32_t q1_route_wait_expired;
+#endif
+#if UCN_FEATURE_DIAGNOSTICS
     uint32_t path_trace_requests_sent;
     uint32_t path_trace_replies_sent;
     uint32_t path_trace_completed;
@@ -749,134 +773,28 @@ typedef struct ucn_node_stats {
     uint32_t policy_diagnostic_timeouts;
     uint32_t policy_diagnostic_rejected;
     uint32_t policy_diagnostic_rate_dropped;
+#endif
+#if UCN_FEATURE_PATH
     uint32_t path_installs_sent;
     uint32_t path_installs_received;
     uint32_t path_revokes_sent;
     uint32_t path_revokes_received;
+    uint32_t path_install_authorization_rejected;
+    uint32_t path_revoke_authorization_rejected;
+    uint32_t path_install_budget_rejected;
+    uint32_t path_revoke_budget_rejected;
+    uint32_t path_control_budget_source_full;
+    uint32_t path_control_budget_session_rotations;
+    uint32_t path_control_budget_sources_reclaimed;
+    uint32_t path_install_table_full;
     uint32_t path_forwards;
     uint32_t path_rejected;
     uint32_t path_route_errors_sent;
+#endif
+#if UCN_FEATURE_SECURITY
     uint32_t session_rotations;
+#endif
 } ucn_node_stats_t;
-
-typedef struct ucn_route_entry {
-    bool valid;
-    bool is_static;
-    ucn_node_id_t destination;
-    ucn_link_t *egress_link;
-    uint32_t expires_at_ms;
-    uint32_t last_used_at_ms;
-    uint32_t last_refresh_started_ms;
-    uint16_t route_cost;
-    uint8_t hop_count;
-    uint16_t route_epoch;
-    bool previous_valid;
-    ucn_link_t *previous_egress_link;
-    uint16_t previous_route_epoch;
-    uint32_t previous_expires_at_ms;
-} ucn_route_entry_t;
-
-typedef struct ucn_route_discovery {
-    bool active;
-    ucn_node_id_t destination;
-    uint32_t request_id;
-    uint32_t started_at_ms;
-    uint32_t deadline_ms;
-    bool is_candidate;
-} ucn_route_discovery_t;
-
-typedef struct ucn_candidate_route {
-    bool valid;
-    bool originated_here;
-    bool activation_sent;
-    ucn_node_id_t destination;
-    uint32_t candidate_id;
-    ucn_link_t *egress_link;
-    uint32_t expires_at_ms;
-    uint32_t next_probe_at_ms;
-    uint16_t route_cost;
-    uint8_t hop_count;
-    uint8_t probes_sent;
-    uint8_t probes_acked;
-    uint16_t route_epoch;
-} ucn_candidate_route_t;
-
-typedef struct ucn_seen_frame {
-    bool valid;
-    ucn_node_id_t source;
-    ucn_session_id_t session_id;
-    ucn_sequence_t sequence;
-    uint16_t best_route_request_cost;
-} ucn_seen_frame_t;
-
-struct ucn_node {
-    ucn_config_t config;
-    ucn_link_t *links[UCN_MAX_LINKS];
-    size_t link_count;
-    ucn_sequence_t next_sequence;
-    uint32_t next_queue_order;
-    ucn_tx_item_t q0[UCN_TX_Q0_DEPTH];
-    ucn_tx_item_t q1[UCN_TX_Q1_DEPTH];
-    ucn_pending_q1_item_t pending_q1[UCN_PENDING_Q1_DEPTH];
-    ucn_path_trace_pending_t path_trace_pending[UCN_PATH_TRACE_PENDING_DEPTH];
-    ucn_path_trace_reverse_t path_trace_reverse[UCN_PATH_TRACE_REVERSE_DEPTH];
-    ucn_node_snapshot_pending_t
-        node_snapshot_pending[UCN_NODE_SNAPSHOT_PENDING_DEPTH];
-    ucn_node_snapshot_reverse_t
-        node_snapshot_reverse[UCN_NODE_SNAPSHOT_REVERSE_DEPTH];
-    ucn_node_snapshot_reply_pending_t
-        node_snapshot_replies[UCN_NODE_SNAPSHOT_REPLY_QUEUE_DEPTH];
-    ucn_policy_diagnostic_pending_t
-        policy_diagnostic_pending[UCN_POLICY_DIAGNOSTIC_PENDING_DEPTH];
-    ucn_policy_diagnostic_reply_pending_t
-        policy_diagnostic_replies[UCN_POLICY_DIAGNOSTIC_REPLY_QUEUE_DEPTH];
-    ucn_route_entry_t routes[UCN_MAX_ROUTES];
-    ucn_candidate_route_t candidates[UCN_MAX_CANDIDATE_ROUTES];
-    ucn_route_discovery_t discoveries[UCN_MAX_ROUTE_DISCOVERIES];
-    ucn_neighbor_entry_t neighbors[UCN_MAX_NEIGHBORS];
-    ucn_policy_state_t policy_state;
-    ucn_path_state_t path_state;
-    ucn_seen_frame_t seen[UCN_SEEN_CACHE_SIZE];
-    size_t next_seen_index;
-    uint32_t now_ms;
-    uint32_t next_route_request_id;
-    uint16_t next_route_epoch;
-    uint32_t next_heartbeat_id;
-    uint32_t next_path_trace_id;
-    uint32_t next_node_snapshot_id;
-    uint32_t next_policy_diagnostic_id;
-    uint8_t business_tx_since_maintenance;
-    uint8_t control_tokens;
-    uint32_t control_last_refill_ms;
-    ucn_control_rx_peer_budget_t control_rx_peer_budgets[UCN_MAX_NEIGHBORS];
-    uint8_t path_trace_tokens;
-    uint32_t path_trace_last_refill_ms;
-    uint8_t node_snapshot_tokens;
-    uint32_t node_snapshot_last_refill_ms;
-    uint8_t policy_diagnostic_tokens;
-    uint32_t policy_diagnostic_last_refill_ms;
-    const ucn_security_ops_t *security_ops;
-    void *security_context;
-    ucn_session_id_t session_id;
-    ucn_join_policy_t join_policy;
-    ucn_neighbor_authorize_fn neighbor_authorize;
-    void *neighbor_authorize_context;
-    ucn_node_snapshot_authorize_fn node_snapshot_authorize;
-    void *node_snapshot_authorize_context;
-    ucn_path_trace_authorize_fn path_trace_authorize;
-    void *path_trace_authorize_context;
-    ucn_policy_diagnostic_authorize_fn policy_diagnostic_authorize;
-    void *policy_diagnostic_authorize_context;
-    ucn_path_control_authorize_fn path_control_authorize;
-    void *path_control_authorize_context;
-    ucn_endpoint_handler_entry_t endpoint_handlers[UCN_MAX_ENDPOINT_HANDLERS];
-    ucn_security_policy_t security_policy;
-    ucn_endpoint_security_policy_entry_t
-        endpoint_security_policies[UCN_MAX_ENDPOINT_SECURITY_POLICIES];
-    ucn_node_stats_t stats;
-    ucn_rx_handler_t rx_handler;
-    void *rx_context;
-};
 
 ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config);
 ucn_result_t ucn_node_set_security(ucn_node_t *node,
