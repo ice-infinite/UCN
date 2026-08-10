@@ -1,0 +1,194 @@
+module: service
+description: Core 外的固定 Service Router 与唯一 Protocol Task Bridge；本机任务通信不绕 Link。
+entry: service.ucn_service_send
+source_files:
+  - src/ucn_service.c
+  - src/ucn_service_bridge.c
+  - E:\File\PlatformIO\ESP32_UCN\ESP32S3_N16R8_UCN_Test1\include\ucn_service_freertos_port.h
+  - E:\File\PlatformIO\ESP32_UCN\ESP32S3_N16R8_UCN_Test1\src\ucn_service_freertos_port.cpp
+
+nodes:
+  - id: service.ucn_service_router_init
+    symbol: ucn_service_router_init
+    type: function
+    file: src/ucn_service.c
+    layer: service
+    role: 校验静态 Binding 表并初始化固定 Q0/Q1 Inbox 与 Remote TX 队列。
+    called_by:
+      - external.product_service_init
+      - external.freertos_port_begin
+    calls:
+      - target: core.ucn_endpoint_is_static
+        type: direct
+        reason: Binding 只能登记当前静态 Endpoint。
+    notes:
+      - R1 是一 Endpoint 一个 owner Service；Router 不拥有 Link 或 Node。
+
+  - id: service.ucn_service_send
+    symbol: ucn_service_send
+    type: function
+    file: src/ucn_service.c
+    layer: service
+    role: 业务 Task 的统一发送入口：目标是本机则直投 Inbox，远端则复制到固定 Remote TX。
+    called_by:
+      - external.application_service_task
+      - service.freertos_port_send
+    calls:
+      - target: service.binding_delivery_helpers_static
+        type: queue
+        reason: destination 等于本机时投递唯一 owner 的 Inbox。
+      - target: service.remote_tx_queue_helpers_static
+        type: queue
+        reason: destination 为远端时按 Q0 FIFO 或 Q1 Latest Value 保存 Remote TX。
+    outputs:
+      - UCN_OK 表示 Router 已拥有 Payload 固定副本。
+      - UCN_ERR_NO_SPACE/ACCESS/NOT_FOUND 表示本机 Router 拒绝，业务必须处理。
+    notes:
+      - 本函数不调用 Link、Node、路由或加密；调用返回后 Payload 可复用。
+      - Q1 的同 (destination, Endpoint) Remote TX 会覆盖旧值；Q0 满即显式失败。
+
+  - id: service.ucn_service_deliver_remote
+    symbol: ucn_service_deliver_remote
+    type: function
+    file: src/ucn_service.c
+    layer: service
+    role: 将已由本 Node Core 接收的 Endpoint 帧复制到其唯一本机 Service Inbox。
+    called_by:
+      - service.ucn_service_protocol_bridge_endpoint_rx
+    calls:
+      - target: service.binding_delivery_helpers_static
+        type: queue
+        reason: 按 Binding、ready、长度、QoS 与 accept_remote 检查后投递。
+    notes:
+      - 写入的 source_node_id 来自线上 frame.source；当前 v4 业务帧不携带 source_service_id，远端来源任务需由业务 Payload 自行表达。
+
+  - id: service.ucn_service_inbox_take
+    symbol: ucn_service_inbox_take
+    type: function
+    file: src/ucn_service.c
+    layer: service
+    role: 目标 owner Task 从自己的 Endpoint Inbox 获取一条 Q0 FIFO 或当前 Q1 Latest Value。
+    called_by:
+      - external.application_service_task
+      - service.freertos_port_inbox_take
+    calls: []
+    notes:
+      - owner_service_id 不匹配会被拒绝；Q1 通知后应循环读取直到 Inbox 为空。
+
+  - id: service.ucn_service_remote_tx_take
+    symbol: ucn_service_remote_tx_take
+    type: function
+    file: src/ucn_service.c
+    layer: service
+    role: 仅供 Bridge 取出一个待发远端请求，严格 Q0 优先于 Q1。
+    called_by:
+      - service.ucn_service_protocol_bridge_step
+    calls: []
+
+  - id: service.ucn_service_protocol_bridge_init
+    symbol: ucn_service_protocol_bridge_init
+    type: function
+    file: src/ucn_service_bridge.c
+    layer: service
+    role: 将同一 local Node ID 的 Router 与 Node 配对；不创建 RTOS 对象或注册 Link。
+    called_by:
+      - external.product_service_init
+    calls: []
+
+  - id: service.ucn_service_protocol_bridge_install_endpoint_handlers
+    symbol: ucn_service_protocol_bridge_install_endpoint_handlers
+    type: function
+    file: src/ucn_service_bridge.c
+    layer: service
+    role: 为所有静态 Binding 注册唯一 Endpoint handler，拒绝覆盖第三方 handler。
+    called_by:
+      - external.product_service_init
+    calls:
+      - target: node_runtime.ucn_node_set_endpoint_handler
+        type: direct
+        reason: 让到达本 Node 的业务 Endpoint 进入 Bridge。
+
+  - id: service.ucn_service_protocol_bridge_endpoint_rx
+    symbol: ucn_service_protocol_bridge_endpoint_rx
+    type: callback
+    file: src/ucn_service_bridge.c
+    layer: service
+    role: Node Endpoint handler 回调；短临界区内投递 Router，解锁后可通知产品 Port。
+    called_by:
+      - node_runtime.dispatch_endpoint_static
+    calls:
+      - target: service.ucn_service_deliver_remote
+        type: direct
+        reason: 将远端业务帧投递给本机 owner Service。
+      - target: external.service_port_inbound_observer
+        type: callback
+        reason: FreeRTOS Port 可在 Router 解锁后发送 Endpoint 事件 token。
+    notes:
+      - 回调运行在 Protocol Task；不得在其中执行耗时业务逻辑或重入 Node。
+
+  - id: service.ucn_service_protocol_bridge_step
+    symbol: ucn_service_protocol_bridge_step
+    type: function
+    file: src/ucn_service_bridge.c
+    layer: service
+    role: Protocol Task 每轮最多取 max_requests 个 Remote TX，调用 Endpoint API 送入 Core。
+    called_by:
+      - node_runtime.protocol_task_mainloop
+    calls:
+      - target: service.ucn_service_remote_tx_take
+        type: queue
+        reason: 以 Q0 优先顺序取出 Router 拥有的固定副本。
+      - target: route.ucn_node_send_endpoint
+        type: direct
+        reason: 复用普通跨 MCU 路由、Policy、Path 和安全路径。
+    notes:
+      - Core 拒绝的项不在 Bridge 自动重试；Q0 失败保持显式，Q1 的 Route Pending 语义归 Core。
+
+  - id: service.freertos_port_send
+    symbol: UcnServiceFreeRtosPort.send
+    type: function
+    file: E:\File\PlatformIO\ESP32_UCN\ESP32S3_N16R8_UCN_Test1\src\ucn_service_freertos_port.cpp
+    layer: application
+    role: ESP32 业务 Task 的产品封装：短临界区保护 Router 后调用统一 Service send。
+    called_by:
+      - external.esp32_sensor_control_actuator_task
+    calls:
+      - target: service.ucn_service_send
+        type: direct
+        reason: 本机和远端都统一使用 Router 语义。
+    notes:
+      - 这是产品 Port，不属于 C99 Core；它不向业务 Task 暴露 ucn_node_t。
+
+  - id: service.freertos_port_inbox_take
+    symbol: UcnServiceFreeRtosPort.inbox_take
+    type: function
+    file: E:\File\PlatformIO\ESP32_UCN\ESP32S3_N16R8_UCN_Test1\src\ucn_service_freertos_port.cpp
+    layer: application
+    role: 已绑定 FreeRTOS Task 从其 Service Inbox 读取消息。
+    called_by:
+      - external.esp32_sensor_control_actuator_task
+    calls:
+      - target: service.ucn_service_inbox_take
+        type: direct
+        reason: 用 Router 的 Q0 FIFO/Q1 Latest Value 规则取消息。
+
+  - id: service.binding_delivery_helpers_static
+    symbol: ucn_service_validate_target/ucn_service_deliver_to_binding
+    type: module
+    file: src/ucn_service.c
+    layer: service
+    role: 校验 Binding、ready、长度、QoS、来源权限后投递 Q0 FIFO 或 Q1 Latest Inbox。
+    called_by:
+      - service.ucn_service_send
+      - service.ucn_service_deliver_remote
+    calls: []
+
+  - id: service.remote_tx_queue_helpers_static
+    symbol: remote_q0/remote_q1
+    type: queue
+    file: src/ucn_service.c
+    layer: service
+    role: 保存将要跨 Node 发送的固定消息副本；Q0 FIFO、Q1 按目的/Endpoint 覆盖旧值。
+    called_by:
+      - service.ucn_service_send
+    calls: []

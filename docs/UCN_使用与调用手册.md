@@ -486,4 +486,5 @@ UCN 的表和队列均是编译期数组。产品根据 MCU RAM 调整上限后�
 - [路由策略与负载均衡执行建议](UCN_路由策略与负载均衡执行建议.md)：Path/策略/质量阈值的设计理由。
 - [T25 首版 Endpoint 与 Service 契约](UCN_T25_首版Endpoint与Service契约.md)：R1 业务 ABI 和 Payload 规则。
 - [T25 节点内任务通信详细执行方案](UCN_T25_节点内任务通信详细执行方案.md)：Router/Bridge/RTOS 边界。
+- [UCN 调用关系树](calltree/README.md)：按真实函数调用、回调和固定队列关系追踪运行路径。
 - `include/ucn/`：最终以公开 API 声明和编译期配置为准；若本文与源码不一致，以源码为准并同步修订本文。

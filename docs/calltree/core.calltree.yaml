@@ -1,0 +1,51 @@
+module: core
+description: 配置校验、静态 Endpoint 编号与控制/业务消息的最小基础边界。
+entry: core.ucn_validate_config
+source_files:
+  - src/ucn_core.c
+  - src/ucn_endpoint.c
+
+nodes:
+  - id: core.ucn_validate_config
+    symbol: ucn_validate_config
+    type: function
+    file: src/ucn_core.c
+    layer: core
+    role: 校验 network_id、node_id 与默认 Hop Limit 是否能创建一个合法 Node。
+    called_by:
+      - node_runtime.ucn_node_init
+      - external.product_startup
+    calls: []
+    outputs:
+      - UCN_OK 或 UCN_ERR_CONFIG/UCN_ERR_ARGUMENT
+    notes:
+      - Node ID 是稳定逻辑身份，不是入网后由 Core 临时分配。
+
+  - id: core.ucn_endpoint_is_static
+    symbol: ucn_endpoint_is_static
+    type: function
+    file: src/ucn_endpoint.c
+    layer: core
+    role: 判断业务 Endpoint 是否在当前静态命名空间 0x40..0xBF。
+    called_by:
+      - node_runtime.ucn_node_set_endpoint_handler
+      - route.ucn_node_send_endpoint
+      - service.ucn_service_router_init
+    calls: []
+    notes:
+      - R1 的 Endpoint→Service 绑定是静态的；语义升级分配新 Endpoint，不复用旧编号。
+
+  - id: core.ucn_message_type_is_control
+    symbol: ucn_message_type_is_control
+    type: function
+    file: src/ucn_endpoint.c
+    layer: core
+    role: 区分 HELLO、Route、Path、诊断等控制帧与业务帧。
+    called_by:
+      - frame.ucn_frame_encode
+      - node_runtime.ucn_node_receive
+      - route.ucn_node_send
+      - route.ucn_node_send_path
+    calls: []
+    notes:
+      - 业务 API 不能伪造控制 message_type；控制帧不能携带业务 Path ID/E2E 组合。

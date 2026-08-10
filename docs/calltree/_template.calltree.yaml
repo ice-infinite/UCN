@@ -1,0 +1,26 @@
+# UCN 调用关系节点模板。复制需要字段，删除不适用字段。
+module: module_id
+description: 模块职责
+entry: module.entry_function
+source_files:
+  - src/example.c
+
+nodes:
+  - id: module.function_name
+    symbol: function_name
+    type: function # function|callback|queue|scheduler|security_provider|module
+    file: src/example.c
+    layer: core # application|adapter|core|routing|security|service|diagnostic|external
+    role: 一句话说明此节点负责什么
+    called_by:
+      - upstream.caller
+    calls:
+      - target: downstream.callee
+        type: direct # direct|callback|queue|external
+        reason: 为什么调用
+    inputs:
+      - 参数说明
+    outputs:
+      - 返回值或状态变化
+    notes:
+      - 并发、QoS、固定资源或权限边界

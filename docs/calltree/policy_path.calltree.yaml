@@ -1,0 +1,254 @@
+module: policy_path
+description: 固定 Policy/Path/Flow 表、授权 Path 控制面、Strict/Failover 与 Q1 流亲和均衡。
+entry: policy_path.ucn_node_set_route_policy
+source_files:
+  - src/ucn_policy.c
+  - src/ucn_path.c
+  - src/ucn_node.c
+
+nodes:
+  - id: policy_path.ucn_node_set_route_policy
+    symbol: ucn_node_set_route_policy
+    type: function
+    file: src/ucn_policy.c
+    layer: routing
+    role: 配置一个精确 (destination, Endpoint, traffic class) 的 AUTO_BEST、Strict、Failover 或 AUTO_BALANCE 策略。
+    called_by:
+      - external.product_policy_setup
+      - external.authorized_management
+    calls: []
+    notes:
+      - Policy 表固定容量；AUTO_BALANCE 仅允许精确 Q1、Primary 必填且禁止 Discovery。
+
+  - id: policy_path.ucn_node_set_policy_path
+    symbol: ucn_node_set_policy_path
+    type: function
+    file: src/ucn_policy.c
+    layer: routing
+    role: 将本地 Path 句柄关联到目标、已认证 wire_path_id、首跳 Link 与 VERIFIED 状态。
+    called_by:
+      - external.product_policy_setup
+    calls: []
+    notes:
+      - local_path_id 仅是本机表句柄；不能替代逐跳已安装的 wire_path_id。
+
+  - id: policy_path.ucn_path_install
+    symbol: ucn_path_install
+    type: function
+    file: src/ucn_path.c
+    layer: routing
+    role: 在固定逐跳转发表安装/更新 (owner, session, path_id, destination) 的下一跳和租约。
+    called_by:
+      - policy_path.install_path_forward_entry_static
+    calls: []
+    notes:
+      - 默认表项数受 UCN_MAX_PATH_FORWARD_ENTRIES 约束。
+
+  - id: policy_path.ucn_node_install_local_path
+    symbol: ucn_node_install_local_path
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 在 Path 源 Node 安装本机的首跳转发表项。
+    called_by:
+      - external.authorized_path_manager
+    calls:
+      - target: policy_path.path_control_helpers_static
+        type: direct
+        reason: 写入源端 owner/session/path/destination 项。
+    notes:
+      - 仅源端安装还不够；中继与终端仍须逐跳收到授权 PATH_INSTALL。
+
+  - id: policy_path.ucn_node_send_path_install
+    symbol: ucn_node_send_path_install
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 向一个中继或终端发送 PATH_INSTALL 控制帧。
+    called_by:
+      - external.authorized_path_manager
+    calls:
+      - target: node_runtime.send_control_to_node_static
+        type: direct
+        reason: 用当前 Route 将控制帧送到指定控制目标。
+    notes:
+      - 目标侧必须配置 path_control_authorizer；未配置时默认拒绝。
+
+  - id: policy_path.handle_path_install_static
+    symbol: handle_path_install
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 验证 PATH_INSTALL 权限、Payload 与下一跳后安装中继/终端 Path 表项。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: policy_path.path_control_helpers_static
+        type: callback
+        reason: 调用产品 Path 控制授权回调。
+      - target: policy_path.path_control_helpers_static
+        type: direct
+        reason: 写入固定 Path 转发表。
+
+  - id: policy_path.send_endpoint_pinned_static
+    symbol: send_endpoint_pinned
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 执行 PINNED_STRICT 或 PINNED_FAILOVER：先走 Primary，只对硬失败尝试 Backup。
+    called_by:
+      - route.ucn_node_send_endpoint
+    calls:
+      - target: policy_path.policy_path_send_helpers_static
+        type: direct
+        reason: 解析 local_path_id 并调用 Path 发送。
+      - target: route.begin_route_discovery_static
+        type: direct
+        reason: 仅 Failover、两条 Path 硬失败、Q1 且配置允许时有限回退发现。
+      - target: route.queue_pending_q1_static
+        type: queue
+        reason: 发现期间只保存最新 Q1。
+    notes:
+      - Strict 永不改线；Failover 只在 LINK_DOWN/NOT_FOUND 等硬失败切换；Q0 不寻路。
+
+  - id: policy_path.send_endpoint_auto_balance_static
+    symbol: send_endpoint_auto_balance
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 对 Q1 Flow 选择/复用 Primary 或 Backup 的已验证 Path，之后从选中 Path 发送。
+    called_by:
+      - route.ucn_node_send_endpoint
+    calls:
+      - target: policy_path.auto_balance_select_path_static
+        type: direct
+        reason: 首次/租约到期/重绑时按质量与流数量打分。
+      - target: policy_path.flow_binding_helpers_static
+        type: direct
+        reason: 在固定 Flow 表保存 (destination, Endpoint, Q1)→local_path_id 租约。
+      - target: policy_path.policy_path_send_helpers_static
+        type: direct
+        reason: 用被绑定的 Path ID 发一份业务帧。
+    notes:
+      - 同 Flow 租约内不逐帧轮询；不复制帧，不做带宽聚合，不适用于 Q0。
+
+  - id: policy_path.auto_balance_select_path_static
+    symbol: auto_balance_select_path
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 综合平滑 Cost、可选 RTT、失败率、队列压力和活跃 Flow 数选择最低分 Path。
+    called_by:
+      - policy_path.send_endpoint_auto_balance_static
+    calls:
+      - target: policy_path.quality_query_helpers_static
+        type: direct
+        reason: 读取 Node step 更新的固定质量快照。
+
+  - id: policy_path.ucn_policy_refresh_link_quality
+    symbol: ucn_policy_refresh_link_quality
+    type: function
+    file: src/ucn_policy.c
+    layer: routing
+    role: 周期读取每条 Link 的通用 metrics，并用 EWMA 更新固定质量快照。
+    called_by:
+      - node_runtime.ucn_node_step
+    calls:
+      - target: external.link_ops_get_metrics
+        type: external
+        reason: Adapter 提供 Cost/RTT/失败率/队列压力的真实或可用指标。
+    notes:
+      - Core 不读取 RSSI、CAN 错误寄存器等介质私有字段；未知指标保持未知而非伪造。
+
+  - id: policy_path.ucn_policy_expire_flows
+    symbol: ucn_policy_expire_flows
+    type: function
+    file: src/ucn_policy.c
+    layer: routing
+    role: 回收 Q1 Flow 固定表中过期的租约绑定。
+    called_by:
+      - node_runtime.ucn_node_step
+    calls: []
+
+  - id: policy_path.ucn_path_expire
+    symbol: ucn_path_expire
+    type: function
+    file: src/ucn_path.c
+    layer: routing
+    role: 回收租约到期的逐跳 Path 转发表项。
+    called_by:
+      - node_runtime.ucn_node_step
+    calls: []
+
+  - id: policy_path.policy_lookup_helpers_static
+    symbol: ucn_node_find_route_policy
+    type: function
+    file: src/ucn_policy.c
+    layer: routing
+    role: 按目的 Node、Endpoint、QoS 匹配精确策略或 traffic-class 通配规则。
+    called_by:
+      - route.ucn_node_send_endpoint
+    calls: []
+
+  - id: policy_path.path_control_helpers_static
+    symbol: authorize_path_control/install_path_forward_entry
+    type: module
+    file: src/ucn_node.c
+    layer: routing
+    role: Path 控制面权限检查与向固定逐跳表写入/更新的内部组。
+    called_by:
+      - policy_path.ucn_node_install_local_path
+      - policy_path.handle_path_install_static
+    calls:
+      - target: external.path_control_authorizer
+        type: callback
+        reason: 产品授权远端 PATH_INSTALL/PATH_REVOKE。
+      - target: policy_path.ucn_path_install
+        type: direct
+        reason: 写入固定 Path 转发表。
+
+  - id: policy_path.policy_path_send_helpers_static
+    symbol: send_endpoint_on_policy_path
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 校验本地 Policy Path 为 VERIFIED 且有 wire_path_id 后走 Path 发送。
+    called_by:
+      - policy_path.send_endpoint_pinned_static
+      - policy_path.send_endpoint_auto_balance_static
+    calls:
+      - target: route.ucn_node_send_path
+        type: direct
+        reason: 带认证 Path ID 发送业务帧。
+
+  - id: policy_path.flow_binding_helpers_static
+    symbol: auto_balance_bind_path/ucn_node_bind_q1_flow
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 创建或更新固定 Q1 Flow 租约绑定，保证同 Flow 不逐帧换 Path。
+    called_by:
+      - policy_path.send_endpoint_auto_balance_static
+    calls: []
+
+  - id: policy_path.quality_query_helpers_static
+    symbol: ucn_node_get_link_quality
+    type: function
+    file: src/ucn_policy.c
+    layer: routing
+    role: 读取 Node 保存的 Link 质量快照，供均衡评分和管理诊断使用。
+    called_by:
+      - policy_path.auto_balance_select_path_static
+      - diagnostic.handle_policy_diagnostic_request_static
+    calls: []
+
+  - id: policy_path.path_invalidation_helpers_static
+    symbol: revoke_path_and_mark_local_policy/revoke_paths_by_unavailable_egress
+    type: module
+    file: src/ucn_node.c
+    layer: routing
+    role: 在 Path RERR 或完整逻辑下一跳不可用时，回收受影响 Path 并标记对应本机 Policy Path Down。
+    called_by:
+      - route.handle_route_error_static
+      - neighbor.maintain_neighbor_liveness_static
+    calls: []

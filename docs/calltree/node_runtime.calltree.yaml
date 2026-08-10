@@ -1,0 +1,248 @@
+module: node_runtime
+description: ucn_node_t 的初始化、收包总入口、业务转发与单线程调度器。
+entry: node_runtime.ucn_node_step
+source_files:
+  - src/ucn_node.c
+
+nodes:
+  - id: node_runtime.ucn_node_init
+    symbol: ucn_node_init
+    type: function
+    file: src/ucn_node.c
+    layer: core
+    role: 清零 Node 固定状态表，保存配置，初始化默认安全/准入/令牌与会话状态。
+    called_by:
+      - external.product_startup
+      - external.host_adapter_startup
+    calls:
+      - target: core.ucn_validate_config
+        type: direct
+        reason: 拒绝非法 Network ID、Node ID 或 Hop Limit。
+      - target: external.port_random
+        type: external
+        reason: 产品 Port 提供随机/会话来源时用于会话初始化。
+    notes:
+      - 一个 MCU 保持一个 Node；不在每个业务 Task 中创建 Node。
+
+  - id: node_runtime.ucn_node_register_link
+    symbol: ucn_node_register_link
+    type: function
+    file: src/ucn_node.c
+    layer: core
+    role: 将已打开的统一 Link 注册到 Node 固定 Link 表。
+    called_by:
+      - external.adapter_init
+      - neighbor.admit_neighbor_entry_static
+    calls:
+      - target: neighbor.candidate_link_helpers_static
+        type: direct
+        reason: 检查 MTU、状态、对端 Node ID 等候选条件。
+    notes:
+      - 同一对端可注册多个 Link 并合并为一个 Neighbor 的多个 Bearer。
+
+  - id: node_runtime.ucn_node_set_endpoint_handler
+    symbol: ucn_node_set_endpoint_handler
+    type: function
+    file: src/ucn_node.c
+    layer: core
+    role: 为一个静态 Endpoint 注册唯一接收回调和上下文。
+    called_by:
+      - service.ucn_service_protocol_bridge_install_endpoint_handlers
+      - external.single_context_application
+    calls:
+      - target: core.ucn_endpoint_is_static
+        type: direct
+        reason: 只允许业务静态 Endpoint 注册 handler。
+    notes:
+      - 已被 Bridge 或其他组件占用的 Endpoint 不应被覆盖；回调运行在 Protocol Task。
+
+  - id: node_runtime.send_control_on_link_static
+    symbol: send_control_on_link
+    type: function
+    file: src/ucn_node.c
+    layer: core
+    role: 组装一个控制帧并从指定 Link 发送。
+    called_by:
+      - neighbor.ucn_node_broadcast_hello
+      - neighbor.send_due_heartbeat_static
+      - neighbor.bearer_lifecycle_helpers_static
+      - route.route_request_helpers_static
+      - diagnostic.path_trace_runtime_helpers_static
+      - diagnostic.node_snapshot_runtime_helpers_static
+    calls:
+      - target: node_runtime.send_frame_on_link_static
+        type: direct
+        reason: 复用统一帧编码和具体 Link 发送。
+    notes:
+      - 控制帧不能作为业务 E2E 帧发送，也不携带 Path ID。
+
+  - id: node_runtime.send_control_to_node_static
+    symbol: send_control_to_node
+    type: function
+    file: src/ucn_node.c
+    layer: core
+    role: 查找到指定 Node 的当前 Route 后发送单播控制帧。
+    called_by:
+      - route.handle_route_request_static
+      - route.handle_route_reply_static
+      - route.handle_route_error_static
+      - policy_path.ucn_node_send_path_install
+      - diagnostic.policy_diagnostic_runtime_helpers_static
+    calls:
+      - target: route.route_lookup_helpers_static
+        type: direct
+        reason: 解析当前可用直连/Route egress。
+      - target: node_runtime.send_control_on_link_static
+        type: direct
+        reason: 在解析出的 Link 上发送控制帧。
+
+  - id: node_runtime.ucn_node_receive
+    symbol: ucn_node_receive
+    type: function
+    file: src/ucn_node.c
+    layer: core
+    role: 所有接收帧的唯一 Core 入口：解码、网络/安全/去重检查、控制面处理、转发或目标 Endpoint 分发。
+    called_by:
+      - adapter.ucn_adapter_rx_pump
+    calls:
+      - target: frame.ucn_frame_decode
+        type: direct
+        reason: 先验证线格式、版本、长度和 CRC。
+      - target: security.validate_inbound_business_security
+        type: direct
+        reason: 执行 Provider 授权、端点安全策略、必要时解密。
+      - target: neighbor.handle_hello_static
+        type: direct
+        reason: HELLO 是未注册 Link 唯一可先处理的控制帧。
+      - target: neighbor.touch_neighbor_static
+        type: direct
+        reason: 已准入 Link 的有效入站活动刷新 liveness。
+      - target: route.handle_route_request_static
+        type: direct
+        reason: 处理/泛洪 RREQ 并学习反向路径。
+      - target: route.handle_route_reply_static
+        type: direct
+        reason: 学习/候选激活 Route，或继续向源转发 RREP。
+      - target: route.handle_route_error_static
+        type: direct
+        reason: 失效受影响动态 Route/Path 并按需回传。
+      - target: policy_path.handle_path_install_static
+        type: direct
+        reason: 已授权时安装逐跳 Path 转发表。
+      - target: diagnostic.control_handlers
+        type: direct
+        reason: 分派 Trace、Snapshot、Policy Diagnostic 控制帧。
+      - target: node_runtime.forward_or_dispatch_static
+        type: direct
+        reason: 非本机目的帧转发；本机业务帧进入 Endpoint handler。
+    notes:
+      - 控制帧不能带 E2E/Path 组合；未准入 Link 的普通业务帧会被拒绝。
+      - 去重键为线上帧身份，不把同一帧多次投递业务任务。
+
+  - id: node_runtime.forward_or_dispatch_static
+    symbol: forward_or_dispatch_static
+    type: module
+    file: src/ucn_node.c
+    layer: core
+    role: 收包末段的二选一：中继转发，或目的 Node 的通用 RX/Endpoint handler 分发。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: node_runtime.send_frame_on_link_static
+        type: direct
+        reason: 中继前递减 Hop Limit，解析 Route/Path 的下一跳并发送。
+      - target: node_runtime.forward_or_dispatch_static
+        type: callback
+        reason: 目的 Node 命中静态 Endpoint 后调用唯一 handler。
+      - target: external.application_rx_handler
+        type: callback
+        reason: 未被 Endpoint handler 占用时可交给通用 RX handler。
+    notes:
+      - 中继不会调用 Service Router，不会把发往其他 Node 的业务帧投递本机 Task。
+
+  - id: node_runtime.send_frame_on_link_static
+    symbol: send_frame_on_link
+    type: function
+    file: src/ucn_node.c
+    layer: core
+    role: 对已准备好的帧执行长度检查、编码并调用具体 Link 的 send。
+    called_by:
+      - route.ucn_node_send
+      - route.ucn_node_send_path
+      - node_runtime.forward_or_dispatch_static
+      - node_runtime.send_control_on_link_static
+    calls:
+      - target: frame.ucn_frame_encode
+        type: direct
+        reason: 生成最终线上帧。
+      - target: external.link_ops_send
+        type: external
+        reason: 交给 ESP-NOW/UART/CAN/BLE/LoRa 等 Adapter 的发送实现。
+    notes:
+      - Link send 成功只代表本介质接受该帧；端到端业务执行需由上层结果 Endpoint/确认协议表达。
+
+  - id: node_runtime.ucn_node_step
+    symbol: ucn_node_step
+    type: scheduler
+    file: src/ucn_node.c
+    layer: core
+    role: 唯一 Protocol Task 的有界维护与发送调度入口。
+    called_by:
+      - external.protocol_task_iteration
+      - node_runtime.protocol_task_mainloop
+    calls:
+      - target: neighbor.maintain_neighbor_liveness_static
+        type: direct
+        reason: 超时状态、单/全 Bearer Down 和动态回收。
+      - target: neighbor.evaluate_bearer_quality_static
+        type: direct
+        reason: 评估主备质量、Probe ACK 和切换滞回。
+      - target: policy_path.ucn_policy_refresh_link_quality
+        type: direct
+        reason: 采样通用 Cost/RTT/失败率/队列压力。
+      - target: policy_path.ucn_policy_expire_flows
+        type: direct
+        reason: 回收到期 Q1 Flow 绑定。
+      - target: policy_path.ucn_path_expire
+        type: direct
+        reason: 回收过期逐跳 Path 表项。
+      - target: route.ucn_node_send
+        type: direct
+        reason: 优先发送 Q0，再发送 Q1 固定 TX 项。
+      - target: route.send_pending_q1_if_ready_static
+        type: direct
+        reason: Route 建立后发送首包等待槽中的最新 Q1。
+      - target: neighbor.send_due_heartbeat_static
+        type: direct
+        reason: 业务空闲后发送一跳 Heartbeat。
+      - target: diagnostic.send_due_diagnostics_static
+        type: direct
+        reason: 在业务、保活、Probe 后发送 Snapshot/Policy 等低频 Reply/Request。
+      - target: route.start_due_route_refresh_static
+        type: direct
+        reason: 最低优先级后台 Route 刷新。
+    notes:
+      - 调度顺序固定为 Q0 → Q1 → Pending Q1 → 保活/Probe/诊断 → Route 刷新。
+      - 每次只消费一个普通 TX 项；产品循环需持续调用，不能在业务 Task 中替代它。
+
+  - id: node_runtime.protocol_task_mainloop
+    symbol: protocol_task_mainloop
+    type: module
+    file: product_port_or_main_loop
+    layer: application
+    role: 推荐产品循环：有限 RX Pump、有限 Service Bridge、Node step、按周期 HELLO。
+    called_by:
+      - external.rtos_task_or_arduino_loop
+    calls:
+      - target: adapter.ucn_adapter_rx_pump
+        type: direct
+        reason: 将驱动 RX 固定副本交给 Node。
+      - target: service.ucn_service_protocol_bridge_step
+        type: direct
+        reason: 将业务 Task 的 Remote TX 有界送入 Core。
+      - target: node_runtime.ucn_node_step
+        type: direct
+        reason: 执行唯一 Node 调度。
+      - target: neighbor.ucn_node_broadcast_hello
+        type: direct
+        reason: 发现型 Adapter 在受控周期广播 HELLO。

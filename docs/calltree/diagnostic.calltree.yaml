@@ -1,0 +1,184 @@
+module: diagnostic
+description: 不常驻、不泛洪业务数据的按需 Path Trace、Node Snapshot 与单 Node Policy 诊断。
+entry: diagnostic.ucn_node_request_path_trace
+source_files:
+  - src/ucn_node.c
+
+nodes:
+  - id: diagnostic.ucn_node_request_path_trace
+    symbol: ucn_node_request_path_trace
+    type: function
+    file: src/ucn_node.c
+    layer: diagnostic
+    role: 由本机管理/测试代码发起到指定目的 Node 的按需路径追踪。
+    called_by:
+      - external.management_task
+    calls:
+      - target: diagnostic.path_trace_runtime_helpers_static
+        type: direct
+        reason: 通过当前 Route 发送带固定记录容量的 Trace Request。
+    notes:
+      - 每跳追加 Node ID，记录数同时受帧 MTU 与 Hop Limit 限制；有独立 Token/Pending/Reverse 表。
+
+  - id: diagnostic.handle_path_trace_request_static
+    symbol: handle_path_trace_request
+    type: function
+    file: src/ucn_node.c
+    layer: diagnostic
+    role: 追加本 Node 到 Trace，抵达目的则反向回复，否则按当前路径继续转发。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: diagnostic.path_trace_runtime_helpers_static
+        type: direct
+        reason: 目的/失败状态沿短期 Reverse 返回源。
+      - target: node_runtime.send_frame_on_link_static
+        type: direct
+        reason: 中继继续转发 Trace Request。
+
+  - id: diagnostic.ucn_node_request_node_snapshot
+    symbol: ucn_node_request_node_snapshot
+    type: function
+    file: src/ucn_node.c
+    layer: diagnostic
+    role: 发起低频、受限广播的全网可达 Node 快照请求。
+    called_by:
+      - external.management_task
+    calls:
+      - target: node_runtime.send_control_on_link_static
+        type: direct
+        reason: 向当前直连 Link 发 Snapshot Request。
+    notes:
+      - 源只保存固定数量结果；不会在所有 Node 建永久全网拓扑表。
+
+  - id: diagnostic.handle_node_snapshot_request_static
+    symbol: handle_node_snapshot_request
+    type: function
+    file: src/ucn_node.c
+    layer: diagnostic
+    role: 经过 Snapshot authorizer 后写短期 Reverse、随机抖动排队本机 Reply，并受限泛洪请求。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: external.node_snapshot_authorizer
+        type: callback
+        reason: 目标默认拒绝，产品显式允许的管理 Node 才能查询。
+      - target: diagnostic.node_snapshot_runtime_helpers_static
+        type: queue
+        reason: 将固定长度 Reply 放到低优先级待发槽。
+      - target: diagnostic.node_snapshot_runtime_helpers_static
+        type: direct
+        reason: 向非 ingress 的健康邻居继续受限泛洪。
+
+  - id: diagnostic.ucn_node_request_policy_diagnostic
+    symbol: ucn_node_request_policy_diagnostic
+    type: function
+    file: src/ucn_node.c
+    layer: diagnostic
+    role: 向一个指定 Node 请求 Summary 或一个固定 Policy/Path/Flow/quality 槽位。
+    called_by:
+      - external.management_task
+    calls: []
+    notes:
+      - 请求 8 B、Reply 32 B；独立 Token/Pending 表，Node step 在普通业务之后才发送。
+
+  - id: diagnostic.handle_policy_diagnostic_request_static
+    symbol: handle_policy_diagnostic_request
+    type: function
+    file: src/ucn_node.c
+    layer: diagnostic
+    role: 验证管理 Node 授权后，从现有固定 Policy/Path/Flow/质量表构建一页 Reply。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: external.policy_diagnostic_authorizer
+        type: callback
+        reason: 未配置 authorizer 时默认拒绝远端管理请求。
+      - target: diagnostic.policy_diagnostic_runtime_helpers_static
+        type: direct
+        reason: 把现有统计/槽位编码到固定 32 B Reply。
+      - target: diagnostic.policy_diagnostic_runtime_helpers_static
+        type: queue
+        reason: 低优先级排队，而不是抢占 Q0/Q1。
+
+  - id: diagnostic.send_due_diagnostics_static
+    symbol: send_due_diagnostics
+    type: module
+    file: src/ucn_node.c
+    layer: diagnostic
+    role: Node step 的低优先级诊断发送组：Snapshot Reply、Policy Reply/Request 和路由维护。
+    called_by:
+      - node_runtime.ucn_node_step
+    calls:
+      - target: diagnostic.node_snapshot_runtime_helpers_static
+        type: direct
+        reason: 发送达到抖动时刻的 Snapshot Reply。
+      - target: diagnostic.policy_diagnostic_runtime_helpers_static
+        type: direct
+        reason: 发送已授权 Policy Reply。
+      - target: diagnostic.policy_diagnostic_runtime_helpers_static
+        type: direct
+        reason: 发送本机发起且未超时的 Policy Request。
+    notes:
+      - 实际调度还位于 Heartbeat/Bearer Probe/Path Probe 之后；不占用业务 Q0 槽。
+
+  - id: diagnostic.control_handlers
+    symbol: diagnostic_control_handlers
+    type: module
+    file: src/ucn_node.c
+    layer: diagnostic
+    role: Node receive 中按控制 message_type 分派 Trace、Snapshot 与 Policy Diagnostic 的分组节点。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: diagnostic.handle_path_trace_request_static
+        type: direct
+        reason: 处理 Trace Request/Reply。
+      - target: diagnostic.handle_node_snapshot_request_static
+        type: direct
+        reason: 处理 Snapshot Request/Reply。
+      - target: diagnostic.handle_policy_diagnostic_request_static
+        type: direct
+        reason: 处理 Policy Diagnostic Request/Reply。
+
+  - id: diagnostic.path_trace_runtime_helpers_static
+    symbol: send_path_trace_request_on_link/send_path_trace_reply_on_link
+    type: module
+    file: src/ucn_node.c
+    layer: diagnostic
+    role: 编码、转发和反向回送 Path Trace 帧，并管理固定 Reverse/Pending 槽。
+    called_by:
+      - diagnostic.ucn_node_request_path_trace
+      - diagnostic.handle_path_trace_request_static
+    calls:
+      - target: node_runtime.send_control_on_link_static
+        type: direct
+        reason: 发送 Trace Request 或 Reply。
+
+  - id: diagnostic.node_snapshot_runtime_helpers_static
+    symbol: queue_node_snapshot_reply/forward_node_snapshot_request/send_due_node_snapshot_reply
+    type: module
+    file: src/ucn_node.c
+    layer: diagnostic
+    role: Snapshot 的 Reply 固定队列、抖动延迟发送和受限泛洪辅助组。
+    called_by:
+      - diagnostic.handle_node_snapshot_request_static
+      - diagnostic.send_due_diagnostics_static
+    calls:
+      - target: node_runtime.send_control_on_link_static
+        type: direct
+        reason: 使用当前 Link 发送 Request 或 Reply。
+
+  - id: diagnostic.policy_diagnostic_runtime_helpers_static
+    symbol: policy_diagnostic_build_reply/queue_reply/send_due_request_reply
+    type: module
+    file: src/ucn_node.c
+    layer: diagnostic
+    role: 组装固定 32 B Policy Reply，维护固定 Pending/Reply 槽并在低优先级发送。
+    called_by:
+      - diagnostic.handle_policy_diagnostic_request_static
+      - diagnostic.send_due_diagnostics_static
+    calls:
+      - target: node_runtime.send_control_to_node_static
+        type: direct
+        reason: 通过当前 Route 单播 Policy Request 或 Reply。

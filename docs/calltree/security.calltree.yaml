@@ -1,0 +1,96 @@
+module: security
+description: Security Provider 挂接、Node/Endpoint 策略、端到端加解密和透明中继边界。
+entry: security.ucn_node_set_security
+source_files:
+  - src/ucn_node.c
+  - src/ucn_frame.c
+  - include/ucn/ucn_security.h
+
+nodes:
+  - id: security.ucn_node_set_security
+    symbol: ucn_node_set_security
+    type: function
+    file: src/ucn_node.c
+    layer: security
+    role: 挂接产品实现的 ucn_security_ops_t 和上下文，加载序号/Session 基础状态。
+    called_by:
+      - external.product_security_init
+    calls:
+      - target: external.security_provider_load_next_sequence
+        type: callback
+        reason: 恢复掉电后不回退的发送序号。
+      - target: external.security_provider_get_session_id
+        type: callback
+        reason: 获取本次 Node Session ID。
+    notes:
+      - Core 不内置生产 AEAD、密钥存储、轮换或身份库。
+
+  - id: security.ucn_node_set_security_policy
+    symbol: ucn_node_set_security_policy
+    type: function
+    file: src/ucn_node.c
+    layer: security
+    role: 设置 Node 默认 TX/RX/Forward 安全策略。
+    called_by:
+      - external.product_security_init
+    calls: []
+
+  - id: security.ucn_node_set_endpoint_security_policy
+    symbol: ucn_node_set_endpoint_security_policy
+    type: function
+    file: src/ucn_node.c
+    layer: security
+    role: 覆盖单个 Endpoint 的默认安全策略。
+    called_by:
+      - external.product_security_init
+    calls: []
+    notes:
+      - 可实现某些 Endpoint 强制加密、另一些按需明文/密文的产品策略。
+
+  - id: security.protect_outbound_business
+    symbol: protect_outbound_business
+    type: function
+    file: src/ucn_node.c
+    layer: security
+    role: 在业务帧发送前选择保护模式，必要时生成 AAD、调用 seal 并附加 Tag。
+    called_by:
+      - route.ucn_node_send
+      - route.ucn_node_send_path
+    calls:
+      - target: external.security_provider_authorize_tx
+        type: callback
+        reason: 产品 ACL/身份策略批准本次发送。
+      - target: external.security_provider_select_tx_protection
+        type: callback
+        reason: 在 AUTO 策略下决定当前帧是否保护。
+      - target: frame.ucn_frame_write_e2e_aad
+        type: direct
+        reason: 绑定不可变的业务身份和 Path ID。
+      - target: external.security_provider_seal
+        type: callback
+        reason: 使用产品 AEAD 加密并生成认证 Tag。
+      - target: external.security_provider_store_next_sequence
+        type: callback
+        reason: 持久化递增后的序号，避免重放窗口回退。
+
+  - id: security.validate_inbound_business_security
+    symbol: validate_inbound_business_security
+    type: function
+    file: src/ucn_node.c
+    layer: security
+    role: 在业务/控制分派前执行 RX 授权、策略匹配、Tag 验证和目标端解密。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: external.security_provider_authorize_rx
+        type: callback
+        reason: 对 ingress Link、来源和帧身份进行 ACL/反重放检查。
+      - target: frame.ucn_frame_write_e2e_aad
+        type: direct
+        reason: 生成与发送端相同的认证附加数据。
+      - target: external.security_provider_open
+        type: callback
+        reason: 仅目标 Node 解密并验证 Tag。
+    notes:
+      - 允许的中继只依据外层 Route/Path 转发密文；它不调用 open，不需要业务密钥。
+      - CRC 先于该函数完成，不能代替安全校验。

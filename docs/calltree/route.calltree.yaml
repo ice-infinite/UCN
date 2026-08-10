@@ -1,0 +1,276 @@
+module: route
+description: 面向 Endpoint 的业务发送、Route Cache、受限 AODV-Lite 发现，以及 RREQ/RREP/RERR 处理。
+entry: route.ucn_node_send_endpoint
+source_files:
+  - src/ucn_node.c
+
+nodes:
+  - id: route.ucn_node_send_endpoint
+    symbol: ucn_node_send_endpoint
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 新业务 API：仅用目的 Node、静态 Endpoint、QoS 和 Payload 发数据。
+    called_by:
+      - service.ucn_service_protocol_bridge_step
+      - external.single_context_application
+    calls:
+      - target: core.ucn_endpoint_is_static
+        type: direct
+        reason: 拒绝非静态业务 Endpoint。
+      - target: policy_path.policy_lookup_helpers_static
+        type: direct
+        reason: 查找精确或可用策略。
+      - target: route.send_endpoint_auto_best_static
+        type: direct
+        reason: 未配置策略时走默认 Route/按需发现。
+      - target: policy_path.send_endpoint_pinned_static
+        type: direct
+        reason: Strict/Failover 策略走预安装 Path。
+      - target: policy_path.send_endpoint_auto_balance_static
+        type: direct
+        reason: Q1 AUTO_BALANCE 策略选择/复用固定 Flow。
+    notes:
+      - 业务不传 Link、介质地址或中继 Node。
+      - Q0/Q1 是当前 Core 发送路径支持的业务类别。
+
+  - id: route.send_endpoint_auto_best_static
+    symbol: send_endpoint_auto_best
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 默认自动路径：已有直连/Route Cache 时直接发送；未知 Q1 路径时启动受限发现并缓存最新值。
+    called_by:
+      - route.ucn_node_send_endpoint
+    calls:
+      - target: route.begin_route_discovery_static
+        type: direct
+        reason: Q1 且没有当前 Link/Route 时建立 RREQ 状态。
+      - target: route.queue_pending_q1_static
+        type: queue
+        reason: Route 尚未建立时在固定 pending 槽保留最新 Q1。
+      - target: route.ucn_node_send
+        type: direct
+        reason: 已有可用 Link 时构造普通业务帧发送。
+    notes:
+      - Q0 绝不等待 RREQ/Route；没有路径立即向本机返回失败。
+
+  - id: route.ucn_node_send
+    symbol: ucn_node_send
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 通过当前直连 Link 或 Active Route 构造普通业务帧并发送。
+    called_by:
+      - route.send_endpoint_auto_best_static
+      - node_runtime.ucn_node_step
+      - policy_path.send_endpoint_pinned_static
+    calls:
+      - target: route.route_lookup_helpers_static
+        type: direct
+        reason: 解析直接或缓存 Route 的 egress Link。
+      - target: security.protect_outbound_business
+        type: direct
+        reason: 分配序号后按 Node/Endpoint 策略选择明文或 E2E 保护。
+      - target: node_runtime.send_frame_on_link_static
+        type: direct
+        reason: 编码并交给具体 Link。
+    notes:
+      - Route Extension 仅在使用 Active Route 且有 route_epoch 时写入。
+
+  - id: route.ucn_node_send_path
+    symbol: ucn_node_send_path
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 使用已安装、已认证的 Path ID 构造业务帧，并按当前健康 Bearer 解析 Path egress。
+    called_by:
+      - policy_path.policy_path_send_helpers_static
+      - external.authorized_path_application
+    calls:
+      - target: security.protect_outbound_business
+        type: direct
+        reason: Path ID 被写入 E2E AAD 后保护业务 Payload。
+      - target: node_runtime.send_frame_on_link_static
+        type: direct
+        reason: 在当前 Path 下一跳的健康 Link 上发送。
+      - target: policy_path.path_invalidation_helpers_static
+        type: direct
+        reason: 逻辑下一跳完整失效时回收受影响 Path。
+    notes:
+      - Path 发送要求 Security Provider 与非零 Session；中继可透明转发密文。
+
+  - id: route.begin_route_discovery_static
+    symbol: begin_route_discovery
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 分配固定 Discovery 项、令牌并发出/转发受 Hop Limit 限制的 RREQ。
+    called_by:
+      - route.send_endpoint_auto_best_static
+      - route.ucn_node_discover_route
+      - route.start_due_route_refresh_static
+    calls:
+      - target: route.route_request_helpers_static
+        type: direct
+        reason: 向当前可用直连 Neighbor 泛洪 RREQ。
+    notes:
+      - 同目的地并发请求合并；控制面有令牌桶和固定表上限。
+
+  - id: route.ucn_node_discover_route
+    symbol: ucn_node_discover_route
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 管理/兼容 API，显式为目的 Node 启动 Route Discovery。
+    called_by:
+      - external.management_or_legacy_application
+    calls:
+      - target: route.begin_route_discovery_static
+        type: direct
+        reason: 复用统一 RREQ 创建逻辑。
+
+  - id: route.handle_route_request_static
+    symbol: handle_route_request
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: RREQ 到达时学习反向路径；若本机为目标则生成 RREP，否则继续泛洪。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: route.route_learning_helpers_static
+        type: direct
+        reason: 记录到 RREQ 源的反向动态 Route。
+      - target: node_runtime.send_control_to_node_static
+        type: direct
+        reason: 目标 Node 按反向 Route 返回 RREP。
+      - target: route.route_request_helpers_static
+        type: direct
+        reason: 非目标 Node 向健康邻居继续受限泛洪。
+
+  - id: route.handle_route_reply_static
+    symbol: handle_route_reply
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: RREP 到达时学习正向 Active/Candidate Route；未到源时沿反向 Route 转发。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: route.route_learning_helpers_static
+        type: direct
+        reason: 正常 RREP 更新 Active Route。
+      - target: route.route_learning_helpers_static
+        type: direct
+        reason: Candidate RREP 先进入候选路径状态。
+      - target: node_runtime.send_control_to_node_static
+        type: direct
+        reason: 继续回送到 RREQ 源 Node。
+      - target: route.send_pending_q1_if_ready_static
+        type: direct
+        reason: 由后续 step 在 Route 就绪时发出等待的 Q1。
+
+  - id: route.handle_route_error_static
+    symbol: handle_route_error
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 处理普通 Route Error 或 Path 范围错误，失效受影响动态状态并按需上游转发。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: route.route_invalidation_helpers_static
+        type: direct
+        reason: 清除/降级受影响 Active、Previous 或 Candidate Route。
+      - target: policy_path.path_invalidation_helpers_static
+        type: direct
+        reason: 仅回收相同 Path ID 的受影响 Path，不误清独立 P2。
+      - target: node_runtime.send_control_to_node_static
+        type: direct
+        reason: 若未到源，沿已有反向路径回传 RERR。
+
+  - id: route.queue_pending_q1_static
+    symbol: queue_pending_q1
+    type: queue
+    file: src/ucn_node.c
+    layer: routing
+    role: 固定 pending 槽按 (destination, Endpoint) 保留未知路径期间的最新 Q1 Payload。
+    called_by:
+      - route.send_endpoint_auto_best_static
+      - policy_path.send_endpoint_pinned_static
+    calls: []
+    notes:
+      - 默认数量和超时均是编译期上限；Q0 不进入该队列。
+
+  - id: route.send_pending_q1_if_ready_static
+    symbol: send_pending_q1_if_ready
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 在 Node step 中检查 Route 是否就绪并发送一个等待 Q1 项。
+    called_by:
+      - node_runtime.ucn_node_step
+    calls:
+      - target: route.ucn_node_send
+        type: direct
+        reason: 使用新建 Active Route 发出待发送数据。
+
+  - id: route.start_due_route_refresh_static
+    symbol: start_due_route_refresh
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 低优先级检查活动 Route 的刷新窗口并启动后台发现。
+    called_by:
+      - node_runtime.ucn_node_step
+    calls:
+      - target: route.begin_route_discovery_static
+        type: direct
+        reason: 刷新即将到期的动态 Route。
+
+  - id: route.route_lookup_helpers_static
+    symbol: find_link/find_active_route
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 解析直连 Link 或动态 Route Cache 的当前 egress。
+    called_by:
+      - route.ucn_node_send
+    calls: []
+
+  - id: route.route_request_helpers_static
+    symbol: forward_route_request
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 跳过 ingress 并向健康下一跳受限泛洪 RREQ。
+    called_by:
+      - route.begin_route_discovery_static
+      - route.handle_route_request_static
+    calls:
+      - target: node_runtime.send_control_on_link_static
+        type: direct
+        reason: 向每个可参与泛洪的直连 Neighbor 发送 RREQ。
+
+  - id: route.route_learning_helpers_static
+    symbol: learn_route/learn_candidate_route/activate_candidate_route
+    type: module
+    file: src/ucn_node.c
+    layer: routing
+    role: 维护 Active、Previous 和 Candidate Route 的固定表及 Route Epoch。
+    called_by:
+      - route.handle_route_request_static
+      - route.handle_route_reply_static
+    calls: []
+
+  - id: route.route_invalidation_helpers_static
+    symbol: invalidate_route_to/invalidate_routes_by_link
+    type: module
+    file: src/ucn_node.c
+    layer: routing
+    role: 在 RERR 或完整逻辑下一跳失效时仅清理受影响动态 Route。
+    called_by:
+      - route.handle_route_error_static
+      - neighbor.maintain_neighbor_liveness_static
+    calls: []

@@ -1,0 +1,97 @@
+module: adapter
+description: 将 ESP-NOW、UART、CAN 等物理驱动转换成地址绑定、Link 与固定 RX 队列。
+entry: adapter.ucn_adapter_rx_enqueue
+source_files:
+  - src/ucn_adapter.c
+
+nodes:
+  - id: adapter.ucn_adapter_bind_peer
+    symbol: ucn_adapter_bind_peer
+    type: function
+    file: src/ucn_adapter.c
+    layer: adapter
+    role: 将一个物理地址绑定到已创建的 ucn_link_t，形成固定 peer 表项。
+    called_by:
+      - external.adapter_discovery
+      - external.product_link_setup
+    calls:
+      - target: adapter.address_helpers_static
+        type: direct
+        reason: 检查地址长度。
+      - target: adapter.address_helpers_static
+        type: direct
+        reason: 拒绝同一物理地址绑定到不同 Link。
+    notes:
+      - 物理地址属于 Adapter；业务和 Route 不读取 MAC/CAN ID/串口号。
+
+  - id: adapter.ucn_adapter_rx_queue_init
+    symbol: ucn_adapter_rx_queue_init
+    type: function
+    file: src/ucn_adapter.c
+    layer: adapter
+    role: 初始化固定 RX 环形队列和可选 Port 临界区回调。
+    called_by:
+      - external.adapter_init
+    calls: []
+    notes:
+      - Queue 自身持有帧副本；不依赖动态内存。
+
+  - id: adapter.ucn_adapter_rx_enqueue
+    symbol: ucn_adapter_rx_enqueue
+    type: function
+    file: src/ucn_adapter.c
+    layer: adapter
+    role: 驱动回调/ISR 后半部复制一帧到固定 RX Queue。
+    called_by:
+      - external.wifi_uart_can_rx_callback
+    calls:
+      - target: adapter.queue_critical_helpers_static
+        type: direct
+        reason: 保护环形队列 head/tail/count。
+      - target: adapter.queue_critical_helpers_static
+        type: direct
+        reason: 完成快速副本后退出临界区。
+    outputs:
+      - UCN_OK，或队列满时 UCN_ERR_NO_SPACE。
+    notes:
+      - 不在此处解码、路由、调用 Endpoint handler 或执行安全 Provider。
+
+  - id: adapter.ucn_adapter_rx_pump
+    symbol: ucn_adapter_rx_pump
+    type: function
+    file: src/ucn_adapter.c
+    layer: adapter
+    role: Protocol Task 每轮最多取 max_frames 项并同步交给 Node 接收入口。
+    called_by:
+      - external.protocol_task_iteration
+      - node_runtime.protocol_task_mainloop
+    calls:
+      - target: node_runtime.ucn_node_receive
+        type: direct
+        reason: 将 ingress Link 和固定副本交给 Core 解析/分发。
+    notes:
+      - Core 拒绝帧只增加 rejected_by_core 统计；Pump 本身继续处理有界数量帧。
+
+  - id: adapter.address_helpers_static
+    symbol: address_helpers
+    type: module
+    file: src/ucn_adapter.c
+    layer: adapter
+    role: 物理地址长度校验、相等比较和固定 peer 表检索。
+    called_by:
+      - adapter.ucn_adapter_bind_peer
+    calls: []
+
+  - id: adapter.queue_critical_helpers_static
+    symbol: queue_enter/queue_exit
+    type: function
+    file: src/ucn_adapter.c
+    layer: adapter
+    role: 通过可选 ucn_port_ops_t 成对进入/退出短临界区，保护 RX 环形队列。
+    called_by:
+      - adapter.ucn_adapter_rx_enqueue
+      - adapter.ucn_adapter_rx_pump
+    calls:
+      - target: external.port_enter_exit_critical
+        type: callback
+        reason: 产品 Port 提供临界区原语。

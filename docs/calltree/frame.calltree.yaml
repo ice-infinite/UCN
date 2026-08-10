@@ -1,0 +1,96 @@
+module: frame
+description: v4 32/36/40 B Header、CRC-16 和端到端 AAD 的编解码路径。
+entry: frame.ucn_frame_encode
+source_files:
+  - src/ucn_frame.c
+
+nodes:
+  - id: frame.ucn_frame_encoded_size
+    symbol: ucn_frame_encoded_size
+    type: function
+    file: src/ucn_frame.c
+    layer: core
+    role: 根据基础/Route/Path Header、Payload 和可选 Tag 计算并校验最终帧长度。
+    called_by:
+      - frame.ucn_frame_encode
+      - node_runtime.send_frame_on_link
+    calls:
+      - target: frame.header_layout_helpers_static
+        type: direct
+        reason: 依据 has_route_extension/has_path_id 选择 32/36/40 B Header。
+    notes:
+      - 固定上限由 UCN_MAX_FRAME_BYTES 限制；超限直接失败，不在 Core 自动分片。
+
+  - id: frame.ucn_frame_encode
+    symbol: ucn_frame_encode
+    type: function
+    file: src/ucn_frame.c
+    layer: core
+    role: 将 ucn_frame_t 编为线上字节序列，写入 Header、Payload、可选 E2E Tag 和 CRC。
+    called_by:
+      - node_runtime.send_frame_on_link
+      - node_runtime.send_control_on_link
+    calls:
+      - target: frame.ucn_frame_encoded_size
+        type: direct
+        reason: 先校验帧扩展组合和输出容量。
+      - target: frame.ucn_crc16_ccitt
+        type: direct
+        reason: 覆盖 Header（不含 CRC 字段）、Payload 和可选 Tag 计算 CRC。
+    notes:
+      - CRC 仅检错，不提供身份认证或防篡改能力。
+
+  - id: frame.ucn_frame_decode
+    symbol: ucn_frame_decode
+    type: function
+    file: src/ucn_frame.c
+    layer: core
+    role: 校验 Magic、协议版本、Header 组合、长度、Hop Limit 与 CRC，并解析为 ucn_frame_t 视图。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: frame.ucn_crc16_ccitt
+        type: direct
+        reason: 重算并对比接收帧 CRC。
+    outputs:
+      - 成功：frame.payload/auth_tag 指向本次输入缓冲区。
+      - 失败：UCN_ERR_MALFORMED、UCN_ERR_VERSION、UCN_ERR_CRC 或 UCN_ERR_TOO_LARGE。
+    notes:
+      - 调用者必须在 Payload 被使用期间保持输入缓冲区有效；Adapter Pump 在当前同步调用内满足此条件。
+
+  - id: frame.ucn_frame_write_e2e_aad
+    symbol: ucn_frame_write_e2e_aad
+    type: function
+    file: src/ucn_frame.c
+    layer: security
+    role: 生成不可变业务身份字段的 30 B AAD，Path 帧额外绑定 Path ID。
+    called_by:
+      - security.protect_outbound_business
+      - security.validate_inbound_business_security
+      - external.security_provider
+    calls: []
+    notes:
+      - Hop Limit/Route Epoch 不在 AAD 内，因此中继可合法递减 TTL/维护 Route；源/目的/序号/Session/Path ID 受保护。
+
+  - id: frame.ucn_crc16_ccitt
+    symbol: ucn_crc16_ccitt
+    type: function
+    file: src/ucn_frame.c
+    layer: core
+    role: CRC-16/CCITT 基础计算函数。
+    called_by:
+      - frame.ucn_frame_encode
+      - frame.ucn_frame_decode
+    calls: []
+
+  - id: frame.header_layout_helpers_static
+    symbol: frame_header_size/frame_crc_offset
+    type: function
+    file: src/ucn_frame.c
+    layer: core
+    role: 根据扩展 Flag 选择 Header 长度和 CRC 字段位置。
+    called_by:
+      - frame.ucn_frame_encoded_size
+      - frame.ucn_frame_encode
+      - frame.ucn_frame_decode
+    calls: []

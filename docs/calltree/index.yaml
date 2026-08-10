@@ -1,0 +1,74 @@
+project: UCN
+protocol_version: "4"
+description: MCU-first UCN Core 调用关系索引；Linux 仅是可选 Host/Adapter，不是路由前提。
+source_root: E:\File\MESH\UCN
+
+modules:
+  - id: core
+    file: core.calltree.yaml
+    status: current
+    role: 配置校验与静态 Endpoint/控制消息边界
+    entry: core.ucn_validate_config
+    source_files: [src/ucn_core.c, src/ucn_endpoint.c]
+
+  - id: frame
+    file: frame.calltree.yaml
+    status: current
+    role: v4 帧编码、解码、CRC 和 E2E AAD
+    entry: frame.ucn_frame_encode
+    source_files: [src/ucn_frame.c]
+
+  - id: adapter
+    file: adapter.calltree.yaml
+    status: current
+    role: 物理地址绑定、固定 RX Queue 和 Protocol Task Pump
+    entry: adapter.ucn_adapter_rx_enqueue
+    source_files: [src/ucn_adapter.c]
+
+  - id: node_runtime
+    file: node_runtime.calltree.yaml
+    status: current
+    role: Node 初始化、收包分发、转发与唯一 Protocol Task 调度
+    entry: node_runtime.ucn_node_step
+    source_files: [src/ucn_node.c]
+  - id: neighbor
+    file: neighbor.calltree.yaml
+    status: current
+    role: HELLO 准入、Neighbor/Bearer 生命周期、Heartbeat 和主备切换
+    entry: neighbor.ucn_node_observe_neighbor
+    source_files: [src/ucn_node.c]
+
+  - id: route
+    file: route.calltree.yaml
+    status: current
+    role: Endpoint 发送、AODV-Lite、Route Cache、RREQ/RREP/RERR
+    entry: route.ucn_node_send_endpoint
+    source_files: [src/ucn_node.c]
+
+  - id: policy_path
+    file: policy_path.calltree.yaml
+    status: current
+    role: 策略、受控 Path、Strict/Failover 和 Q1 流亲和均衡
+    entry: policy_path.ucn_node_set_route_policy
+    source_files: [src/ucn_policy.c, src/ucn_path.c, src/ucn_node.c]
+
+  - id: security
+    file: security.calltree.yaml
+    status: current_provider_boundary
+    role: 安全 Provider、端到端保护、ACL 和透明转发边界
+    entry: security.ucn_node_set_security
+    source_files: [src/ucn_node.c, src/ucn_frame.c]
+
+  - id: service
+    file: service.calltree.yaml
+    status: current
+    role: MCU 内任务 Router、Remote TX 与 Protocol Task Bridge
+    entry: service.ucn_service_send
+    source_files: [src/ucn_service.c, src/ucn_service_bridge.c]
+
+  - id: diagnostic
+    file: diagnostic.calltree.yaml
+    status: current_core_virtual_verified
+    role: 按需 Path Trace、Node Snapshot、Policy Diagnostic
+    entry: diagnostic.ucn_node_request_path_trace
+    source_files: [src/ucn_node.c]
