@@ -868,6 +868,17 @@ typedef struct ucn_node_stats {
 } ucn_node_stats_t;
 
 ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config);
+/* A new Node defaults to fixed W3 for source compatibility.  Configure a
+ * smaller fixed domain before registering links or installing Security.
+ * max_receive_profile may be wider than tx_profile so a gateway-capable Node
+ * can accept and transparently forward narrower frames without truncation. */
+ucn_result_t ucn_node_set_wire_profiles(
+    ucn_node_t *node,
+    ucn_wire_profile_t tx_profile,
+    ucn_wire_profile_t max_receive_profile);
+ucn_wire_profile_t ucn_node_get_tx_wire_profile(const ucn_node_t *node);
+ucn_wire_profile_t ucn_node_get_max_receive_wire_profile(
+    const ucn_node_t *node);
 /* Plain deployments should set a non-zero boot/session value before network
  * traffic so a reboot cannot reuse an old Source/Session sequence window.
  * A Security Provider replaces this value with its authenticated Session. */

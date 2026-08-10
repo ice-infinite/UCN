@@ -46,11 +46,18 @@ static const ucn_link_ops_t AODV_LINK_OPS = {
 static int aodv_init_node(ucn_node_t *node, ucn_node_id_t id)
 {
     ucn_config_t config;
+    ucn_result_t result;
 
-    config.network_id = UINT32_C(0x12345678);
+    config.network_id = UINT32_C(42);
     config.node_id = id;
     config.default_hop_limit = 4U;
-    return ucn_node_init(node, &config) == UCN_OK ? 0 : 1;
+    result = ucn_node_init(node, &config);
+    if (result != UCN_OK) {
+        return 1;
+    }
+    return ucn_node_set_wire_profiles(node, UCN_WIRE_PROFILE_W0_LOCAL,
+                                      UCN_WIRE_PROFILE_W0_LOCAL) == UCN_OK ?
+               0 : 1;
 }
 
 static void aodv_rx(void *context, const ucn_frame_t *frame)
@@ -126,7 +133,8 @@ int test_aodv_lite(void)
     duplicate_request.message_type = UCN_MSG_ROUTE_REQ;
     duplicate_request.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
     duplicate_request.hop_limit = 4U;
-    duplicate_request.network_id = UINT32_C(0x12345678);
+    duplicate_request.wire_profile = UCN_WIRE_PROFILE_W0_LOCAL;
+    duplicate_request.network_id = UINT32_C(42);
     duplicate_request.source = UINT32_C(1);
     duplicate_request.destination = UCN_NODE_BROADCAST;
     duplicate_request.sequence = UINT32_C(0xAA);

@@ -92,6 +92,7 @@ if(UCN_BUILD_TESTS)
         tests/test_core.c
         tests/test_frame.c
         tests/test_wire_profile.c
+        tests/test_node_wire_profile.c
         tests/test_node.c
         tests/test_virtual_link.c
         tests/test_qos.c

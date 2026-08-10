@@ -124,10 +124,16 @@ static bool route_cost_is_better(uint16_t candidate_cost, uint16_t active_cost)
     return !route_cost_is_known(active_cost) || candidate_cost < active_cost;
 }
 
-static uint16_t route_epoch_from_request_id(uint32_t request_id)
+static uint16_t route_epoch_from_request_id(ucn_wire_profile_t profile,
+                                            uint32_t request_id)
 {
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(profile);
     uint16_t route_epoch = (uint16_t)(request_id ^ (request_id >> 16U));
 
+    if (descriptor != NULL && descriptor->route_epoch_bytes == 1U) {
+        route_epoch = (uint16_t)(route_epoch & UINT16_C(0x00FF));
+    }
     return route_epoch == 0U ? 1U : route_epoch;
 }
 
@@ -1638,6 +1644,8 @@ static ucn_result_t allocate_sequence(ucn_node_t *node, ucn_sequence_t *sequence
             return result;
         }
         if (new_session_id == 0U || new_session_id == node->session_id ||
+            new_session_id > ucn_wire_profile_get_descriptor(
+                                 node->tx_wire_profile)->max_wire_value ||
             rotated_sequence == 0U ||
             rotated_sequence >= UCN_SEQUENCE_ROTATION_THRESHOLD) {
             return UCN_ERR_SECURITY;
@@ -1776,16 +1784,25 @@ static ucn_result_t send_frame_on_link(ucn_node_t *node,
                                        ucn_link_t *link,
                                        const ucn_frame_t *frame)
 {
+    ucn_frame_t prepared;
     ucn_link_status_t status;
     uint8_t encoded[UCN_MAX_FRAME_BYTES];
     size_t encoded_length = 0U;
     ucn_result_t result;
 
+    if (node == NULL || link == NULL || frame == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    prepared = *frame;
+    if (prepared.wire_profile == UCN_WIRE_PROFILE_UNSPECIFIED) {
+        prepared.wire_profile = node->tx_wire_profile;
+    }
     if (!ucn_node_security_ready(node)) {
         return UCN_ERR_SECURITY;
     }
     if (node->security_ops != NULL) {
-        result = node->security_ops->authorize_tx(node->security_context, frame);
+        result = node->security_ops->authorize_tx(node->security_context,
+                                                  &prepared);
         if (result != UCN_OK) {
             return result;
         }
@@ -1800,7 +1817,8 @@ static ucn_result_t send_frame_on_link(ucn_node_t *node,
         return UCN_ERR_LINK_DOWN;
     }
 
-    result = ucn_frame_encode(frame, encoded, sizeof(encoded), &encoded_length);
+    result = ucn_frame_encode(&prepared, encoded, sizeof(encoded),
+                              &encoded_length);
     if (result != UCN_OK) {
         return result;
     }
@@ -1826,6 +1844,9 @@ static ucn_result_t protect_outbound_business(ucn_node_t *node,
     bool protected_frame = false;
     ucn_result_t result;
 
+    if (frame->wire_profile == UCN_WIRE_PROFILE_UNSPECIFIED) {
+        frame->wire_profile = node->tx_wire_profile;
+    }
     if (ucn_message_type_is_control(frame->message_type)) {
         return (frame->flags & UCN_FRAME_FLAG_E2E_PROTECTED) != 0U ?
                UCN_ERR_MALFORMED : UCN_OK;
@@ -3660,12 +3681,18 @@ static ucn_link_t *find_candidate_link(ucn_node_t *node,
 
 static uint16_t allocate_route_epoch(ucn_node_t *node, ucn_node_id_t destination)
 {
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(node->tx_wire_profile);
+    const uint16_t maximum =
+        descriptor != NULL && descriptor->route_epoch_bytes == 1U ?
+            UINT16_C(0x00FF) : UINT16_MAX;
     ucn_route_entry_t *route = find_active_route(node, destination);
 
     for (;;) {
         uint16_t route_epoch;
 
-        if (node->next_route_epoch == 0U || node->next_route_epoch == UINT16_MAX) {
+        if (node->next_route_epoch == 0U ||
+            node->next_route_epoch >= maximum) {
             node->next_route_epoch = 1U;
         }
         route_epoch = node->next_route_epoch++;
@@ -4073,10 +4100,12 @@ static ucn_result_t handle_route_request(ucn_node_t *node,
              learn_candidate_route(node, origin, request_id, ingress_link,
                                    route_cost, hop_count, false) :
              learn_route(node, origin, ingress_link, route_cost, hop_count,
-                         route_epoch_from_request_id(request_id));
+                         route_epoch_from_request_id(frame->wire_profile,
+                                                     request_id));
 #else
     result = learn_route(node, origin, ingress_link, route_cost, hop_count,
-                         route_epoch_from_request_id(request_id));
+                         route_epoch_from_request_id(frame->wire_profile,
+                                                     request_id));
 #endif
     if (result != UCN_OK) {
         return result;
@@ -4557,6 +4586,8 @@ ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config)
 
     (void)memset(node, 0, sizeof(*node));
     node->config = *config;
+    node->tx_wire_profile = UCN_WIRE_PROFILE_W3_BACKBONE;
+    node->max_receive_wire_profile = UCN_WIRE_PROFILE_W3_BACKBONE;
     node->next_sequence = 1U;
     node->next_queue_order = 1U;
     node->next_route_request_id = 1U;
@@ -4578,6 +4609,48 @@ ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config)
     return UCN_OK;
 }
 
+ucn_result_t ucn_node_set_wire_profiles(
+    ucn_node_t *node,
+    ucn_wire_profile_t tx_profile,
+    ucn_wire_profile_t max_receive_profile)
+{
+    const ucn_wire_profile_descriptor_t *tx;
+    const ucn_wire_profile_descriptor_t *rx;
+
+    if (node == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (node->link_count != 0U || node->security_ops != NULL) {
+        return UCN_ERR_CONFIG;
+    }
+    tx = ucn_wire_profile_get_descriptor(tx_profile);
+    rx = ucn_wire_profile_get_descriptor(max_receive_profile);
+    if (tx == NULL || rx == NULL || max_receive_profile < tx_profile) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (node->config.network_id > tx->max_wire_value ||
+        node->config.node_id > tx->max_node_id ||
+        node->config.default_hop_limit > tx->max_hops ||
+        node->session_id > tx->max_wire_value) {
+        return UCN_ERR_TOO_LARGE;
+    }
+    node->tx_wire_profile = tx_profile;
+    node->max_receive_wire_profile = max_receive_profile;
+    return UCN_OK;
+}
+
+ucn_wire_profile_t ucn_node_get_tx_wire_profile(const ucn_node_t *node)
+{
+    return node == NULL ? UCN_WIRE_PROFILE_UNSPECIFIED : node->tx_wire_profile;
+}
+
+ucn_wire_profile_t ucn_node_get_max_receive_wire_profile(
+    const ucn_node_t *node)
+{
+    return node == NULL ? UCN_WIRE_PROFILE_UNSPECIFIED :
+                          node->max_receive_wire_profile;
+}
+
 ucn_result_t ucn_node_set_plain_session_id(ucn_node_t *node,
                                            ucn_session_id_t session_id)
 {
@@ -4586,6 +4659,10 @@ ucn_result_t ucn_node_set_plain_session_id(ucn_node_t *node,
     }
     if (node->security_ops != NULL) {
         return UCN_ERR_CONFIG;
+    }
+    if (session_id > ucn_wire_profile_get_descriptor(
+                         node->tx_wire_profile)->max_wire_value) {
+        return UCN_ERR_TOO_LARGE;
     }
     node->session_id = session_id;
     return UCN_OK;
@@ -4662,6 +4739,10 @@ ucn_result_t ucn_node_set_security(ucn_node_t *node,
     result = ops->get_session_id(context, &session_id);
     if (result != UCN_OK || session_id == 0U) {
         return result == UCN_OK ? UCN_ERR_SECURITY : result;
+    }
+    if (session_id > ucn_wire_profile_get_descriptor(
+                         node->tx_wire_profile)->max_wire_value) {
+        return UCN_ERR_TOO_LARGE;
     }
 
     node->security_ops = ops;
@@ -4995,7 +5076,8 @@ ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
 
     if (node == NULL || link == NULL || link->ops == NULL ||
         link->ops->send == NULL || link->ops->get_status == NULL ||
-        link->mtu < UCN_FRAME_HEADER_SIZE) {
+        link->mtu < ucn_frame_header_size_for_profile(
+                        node->max_receive_wire_profile, 0U)) {
         return UCN_ERR_ARGUMENT;
     }
 
@@ -6526,6 +6608,10 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
     result = ucn_frame_decode(data, length, &frame);
     if (result != UCN_OK) {
         return result;
+    }
+
+    if (frame.wire_profile > node->max_receive_wire_profile) {
+        return UCN_ERR_UNSUPPORTED;
     }
 
     if (frame.network_id != node->config.network_id) {

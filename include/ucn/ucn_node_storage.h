@@ -220,6 +220,8 @@ typedef struct ucn_rreq_cache_entry {
 
 struct ucn_node {
     ucn_config_t config;
+    ucn_wire_profile_t tx_wire_profile;
+    ucn_wire_profile_t max_receive_wire_profile;
     ucn_link_t *links[UCN_MAX_LINKS];
     size_t link_count;
     ucn_sequence_t next_sequence;
