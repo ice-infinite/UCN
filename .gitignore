@@ -1,6 +1,7 @@
 # CMake / CTest local build trees.
 /build/
 /build-*/
+/build_*/
 /cmake-build-*/
 CMakeCache.txt
 CMakeFiles/

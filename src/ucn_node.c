@@ -7,10 +7,13 @@
 #define UCN_ROUTE_REQ_PAYLOAD_BYTES ((size_t)16U)
 #define UCN_ROUTE_REPLY_PAYLOAD_BYTES ((size_t)18U)
 #define UCN_ROUTE_ERROR_PAYLOAD_BYTES ((size_t)4U)
+#define UCN_PATH_ROUTE_ERROR_PAYLOAD_BYTES ((size_t)16U)
 #define UCN_HELLO_PAYLOAD_BYTES ((size_t)4U)
 #define UCN_HEARTBEAT_PAYLOAD_BYTES ((size_t)8U)
 #define UCN_PATH_PROBE_PAYLOAD_BYTES ((size_t)12U)
 #define UCN_PATH_ACTIVATE_PAYLOAD_BYTES ((size_t)6U)
+#define UCN_PATH_INSTALL_PAYLOAD_BYTES ((size_t)16U)
+#define UCN_PATH_REVOKE_PAYLOAD_BYTES ((size_t)8U)
 #define UCN_PATH_TRACE_TRACE_ID_OFFSET ((size_t)0U)
 #define UCN_PATH_TRACE_RECORD_COUNT_OFFSET ((size_t)4U)
 #define UCN_PATH_TRACE_RECORD_LIMIT_OFFSET ((size_t)5U)
@@ -25,19 +28,45 @@
 #define UCN_NODE_SNAPSHOT_REPLY_NODE_ID_OFFSET ((size_t)4U)
 #define UCN_NODE_SNAPSHOT_REPLY_NEIGHBOR_COUNT_OFFSET ((size_t)8U)
 #define UCN_NODE_SNAPSHOT_REPLY_FLAGS_OFFSET ((size_t)9U)
+#define UCN_POLICY_DIAGNOSTIC_REQUEST_ID_OFFSET ((size_t)0U)
+#define UCN_POLICY_DIAGNOSTIC_SECTION_OFFSET ((size_t)4U)
+#define UCN_POLICY_DIAGNOSTIC_INDEX_OFFSET ((size_t)5U)
+#define UCN_POLICY_DIAGNOSTIC_REQUEST_RESERVED_OFFSET ((size_t)6U)
+#define UCN_POLICY_DIAGNOSTIC_REPLY_STATUS_OFFSET ((size_t)6U)
+#define UCN_POLICY_DIAGNOSTIC_REPLY_RESERVED_OFFSET ((size_t)7U)
+#define UCN_POLICY_DIAGNOSTIC_RECORD_OFFSET ((size_t)8U)
+#define UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_UP ((uint8_t)0x01U)
+#define UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_ROUTE_COST ((uint8_t)0x02U)
+#define UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_RTT ((uint8_t)0x04U)
+#define UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_TX_FAILURE ((uint8_t)0x08U)
+#define UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_QUEUE_PRESSURE ((uint8_t)0x10U)
 #define UCN_HEARTBEAT_REQUEST ((uint8_t)1U)
 #define UCN_HEARTBEAT_ACK ((uint8_t)2U)
 #define UCN_ROUTE_REQ_FLAG_CANDIDATE ((uint8_t)0x01U)
 
 static void invalidate_routes_by_link(ucn_node_t *node, const ucn_link_t *link);
-static void remove_neighbor_by_link(ucn_node_t *node, ucn_link_t *link);
 static ucn_result_t get_link_status(const ucn_link_t *link, ucn_link_status_t *status);
+static bool link_is_usable(const ucn_link_t *link);
+static ucn_link_t *resolve_egress_link(ucn_node_t *node, ucn_link_t *link);
+static void revoke_path_and_mark_local_policy(ucn_node_t *node,
+                                               ucn_node_id_t owner,
+                                               ucn_session_id_t owner_session_id,
+                                               ucn_path_id_t path_id,
+                                               ucn_node_id_t destination);
+static void revoke_paths_by_unavailable_egress(ucn_node_t *node,
+                                                ucn_link_t *failed_link);
 static ucn_result_t begin_route_discovery(ucn_node_t *node,
                                           ucn_node_id_t destination,
                                           uint32_t now_ms,
                                           bool is_candidate);
 static void expire_candidate_routes(ucn_node_t *node);
 static bool deadline_expired(uint32_t now_ms, uint32_t deadline_ms);
+static ucn_result_t send_path_route_error(ucn_node_t *node,
+                                          ucn_link_t *upstream_link,
+                                          ucn_node_id_t origin,
+                                          ucn_node_id_t unreachable,
+                                          ucn_session_id_t owner_session_id,
+                                          ucn_path_id_t path_id);
 
 static uint32_t read_u32_be(const uint8_t *data)
 {
@@ -81,6 +110,7 @@ static uint16_t link_route_cost(const ucn_link_t *link)
 {
     ucn_link_metrics_t metrics;
 
+    (void)memset(&metrics, 0, sizeof(metrics));
     if (link != NULL && link->ops != NULL && link->ops->get_metrics != NULL &&
         link->ops->get_metrics(link, &metrics) == UCN_OK &&
         metrics.route_cost_valid && metrics.route_cost != 0U) {
@@ -101,8 +131,9 @@ static bool candidate_is_expired(const ucn_node_t *node,
     return (int32_t)(node->now_ms - candidate->expires_at_ms) >= 0;
 }
 
-static bool candidate_is_sufficiently_better(uint16_t active_cost,
-                                             uint16_t candidate_cost)
+static bool cost_is_sufficiently_better(uint16_t active_cost,
+                                        uint16_t candidate_cost,
+                                        uint8_t improvement_percent)
 {
     uint32_t candidate_scaled;
     uint32_t active_scaled;
@@ -112,11 +143,18 @@ static bool candidate_is_sufficiently_better(uint16_t active_cost,
     }
     candidate_scaled = (uint32_t)candidate_cost * 100U;
     active_scaled = (uint32_t)active_cost *
-                    (uint32_t)(100U - UCN_ROUTE_SWITCH_IMPROVEMENT_PERCENT);
+                    (uint32_t)(100U - improvement_percent);
     return candidate_scaled <= active_scaled;
 }
 
-static ucn_link_t *find_direct_link(const ucn_node_t *node,
+static bool candidate_is_sufficiently_better(uint16_t active_cost,
+                                             uint16_t candidate_cost)
+{
+    return cost_is_sufficiently_better(active_cost, candidate_cost,
+                                       UCN_ROUTE_SWITCH_IMPROVEMENT_PERCENT);
+}
+
+static ucn_link_t *find_direct_link(ucn_node_t *node,
                                     ucn_node_id_t destination)
 {
     size_t index;
@@ -124,17 +162,26 @@ static ucn_link_t *find_direct_link(const ucn_node_t *node,
     uint16_t best_direct_cost = UINT16_MAX;
 
     for (index = 0U; index < node->link_count; ++index) {
-        if (node->links[index]->peer_node_id == destination &&
-            link_route_cost(node->links[index]) < best_direct_cost) {
-            best_direct = node->links[index];
-            best_direct_cost = link_route_cost(node->links[index]);
+        ucn_link_t *link = node->links[index];
+        ucn_link_t *selected;
+
+        if (link->peer_node_id != destination) {
+            continue;
+        }
+        selected = resolve_egress_link(node, link);
+        if (selected != link) {
+            continue;
+        }
+        if (link_route_cost(link) < best_direct_cost) {
+            best_direct = link;
+            best_direct_cost = link_route_cost(link);
         }
     }
 
     return best_direct;
 }
 
-static ucn_link_t *find_link(const ucn_node_t *node, ucn_node_id_t destination)
+static ucn_link_t *find_link(ucn_node_t *node, ucn_node_id_t destination)
 {
     size_t index;
     ucn_link_t *direct = find_direct_link(node, destination);
@@ -147,14 +194,14 @@ static ucn_link_t *find_link(const ucn_node_t *node, ucn_node_id_t destination)
         if (node->routes[index].valid &&
             !route_is_expired(node, &node->routes[index]) &&
             node->routes[index].destination == destination) {
-            return node->routes[index].egress_link;
+            return resolve_egress_link(node, node->routes[index].egress_link);
         }
     }
 
     return NULL;
 }
 
-static ucn_link_t *find_link_for_route_epoch(const ucn_node_t *node,
+static ucn_link_t *find_link_for_route_epoch(ucn_node_t *node,
                                              ucn_node_id_t destination,
                                              bool has_route_extension,
                                              uint16_t route_epoch)
@@ -174,24 +221,24 @@ static ucn_link_t *find_link_for_route_epoch(const ucn_node_t *node,
         }
         if (has_route_extension) {
             if (route->route_epoch == route_epoch) {
-                return route->egress_link;
+                return resolve_egress_link(node, route->egress_link);
             }
             if (route->previous_valid &&
                 !deadline_expired(node->now_ms, route->previous_expires_at_ms) &&
                 route->previous_route_epoch == route_epoch) {
-                return route->previous_egress_link;
+                return resolve_egress_link(node, route->previous_egress_link);
             }
         } else if (route->route_epoch == 0U) {
-            return route->egress_link;
+            return resolve_egress_link(node, route->egress_link);
         } else if (route->previous_valid && route->previous_route_epoch == 0U &&
                    !deadline_expired(node->now_ms, route->previous_expires_at_ms)) {
-            return route->previous_egress_link;
+            return resolve_egress_link(node, route->previous_egress_link);
         }
     }
     return NULL;
 }
 
-static bool route_epoch_is_accepted(const ucn_node_t *node,
+static bool route_epoch_is_accepted(ucn_node_t *node,
                                     ucn_node_id_t source,
                                     const ucn_frame_t *frame)
 {
@@ -215,6 +262,19 @@ static bool link_is_registered(const ucn_node_t *node, const ucn_link_t *link)
     return false;
 }
 
+static const ucn_path_forward_entry_t *find_active_path(
+    const ucn_node_t *node,
+    ucn_node_id_t owner,
+    ucn_session_id_t owner_session_id,
+    ucn_path_id_t path_id,
+    ucn_node_id_t destination)
+{
+    const ucn_path_forward_entry_t *entry = ucn_path_find(
+        &node->path_state, owner, owner_session_id, path_id, destination);
+
+    return ucn_path_is_expired(entry, node->now_ms) ? NULL : entry;
+}
+
 static ucn_neighbor_entry_t *find_neighbor(ucn_node_t *node,
                                             ucn_node_id_t peer_node_id)
 {
@@ -233,14 +293,333 @@ static ucn_neighbor_entry_t *find_neighbor_by_link(ucn_node_t *node,
                                                     const ucn_link_t *link)
 {
     size_t index;
+    size_t bearer_index;
 
     for (index = 0U; index < UCN_MAX_NEIGHBORS; ++index) {
-        if (node->neighbors[index].state != UCN_NEIGHBOR_EMPTY &&
-            node->neighbors[index].link == link) {
-            return &node->neighbors[index];
+        if (node->neighbors[index].state == UCN_NEIGHBOR_EMPTY) {
+            continue;
+        }
+        for (bearer_index = 0U;
+             bearer_index < UCN_MAX_BEARERS_PER_NEIGHBOR;
+             ++bearer_index) {
+            if (node->neighbors[index].bearers[bearer_index].link == link) {
+                return &node->neighbors[index];
+            }
         }
     }
     return NULL;
+}
+
+static ucn_neighbor_bearer_t *find_neighbor_bearer(ucn_neighbor_entry_t *entry,
+                                                    const ucn_link_t *link)
+{
+    size_t index;
+
+    if (entry == NULL || link == NULL) {
+        return NULL;
+    }
+    for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
+        if (entry->bearers[index].link == link) {
+            return &entry->bearers[index];
+        }
+    }
+    return NULL;
+}
+
+static ucn_neighbor_bearer_t *allocate_neighbor_bearer(ucn_neighbor_entry_t *entry)
+{
+    size_t index;
+
+    if (entry == NULL || entry->bearer_count >= UCN_MAX_BEARERS_PER_NEIGHBOR) {
+        return NULL;
+    }
+    for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
+        if (entry->bearers[index].state == UCN_NEIGHBOR_BEARER_EMPTY) {
+            return &entry->bearers[index];
+        }
+    }
+    return NULL;
+}
+
+static size_t bearer_index_from_entry(const ucn_neighbor_entry_t *entry,
+                                      const ucn_neighbor_bearer_t *bearer)
+{
+    return (size_t)(bearer - entry->bearers);
+}
+
+static bool bearer_is_active(const ucn_neighbor_bearer_t *bearer)
+{
+    return bearer != NULL && (bearer->state == UCN_NEIGHBOR_BEARER_ADMITTED ||
+                               bearer->state == UCN_NEIGHBOR_BEARER_SUSPECT);
+}
+
+static ucn_neighbor_bearer_t *select_neighbor_bearer(ucn_neighbor_entry_t *entry)
+{
+    size_t index;
+    ucn_neighbor_bearer_t *best = NULL;
+    uint16_t best_cost = UINT16_MAX;
+
+    if (entry == NULL) {
+        return NULL;
+    }
+    if (entry->primary_bearer_index != UCN_NEIGHBOR_PRIMARY_BEARER_NONE &&
+        entry->primary_bearer_index < UCN_MAX_BEARERS_PER_NEIGHBOR) {
+        ucn_neighbor_bearer_t *primary =
+            &entry->bearers[entry->primary_bearer_index];
+
+        if (bearer_is_active(primary) && link_is_usable(primary->link)) {
+            return primary;
+        }
+    }
+    for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
+        ucn_neighbor_bearer_t *bearer = &entry->bearers[index];
+
+        if (bearer->state != UCN_NEIGHBOR_BEARER_ADMITTED ||
+            !link_is_usable(bearer->link)) {
+            continue;
+        }
+        if (best == NULL || link_route_cost(bearer->link) < best_cost) {
+            best = bearer;
+            best_cost = link_route_cost(bearer->link);
+        }
+    }
+    if (best != NULL) {
+        entry->primary_bearer_index = (uint8_t)bearer_index_from_entry(entry, best);
+        return best;
+    }
+    for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
+        ucn_neighbor_bearer_t *bearer = &entry->bearers[index];
+
+        if (bearer->state == UCN_NEIGHBOR_BEARER_SUSPECT &&
+            link_is_usable(bearer->link)) {
+            entry->primary_bearer_index = (uint8_t)index;
+            return bearer;
+        }
+    }
+    entry->primary_bearer_index = UCN_NEIGHBOR_PRIMARY_BEARER_NONE;
+    return NULL;
+}
+
+/* Quality switching deliberately stays inside one Neighbor's fixed Bearer
+ * set.  It never changes an end-to-end route and therefore does not share
+ * PATH_PROBE's multi-hop control plane. */
+static void reset_bearer_quality_probe(ucn_neighbor_bearer_t *bearer)
+{
+    if (bearer == NULL) {
+        return;
+    }
+    bearer->quality_probe_id = 0U;
+    bearer->quality_probe_sent_at_ms = 0U;
+    bearer->quality_better_samples = 0U;
+    bearer->quality_probes_sent = 0U;
+    bearer->quality_probe_acks = 0U;
+    bearer->quality_probe_pending = false;
+}
+
+static void reset_neighbor_quality_probes(ucn_neighbor_entry_t *entry)
+{
+    size_t index;
+
+    if (entry == NULL) {
+        return;
+    }
+    for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
+        reset_bearer_quality_probe(&entry->bearers[index]);
+    }
+}
+
+static ucn_neighbor_bearer_t *find_better_neighbor_bearer(
+    ucn_neighbor_entry_t *entry,
+    const ucn_neighbor_bearer_t *primary)
+{
+    size_t index;
+    ucn_neighbor_bearer_t *best = NULL;
+    uint16_t primary_cost;
+    uint16_t best_cost = UINT16_MAX;
+
+    if (entry == NULL || primary == NULL || !link_is_usable(primary->link)) {
+        return NULL;
+    }
+    primary_cost = link_route_cost(primary->link);
+    for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
+        ucn_neighbor_bearer_t *bearer = &entry->bearers[index];
+        uint16_t bearer_cost;
+
+        if (bearer == primary ||
+            bearer->state != UCN_NEIGHBOR_BEARER_ADMITTED ||
+            !link_is_usable(bearer->link)) {
+            continue;
+        }
+        bearer_cost = link_route_cost(bearer->link);
+        if (!cost_is_sufficiently_better(
+                primary_cost, bearer_cost,
+                UCN_BEARER_SWITCH_IMPROVEMENT_PERCENT)) {
+            continue;
+        }
+        if (best == NULL || bearer_cost < best_cost) {
+            best = bearer;
+            best_cost = bearer_cost;
+        }
+    }
+    return best;
+}
+
+static void switch_neighbor_primary(ucn_node_t *node,
+                                    ucn_neighbor_entry_t *entry,
+                                    ucn_neighbor_bearer_t *bearer)
+{
+    uint8_t bearer_index;
+
+    if (node == NULL || entry == NULL || bearer == NULL) {
+        return;
+    }
+    bearer_index = (uint8_t)bearer_index_from_entry(entry, bearer);
+    if (entry->primary_bearer_index != bearer_index) {
+        entry->primary_bearer_index = bearer_index;
+        node->stats.bearer_quality_switches++;
+    }
+    reset_neighbor_quality_probes(entry);
+}
+
+static void evaluate_bearer_quality(ucn_node_t *node, uint32_t now_ms)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_MAX_NEIGHBORS; ++index) {
+        ucn_neighbor_entry_t *entry = &node->neighbors[index];
+        ucn_neighbor_bearer_t *primary;
+        ucn_neighbor_bearer_t *candidate;
+        size_t bearer_index;
+
+        if (entry->state != UCN_NEIGHBOR_ADMITTED &&
+            entry->state != UCN_NEIGHBOR_SUSPECT) {
+            continue;
+        }
+        primary = select_neighbor_bearer(entry);
+        if (primary == NULL) {
+            reset_neighbor_quality_probes(entry);
+            continue;
+        }
+        candidate = find_better_neighbor_bearer(entry, primary);
+        for (bearer_index = 0U;
+             bearer_index < UCN_MAX_BEARERS_PER_NEIGHBOR;
+             ++bearer_index) {
+            ucn_neighbor_bearer_t *bearer = &entry->bearers[bearer_index];
+
+            if (bearer != candidate) {
+                reset_bearer_quality_probe(bearer);
+            }
+        }
+        if (candidate == NULL ||
+            (entry->bearer_quality_sampled &&
+             (uint32_t)(now_ms - entry->last_bearer_quality_sample_ms) <
+             UCN_BEARER_QUALITY_SAMPLE_INTERVAL_MS)) {
+            continue;
+        }
+        entry->last_bearer_quality_sample_ms = now_ms;
+        entry->bearer_quality_sampled = true;
+        if (candidate->quality_better_samples <
+            UCN_BEARER_QUALITY_STABLE_SAMPLES) {
+            candidate->quality_better_samples++;
+        }
+        if (candidate->quality_better_samples <
+            UCN_BEARER_QUALITY_STABLE_SAMPLES) {
+            continue;
+        }
+        if (candidate->quality_probe_acks >=
+            UCN_BEARER_QUALITY_PROBE_REQUIRED_ACKS) {
+            switch_neighbor_primary(node, entry, candidate);
+        } else if (candidate->quality_probes_sent >=
+                   UCN_BEARER_QUALITY_PROBE_MAX_ATTEMPTS &&
+                   (!candidate->quality_probe_pending ||
+                    (uint32_t)(now_ms - candidate->quality_probe_sent_at_ms) >=
+                    UCN_BEARER_QUALITY_PROBE_INTERVAL_MS)) {
+            reset_bearer_quality_probe(candidate);
+        }
+    }
+}
+
+/* Routes retain the Link that learned them, while a Neighbor may later move
+ * its active physical carrier to a healthy backup.  Resolve at send time so
+ * that Bearer failover does not invalidate the logical next hop. */
+static ucn_link_t *resolve_egress_link(ucn_node_t *node, ucn_link_t *link)
+{
+    ucn_neighbor_entry_t *entry = find_neighbor_by_link(node, link);
+    ucn_neighbor_bearer_t *bearer;
+
+    if (entry == NULL) {
+        return link;
+    }
+    bearer = select_neighbor_bearer(entry);
+    return bearer == NULL ? NULL : bearer->link;
+}
+
+/* A Path stores the Link through which it was provisioned, but that Link can
+ * be one Bearer in a logical Neighbor.  Revoke only after the whole Neighbor
+ * Bearer set is unavailable; a primary-to-backup switch must preserve the
+ * authenticated Path ID and its forwarding entry. */
+static void revoke_path_and_mark_local_policy(ucn_node_t *node,
+                                               ucn_node_id_t owner,
+                                               ucn_session_id_t owner_session_id,
+                                               ucn_path_id_t path_id,
+                                               ucn_node_id_t destination)
+{
+    size_t index;
+
+    if (node == NULL || owner == 0U || owner_session_id == 0U ||
+        path_id == 0U || destination == 0U) {
+        return;
+    }
+    (void)ucn_path_revoke(&node->path_state, owner, owner_session_id,
+                          path_id, destination);
+    if (owner != node->config.node_id || owner_session_id != node->session_id) {
+        return;
+    }
+    for (index = 0U; index < UCN_MAX_POLICY_PATHS; ++index) {
+        const ucn_policy_path_entry_t *policy_path =
+            &node->policy_state.paths[index];
+
+        if (policy_path->occupied && policy_path->wire_path_id == path_id &&
+            policy_path->destination == destination) {
+            ucn_policy_mark_path_down(&node->policy_state,
+                                      policy_path->local_path_id);
+        }
+    }
+}
+
+static void revoke_paths_by_unavailable_egress(ucn_node_t *node,
+                                                ucn_link_t *failed_link)
+{
+    ucn_neighbor_entry_t *neighbor;
+    size_t index;
+
+    if (node == NULL || failed_link == NULL) {
+        return;
+    }
+    neighbor = find_neighbor_by_link(node, failed_link);
+    if (neighbor != NULL && select_neighbor_bearer(neighbor) != NULL) {
+        return;
+    }
+    for (index = 0U; index < UCN_MAX_PATH_FORWARD_ENTRIES; ++index) {
+        const ucn_path_forward_entry_t *path = &node->path_state.entries[index];
+        bool affected = false;
+
+        if (!path->occupied || path->terminal || path->egress_link == NULL) {
+            continue;
+        }
+        if (neighbor != NULL) {
+            affected = find_neighbor_bearer(neighbor, path->egress_link) != NULL;
+        } else {
+            affected = path->egress_link == failed_link &&
+                       !link_is_usable(path->egress_link);
+        }
+        if (affected) {
+            revoke_path_and_mark_local_policy(node, path->owner,
+                                               path->owner_session_id,
+                                               path->path_id,
+                                               path->destination);
+        }
+    }
 }
 
 /* Static Links have no Neighbor entry.  A dynamically admitted Link may
@@ -249,8 +628,14 @@ static ucn_neighbor_entry_t *find_neighbor_by_link(ucn_node_t *node,
 static bool link_is_candidate_eligible(ucn_node_t *node, const ucn_link_t *link)
 {
     ucn_neighbor_entry_t *entry = find_neighbor_by_link(node, link);
+    ucn_neighbor_bearer_t *bearer;
 
-    return entry == NULL || entry->state == UCN_NEIGHBOR_ADMITTED;
+    if (entry == NULL) {
+        return true;
+    }
+    bearer = find_neighbor_bearer(entry, link);
+    return bearer != NULL && bearer->state == UCN_NEIGHBOR_BEARER_ADMITTED &&
+           select_neighbor_bearer(entry) == bearer;
 }
 
 static ucn_endpoint_handler_entry_t *find_endpoint_handler(ucn_node_t *node,
@@ -440,19 +825,65 @@ static bool take_node_snapshot_token(ucn_node_t *node)
     return true;
 }
 
+/* Per-node strategy inspection is unicast, but still must never consume the
+ * Q0 control budget or become a periodic telemetry stream. */
+static bool take_policy_diagnostic_token(ucn_node_t *node)
+{
+    uint32_t elapsed = node->now_ms - node->policy_diagnostic_last_refill_ms;
+    uint32_t refill_count = elapsed / UCN_POLICY_DIAGNOSTIC_TOKEN_REFILL_MS;
+
+    if (refill_count != 0U) {
+        uint32_t new_tokens = (uint32_t)node->policy_diagnostic_tokens + refill_count;
+
+        node->policy_diagnostic_tokens =
+            (uint8_t)(new_tokens > UCN_POLICY_DIAGNOSTIC_TOKEN_BURST ?
+                          UCN_POLICY_DIAGNOSTIC_TOKEN_BURST : new_tokens);
+        node->policy_diagnostic_last_refill_ms +=
+            refill_count * UCN_POLICY_DIAGNOSTIC_TOKEN_REFILL_MS;
+    }
+    if (node->policy_diagnostic_tokens == 0U) {
+        node->stats.policy_diagnostic_rate_dropped++;
+        return false;
+    }
+    --node->policy_diagnostic_tokens;
+    return true;
+}
+
 static void expire_neighbor_candidates(ucn_node_t *node, uint32_t now_ms)
 {
     size_t index;
 
     for (index = 0U; index < UCN_MAX_NEIGHBORS; ++index) {
-        if (node->neighbors[index].state == UCN_NEIGHBOR_CANDIDATE &&
-            deadline_expired(now_ms, node->neighbors[index].last_seen_ms +
-                              UCN_NEIGHBOR_CANDIDATE_TIMEOUT_MS)) {
-            if (node->neighbors[index].link != NULL &&
-                !link_is_registered(node, node->neighbors[index].link)) {
-                node->neighbors[index].link->peer_node_id = 0U;
+        ucn_neighbor_entry_t *entry = &node->neighbors[index];
+        size_t bearer_index;
+        bool has_candidate = false;
+        bool has_active = false;
+
+        if (entry->state == UCN_NEIGHBOR_EMPTY) {
+            continue;
+        }
+        for (bearer_index = 0U;
+             bearer_index < UCN_MAX_BEARERS_PER_NEIGHBOR;
+             ++bearer_index) {
+            ucn_neighbor_bearer_t *bearer = &entry->bearers[bearer_index];
+
+            if (bearer->state == UCN_NEIGHBOR_BEARER_CANDIDATE &&
+                deadline_expired(now_ms, bearer->last_seen_ms +
+                                  UCN_NEIGHBOR_CANDIDATE_TIMEOUT_MS)) {
+                if (bearer->link != NULL && !link_is_registered(node, bearer->link)) {
+                    bearer->link->peer_node_id = 0U;
+                }
+                (void)memset(bearer, 0, sizeof(*bearer));
+                --entry->bearer_count;
+                continue;
             }
-            node->neighbors[index].state = UCN_NEIGHBOR_EXPIRED;
+            has_candidate = has_candidate ||
+                bearer->state == UCN_NEIGHBOR_BEARER_CANDIDATE;
+            has_active = has_active || bearer_is_active(bearer);
+        }
+        if (!has_active && !has_candidate && entry->bearer_count == 0U &&
+            entry->state == UCN_NEIGHBOR_CANDIDATE) {
+            entry->state = UCN_NEIGHBOR_EXPIRED;
         }
     }
 }
@@ -475,21 +906,39 @@ static ucn_neighbor_entry_t *allocate_neighbor_slot(ucn_node_t *node)
 static ucn_result_t admit_neighbor_entry(ucn_node_t *node,
                                          ucn_neighbor_entry_t *entry)
 {
-    ucn_result_t result;
+    size_t index;
+    ucn_result_t result = UCN_ERR_NOT_FOUND;
+    bool admitted = false;
 
-    if (entry == NULL || entry->state != UCN_NEIGHBOR_CANDIDATE) {
+    if (entry == NULL || entry->state == UCN_NEIGHBOR_REJECTED ||
+        entry->state == UCN_NEIGHBOR_EXPIRED ||
+        entry->state == UCN_NEIGHBOR_REMOVED) {
         return UCN_ERR_NOT_FOUND;
     }
-    if (link_is_registered(node, entry->link)) {
-        entry->state = UCN_NEIGHBOR_ADMITTED;
-        entry->suspect_since_ms = 0U;
-        return UCN_OK;
-    }
+    for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
+        ucn_neighbor_bearer_t *bearer = &entry->bearers[index];
 
-    result = ucn_node_register_link(node, entry->link);
-    if (result == UCN_OK) {
+        if (bearer->state != UCN_NEIGHBOR_BEARER_CANDIDATE) {
+            continue;
+        }
+        if (link_is_registered(node, bearer->link)) {
+            bearer->state = UCN_NEIGHBOR_BEARER_ADMITTED;
+            admitted = true;
+            continue;
+        }
+        result = ucn_node_register_link(node, bearer->link);
+        if (result != UCN_OK) {
+            return result;
+        }
+        bearer->state = UCN_NEIGHBOR_BEARER_ADMITTED;
+        admitted = true;
+    }
+    if (admitted || entry->state == UCN_NEIGHBOR_ADMITTED ||
+        entry->state == UCN_NEIGHBOR_SUSPECT) {
         entry->state = UCN_NEIGHBOR_ADMITTED;
         entry->suspect_since_ms = 0U;
+        (void)select_neighbor_bearer(entry);
+        return UCN_OK;
     }
     return result;
 }
@@ -818,15 +1267,27 @@ static void unregister_link(ucn_node_t *node, ucn_link_t *link)
 
 static void remove_neighbor_entry(ucn_node_t *node, ucn_neighbor_entry_t *entry)
 {
-    ucn_link_t *link;
+    size_t index;
 
     if (entry == NULL || entry->state == UCN_NEIGHBOR_EMPTY ||
         entry->state == UCN_NEIGHBOR_REMOVED) {
         return;
     }
 
-    link = entry->link;
-    if (link != NULL) {
+    /* The entry is still available here, so the helper can distinguish this
+     * complete logical-neighbor loss from a single failed physical Bearer. */
+    for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
+        if (entry->bearers[index].link != NULL) {
+            revoke_paths_by_unavailable_egress(node, entry->bearers[index].link);
+            break;
+        }
+    }
+    for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
+        ucn_link_t *link = entry->bearers[index].link;
+
+        if (link == NULL) {
+            continue;
+        }
         invalidate_routes_by_link(node, link);
         unregister_link(node, link);
         link->peer_node_id = 0U;
@@ -836,23 +1297,86 @@ static void remove_neighbor_entry(ucn_node_t *node, ucn_neighbor_entry_t *entry)
     node->stats.neighbor_removed++;
 }
 
-static void remove_neighbor_by_link(ucn_node_t *node, ucn_link_t *link)
-{
-    remove_neighbor_entry(node, find_neighbor_by_link(node, link));
-}
-
 static void touch_neighbor(ucn_node_t *node, ucn_link_t *link)
 {
     ucn_neighbor_entry_t *entry = find_neighbor_by_link(node, link);
+    ucn_neighbor_bearer_t *bearer = find_neighbor_bearer(entry, link);
 
-    if (entry != NULL && (entry->state == UCN_NEIGHBOR_ADMITTED ||
-                          entry->state == UCN_NEIGHBOR_SUSPECT)) {
-        entry->last_seen_ms = node->now_ms;
+    if (entry != NULL && bearer != NULL && bearer_is_active(bearer)) {
+        bearer->last_seen_ms = node->now_ms;
+        if (bearer->state == UCN_NEIGHBOR_BEARER_SUSPECT) {
+            bearer->state = UCN_NEIGHBOR_BEARER_ADMITTED;
+        }
         if (entry->state == UCN_NEIGHBOR_SUSPECT) {
             entry->state = UCN_NEIGHBOR_ADMITTED;
             entry->suspect_since_ms = 0U;
         }
+        (void)select_neighbor_bearer(entry);
     }
+}
+
+static bool neighbor_has_active_bearer(const ucn_neighbor_entry_t *entry)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
+        if (bearer_is_active(&entry->bearers[index])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool neighbor_has_admitted_bearer(const ucn_neighbor_entry_t *entry)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
+        if (entry->bearers[index].state == UCN_NEIGHBOR_BEARER_ADMITTED) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void refresh_neighbor_liveness_state(ucn_node_t *node,
+                                             ucn_neighbor_entry_t *entry,
+                                             uint32_t now_ms)
+{
+    if (neighbor_has_admitted_bearer(entry)) {
+        entry->state = UCN_NEIGHBOR_ADMITTED;
+        entry->suspect_since_ms = 0U;
+        (void)select_neighbor_bearer(entry);
+        return;
+    }
+    if (neighbor_has_active_bearer(entry)) {
+        if (entry->state != UCN_NEIGHBOR_SUSPECT) {
+            entry->state = UCN_NEIGHBOR_SUSPECT;
+            entry->suspect_since_ms = now_ms;
+            node->stats.neighbor_suspected++;
+        }
+        (void)select_neighbor_bearer(entry);
+        return;
+    }
+    remove_neighbor_entry(node, entry);
+}
+
+/* A Link may transition down between a caller's selection and the local
+ * status check in send_frame_on_link().  Treat that observed local failure
+ * like a sampled-down Bearer so a later Path resolution can use its backup. */
+static void mark_neighbor_bearer_down(ucn_node_t *node, ucn_link_t *link)
+{
+    ucn_neighbor_entry_t *entry = find_neighbor_by_link(node, link);
+    ucn_neighbor_bearer_t *bearer = find_neighbor_bearer(entry, link);
+
+    if (entry == NULL || bearer == NULL || !bearer_is_active(bearer)) {
+        return;
+    }
+    bearer->state = UCN_NEIGHBOR_BEARER_DOWN;
+    if (entry->primary_bearer_index == bearer_index_from_entry(entry, bearer)) {
+        entry->primary_bearer_index = UCN_NEIGHBOR_PRIMARY_BEARER_NONE;
+    }
+    refresh_neighbor_liveness_state(node, entry, node->now_ms);
 }
 
 static void maintain_neighbor_liveness(ucn_node_t *node, uint32_t now_ms)
@@ -861,28 +1385,42 @@ static void maintain_neighbor_liveness(ucn_node_t *node, uint32_t now_ms)
 
     for (index = 0U; index < UCN_MAX_NEIGHBORS; ++index) {
         ucn_neighbor_entry_t *entry = &node->neighbors[index];
-        ucn_link_status_t status;
+        size_t bearer_index;
 
         if (entry->state != UCN_NEIGHBOR_ADMITTED &&
             entry->state != UCN_NEIGHBOR_SUSPECT) {
             continue;
         }
-        if (get_link_status(entry->link, &status) != UCN_OK || !status.is_up) {
-            remove_neighbor_entry(node, entry);
-            continue;
+        for (bearer_index = 0U;
+             bearer_index < UCN_MAX_BEARERS_PER_NEIGHBOR;
+             ++bearer_index) {
+            ucn_neighbor_bearer_t *bearer = &entry->bearers[bearer_index];
+
+            if (!bearer_is_active(bearer)) {
+                continue;
+            }
+            if (!link_is_usable(bearer->link)) {
+                bearer->state = UCN_NEIGHBOR_BEARER_DOWN;
+                if (entry->primary_bearer_index == bearer_index) {
+                    entry->primary_bearer_index = UCN_NEIGHBOR_PRIMARY_BEARER_NONE;
+                }
+                continue;
+            }
+            if (bearer->state == UCN_NEIGHBOR_BEARER_ADMITTED &&
+                deadline_expired(now_ms, bearer->last_seen_ms +
+                                 UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS)) {
+                bearer->state = UCN_NEIGHBOR_BEARER_SUSPECT;
+            }
+            if (bearer->state == UCN_NEIGHBOR_BEARER_SUSPECT &&
+                deadline_expired(now_ms, bearer->last_seen_ms +
+                                 UCN_NEIGHBOR_REMOVE_TIMEOUT_MS)) {
+                bearer->state = UCN_NEIGHBOR_BEARER_DOWN;
+                if (entry->primary_bearer_index == bearer_index) {
+                    entry->primary_bearer_index = UCN_NEIGHBOR_PRIMARY_BEARER_NONE;
+                }
+            }
         }
-        if (entry->state == UCN_NEIGHBOR_ADMITTED &&
-            deadline_expired(now_ms, entry->last_seen_ms +
-                             UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS)) {
-            entry->state = UCN_NEIGHBOR_SUSPECT;
-            entry->suspect_since_ms = now_ms;
-            node->stats.neighbor_suspected++;
-        }
-        if (entry->state == UCN_NEIGHBOR_SUSPECT &&
-            deadline_expired(now_ms, entry->last_seen_ms +
-                             UCN_NEIGHBOR_REMOVE_TIMEOUT_MS)) {
-            remove_neighbor_entry(node, entry);
-        }
+        refresh_neighbor_liveness_state(node, entry, now_ms);
     }
 }
 
@@ -1012,6 +1550,13 @@ static ucn_result_t get_link_status(const ucn_link_t *link, ucn_link_status_t *s
     return link->ops->get_status(link, status);
 }
 
+static bool link_is_usable(const ucn_link_t *link)
+{
+    ucn_link_status_t status;
+
+    return get_link_status(link, &status) == UCN_OK && status.is_up;
+}
+
 static ucn_result_t send_frame_on_link(ucn_node_t *node,
                                        ucn_link_t *link,
                                        const ucn_frame_t *frame)
@@ -1033,7 +1578,7 @@ static ucn_result_t send_frame_on_link(ucn_node_t *node,
         return result;
     }
     if (!status.is_up) {
-        remove_neighbor_by_link(node, link);
+        mark_neighbor_bearer_down(node, link);
         return UCN_ERR_LINK_DOWN;
     }
 
@@ -1183,6 +1728,76 @@ static ucn_result_t send_control_on_link(ucn_node_t *node,
         mark_route_used(node, destination);
     }
     return result;
+}
+
+static ucn_result_t send_control_to_node(ucn_node_t *node,
+                                         ucn_node_id_t control_target,
+                                         uint8_t message_type,
+                                         const uint8_t *payload,
+                                         uint16_t payload_length)
+{
+    ucn_link_t *link;
+
+    if (node == NULL || control_target == 0U ||
+        control_target == UCN_NODE_BROADCAST) {
+        return UCN_ERR_ARGUMENT;
+    }
+    link = find_link(node, control_target);
+    if (link == NULL) {
+        return UCN_ERR_NOT_FOUND;
+    }
+    return send_control_on_link(node, link, control_target, message_type,
+                                payload, payload_length);
+}
+
+static uint32_t path_expires_at(const ucn_node_t *node, uint32_t lease_ms)
+{
+    uint32_t expires_at_ms;
+
+    if (node == NULL || lease_ms == 0U) {
+        return 0U;
+    }
+    expires_at_ms = node->now_ms + lease_ms;
+    return expires_at_ms == 0U ? 1U : expires_at_ms;
+}
+
+static ucn_result_t install_path_forward_entry(ucn_node_t *node,
+                                               ucn_node_id_t owner,
+                                               ucn_session_id_t owner_session_id,
+                                               ucn_path_id_t path_id,
+                                               ucn_node_id_t destination,
+                                               ucn_node_id_t next_hop,
+                                               uint32_t lease_ms)
+{
+    ucn_path_forward_config_t config;
+
+    if (node == NULL || owner == 0U || owner == UCN_NODE_BROADCAST ||
+        owner_session_id == 0U || path_id == 0U || destination == 0U ||
+        destination == UCN_NODE_BROADCAST || lease_ms == 0U) {
+        return UCN_ERR_ARGUMENT;
+    }
+
+    (void)memset(&config, 0, sizeof(config));
+    config.owner = owner;
+    config.owner_session_id = owner_session_id;
+    config.path_id = path_id;
+    config.destination = destination;
+    config.next_hop = next_hop;
+    config.expires_at_ms = path_expires_at(node, lease_ms);
+    if (next_hop == 0U) {
+        if (destination != node->config.node_id) {
+            return UCN_ERR_ARGUMENT;
+        }
+    } else {
+        if (destination == node->config.node_id || next_hop == node->config.node_id) {
+            return UCN_ERR_ARGUMENT;
+        }
+        config.egress_link = find_direct_link(node, next_hop);
+        if (config.egress_link == NULL) {
+            return UCN_ERR_NOT_FOUND;
+        }
+    }
+    return ucn_path_install(&node->path_state, &config);
 }
 
 static bool path_trace_status_is_wire_valid(uint8_t status)
@@ -1869,6 +2484,607 @@ static ucn_result_t send_due_node_snapshot_reply(ucn_node_t *node,
     return UCN_ERR_NOT_FOUND;
 }
 
+static bool policy_diagnostic_selector_is_valid(uint8_t section, uint8_t index)
+{
+    switch ((ucn_policy_diagnostic_section_t)section) {
+    case UCN_POLICY_DIAGNOSTIC_SUMMARY:
+        return index < 3U;
+    case UCN_POLICY_DIAGNOSTIC_POLICY:
+        return index < UCN_MAX_ROUTE_POLICIES;
+    case UCN_POLICY_DIAGNOSTIC_PATH:
+        return index < UCN_MAX_POLICY_PATHS;
+    case UCN_POLICY_DIAGNOSTIC_FLOW:
+        return index < UCN_MAX_POLICY_FLOWS;
+    case UCN_POLICY_DIAGNOSTIC_LINK_QUALITY:
+        return index < UCN_MAX_LINKS;
+    default:
+        return false;
+    }
+}
+
+static bool policy_diagnostic_request_is_valid(const ucn_frame_t *frame)
+{
+    const uint8_t section = frame == NULL || frame->payload == NULL ? UINT8_MAX :
+                            frame->payload[UCN_POLICY_DIAGNOSTIC_SECTION_OFFSET];
+    const uint8_t index = frame == NULL || frame->payload == NULL ? 0U :
+                          frame->payload[UCN_POLICY_DIAGNOSTIC_INDEX_OFFSET];
+
+    if (frame == NULL || frame->payload == NULL ||
+        frame->payload_length != UCN_POLICY_DIAGNOSTIC_REQUEST_PAYLOAD_BYTES ||
+        frame->traffic_class != UCN_TRAFFIC_Q1_REALTIME ||
+        frame->flags != UCN_FRAME_FLAG_DIAGNOSTIC || frame->has_route_extension ||
+        read_u32_be(frame->payload + UCN_POLICY_DIAGNOSTIC_REQUEST_ID_OFFSET) == 0U ||
+        frame->payload[UCN_POLICY_DIAGNOSTIC_REQUEST_RESERVED_OFFSET] != 0U ||
+        frame->payload[UCN_POLICY_DIAGNOSTIC_REQUEST_RESERVED_OFFSET + 1U] != 0U) {
+        return false;
+    }
+    return policy_diagnostic_selector_is_valid(section, index);
+}
+
+static bool policy_diagnostic_reply_is_valid(const ucn_frame_t *frame)
+{
+    const uint8_t section = frame == NULL || frame->payload == NULL ? UINT8_MAX :
+                            frame->payload[UCN_POLICY_DIAGNOSTIC_SECTION_OFFSET];
+    const uint8_t status = frame == NULL || frame->payload == NULL ? UINT8_MAX :
+                           frame->payload[UCN_POLICY_DIAGNOSTIC_REPLY_STATUS_OFFSET];
+
+    if (frame == NULL || frame->payload == NULL ||
+        frame->payload_length != UCN_POLICY_DIAGNOSTIC_REPLY_PAYLOAD_BYTES ||
+        frame->traffic_class != UCN_TRAFFIC_Q1_REALTIME ||
+        frame->flags != UCN_FRAME_FLAG_DIAGNOSTIC || frame->has_route_extension ||
+        read_u32_be(frame->payload + UCN_POLICY_DIAGNOSTIC_REQUEST_ID_OFFSET) == 0U ||
+        !policy_diagnostic_selector_is_valid(section,
+            frame->payload[UCN_POLICY_DIAGNOSTIC_INDEX_OFFSET]) ||
+        status > (uint8_t)UCN_POLICY_DIAGNOSTIC_STATUS_EMPTY ||
+        frame->payload[UCN_POLICY_DIAGNOSTIC_REPLY_RESERVED_OFFSET] != 0U) {
+        return false;
+    }
+    if (status == (uint8_t)UCN_POLICY_DIAGNOSTIC_STATUS_EMPTY) {
+        return true;
+    }
+    switch ((ucn_policy_diagnostic_section_t)section) {
+    case UCN_POLICY_DIAGNOSTIC_POLICY:
+        return frame->payload[UCN_POLICY_DIAGNOSTIC_RECORD_OFFSET + 6U] <=
+               (uint8_t)UCN_ROUTE_POLICY_AUTO_BALANCE;
+    case UCN_POLICY_DIAGNOSTIC_PATH:
+        return frame->payload[UCN_POLICY_DIAGNOSTIC_RECORD_OFFSET + 10U] <=
+               (uint8_t)UCN_POLICY_PATH_DOWN;
+    case UCN_POLICY_DIAGNOSTIC_FLOW:
+        return frame->payload[UCN_POLICY_DIAGNOSTIC_RECORD_OFFSET + 20U] <=
+               (uint8_t)UCN_POLICY_PATH_DOWN;
+    default:
+        return true;
+    }
+}
+
+static uint8_t policy_diagnostic_quality_flags(
+    const ucn_policy_link_quality_snapshot_t *quality)
+{
+    uint8_t flags = 0U;
+
+    if (quality == NULL) {
+        return 0U;
+    }
+    if (quality->is_up) {
+        flags |= UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_UP;
+    }
+    if (quality->route_cost_valid) {
+        flags |= UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_ROUTE_COST;
+    }
+    if (quality->rtt_valid) {
+        flags |= UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_RTT;
+    }
+    if (quality->tx_failure_rate_valid) {
+        flags |= UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_TX_FAILURE;
+    }
+    if (quality->queue_pressure_valid) {
+        flags |= UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_QUEUE_PRESSURE;
+    }
+    return flags;
+}
+
+static void policy_diagnostic_write_quality(
+    uint8_t *record,
+    size_t offset,
+    const ucn_policy_link_quality_snapshot_t *quality)
+{
+    if (quality == NULL) {
+        return;
+    }
+    write_u16_be(record + offset, quality->route_cost);
+    write_u16_be(record + offset + 2U, quality->rtt_ewma_ms);
+    write_u16_be(record + offset + 4U, quality->tx_failure_ewma_per_mille);
+    write_u16_be(record + offset + 6U, quality->queue_pressure_ewma_per_mille);
+}
+
+static void policy_diagnostic_build_reply(
+    const ucn_node_t *node,
+    uint32_t request_id,
+    ucn_policy_diagnostic_section_t section,
+    uint8_t index,
+    uint8_t *payload)
+{
+    uint8_t *record = payload + UCN_POLICY_DIAGNOSTIC_RECORD_OFFSET;
+    ucn_policy_diagnostic_status_t status = UCN_POLICY_DIAGNOSTIC_STATUS_EMPTY;
+
+    (void)memset(payload, 0, UCN_POLICY_DIAGNOSTIC_REPLY_PAYLOAD_BYTES);
+    write_u32_be(payload + UCN_POLICY_DIAGNOSTIC_REQUEST_ID_OFFSET, request_id);
+    payload[UCN_POLICY_DIAGNOSTIC_SECTION_OFFSET] = (uint8_t)section;
+    payload[UCN_POLICY_DIAGNOSTIC_INDEX_OFFSET] = index;
+
+    switch (section) {
+    case UCN_POLICY_DIAGNOSTIC_SUMMARY: {
+        const ucn_policy_stats_t *stats = &node->policy_state.stats;
+        const uint32_t *values = NULL;
+        uint32_t page[6];
+        size_t value_index;
+
+        switch (index) {
+        case 0U:
+            page[0] = stats->policy_match_hits;
+            page[1] = stats->pinned_strict_sends;
+            page[2] = stats->pinned_strict_failures;
+            page[3] = stats->pinned_failover_primary_sends;
+            page[4] = stats->pinned_failover_backup_sends;
+            page[5] = stats->pinned_failover_hard_failures;
+            values = page;
+            break;
+        case 1U:
+            page[0] = stats->pinned_failover_discovery_fallbacks;
+            page[1] = stats->pinned_policy_config_errors;
+            page[2] = stats->auto_balance_sends;
+            page[3] = stats->auto_balance_flow_bindings;
+            page[4] = stats->auto_balance_rebindings;
+            page[5] = stats->auto_balance_congestion_rebindings;
+            values = page;
+            break;
+        default:
+            page[0] = stats->auto_balance_down_rebindings;
+            page[1] = stats->auto_balance_selection_failures;
+            page[2] = stats->flow_bindings_expired;
+            page[3] = stats->quality_samples;
+            page[4] = stats->quality_metrics_unavailable;
+            page[5] = stats->quality_link_down;
+            values = page;
+            break;
+        }
+        for (value_index = 0U; value_index < 6U; ++value_index) {
+            write_u32_be(record + value_index * sizeof(uint32_t), values[value_index]);
+        }
+        status = UCN_POLICY_DIAGNOSTIC_STATUS_OK;
+        break;
+    }
+    case UCN_POLICY_DIAGNOSTIC_POLICY: {
+        const ucn_route_policy_entry_t *entry =
+            &node->policy_state.policies[index];
+
+        if (entry->occupied) {
+            write_u32_be(record, entry->config.key.destination);
+            record[4] = entry->config.key.endpoint;
+            record[5] = entry->config.key.traffic_class;
+            record[6] = (uint8_t)entry->config.mode;
+            record[7] = entry->config.allow_discovery_on_hard_failure ? 1U : 0U;
+            write_u16_be(record + 8U, entry->config.primary_local_path_id);
+            write_u16_be(record + 10U, entry->config.backup_local_path_id);
+            write_u32_be(record + 12U, entry->config.balance_flow_lease_ms);
+            write_u32_be(record + 16U, entry->match_hits);
+            status = UCN_POLICY_DIAGNOSTIC_STATUS_OK;
+        }
+        break;
+    }
+    case UCN_POLICY_DIAGNOSTIC_PATH: {
+        const ucn_policy_path_entry_t *entry = &node->policy_state.paths[index];
+
+        if (entry->occupied) {
+            ucn_link_t *active_bearer = resolve_egress_link((ucn_node_t *)node,
+                                                             entry->egress_link);
+            const ucn_policy_link_quality_snapshot_t *quality =
+                active_bearer == NULL ? NULL :
+                ucn_node_get_link_quality(node, active_bearer);
+
+            write_u16_be(record, entry->local_path_id);
+            write_u32_be(record + 2U, entry->wire_path_id);
+            write_u32_be(record + 6U, entry->destination);
+            record[10] = (uint8_t)entry->state;
+            record[11] = entry->congestion_samples;
+            record[12] = entry->egress_link == NULL ? 0U : entry->egress_link->link_id;
+            record[13] = active_bearer == NULL ? 0U : active_bearer->link_id;
+            record[14] = policy_diagnostic_quality_flags(quality);
+            policy_diagnostic_write_quality(record, 16U, quality);
+            status = UCN_POLICY_DIAGNOSTIC_STATUS_OK;
+        }
+        break;
+    }
+    case UCN_POLICY_DIAGNOSTIC_FLOW: {
+        const ucn_policy_flow_binding_t *entry = &node->policy_state.flows[index];
+
+        if (entry->occupied && !deadline_expired(node->now_ms, entry->expires_at_ms)) {
+            const ucn_policy_path_entry_t *path =
+                ucn_node_find_policy_path(node, entry->local_path_id);
+            ucn_link_t *active_bearer = path == NULL ? NULL :
+                resolve_egress_link((ucn_node_t *)node, path->egress_link);
+
+            write_u32_be(record, entry->key.destination);
+            record[4] = entry->key.endpoint;
+            record[5] = (uint8_t)entry->key.traffic_class;
+            write_u16_be(record + 6U, entry->local_path_id);
+            write_u32_be(record + 8U, entry->expires_at_ms);
+            write_u32_be(record + 12U, entry->last_used_at_ms);
+            write_u32_be(record + 16U, entry->expires_at_ms - node->now_ms);
+            record[20] = path == NULL ? (uint8_t)UCN_POLICY_PATH_EMPTY :
+                         (uint8_t)path->state;
+            record[21] = active_bearer == NULL ? 0U : active_bearer->link_id;
+            status = UCN_POLICY_DIAGNOSTIC_STATUS_OK;
+        }
+        break;
+    }
+    case UCN_POLICY_DIAGNOSTIC_LINK_QUALITY: {
+        const ucn_policy_link_quality_snapshot_t *quality =
+            &node->policy_state.quality[index];
+
+        if (quality->occupied) {
+            record[0] = quality->link == NULL ? 0U : quality->link->link_id;
+            record[1] = policy_diagnostic_quality_flags(quality);
+            policy_diagnostic_write_quality(record, 4U, quality);
+            write_u32_be(record + 12U, quality->sampled_at_ms);
+            status = UCN_POLICY_DIAGNOSTIC_STATUS_OK;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    payload[UCN_POLICY_DIAGNOSTIC_REPLY_STATUS_OFFSET] = (uint8_t)status;
+}
+
+static void policy_diagnostic_decode_result(
+    ucn_policy_diagnostic_result_t *result,
+    ucn_node_id_t source,
+    const uint8_t *payload)
+{
+    const uint8_t *record = payload + UCN_POLICY_DIAGNOSTIC_RECORD_OFFSET;
+    const uint8_t flags = record[14];
+
+    (void)memset(result, 0, sizeof(*result));
+    result->request_id = read_u32_be(payload + UCN_POLICY_DIAGNOSTIC_REQUEST_ID_OFFSET);
+    result->node_id = source;
+    result->section = (ucn_policy_diagnostic_section_t)
+        payload[UCN_POLICY_DIAGNOSTIC_SECTION_OFFSET];
+    result->index = payload[UCN_POLICY_DIAGNOSTIC_INDEX_OFFSET];
+    result->status = (ucn_policy_diagnostic_status_t)
+        payload[UCN_POLICY_DIAGNOSTIC_REPLY_STATUS_OFFSET];
+    if (result->status != UCN_POLICY_DIAGNOSTIC_STATUS_OK) {
+        return;
+    }
+
+    switch (result->section) {
+    case UCN_POLICY_DIAGNOSTIC_SUMMARY: {
+        size_t value_index;
+
+        for (value_index = 0U; value_index < 6U; ++value_index) {
+            result->record.summary.counters[value_index] =
+                read_u32_be(record + value_index * sizeof(uint32_t));
+        }
+        break;
+    }
+    case UCN_POLICY_DIAGNOSTIC_POLICY:
+        result->record.policy.key.destination = read_u32_be(record);
+        result->record.policy.key.endpoint = record[4];
+        result->record.policy.key.traffic_class = record[5];
+        result->record.policy.mode = (ucn_route_policy_mode_t)record[6];
+        result->record.policy.allow_discovery_on_hard_failure = record[7] != 0U;
+        result->record.policy.primary_local_path_id = read_u16_be(record + 8U);
+        result->record.policy.backup_local_path_id = read_u16_be(record + 10U);
+        result->record.policy.balance_flow_lease_ms = read_u32_be(record + 12U);
+        result->record.policy.match_hits = read_u32_be(record + 16U);
+        break;
+    case UCN_POLICY_DIAGNOSTIC_PATH:
+        result->record.path.local_path_id = read_u16_be(record);
+        result->record.path.wire_path_id = read_u32_be(record + 2U);
+        result->record.path.destination = read_u32_be(record + 6U);
+        result->record.path.state = (ucn_policy_path_state_t)record[10];
+        result->record.path.congestion_samples = record[11];
+        result->record.path.configured_egress_link_id = record[12];
+        result->record.path.active_bearer_link_id = record[13];
+        result->record.path.active_bearer_is_up =
+            (flags & UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_UP) != 0U;
+        result->record.path.route_cost_valid =
+            (flags & UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_ROUTE_COST) != 0U;
+        result->record.path.rtt_valid =
+            (flags & UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_RTT) != 0U;
+        result->record.path.tx_failure_rate_valid =
+            (flags & UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_TX_FAILURE) != 0U;
+        result->record.path.queue_pressure_valid =
+            (flags & UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_QUEUE_PRESSURE) != 0U;
+        result->record.path.route_cost = read_u16_be(record + 16U);
+        result->record.path.rtt_ewma_ms = read_u16_be(record + 18U);
+        result->record.path.tx_failure_ewma_per_mille = read_u16_be(record + 20U);
+        result->record.path.queue_pressure_ewma_per_mille = read_u16_be(record + 22U);
+        break;
+    case UCN_POLICY_DIAGNOSTIC_FLOW:
+        result->record.flow.key.destination = read_u32_be(record);
+        result->record.flow.key.endpoint = record[4];
+        result->record.flow.key.traffic_class = (ucn_traffic_class_t)record[5];
+        result->record.flow.local_path_id = read_u16_be(record + 6U);
+        result->record.flow.expires_at_ms = read_u32_be(record + 8U);
+        result->record.flow.last_used_at_ms = read_u32_be(record + 12U);
+        result->record.flow.remaining_ms = read_u32_be(record + 16U);
+        result->record.flow.path_state = (ucn_policy_path_state_t)record[20];
+        result->record.flow.active_bearer_link_id = record[21];
+        break;
+    case UCN_POLICY_DIAGNOSTIC_LINK_QUALITY:
+        result->record.link_quality.link_id = record[0];
+        result->record.link_quality.is_up =
+            (record[1] & UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_UP) != 0U;
+        result->record.link_quality.route_cost_valid =
+            (record[1] & UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_ROUTE_COST) != 0U;
+        result->record.link_quality.rtt_valid =
+            (record[1] & UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_RTT) != 0U;
+        result->record.link_quality.tx_failure_rate_valid =
+            (record[1] & UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_TX_FAILURE) != 0U;
+        result->record.link_quality.queue_pressure_valid =
+            (record[1] & UCN_POLICY_DIAGNOSTIC_QUALITY_FLAG_QUEUE_PRESSURE) != 0U;
+        result->record.link_quality.route_cost = read_u16_be(record + 4U);
+        result->record.link_quality.rtt_ewma_ms = read_u16_be(record + 6U);
+        result->record.link_quality.tx_failure_ewma_per_mille = read_u16_be(record + 8U);
+        result->record.link_quality.queue_pressure_ewma_per_mille =
+            read_u16_be(record + 10U);
+        result->record.link_quality.sampled_at_ms = read_u32_be(record + 12U);
+        break;
+    default:
+        break;
+    }
+}
+
+static ucn_policy_diagnostic_pending_t *find_policy_diagnostic_pending(
+    ucn_node_t *node,
+    uint32_t request_id)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_POLICY_DIAGNOSTIC_PENDING_DEPTH; ++index) {
+        if (node->policy_diagnostic_pending[index].occupied &&
+            node->policy_diagnostic_pending[index].request_id == request_id) {
+            return &node->policy_diagnostic_pending[index];
+        }
+    }
+    return NULL;
+}
+
+static ucn_policy_diagnostic_pending_t *find_free_policy_diagnostic_pending(
+    ucn_node_t *node)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_POLICY_DIAGNOSTIC_PENDING_DEPTH; ++index) {
+        if (!node->policy_diagnostic_pending[index].occupied) {
+            return &node->policy_diagnostic_pending[index];
+        }
+    }
+    return NULL;
+}
+
+static bool queue_policy_diagnostic_reply(ucn_node_t *node,
+                                          ucn_node_id_t destination,
+                                          const uint8_t *payload)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_POLICY_DIAGNOSTIC_REPLY_QUEUE_DEPTH; ++index) {
+        ucn_policy_diagnostic_reply_pending_t *entry =
+            &node->policy_diagnostic_replies[index];
+
+        if (!entry->occupied) {
+            (void)memset(entry, 0, sizeof(*entry));
+            entry->occupied = true;
+            entry->destination = destination;
+            entry->expires_at_ms = node->now_ms + UCN_POLICY_DIAGNOSTIC_TIMEOUT_MS;
+            (void)memcpy(entry->payload, payload, sizeof(entry->payload));
+            return true;
+        }
+    }
+    return false;
+}
+
+static void expire_policy_diagnostic_state(ucn_node_t *node, uint32_t now_ms)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_POLICY_DIAGNOSTIC_REPLY_QUEUE_DEPTH; ++index) {
+        ucn_policy_diagnostic_reply_pending_t *entry =
+            &node->policy_diagnostic_replies[index];
+
+        if (entry->occupied && deadline_expired(now_ms, entry->expires_at_ms)) {
+            entry->occupied = false;
+            node->stats.policy_diagnostic_rejected++;
+        }
+    }
+    for (index = 0U; index < UCN_POLICY_DIAGNOSTIC_PENDING_DEPTH; ++index) {
+        ucn_policy_diagnostic_pending_t *pending =
+            &node->policy_diagnostic_pending[index];
+
+        if (pending->occupied && deadline_expired(now_ms, pending->deadline_ms)) {
+            ucn_policy_diagnostic_result_t result;
+            ucn_policy_diagnostic_handler_t handler = pending->handler;
+            void *context = pending->context;
+
+            (void)memset(&result, 0, sizeof(result));
+            result.request_id = pending->request_id;
+            result.node_id = pending->destination;
+            result.section = pending->section;
+            result.index = pending->index;
+            result.status = UCN_POLICY_DIAGNOSTIC_STATUS_TIMEOUT;
+            pending->occupied = false;
+            node->stats.policy_diagnostic_timeouts++;
+            if (handler != NULL) {
+                handler(context, &result);
+            }
+        }
+    }
+}
+
+static ucn_result_t send_policy_diagnostic_frame_on_link(
+    ucn_node_t *node,
+    ucn_link_t *link,
+    ucn_node_id_t destination,
+    uint8_t message_type,
+    const uint8_t *payload,
+    uint16_t payload_length)
+{
+    ucn_frame_t frame;
+    ucn_result_t result;
+
+    (void)memset(&frame, 0, sizeof(frame));
+    frame.message_type = message_type;
+    frame.traffic_class = UCN_TRAFFIC_Q1_REALTIME;
+    frame.flags = UCN_FRAME_FLAG_DIAGNOSTIC;
+    frame.hop_limit = node->config.default_hop_limit;
+    frame.network_id = node->config.network_id;
+    frame.source = node->config.node_id;
+    frame.destination = destination;
+    frame.session_id = node->session_id;
+    frame.payload = payload;
+    frame.payload_length = payload_length;
+    result = allocate_sequence(node, &frame.sequence);
+    if (result != UCN_OK) {
+        return result;
+    }
+    return send_frame_on_link(node, link, &frame);
+}
+
+static ucn_result_t send_due_policy_diagnostic_request(ucn_node_t *node)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_POLICY_DIAGNOSTIC_PENDING_DEPTH; ++index) {
+        ucn_policy_diagnostic_pending_t *pending =
+            &node->policy_diagnostic_pending[index];
+        uint8_t payload[UCN_POLICY_DIAGNOSTIC_REQUEST_PAYLOAD_BYTES];
+        ucn_link_t *link;
+
+        if (!pending->occupied || pending->sent) {
+            continue;
+        }
+        link = find_link(node, pending->destination);
+        if (link == NULL) {
+            return UCN_ERR_NOT_FOUND;
+        }
+        (void)memset(payload, 0, sizeof(payload));
+        write_u32_be(payload + UCN_POLICY_DIAGNOSTIC_REQUEST_ID_OFFSET,
+                     pending->request_id);
+        payload[UCN_POLICY_DIAGNOSTIC_SECTION_OFFSET] = (uint8_t)pending->section;
+        payload[UCN_POLICY_DIAGNOSTIC_INDEX_OFFSET] = pending->index;
+        /* Mark before send: virtual transports can synchronously complete the
+         * reply and clear this same slot.  A failed attempt is not retried
+         * outside the independent rate budget. */
+        pending->sent = true;
+        node->stats.policy_diagnostic_requests_sent++;
+        return send_policy_diagnostic_frame_on_link(
+            node, link, pending->destination, UCN_MSG_POLICY_DIAGNOSTIC_REQ,
+            payload, (uint16_t)sizeof(payload));
+    }
+    return UCN_ERR_NOT_FOUND;
+}
+
+static ucn_result_t send_due_policy_diagnostic_reply(ucn_node_t *node)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_POLICY_DIAGNOSTIC_REPLY_QUEUE_DEPTH; ++index) {
+        ucn_policy_diagnostic_reply_pending_t *pending =
+            &node->policy_diagnostic_replies[index];
+        ucn_link_t *link;
+        ucn_result_t result;
+
+        if (!pending->occupied) {
+            continue;
+        }
+        link = find_link(node, pending->destination);
+        if (link == NULL) {
+            pending->occupied = false;
+            node->stats.policy_diagnostic_rejected++;
+            return UCN_ERR_NOT_FOUND;
+        }
+        pending->occupied = false;
+        result = send_policy_diagnostic_frame_on_link(
+            node, link, pending->destination, UCN_MSG_POLICY_DIAGNOSTIC_REPLY,
+            pending->payload, (uint16_t)sizeof(pending->payload));
+        if (result == UCN_OK) {
+            node->stats.policy_diagnostic_replies_sent++;
+        }
+        return result;
+    }
+    return UCN_ERR_NOT_FOUND;
+}
+
+static ucn_result_t handle_policy_diagnostic_request(
+    ucn_node_t *node,
+    const ucn_frame_t *frame)
+{
+    uint8_t payload[UCN_POLICY_DIAGNOSTIC_REPLY_PAYLOAD_BYTES];
+    uint32_t request_id;
+
+    if (!policy_diagnostic_request_is_valid(frame) ||
+        frame->destination != node->config.node_id ||
+        node->policy_diagnostic_authorize == NULL ||
+        !node->policy_diagnostic_authorize(node->policy_diagnostic_authorize_context,
+                                           frame->source)) {
+        node->stats.policy_diagnostic_rejected++;
+        return UCN_ERR_ACCESS;
+    }
+    if (!take_policy_diagnostic_token(node)) {
+        return UCN_ERR_NO_SPACE;
+    }
+    request_id = read_u32_be(frame->payload + UCN_POLICY_DIAGNOSTIC_REQUEST_ID_OFFSET);
+    policy_diagnostic_build_reply(node, request_id,
+        (ucn_policy_diagnostic_section_t)
+            frame->payload[UCN_POLICY_DIAGNOSTIC_SECTION_OFFSET],
+        frame->payload[UCN_POLICY_DIAGNOSTIC_INDEX_OFFSET], payload);
+    if (!queue_policy_diagnostic_reply(node, frame->source, payload)) {
+        node->stats.policy_diagnostic_rejected++;
+        return UCN_ERR_NO_SPACE;
+    }
+    node->stats.policy_diagnostic_requests_received++;
+    return UCN_OK;
+}
+
+static ucn_result_t handle_policy_diagnostic_reply(
+    ucn_node_t *node,
+    const ucn_frame_t *frame)
+{
+    uint32_t request_id;
+    ucn_policy_diagnostic_pending_t *pending;
+    ucn_policy_diagnostic_result_t result;
+    ucn_policy_diagnostic_handler_t handler;
+    void *context;
+
+    if (!policy_diagnostic_reply_is_valid(frame) ||
+        frame->destination != node->config.node_id) {
+        node->stats.policy_diagnostic_rejected++;
+        return UCN_ERR_MALFORMED;
+    }
+    request_id = read_u32_be(frame->payload + UCN_POLICY_DIAGNOSTIC_REQUEST_ID_OFFSET);
+    pending = find_policy_diagnostic_pending(node, request_id);
+    if (pending == NULL || !pending->sent ||
+        pending->destination != frame->source ||
+        pending->section != (ucn_policy_diagnostic_section_t)
+                                frame->payload[UCN_POLICY_DIAGNOSTIC_SECTION_OFFSET] ||
+        pending->index != frame->payload[UCN_POLICY_DIAGNOSTIC_INDEX_OFFSET]) {
+        node->stats.policy_diagnostic_rejected++;
+        return UCN_ERR_NOT_FOUND;
+    }
+    policy_diagnostic_decode_result(&result, frame->source, frame->payload);
+    handler = pending->handler;
+    context = pending->context;
+    pending->occupied = false;
+    node->stats.policy_diagnostic_replies_received++;
+    node->stats.policy_diagnostic_completed++;
+    if (handler != NULL) {
+        handler(context, &result);
+    }
+    return UCN_OK;
+}
+
 static ucn_result_t complete_node_snapshot_reply(ucn_node_t *node,
                                                   const ucn_frame_t *frame)
 {
@@ -1974,15 +3190,86 @@ static ucn_result_t send_due_heartbeat(ucn_node_t *node, uint32_t now_ms)
 
     for (index = 0U; index < UCN_MAX_NEIGHBORS; ++index) {
         ucn_neighbor_entry_t *entry = &node->neighbors[index];
+        size_t bearer_index;
+
+        if (entry->state != UCN_NEIGHBOR_ADMITTED &&
+            entry->state != UCN_NEIGHBOR_SUSPECT) {
+            continue;
+        }
+        for (bearer_index = 0U;
+             bearer_index < UCN_MAX_BEARERS_PER_NEIGHBOR;
+             ++bearer_index) {
+            ucn_neighbor_bearer_t *bearer = &entry->bearers[bearer_index];
+            uint8_t payload[UCN_HEARTBEAT_PAYLOAD_BYTES];
+            ucn_result_t result;
+
+            if (!bearer_is_active(bearer) || !link_is_usable(bearer->link) ||
+                (bearer->heartbeat_sent &&
+                 (uint32_t)(now_ms - bearer->last_heartbeat_sent_ms) <
+                 UCN_HEARTBEAT_INTERVAL_MS)) {
+                continue;
+            }
+            if (node->next_heartbeat_id == 0U) {
+                node->next_heartbeat_id = 1U;
+            }
+            if (!take_control_token(node)) {
+                return UCN_ERR_NO_SPACE;
+            }
+            (void)memset(payload, 0, sizeof(payload));
+            payload[0] = UCN_HEARTBEAT_REQUEST;
+            write_u32_be(payload + 4U, node->next_heartbeat_id++);
+            result = send_control_on_link(node, bearer->link, entry->peer_node_id,
+                                          UCN_MSG_HEARTBEAT, payload,
+                                          (uint16_t)sizeof(payload));
+            if (result == UCN_OK) {
+                bearer->heartbeat_sent = true;
+                bearer->last_heartbeat_sent_ms = now_ms;
+                node->stats.heartbeat_requests_sent++;
+            }
+            return result;
+        }
+    }
+    return UCN_ERR_NOT_FOUND;
+}
+
+/* Reuse the one-hop HEARTBEAT request/ACK wire format as a fixed-size Bearer
+ * quality probe.  The candidate is addressed on its own Link, so a relay
+ * never needs to parse or forward it.  State is installed before the send:
+ * virtual Links and some Drivers may synchronously deliver the ACK. */
+static ucn_result_t send_due_bearer_quality_probe(ucn_node_t *node,
+                                                   uint32_t now_ms)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_MAX_NEIGHBORS; ++index) {
+        ucn_neighbor_entry_t *entry = &node->neighbors[index];
+        ucn_neighbor_bearer_t *primary;
+        ucn_neighbor_bearer_t *candidate;
         uint8_t payload[UCN_HEARTBEAT_PAYLOAD_BYTES];
+        uint32_t probe_id;
         ucn_result_t result;
 
-        if ((entry->state != UCN_NEIGHBOR_ADMITTED &&
-             entry->state != UCN_NEIGHBOR_SUSPECT) || entry->link == NULL ||
-            (entry->heartbeat_sent &&
-             (uint32_t)(now_ms - entry->last_heartbeat_sent_ms) <
-             UCN_HEARTBEAT_INTERVAL_MS)) {
+        if (entry->state != UCN_NEIGHBOR_ADMITTED &&
+            entry->state != UCN_NEIGHBOR_SUSPECT) {
             continue;
+        }
+        primary = select_neighbor_bearer(entry);
+        candidate = find_better_neighbor_bearer(entry, primary);
+        if (candidate == NULL ||
+            candidate->quality_better_samples <
+                UCN_BEARER_QUALITY_STABLE_SAMPLES ||
+            candidate->quality_probe_acks >=
+                UCN_BEARER_QUALITY_PROBE_REQUIRED_ACKS ||
+            candidate->quality_probes_sent >=
+                UCN_BEARER_QUALITY_PROBE_MAX_ATTEMPTS) {
+            continue;
+        }
+        if (candidate->quality_probe_pending) {
+            if ((uint32_t)(now_ms - candidate->quality_probe_sent_at_ms) <
+                UCN_BEARER_QUALITY_PROBE_INTERVAL_MS) {
+                continue;
+            }
+            candidate->quality_probe_pending = false;
         }
         if (node->next_heartbeat_id == 0U) {
             node->next_heartbeat_id = 1U;
@@ -1990,16 +3277,22 @@ static ucn_result_t send_due_heartbeat(ucn_node_t *node, uint32_t now_ms)
         if (!take_control_token(node)) {
             return UCN_ERR_NO_SPACE;
         }
+        probe_id = node->next_heartbeat_id++;
         (void)memset(payload, 0, sizeof(payload));
         payload[0] = UCN_HEARTBEAT_REQUEST;
-        write_u32_be(payload + 4U, node->next_heartbeat_id++);
-        result = send_control_on_link(node, entry->link, entry->peer_node_id,
+        write_u32_be(payload + 4U, probe_id);
+        candidate->quality_probe_id = probe_id;
+        candidate->quality_probe_sent_at_ms = now_ms;
+        candidate->quality_probe_pending = true;
+        candidate->quality_probes_sent++;
+        result = send_control_on_link(node, candidate->link,
+                                      entry->peer_node_id,
                                       UCN_MSG_HEARTBEAT, payload,
                                       (uint16_t)sizeof(payload));
         if (result == UCN_OK) {
-            entry->heartbeat_sent = true;
-            entry->last_heartbeat_sent_ms = now_ms;
-            node->stats.heartbeat_requests_sent++;
+            node->stats.bearer_quality_probes_sent++;
+        } else {
+            candidate->quality_probe_pending = false;
         }
         return result;
     }
@@ -2011,11 +3304,11 @@ static ucn_result_t handle_heartbeat(ucn_node_t *node,
                                      const ucn_frame_t *frame)
 {
     ucn_neighbor_entry_t *entry = find_neighbor_by_link(node, ingress_link);
+    ucn_neighbor_bearer_t *bearer = find_neighbor_bearer(entry, ingress_link);
     uint8_t response[UCN_HEARTBEAT_PAYLOAD_BYTES];
     ucn_result_t result;
 
-    if (entry == NULL || (entry->state != UCN_NEIGHBOR_ADMITTED &&
-                          entry->state != UCN_NEIGHBOR_SUSPECT)) {
+    if (entry == NULL || bearer == NULL || !bearer_is_active(bearer)) {
         return UCN_ERR_ACCESS;
     }
     if (frame->payload_length != UCN_HEARTBEAT_PAYLOAD_BYTES ||
@@ -2030,6 +3323,15 @@ static ucn_result_t handle_heartbeat(ucn_node_t *node,
     touch_neighbor(node, ingress_link);
     node->stats.heartbeat_received++;
     if (frame->payload[0] == UCN_HEARTBEAT_ACK) {
+        if (bearer->quality_probe_pending &&
+            bearer->quality_probe_id == read_u32_be(frame->payload + 4U)) {
+            bearer->quality_probe_pending = false;
+            if (bearer->quality_probe_acks <
+                UCN_BEARER_QUALITY_PROBE_REQUIRED_ACKS) {
+                bearer->quality_probe_acks++;
+                node->stats.bearer_quality_probe_acks_received++;
+            }
+        }
         return UCN_OK;
     }
 
@@ -2050,10 +3352,14 @@ static ucn_link_t *find_candidate_link(ucn_node_t *node,
 {
     ucn_candidate_route_t *candidate =
         find_candidate_route(node, destination, candidate_id);
+    ucn_link_t *egress_link;
 
-    return candidate == NULL || !link_is_candidate_eligible(node,
-                                                             candidate->egress_link) ?
-           NULL : candidate->egress_link;
+    if (candidate == NULL) {
+        return NULL;
+    }
+    egress_link = resolve_egress_link(node, candidate->egress_link);
+    return egress_link == NULL || !link_is_candidate_eligible(node, egress_link) ?
+           NULL : egress_link;
 }
 
 static uint16_t allocate_route_epoch(ucn_node_t *node, ucn_node_id_t destination)
@@ -2082,9 +3388,15 @@ static ucn_result_t send_due_path_probe(ucn_node_t *node, uint32_t now_ms)
     for (index = 0U; index < UCN_MAX_CANDIDATE_ROUTES; ++index) {
         ucn_candidate_route_t *candidate = &node->candidates[index];
         uint8_t payload[UCN_PATH_PROBE_PAYLOAD_BYTES];
+        ucn_link_t *egress_link;
         ucn_result_t result;
 
         if (!candidate->valid || !candidate->originated_here) {
+            continue;
+        }
+        egress_link = find_candidate_link(node, candidate->destination,
+                                          candidate->candidate_id);
+        if (egress_link == NULL) {
             continue;
         }
         if (candidate->probes_acked >= UCN_PATH_PROBE_REQUIRED_ACKS) {
@@ -2100,7 +3412,7 @@ static ucn_result_t send_due_path_probe(ucn_node_t *node, uint32_t now_ms)
             }
             write_u32_be(payload, candidate->candidate_id);
             write_u16_be(payload + 4U, candidate->route_epoch);
-            result = send_control_on_link(node, candidate->egress_link,
+            result = send_control_on_link(node, egress_link,
                                           candidate->destination,
                                           UCN_MSG_PATH_ACTIVATE, payload,
                                           UCN_PATH_ACTIVATE_PAYLOAD_BYTES);
@@ -2122,7 +3434,7 @@ static ucn_result_t send_due_path_probe(ucn_node_t *node, uint32_t now_ms)
         write_u32_be(payload, candidate->candidate_id);
         write_u32_be(payload + 4U, (uint32_t)candidate->probes_sent + 1U);
         write_u32_be(payload + 8U, now_ms);
-        result = send_control_on_link(node, candidate->egress_link,
+        result = send_control_on_link(node, egress_link,
                                       candidate->destination, UCN_MSG_PATH_PROBE,
                                       payload, (uint16_t)sizeof(payload));
         if (result == UCN_OK) {
@@ -2334,6 +3646,35 @@ static ucn_result_t send_route_error(ucn_node_t *node,
     return result;
 }
 
+static ucn_result_t send_path_route_error(ucn_node_t *node,
+                                          ucn_link_t *upstream_link,
+                                          ucn_node_id_t origin,
+                                          ucn_node_id_t unreachable,
+                                          ucn_session_id_t owner_session_id,
+                                          ucn_path_id_t path_id)
+{
+    uint8_t payload[UCN_PATH_ROUTE_ERROR_PAYLOAD_BYTES];
+    ucn_result_t result;
+
+    if (upstream_link == NULL || origin == 0U || origin == UCN_NODE_BROADCAST ||
+        unreachable == 0U || unreachable == UCN_NODE_BROADCAST ||
+        owner_session_id == 0U || path_id == 0U) {
+        return UCN_ERR_ARGUMENT;
+    }
+
+    write_u32_be(payload, unreachable);
+    write_u32_be(payload + 4U, origin);
+    write_u32_be(payload + 8U, owner_session_id);
+    write_u32_be(payload + 12U, path_id);
+    result = send_control_on_link(node, upstream_link, origin, UCN_MSG_ROUTE_ERROR,
+                                  payload, (uint16_t)sizeof(payload));
+    if (result == UCN_OK) {
+        node->stats.route_errors_sent++;
+        node->stats.path_route_errors_sent++;
+    }
+    return result;
+}
+
 static void invalidate_route_to(ucn_node_t *node, ucn_node_id_t destination)
 {
     size_t index;
@@ -2516,19 +3857,122 @@ static ucn_result_t handle_route_error(ucn_node_t *node,
                                        bool *consumed)
 {
     ucn_node_id_t unreachable;
+    bool path_scoped = false;
 
     *consumed = false;
-    if (frame->payload_length != UCN_ROUTE_ERROR_PAYLOAD_BYTES) {
+    if (frame->payload_length != UCN_ROUTE_ERROR_PAYLOAD_BYTES &&
+        frame->payload_length != UCN_PATH_ROUTE_ERROR_PAYLOAD_BYTES) {
         return UCN_ERR_MALFORMED;
     }
     unreachable = read_u32_be(frame->payload);
     if (unreachable == 0U || unreachable == UCN_NODE_BROADCAST) {
         return UCN_ERR_MALFORMED;
     }
-    invalidate_route_to(node, unreachable);
+    path_scoped = frame->payload_length == UCN_PATH_ROUTE_ERROR_PAYLOAD_BYTES;
+    if (path_scoped) {
+        const ucn_node_id_t owner = read_u32_be(frame->payload + 4U);
+        const ucn_session_id_t owner_session_id = read_u32_be(frame->payload + 8U);
+        const ucn_path_id_t path_id = read_u32_be(frame->payload + 12U);
+
+        if (owner == 0U || owner == UCN_NODE_BROADCAST ||
+            owner != frame->destination || owner_session_id == 0U || path_id == 0U) {
+            return UCN_ERR_MALFORMED;
+        }
+        revoke_path_and_mark_local_policy(node, owner, owner_session_id,
+                                           path_id, unreachable);
+    } else {
+        invalidate_route_to(node, unreachable);
+    }
     if (frame->destination == node->config.node_id) {
         *consumed = true;
     }
+    return UCN_OK;
+}
+
+static ucn_result_t authorize_path_control(ucn_node_t *node,
+                                           ucn_link_t *ingress_link,
+                                           const ucn_frame_t *frame,
+                                           ucn_path_control_operation_t operation,
+                                           ucn_path_id_t path_id,
+                                           ucn_node_id_t destination,
+                                           ucn_node_id_t next_hop)
+{
+    if (node->security_ops == NULL || node->path_control_authorize == NULL) {
+        return UCN_ERR_ACCESS;
+    }
+    return node->path_control_authorize(node->path_control_authorize_context,
+                                        ingress_link, frame, operation, path_id,
+                                        destination, next_hop);
+}
+
+static ucn_result_t handle_path_install(ucn_node_t *node,
+                                        ucn_link_t *ingress_link,
+                                        const ucn_frame_t *frame)
+{
+    ucn_path_id_t path_id;
+    ucn_node_id_t destination;
+    ucn_node_id_t next_hop;
+    uint32_t lease_ms;
+    ucn_result_t result;
+
+    if (frame->payload_length != UCN_PATH_INSTALL_PAYLOAD_BYTES ||
+        frame->destination != node->config.node_id || frame->source == 0U ||
+        frame->source == UCN_NODE_BROADCAST || frame->session_id == 0U) {
+        return UCN_ERR_MALFORMED;
+    }
+    path_id = read_u32_be(frame->payload);
+    destination = read_u32_be(frame->payload + 4U);
+    next_hop = read_u32_be(frame->payload + 8U);
+    lease_ms = read_u32_be(frame->payload + 12U);
+    if (path_id == 0U || destination == 0U || destination == UCN_NODE_BROADCAST ||
+        next_hop == UCN_NODE_BROADCAST || lease_ms == 0U ||
+        (next_hop == 0U && destination != node->config.node_id)) {
+        return UCN_ERR_MALFORMED;
+    }
+    result = authorize_path_control(node, ingress_link, frame,
+                                    UCN_PATH_CONTROL_INSTALL, path_id,
+                                    destination, next_hop);
+    if (result != UCN_OK) {
+        return result;
+    }
+    result = install_path_forward_entry(node, frame->source, frame->session_id,
+                                        path_id, destination, next_hop, lease_ms);
+    if (result == UCN_OK) {
+        node->stats.path_installs_received++;
+    }
+    return result;
+}
+
+static ucn_result_t handle_path_revoke(ucn_node_t *node,
+                                       ucn_link_t *ingress_link,
+                                       const ucn_frame_t *frame)
+{
+    ucn_path_id_t path_id;
+    ucn_node_id_t destination;
+    ucn_result_t result;
+
+    if (frame->payload_length != UCN_PATH_REVOKE_PAYLOAD_BYTES ||
+        frame->destination != node->config.node_id || frame->source == 0U ||
+        frame->source == UCN_NODE_BROADCAST || frame->session_id == 0U) {
+        return UCN_ERR_MALFORMED;
+    }
+    path_id = read_u32_be(frame->payload);
+    destination = read_u32_be(frame->payload + 4U);
+    if (path_id == 0U || destination == 0U || destination == UCN_NODE_BROADCAST) {
+        return UCN_ERR_MALFORMED;
+    }
+    result = authorize_path_control(node, ingress_link, frame,
+                                    UCN_PATH_CONTROL_REVOKE, path_id,
+                                    destination, 0U);
+    if (result != UCN_OK) {
+        return result;
+    }
+    result = ucn_path_revoke(&node->path_state, frame->source, frame->session_id,
+                             path_id, destination);
+    if (result != UCN_OK && result != UCN_ERR_NOT_FOUND) {
+        return result;
+    }
+    node->stats.path_revokes_received++;
     return UCN_OK;
 }
 
@@ -2582,9 +4026,11 @@ ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config)
     node->next_heartbeat_id = 1U;
     node->next_path_trace_id = 1U;
     node->next_node_snapshot_id = 1U;
+    node->next_policy_diagnostic_id = 1U;
     node->control_tokens = UCN_CONTROL_TOKEN_BURST;
     node->path_trace_tokens = UCN_PATH_TRACE_TOKEN_BURST;
     node->node_snapshot_tokens = UCN_NODE_SNAPSHOT_TOKEN_BURST;
+    node->policy_diagnostic_tokens = UCN_POLICY_DIAGNOSTIC_TOKEN_BURST;
     node->security_policy.tx_mode = UCN_SECURITY_TX_PLAIN;
     node->security_policy.rx_mode = UCN_SECURITY_RX_BOTH;
     node->security_policy.forward_mode = UCN_SECURITY_FORWARD_PLAIN_AND_OPAQUE_E2E;
@@ -2716,11 +4162,38 @@ ucn_result_t ucn_node_set_node_snapshot_authorizer(
     return UCN_OK;
 }
 
+ucn_result_t ucn_node_set_policy_diagnostic_authorizer(
+    ucn_node_t *node,
+    ucn_policy_diagnostic_authorize_fn authorize,
+    void *context)
+{
+    if (node == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    node->policy_diagnostic_authorize = authorize;
+    node->policy_diagnostic_authorize_context = context;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_node_set_path_control_authorizer(
+    ucn_node_t *node,
+    ucn_path_control_authorize_fn authorize,
+    void *context)
+{
+    if (node == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    node->path_control_authorize = authorize;
+    node->path_control_authorize_context = context;
+    return UCN_OK;
+}
+
 ucn_result_t ucn_node_observe_neighbor(ucn_node_t *node,
                                        ucn_link_t *link,
                                        uint32_t now_ms)
 {
     ucn_neighbor_entry_t *entry;
+    ucn_neighbor_bearer_t *bearer;
     ucn_result_t result;
 
     if (node == NULL || link == NULL || link->peer_node_id == 0U ||
@@ -2733,24 +4206,50 @@ ucn_result_t ucn_node_observe_neighbor(ucn_node_t *node,
     expire_neighbor_candidates(node, now_ms);
     entry = find_neighbor(node, link->peer_node_id);
     if (entry != NULL) {
-        if (entry->state == UCN_NEIGHBOR_ADMITTED && entry->link != link) {
-            return UCN_ERR_CONFIG;
-        }
-        if (entry->state == UCN_NEIGHBOR_ADMITTED ||
-            entry->state == UCN_NEIGHBOR_SUSPECT) {
-            if (entry->link != link) {
-                return UCN_ERR_CONFIG;
-            }
-            entry->last_seen_ms = now_ms;
+        bearer = find_neighbor_bearer(entry, link);
+        if (bearer != NULL && bearer_is_active(bearer)) {
+            bearer->last_seen_ms = now_ms;
+            bearer->state = UCN_NEIGHBOR_BEARER_ADMITTED;
             entry->state = UCN_NEIGHBOR_ADMITTED;
             entry->suspect_since_ms = 0U;
+            (void)select_neighbor_bearer(entry);
             return UCN_OK;
         }
-        (void)memset(entry, 0, sizeof(*entry));
-        entry->state = UCN_NEIGHBOR_CANDIDATE;
-        entry->peer_node_id = link->peer_node_id;
-        entry->link = link;
-        entry->last_seen_ms = now_ms;
+        if (bearer != NULL && bearer->state == UCN_NEIGHBOR_BEARER_CANDIDATE) {
+            if (entry->state == UCN_NEIGHBOR_REJECTED ||
+                entry->state == UCN_NEIGHBOR_EXPIRED ||
+                entry->state == UCN_NEIGHBOR_REMOVED) {
+                entry->state = UCN_NEIGHBOR_CANDIDATE;
+            }
+            bearer->last_seen_ms = now_ms;
+        } else if (bearer != NULL) {
+            (void)memset(bearer, 0, sizeof(*bearer));
+            bearer->state = UCN_NEIGHBOR_BEARER_CANDIDATE;
+            bearer->link = link;
+            bearer->last_seen_ms = now_ms;
+        } else if (entry->state == UCN_NEIGHBOR_ADMITTED ||
+                   entry->state == UCN_NEIGHBOR_SUSPECT ||
+                   entry->state == UCN_NEIGHBOR_CANDIDATE) {
+            bearer = allocate_neighbor_bearer(entry);
+            if (bearer == NULL) {
+                return UCN_ERR_NO_SPACE;
+            }
+            (void)memset(bearer, 0, sizeof(*bearer));
+            bearer->state = UCN_NEIGHBOR_BEARER_CANDIDATE;
+            bearer->link = link;
+            bearer->last_seen_ms = now_ms;
+            ++entry->bearer_count;
+        } else {
+            (void)memset(entry, 0, sizeof(*entry));
+            entry->state = UCN_NEIGHBOR_CANDIDATE;
+            entry->peer_node_id = link->peer_node_id;
+            entry->primary_bearer_index = UCN_NEIGHBOR_PRIMARY_BEARER_NONE;
+            bearer = &entry->bearers[0];
+            bearer->state = UCN_NEIGHBOR_BEARER_CANDIDATE;
+            bearer->link = link;
+            bearer->last_seen_ms = now_ms;
+            entry->bearer_count = 1U;
+        }
     } else {
         entry = allocate_neighbor_slot(node);
         if (entry == NULL) {
@@ -2759,8 +4258,12 @@ ucn_result_t ucn_node_observe_neighbor(ucn_node_t *node,
         (void)memset(entry, 0, sizeof(*entry));
         entry->state = UCN_NEIGHBOR_CANDIDATE;
         entry->peer_node_id = link->peer_node_id;
-        entry->link = link;
-        entry->last_seen_ms = now_ms;
+        entry->primary_bearer_index = UCN_NEIGHBOR_PRIMARY_BEARER_NONE;
+        bearer = &entry->bearers[0];
+        bearer->state = UCN_NEIGHBOR_BEARER_CANDIDATE;
+        bearer->link = link;
+        bearer->last_seen_ms = now_ms;
+        entry->bearer_count = 1U;
     }
 
     if (node->join_policy == UCN_JOIN_MANUAL) {
@@ -2770,13 +4273,22 @@ ucn_result_t ucn_node_observe_neighbor(ucn_node_t *node,
         result = node->neighbor_authorize(node->neighbor_authorize_context,
                                           node->config.node_id,
                                           entry->peer_node_id,
-                                          entry->link);
+                                          bearer->link);
         if (result != UCN_OK) {
-            entry->state = UCN_NEIGHBOR_REJECTED;
+            if (entry->state == UCN_NEIGHBOR_CANDIDATE) {
+                entry->state = UCN_NEIGHBOR_REJECTED;
+            } else {
+                (void)memset(bearer, 0, sizeof(*bearer));
+                --entry->bearer_count;
+            }
             return result;
         }
     }
-    return admit_neighbor_entry(node, entry);
+    result = admit_neighbor_entry(node, entry);
+    if (result == UCN_OK) {
+        (void)select_neighbor_bearer(entry);
+    }
+    return result;
 }
 
 ucn_result_t ucn_node_probe_neighbor(ucn_node_t *node,
@@ -2826,9 +4338,6 @@ ucn_result_t ucn_node_admit_neighbor(ucn_node_t *node,
     if (entry == NULL) {
         return UCN_ERR_NOT_FOUND;
     }
-    if (entry->state == UCN_NEIGHBOR_ADMITTED) {
-        return UCN_OK;
-    }
     return admit_neighbor_entry(node, entry);
 }
 
@@ -2844,7 +4353,8 @@ ucn_result_t ucn_node_reject_neighbor(ucn_node_t *node,
     if (entry == NULL) {
         return UCN_ERR_NOT_FOUND;
     }
-    if (entry->state == UCN_NEIGHBOR_ADMITTED) {
+    if (entry->state == UCN_NEIGHBOR_ADMITTED ||
+        entry->state == UCN_NEIGHBOR_SUSPECT) {
         return UCN_ERR_UNSUPPORTED;
     }
     entry->state = UCN_NEIGHBOR_REJECTED;
@@ -3119,6 +4629,106 @@ ucn_result_t ucn_node_set_endpoint_handler(ucn_node_t *node,
     return UCN_ERR_NO_SPACE;
 }
 
+ucn_result_t ucn_node_install_local_path(ucn_node_t *node,
+                                         ucn_path_id_t path_id,
+                                         ucn_node_id_t destination,
+                                         ucn_node_id_t next_hop,
+                                         uint32_t lease_ms)
+{
+    if (node == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (node->security_ops == NULL || node->session_id == 0U) {
+        return UCN_ERR_SECURITY;
+    }
+    return install_path_forward_entry(node, node->config.node_id, node->session_id,
+                                      path_id, destination, next_hop, lease_ms);
+}
+
+ucn_result_t ucn_node_revoke_local_path(ucn_node_t *node,
+                                        ucn_path_id_t path_id,
+                                        ucn_node_id_t destination)
+{
+    if (node == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (node->security_ops == NULL || node->session_id == 0U) {
+        return UCN_ERR_SECURITY;
+    }
+    return ucn_path_revoke(&node->path_state, node->config.node_id,
+                           node->session_id, path_id, destination);
+}
+
+ucn_result_t ucn_node_send_path_install(ucn_node_t *node,
+                                        ucn_node_id_t control_target,
+                                        ucn_path_id_t path_id,
+                                        ucn_node_id_t destination,
+                                        ucn_node_id_t next_hop,
+                                        uint32_t lease_ms)
+{
+    uint8_t payload[UCN_PATH_INSTALL_PAYLOAD_BYTES];
+    ucn_result_t result;
+
+    if (node == NULL || control_target == 0U ||
+        control_target == UCN_NODE_BROADCAST || control_target == node->config.node_id ||
+        path_id == 0U || destination == 0U || destination == UCN_NODE_BROADCAST ||
+        lease_ms == 0U || (next_hop == 0U && control_target != destination)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (node->security_ops == NULL || node->session_id == 0U) {
+        return UCN_ERR_SECURITY;
+    }
+    write_u32_be(payload, path_id);
+    write_u32_be(payload + 4U, destination);
+    write_u32_be(payload + 8U, next_hop);
+    write_u32_be(payload + 12U, lease_ms);
+    result = send_control_to_node(node, control_target, UCN_MSG_PATH_INSTALL,
+                                  payload, (uint16_t)sizeof(payload));
+    if (result == UCN_OK) {
+        node->stats.path_installs_sent++;
+    }
+    return result;
+}
+
+ucn_result_t ucn_node_send_path_revoke(ucn_node_t *node,
+                                       ucn_node_id_t control_target,
+                                       ucn_path_id_t path_id,
+                                       ucn_node_id_t destination)
+{
+    uint8_t payload[UCN_PATH_REVOKE_PAYLOAD_BYTES];
+    ucn_result_t result;
+
+    if (node == NULL || control_target == 0U ||
+        control_target == UCN_NODE_BROADCAST || control_target == node->config.node_id ||
+        path_id == 0U || destination == 0U || destination == UCN_NODE_BROADCAST) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (node->security_ops == NULL || node->session_id == 0U) {
+        return UCN_ERR_SECURITY;
+    }
+    write_u32_be(payload, path_id);
+    write_u32_be(payload + 4U, destination);
+    result = send_control_to_node(node, control_target, UCN_MSG_PATH_REVOKE,
+                                  payload, (uint16_t)sizeof(payload));
+    if (result == UCN_OK) {
+        node->stats.path_revokes_sent++;
+    }
+    return result;
+}
+
+const ucn_path_forward_entry_t *ucn_node_find_path_forward(
+    const ucn_node_t *node,
+    ucn_node_id_t owner,
+    ucn_session_id_t owner_session_id,
+    ucn_path_id_t path_id,
+    ucn_node_id_t destination)
+{
+    if (node == NULL) {
+        return NULL;
+    }
+    return find_active_path(node, owner, owner_session_id, path_id, destination);
+}
+
 ucn_result_t ucn_node_send(ucn_node_t *node,
                            ucn_node_id_t destination,
                            uint8_t message_type,
@@ -3188,19 +4798,138 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
     return send_frame_on_link(node, link, &frame);
 }
 
-ucn_result_t ucn_node_send_endpoint(ucn_node_t *node,
-                                    ucn_node_id_t destination,
-                                    ucn_endpoint_t endpoint,
-                                    ucn_traffic_class_t traffic_class,
-                                    const uint8_t *payload,
-                                    uint16_t payload_length)
+/* Re-resolve a Path only after a definitive physical-Bearer failure.  The
+ * first send returned LINK_DOWN, so retrying the unchanged frame once on the
+ * newly selected Bearer cannot create a second successful delivery. */
+static ucn_result_t send_frame_on_path_egress(
+    ucn_node_t *node,
+    const ucn_path_forward_entry_t *path,
+    const ucn_frame_t *frame,
+    ucn_link_t **last_egress_link)
 {
+    ucn_link_t *configured_egress_link;
+    ucn_link_t *link;
     ucn_result_t result;
 
-    if (node == NULL || !ucn_endpoint_is_static(endpoint) || destination == 0U ||
+    if (last_egress_link != NULL) {
+        *last_egress_link = NULL;
+    }
+    if (node == NULL || path == NULL || path->egress_link == NULL || frame == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    configured_egress_link = path->egress_link;
+    link = resolve_egress_link(node, configured_egress_link);
+    if (link == NULL) {
+        revoke_paths_by_unavailable_egress(node, configured_egress_link);
+        return UCN_ERR_LINK_DOWN;
+    }
+    if (last_egress_link != NULL) {
+        *last_egress_link = link;
+    }
+    result = send_frame_on_link(node, link, frame);
+    if (result != UCN_ERR_LINK_DOWN) {
+        return result;
+    }
+
+    link = resolve_egress_link(node, configured_egress_link);
+    if (link == NULL || (last_egress_link != NULL && link == *last_egress_link)) {
+        revoke_paths_by_unavailable_egress(node, configured_egress_link);
+        return UCN_ERR_LINK_DOWN;
+    }
+    if (last_egress_link != NULL) {
+        *last_egress_link = link;
+    }
+    result = send_frame_on_link(node, link, frame);
+    if (result == UCN_ERR_LINK_DOWN) {
+        revoke_paths_by_unavailable_egress(node, configured_egress_link);
+    }
+    return result;
+}
+
+ucn_result_t ucn_node_send_path(ucn_node_t *node,
+                                ucn_node_id_t destination,
+                                uint8_t message_type,
+                                ucn_traffic_class_t traffic_class,
+                                ucn_path_id_t path_id,
+                                const uint8_t *payload,
+                                uint16_t payload_length)
+{
+    const ucn_path_forward_entry_t *path;
+    ucn_frame_t frame;
+    ucn_link_t *link;
+    ucn_result_t result;
+    uint8_t ciphertext[UCN_MAX_PAYLOAD_BYTES];
+    uint8_t auth_tag[UCN_E2E_TAG_SIZE];
+
+    if (node == NULL || destination == 0U || path_id == 0U ||
         (payload_length != 0U && payload == NULL)) {
         return UCN_ERR_ARGUMENT;
     }
+    if (traffic_class != UCN_TRAFFIC_Q0_CRITICAL &&
+        traffic_class != UCN_TRAFFIC_Q1_REALTIME) {
+        return UCN_ERR_UNSUPPORTED;
+    }
+    if (ucn_message_type_is_control(message_type)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (node->security_ops == NULL || node->session_id == 0U) {
+        return UCN_ERR_SECURITY;
+    }
+
+    path = find_active_path(node, node->config.node_id, node->session_id,
+                            path_id, destination);
+    if (path == NULL || path->terminal || path->egress_link == NULL) {
+        return UCN_ERR_NOT_FOUND;
+    }
+
+    (void)memset(&frame, 0, sizeof(frame));
+    frame.message_type = message_type;
+    frame.traffic_class = traffic_class;
+    frame.flags = UCN_FRAME_FLAG_ROUTE_EXTENSION | UCN_FRAME_FLAG_PATH_ID;
+    frame.hop_limit = node->config.default_hop_limit;
+    frame.network_id = node->config.network_id;
+    frame.source = node->config.node_id;
+    frame.destination = destination;
+    frame.session_id = node->session_id;
+    frame.has_route_extension = true;
+    frame.has_path_id = true;
+    frame.path_id = path_id;
+    result = allocate_sequence(node, &frame.sequence);
+    if (result != UCN_OK) {
+        return result;
+    }
+    frame.payload = payload;
+    frame.payload_length = payload_length;
+    result = protect_outbound_business(node, &frame, ciphertext, auth_tag);
+    if (result != UCN_OK) {
+        return result;
+    }
+    result = send_frame_on_path_egress(node, path, &frame, &link);
+    if (result == UCN_ERR_LINK_DOWN) {
+        revoke_path_and_mark_local_policy(node, node->config.node_id,
+                                           node->session_id, path_id,
+                                           destination);
+    }
+    return result;
+}
+
+static bool pinned_path_has_hard_failure(ucn_result_t result)
+{
+    /* These two results mean the selected authenticated Path no longer has a
+     * usable local forwarding entry.  Backpressure, security failure and
+     * generic driver errors must not silently move a deterministic flow. */
+    return result == UCN_ERR_LINK_DOWN || result == UCN_ERR_NOT_FOUND;
+}
+
+static ucn_result_t send_endpoint_auto_best(ucn_node_t *node,
+                                            ucn_node_id_t destination,
+                                            ucn_endpoint_t endpoint,
+                                            ucn_traffic_class_t traffic_class,
+                                            const uint8_t *payload,
+                                            uint16_t payload_length)
+{
+    ucn_result_t result;
+
     if (traffic_class == UCN_TRAFFIC_Q1_REALTIME &&
         find_link(node, destination) == NULL) {
         result = begin_route_discovery(node, destination, node->now_ms, false);
@@ -3214,6 +4943,407 @@ ucn_result_t ucn_node_send_endpoint(ucn_node_t *node,
     }
     return ucn_node_send(node, destination, (uint8_t)endpoint, traffic_class,
                          payload, payload_length);
+}
+
+static ucn_result_t send_endpoint_on_policy_path(
+    ucn_node_t *node,
+    ucn_node_id_t destination,
+    ucn_endpoint_t endpoint,
+    ucn_traffic_class_t traffic_class,
+    uint16_t local_path_id,
+    const uint8_t *payload,
+    uint16_t payload_length)
+{
+    const ucn_policy_path_entry_t *path;
+    ucn_result_t result;
+
+    path = ucn_node_find_policy_path(node, local_path_id);
+    if (path == NULL || path->destination != destination ||
+        path->wire_path_id == 0U || path->state == UCN_POLICY_PATH_EMPTY ||
+        path->state == UCN_POLICY_PATH_CANDIDATE) {
+        node->policy_state.stats.pinned_policy_config_errors++;
+        return UCN_ERR_CONFIG;
+    }
+    if (path->state == UCN_POLICY_PATH_DOWN) {
+        return UCN_ERR_LINK_DOWN;
+    }
+
+    result = ucn_node_send_path(node, destination, (uint8_t)endpoint,
+                                traffic_class, path->wire_path_id, payload,
+                                payload_length);
+    if (pinned_path_has_hard_failure(result)) {
+        ucn_policy_mark_path_down(&node->policy_state, local_path_id);
+    }
+    return result;
+}
+
+static bool auto_balance_path_is_member(const ucn_route_policy_config_t *config,
+                                        uint16_t local_path_id)
+{
+    return local_path_id != 0U &&
+           (local_path_id == config->primary_local_path_id ||
+            local_path_id == config->backup_local_path_id);
+}
+
+static bool auto_balance_path_is_usable(const ucn_node_t *node,
+                                        ucn_node_id_t destination,
+                                        uint16_t local_path_id)
+{
+    const ucn_policy_path_entry_t *path;
+    const ucn_path_forward_entry_t *wire_path;
+
+    path = ucn_node_find_policy_path(node, local_path_id);
+    if (path == NULL || path->destination != destination ||
+        path->wire_path_id == 0U || path->state != UCN_POLICY_PATH_VERIFIED) {
+        return false;
+    }
+    wire_path = ucn_path_find(&node->path_state, node->config.node_id,
+                              node->session_id, path->wire_path_id,
+                              destination);
+    return wire_path != NULL && !wire_path->terminal &&
+           !ucn_path_is_expired(wire_path, node->now_ms) &&
+           wire_path->egress_link == path->egress_link;
+}
+
+static bool auto_balance_path_is_congested(const ucn_node_t *node,
+                                           uint16_t local_path_id)
+{
+    const ucn_policy_path_entry_t *path =
+        ucn_node_find_policy_path(node, local_path_id);
+
+    return path != NULL && path->congestion_samples >=
+                               UCN_POLICY_BALANCE_CONGESTED_SAMPLE_LIMIT;
+}
+
+static size_t auto_balance_active_flow_count(const ucn_node_t *node,
+                                             uint16_t local_path_id)
+{
+    size_t index;
+    size_t count = 0U;
+
+    for (index = 0U; index < UCN_MAX_POLICY_FLOWS; ++index) {
+        const ucn_policy_flow_binding_t *flow = &node->policy_state.flows[index];
+
+        if (flow->occupied && flow->local_path_id == local_path_id &&
+            !deadline_expired(node->now_ms, flow->expires_at_ms)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static uint32_t auto_balance_path_score(const ucn_node_t *node,
+                                        uint16_t local_path_id)
+{
+    const ucn_policy_path_entry_t *path =
+        ucn_node_find_policy_path(node, local_path_id);
+    const ucn_policy_link_quality_snapshot_t *quality;
+    uint32_t score = UCN_UNKNOWN_LINK_ROUTE_COST;
+    size_t active_flows;
+
+    if (path == NULL) {
+        return UINT32_MAX;
+    }
+    quality = ucn_node_get_link_quality(node, path->egress_link);
+    if (quality != NULL && quality->route_cost_valid) {
+        score = quality->route_cost;
+    }
+    if (quality != NULL && quality->rtt_valid) {
+        score += quality->rtt_ewma_ms;
+    }
+    if (quality != NULL && quality->tx_failure_rate_valid) {
+        score += quality->tx_failure_ewma_per_mille;
+    }
+    if (quality != NULL && quality->queue_pressure_valid) {
+        score += quality->queue_pressure_ewma_per_mille;
+    }
+    if (score == 0U) {
+        score = 1U;
+    }
+    active_flows = auto_balance_active_flow_count(node, local_path_id);
+    return score * (uint32_t)(active_flows + 1U);
+}
+
+static bool auto_balance_has_configured_path(
+    const ucn_node_t *node,
+    const ucn_route_policy_config_t *config,
+    ucn_node_id_t destination)
+{
+    const ucn_policy_path_entry_t *path;
+
+    path = ucn_node_find_policy_path(node, config->primary_local_path_id);
+    if (path != NULL && path->destination == destination) {
+        return true;
+    }
+    path = ucn_node_find_policy_path(node, config->backup_local_path_id);
+    return path != NULL && path->destination == destination;
+}
+
+static uint16_t auto_balance_select_path(const ucn_node_t *node,
+                                         const ucn_route_policy_config_t *config,
+                                         ucn_node_id_t destination,
+                                         uint16_t excluded_local_path_id)
+{
+    const uint16_t candidates[2] = {
+        config->primary_local_path_id,
+        config->backup_local_path_id
+    };
+    uint16_t selected = 0U;
+    uint32_t best_score = UINT32_MAX;
+    bool has_noncongested = false;
+    size_t index;
+
+    for (index = 0U; index < 2U; ++index) {
+        const uint16_t candidate = candidates[index];
+
+        if (candidate != excluded_local_path_id &&
+            auto_balance_path_is_usable(node, destination, candidate) &&
+            !auto_balance_path_is_congested(node, candidate)) {
+            has_noncongested = true;
+            break;
+        }
+    }
+    for (index = 0U; index < 2U; ++index) {
+        const uint16_t candidate = candidates[index];
+        uint32_t score;
+
+        if (candidate == excluded_local_path_id ||
+            !auto_balance_path_is_usable(node, destination, candidate) ||
+            (has_noncongested && auto_balance_path_is_congested(node, candidate))) {
+            continue;
+        }
+        score = auto_balance_path_score(node, candidate);
+        if (selected == 0U || score < best_score) {
+            selected = candidate;
+            best_score = score;
+        }
+    }
+    return selected;
+}
+
+static ucn_result_t auto_balance_bind_path(ucn_node_t *node,
+                                           ucn_node_id_t destination,
+                                           ucn_endpoint_t endpoint,
+                                           uint16_t local_path_id,
+                                           uint32_t lease_ms)
+{
+    return ucn_node_bind_q1_flow(node, destination, endpoint, local_path_id,
+                                 lease_ms);
+}
+
+static ucn_result_t send_endpoint_auto_balance(
+    ucn_node_t *node,
+    const ucn_route_policy_entry_t *policy,
+    ucn_node_id_t destination,
+    ucn_endpoint_t endpoint,
+    const uint8_t *payload,
+    uint16_t payload_length)
+{
+    const ucn_route_policy_config_t *config = &policy->config;
+    const ucn_policy_flow_binding_t *flow;
+    const uint32_t lease_ms = config->balance_flow_lease_ms == 0U ?
+                                  UCN_POLICY_BALANCE_FLOW_LEASE_MS :
+                                  config->balance_flow_lease_ms;
+    uint16_t selected_local_path_id;
+    bool rebinding = false;
+    bool congestion_rebind = false;
+    bool down_rebind = false;
+    ucn_result_t result;
+
+    flow = ucn_node_find_q1_flow(node, destination, endpoint);
+    if (flow != NULL && auto_balance_path_is_member(config, flow->local_path_id) &&
+        auto_balance_path_is_usable(node, destination, flow->local_path_id) &&
+        !auto_balance_path_is_congested(node, flow->local_path_id)) {
+        selected_local_path_id = flow->local_path_id;
+    } else {
+        rebinding = flow != NULL;
+        congestion_rebind = rebinding &&
+                             auto_balance_path_is_member(config,
+                                                         flow->local_path_id) &&
+                             auto_balance_path_is_usable(node, destination,
+                                                         flow->local_path_id) &&
+                             auto_balance_path_is_congested(node,
+                                                            flow->local_path_id);
+        down_rebind = rebinding &&
+                      auto_balance_path_is_member(config, flow->local_path_id) &&
+                      !auto_balance_path_is_usable(node, destination,
+                                                    flow->local_path_id);
+        selected_local_path_id = auto_balance_select_path(node, config,
+                                                           destination, 0U);
+        if (selected_local_path_id == 0U) {
+            node->policy_state.stats.auto_balance_selection_failures++;
+            return auto_balance_has_configured_path(node, config, destination) ?
+                       UCN_ERR_LINK_DOWN : UCN_ERR_CONFIG;
+        }
+        result = auto_balance_bind_path(node, destination, endpoint,
+                                        selected_local_path_id, lease_ms);
+        if (result != UCN_OK) {
+            node->policy_state.stats.auto_balance_selection_failures++;
+            return result;
+        }
+        if (rebinding) {
+            node->policy_state.stats.auto_balance_rebindings++;
+            if (congestion_rebind) {
+                node->policy_state.stats.auto_balance_congestion_rebindings++;
+            } else if (down_rebind) {
+                node->policy_state.stats.auto_balance_down_rebindings++;
+            }
+        } else {
+            node->policy_state.stats.auto_balance_flow_bindings++;
+        }
+    }
+
+    result = send_endpoint_on_policy_path(node, destination, endpoint,
+                                          UCN_TRAFFIC_Q1_REALTIME,
+                                          selected_local_path_id, payload,
+                                          payload_length);
+    if (result == UCN_OK) {
+        node->policy_state.stats.auto_balance_sends++;
+        ucn_policy_touch_q1_flow(&node->policy_state, destination, endpoint,
+                                 node->now_ms);
+        return UCN_OK;
+    }
+    if (!pinned_path_has_hard_failure(result)) {
+        return result;
+    }
+
+    /* The selected Path was proven down by this send.  Rebind once and retry
+     * only on another verified member; this is failover, never replication. */
+    selected_local_path_id = auto_balance_select_path(node, config, destination,
+                                                       selected_local_path_id);
+    if (selected_local_path_id == 0U) {
+        node->policy_state.stats.auto_balance_selection_failures++;
+        return result;
+    }
+    result = auto_balance_bind_path(node, destination, endpoint,
+                                    selected_local_path_id, lease_ms);
+    if (result != UCN_OK) {
+        node->policy_state.stats.auto_balance_selection_failures++;
+        return result;
+    }
+    node->policy_state.stats.auto_balance_rebindings++;
+    node->policy_state.stats.auto_balance_down_rebindings++;
+    result = send_endpoint_on_policy_path(node, destination, endpoint,
+                                          UCN_TRAFFIC_Q1_REALTIME,
+                                          selected_local_path_id, payload,
+                                          payload_length);
+    if (result == UCN_OK) {
+        node->policy_state.stats.auto_balance_sends++;
+        ucn_policy_touch_q1_flow(&node->policy_state, destination, endpoint,
+                                 node->now_ms);
+    }
+    return result;
+}
+
+static ucn_result_t send_endpoint_pinned(
+    ucn_node_t *node,
+    const ucn_route_policy_entry_t *policy,
+    ucn_node_id_t destination,
+    ucn_endpoint_t endpoint,
+    ucn_traffic_class_t traffic_class,
+    const uint8_t *payload,
+    uint16_t payload_length)
+{
+    const ucn_route_policy_config_t *config = &policy->config;
+    ucn_result_t result;
+
+    if (config->primary_local_path_id == 0U) {
+        node->policy_state.stats.pinned_policy_config_errors++;
+        return UCN_ERR_CONFIG;
+    }
+
+    result = send_endpoint_on_policy_path(node, destination, endpoint,
+                                          traffic_class,
+                                          config->primary_local_path_id,
+                                          payload, payload_length);
+    if (config->mode == UCN_ROUTE_POLICY_PINNED_STRICT) {
+        if (result == UCN_OK) {
+            node->policy_state.stats.pinned_strict_sends++;
+        } else {
+            node->policy_state.stats.pinned_strict_failures++;
+        }
+        return result;
+    }
+
+    if (result == UCN_OK) {
+        node->policy_state.stats.pinned_failover_primary_sends++;
+        return UCN_OK;
+    }
+    if (!pinned_path_has_hard_failure(result)) {
+        return result;
+    }
+    node->policy_state.stats.pinned_failover_hard_failures++;
+
+    if (config->backup_local_path_id != 0U) {
+        result = send_endpoint_on_policy_path(node, destination, endpoint,
+                                              traffic_class,
+                                              config->backup_local_path_id,
+                                              payload, payload_length);
+        if (result == UCN_OK) {
+            node->policy_state.stats.pinned_failover_backup_sends++;
+            return UCN_OK;
+        }
+        if (!pinned_path_has_hard_failure(result)) {
+            return result;
+        }
+    }
+
+    /* Discovery is a deliberate last resort of PINNED_FAILOVER.  Q0 never
+     * waits for it, and strict mode never reaches this branch. */
+    if (config->allow_discovery_on_hard_failure &&
+        traffic_class == UCN_TRAFFIC_Q1_REALTIME) {
+        result = begin_route_discovery(node, destination, node->now_ms, false);
+        if (result != UCN_OK) {
+            return result;
+        }
+        node->policy_state.stats.pinned_failover_discovery_fallbacks++;
+        if (find_link(node, destination) == NULL) {
+            return queue_pending_q1(node, destination, (uint8_t)endpoint,
+                                    payload, payload_length);
+        }
+        return ucn_node_send(node, destination, (uint8_t)endpoint,
+                             traffic_class, payload, payload_length);
+    }
+    return result;
+}
+
+ucn_result_t ucn_node_send_endpoint(ucn_node_t *node,
+                                    ucn_node_id_t destination,
+                                    ucn_endpoint_t endpoint,
+                                    ucn_traffic_class_t traffic_class,
+                                    const uint8_t *payload,
+                                    uint16_t payload_length)
+{
+    const ucn_route_policy_entry_t *policy;
+
+    if (node == NULL || !ucn_endpoint_is_static(endpoint) || destination == 0U ||
+        (payload_length != 0U && payload == NULL)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    policy = ucn_node_find_route_policy(node, destination, endpoint, traffic_class);
+    if (policy != NULL) {
+        size_t policy_index;
+
+        node->policy_state.stats.policy_match_hits++;
+        for (policy_index = 0U; policy_index < UCN_MAX_ROUTE_POLICIES;
+             ++policy_index) {
+            if (&node->policy_state.policies[policy_index] == policy) {
+                node->policy_state.policies[policy_index].match_hits++;
+                break;
+            }
+        }
+        if (policy->config.mode == UCN_ROUTE_POLICY_PINNED_STRICT ||
+            policy->config.mode == UCN_ROUTE_POLICY_PINNED_FAILOVER) {
+            return send_endpoint_pinned(node, policy, destination, endpoint,
+                                        traffic_class, payload, payload_length);
+        }
+        if (policy->config.mode == UCN_ROUTE_POLICY_AUTO_BALANCE) {
+            return send_endpoint_auto_balance(node, policy, destination, endpoint,
+                                              payload, payload_length);
+        }
+    }
+    return send_endpoint_auto_best(node, destination, endpoint, traffic_class,
+                                   payload, payload_length);
 }
 
 ucn_result_t ucn_node_enqueue(ucn_node_t *node,
@@ -3432,6 +5562,51 @@ ucn_result_t ucn_node_request_node_snapshot(
     return UCN_OK;
 }
 
+ucn_result_t ucn_node_request_policy_diagnostic(
+    ucn_node_t *node,
+    ucn_node_id_t destination,
+    ucn_policy_diagnostic_section_t section,
+    uint8_t index,
+    ucn_policy_diagnostic_handler_t handler,
+    void *context)
+{
+    ucn_policy_diagnostic_pending_t *pending;
+    uint32_t request_id;
+
+    if (node == NULL || handler == NULL || destination == 0U ||
+        destination == UCN_NODE_BROADCAST || destination == node->config.node_id ||
+        !policy_diagnostic_selector_is_valid((uint8_t)section, index)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    expire_policy_diagnostic_state(node, node->now_ms);
+    pending = find_free_policy_diagnostic_pending(node);
+    if (pending == NULL) {
+        return UCN_ERR_NO_SPACE;
+    }
+    if (find_link(node, destination) == NULL) {
+        return UCN_ERR_NOT_FOUND;
+    }
+    if (!take_policy_diagnostic_token(node)) {
+        return UCN_ERR_NO_SPACE;
+    }
+    request_id = node->next_policy_diagnostic_id;
+    if (request_id == 0U || request_id == UINT32_MAX) {
+        request_id = 1U;
+    }
+    node->next_policy_diagnostic_id = request_id + 1U;
+    (void)memset(pending, 0, sizeof(*pending));
+    pending->occupied = true;
+    pending->destination = destination;
+    pending->request_id = request_id;
+    pending->deadline_ms = node->now_ms + UCN_POLICY_DIAGNOSTIC_TIMEOUT_MS;
+    pending->section = section;
+    pending->index = index;
+    pending->handler = handler;
+    pending->context = context;
+    /* `ucn_node_step()` sends this only after ordinary Q0/Q1 work. */
+    return UCN_OK;
+}
+
 ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
 {
     ucn_tx_item_t *item;
@@ -3443,10 +5618,16 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
     }
 
     expire_dynamic_state(node, now_ms);
+    ucn_policy_refresh_link_quality(&node->policy_state, node->links,
+                                    node->link_count, now_ms);
+    ucn_policy_expire_flows(&node->policy_state, now_ms);
+    ucn_path_expire(&node->path_state, now_ms);
     expire_path_trace_state(node, now_ms);
     expire_node_snapshot_state(node, now_ms);
+    expire_policy_diagnostic_state(node, now_ms);
     expire_neighbor_candidates(node, now_ms);
     maintain_neighbor_liveness(node, now_ms);
+    evaluate_bearer_quality(node, now_ms);
 
     item = find_next_item(node->q0, UCN_TX_Q0_DEPTH);
     if (item == NULL) {
@@ -3462,11 +5643,26 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
         if (result != UCN_ERR_NOT_FOUND) {
             return result;
         }
+        result = send_due_bearer_quality_probe(node, now_ms);
+        if (result != UCN_ERR_NOT_FOUND) {
+            return result;
+        }
         result = send_due_path_probe(node, now_ms);
         if (result != UCN_ERR_NOT_FOUND) {
             return result;
         }
         result = send_due_node_snapshot_reply(node, now_ms);
+        if (result != UCN_ERR_NOT_FOUND) {
+            return result;
+        }
+        /* T22.6 queries are deliberately after normal Q0/Q1 work, liveness,
+         * route maintenance and existing diagnostics.  They never enter the
+         * business queues and cannot consume a Q0 slot. */
+        result = send_due_policy_diagnostic_reply(node);
+        if (result != UCN_ERR_NOT_FOUND) {
+            return result;
+        }
+        result = send_due_policy_diagnostic_request(node);
         if (result != UCN_ERR_NOT_FOUND) {
             return result;
         }
@@ -3523,6 +5719,9 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
 
     if (ucn_message_type_is_control(frame.message_type) &&
         (frame.flags & UCN_FRAME_FLAG_E2E_PROTECTED) != 0U) {
+        return UCN_ERR_MALFORMED;
+    }
+    if (ucn_message_type_is_control(frame.message_type) && frame.has_path_id) {
         return UCN_ERR_MALFORMED;
     }
 
@@ -3585,11 +5784,27 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
     if (frame.message_type == UCN_MSG_NODE_SNAPSHOT_REPLY) {
         return handle_node_snapshot_reply(node, ingress_link, &frame);
     }
+    if (frame.message_type == UCN_MSG_POLICY_DIAGNOSTIC_REQ &&
+        frame.destination == node->config.node_id) {
+        return handle_policy_diagnostic_request(node, &frame);
+    }
+    if (frame.message_type == UCN_MSG_POLICY_DIAGNOSTIC_REPLY &&
+        frame.destination == node->config.node_id) {
+        return handle_policy_diagnostic_reply(node, &frame);
+    }
     if (frame.message_type == UCN_MSG_PATH_TRACE_REQ) {
         return handle_path_trace_request(node, ingress_link, &frame);
     }
     if (frame.message_type == UCN_MSG_PATH_TRACE_REPLY) {
         return handle_path_trace_reply(node, ingress_link, &frame);
+    }
+    if (frame.message_type == UCN_MSG_PATH_INSTALL &&
+        frame.destination == node->config.node_id) {
+        return handle_path_install(node, ingress_link, &frame);
+    }
+    if (frame.message_type == UCN_MSG_PATH_REVOKE &&
+        frame.destination == node->config.node_id) {
+        return handle_path_revoke(node, ingress_link, &frame);
     }
     if (frame.message_type == UCN_MSG_PATH_PROBE &&
         frame.destination == node->config.node_id) {
@@ -3627,7 +5842,23 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
         }
     }
 
-    if (!ucn_message_type_is_control(frame.message_type) && frame.has_route_extension &&
+    if (!ucn_message_type_is_control(frame.message_type) && frame.has_path_id) {
+        const ucn_path_forward_entry_t *path = find_active_path(
+            node, frame.source, frame.session_id, frame.path_id, frame.destination);
+
+        if (path == NULL ||
+            (frame.destination == node->config.node_id && !path->terminal) ||
+            (frame.destination != node->config.node_id && path->terminal)) {
+            node->stats.path_rejected++;
+            (void)send_path_route_error(node, ingress_link, frame.source,
+                                        frame.destination, frame.session_id,
+                                        frame.path_id);
+            return UCN_ERR_NOT_FOUND;
+        }
+    }
+
+    if (!ucn_message_type_is_control(frame.message_type) && !frame.has_path_id &&
+        frame.has_route_extension &&
         frame.destination == node->config.node_id &&
         !route_epoch_is_accepted(node, frame.source, &frame)) {
         node->stats.route_epoch_rejected++;
@@ -3637,6 +5868,7 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
     if (frame.destination != node->config.node_id &&
         frame.destination != UCN_NODE_BROADCAST) {
         ucn_link_t *egress_link;
+        const ucn_path_forward_entry_t *path = NULL;
 
         if (frame.hop_limit <= 1U) {
             return UCN_ERR_TTL;
@@ -3655,6 +5887,14 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
             }
             egress_link = find_candidate_link(node, frame.destination,
                                               read_u32_be(frame.payload));
+        } else if (!ucn_message_type_is_control(frame.message_type) &&
+                   frame.has_path_id) {
+            path = find_active_path(
+                node, frame.source, frame.session_id, frame.path_id,
+                frame.destination);
+
+            egress_link = path == NULL ? NULL :
+                          resolve_egress_link(node, path->egress_link);
         } else if (!ucn_message_type_is_control(frame.message_type)) {
             egress_link = find_link_for_route_epoch(node, frame.destination,
                                                      frame.has_route_extension,
@@ -3663,23 +5903,45 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
             egress_link = find_link(node, frame.destination);
         }
         if (egress_link == NULL || egress_link == ingress_link) {
-            if (frame.message_type != UCN_MSG_ROUTE_ERROR) {
+            if (frame.has_path_id) {
+                if (egress_link == NULL && path != NULL) {
+                    revoke_path_and_mark_local_policy(node, path->owner,
+                                                       path->owner_session_id,
+                                                       path->path_id,
+                                                       path->destination);
+                }
+                (void)send_path_route_error(node, ingress_link, frame.source,
+                                            frame.destination, frame.session_id,
+                                            frame.path_id);
+            } else if (frame.message_type != UCN_MSG_ROUTE_ERROR) {
                 (void)send_route_error(node, ingress_link, frame.source, frame.destination);
             }
             return UCN_ERR_NOT_FOUND;
         }
 
         --frame.hop_limit;
-        result = send_frame_on_link(node, egress_link, &frame);
+        result = frame.has_path_id ?
+                 send_frame_on_path_egress(node, path, &frame, &egress_link) :
+                 send_frame_on_link(node, egress_link, &frame);
         if (result == UCN_OK) {
             mark_route_used(node, frame.destination);
+            if (frame.has_path_id) {
+                node->stats.path_forwards++;
+            }
             if ((frame.flags & UCN_FRAME_FLAG_E2E_PROTECTED) != 0U) {
                 node->stats.e2e_protected_forwarded++;
             }
         }
         if (result == UCN_ERR_LINK_DOWN) {
             invalidate_routes_by_link(node, egress_link);
-            if (frame.message_type != UCN_MSG_ROUTE_ERROR) {
+            if (frame.has_path_id) {
+                revoke_path_and_mark_local_policy(node, frame.source,
+                                                   frame.session_id, frame.path_id,
+                                                   frame.destination);
+                (void)send_path_route_error(node, ingress_link, frame.source,
+                                            frame.destination, frame.session_id,
+                                            frame.path_id);
+            } else if (frame.message_type != UCN_MSG_ROUTE_ERROR) {
                 (void)send_route_error(node, ingress_link, frame.source, frame.destination);
             }
         }

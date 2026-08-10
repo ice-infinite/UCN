@@ -16,7 +16,7 @@ UCN 不应规定“无线一定加密”或“所有帧一定加密”。每个�
 
 | 项目 | 当前 v4 Core 实现 | 仍待产品接入 |
 | --- | --- | --- |
-| 帧 | 32 B 基础头或 36 B Route Header；`E2E_PROTECTED=0x02` 时追加固定 16 B Tag；CRC 覆盖密文和 Tag。 | 逐跳 Link AEAD 封装。 |
+| 帧 | 32 B 基础头、36 B Route Header 或 40 B Path Header；`E2E_PROTECTED=0x02` 时追加固定 16 B Tag；CRC 覆盖密文和 Tag。 | 逐跳 Link AEAD 封装。 |
 | Security Provider | 会话 ID、持久化发送序号、TX/RX 授权、可选 `select_tx_protection`、固定缓冲 `seal/open` 回调。 | 密钥选择/供应、生产重放窗口和 Endpoint ACL 表。 |
 | 加密 | Core 不内置密码算法；测试使用明确标识的非生产 Provider 验证调用链。 | 用经审计的 AEAD Provider 替换测试 Provider，并测资源。 |
 | 转发 | 中继按 Node/Endpoint `forward_mode` 可透明转发密文，不调用 `open`。 | 逐跳 Link AEAD 的 Adapter 实现。 |
@@ -81,7 +81,7 @@ C：按 (source=A, destination=C, endpoint, session) 找到 E2E Key
 
 | 字段类别 | 处理原则 |
 | --- | --- |
-| 不可变 AAD | Version、`E2E_PROTECTED` 标志、Network ID、Source、Destination、Message Type/Endpoint、Traffic Class、Session ID、Sequence、Payload Length。 |
+| 不可变 AAD | Version、`E2E_PROTECTED`/Path 标志、Network ID、Source、Destination、Message Type/Endpoint、Traffic Class、Session ID、Sequence、Payload Length，以及存在时的 Path ID。 |
 | 可变转发元数据 | Hop Limit、Route Extension、CRC。中继可按协议改写；它们不能作为“原始来源身份”的证明。 |
 | 受保护内容 | 整个业务 Payload 和 AEAD Tag。 |
 
@@ -92,20 +92,20 @@ C：按 (source=A, destination=C, endpoint, session) 找到 E2E Key
 ### 5.1 明文业务帧
 
 ```text
-[UCN Header 32 B 或 Route Header 36 B][Plain Business Payload P]
+[UCN Header 32 B / Route Header 36 B / Path Header 40 B][Plain Business Payload P]
 ```
 
 ### 5.2 端到端受保护业务帧
 
 ```text
-[UCN Header 32 B 或 Route Header 36 B, E2E_PROTECTED=1]
+[UCN Header 32 B / Route Header 36 B / Path Header 40 B, E2E_PROTECTED=1]
 [Ciphertext Business Payload P]
 [AEAD Tag 16 B]
 ```
 
 `Payload Length` 仍只表示 `P`，不包含 Tag；解码器依据 `E2E_PROTECTED` 计算实际帧长。CRC 覆盖密文和 Tag，用于快速误码丢弃，但 Tag 才是安全校验。
 
-已冻结标志位：`ROUTE_EXTENSION = 0x01`、`E2E_PROTECTED = 0x02`、`DIAGNOSTIC = 0x04`；仅诊断控制帧可使用后者，其他未知值由解码器拒绝。v3/v4 不能在同一 Network ID 内静默混用。
+已冻结标志位：`ROUTE_EXTENSION = 0x01`、`E2E_PROTECTED = 0x02`、`DIAGNOSTIC = 0x04`、`PATH_ID = 0x08`；Path 业务帧必须同时具备 Route Extension 和非零 Path ID。仅诊断控制帧可使用 `DIAGNOSTIC`，控制帧不允许 E2E/Path ID，其他未知值由解码器拒绝。v3/v4 不能在同一 Network ID 内静默混用。
 
 在默认 256 B 最大帧下：
 
@@ -115,6 +115,8 @@ C：按 (source=A, destination=C, endpoint, session) 找到 E2E Key
 | 正常端到端受保护 | `32 + P + 16` | 208 B |
 | 带路径扩展的明文 | `36 + P` | 220 B |
 | 带路径扩展的端到端受保护 | `36 + P + 16` | 204 B |
+| 带 Path ID 的明文 | `40 + P` | 216 B |
+| 带 Path ID 的端到端受保护 | `40 + P + 16` | 200 B |
 
 Nonce 不额外放入每一帧；由方向、Source Node、Session ID、Sequence 和密钥 Epoch 按已冻结算法确定。前提是同一密钥下绝不能重用该组合：发送 Counter 需持久化或在重启前后换出新会话密钥，Sequence 到上限前必须换密钥。
 

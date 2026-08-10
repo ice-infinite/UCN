@@ -18,12 +18,20 @@ int main(void)
     result |= test_neighbor_lifecycle();
     result |= test_hello_join();
     result |= test_neighbor_heartbeat();
+    result |= test_neighbor_bearer();
+    result |= test_neighbor_quality();
+    result |= test_neighbor_route_bearer();
     result |= test_endpoint();
     result |= test_candidate_route();
     result |= test_adapter();
     result |= test_v3();
     result |= test_path_trace();
     result |= test_node_snapshot();
+    result |= test_path_control();
+    result |= test_policy();
+    result |= test_policy_diagnostic();
+    result |= test_service();
+    result |= test_service_bridge();
 
     if (result == 0) {
         printf("All UCN tests passed.\n");

@@ -14,6 +14,10 @@ add_library(ucn_core STATIC
     src/ucn_endpoint.c
     src/ucn_frame.c
     src/ucn_node.c
+    src/ucn_path.c
+    src/ucn_policy.c
+    src/ucn_service.c
+    src/ucn_service_bridge.c
 )
 
 target_include_directories(ucn_core
@@ -44,12 +48,18 @@ if(UCN_BUILD_TESTS)
         tests/test_neighbor_lifecycle.c
         tests/test_hello_join.c
         tests/test_neighbor_heartbeat.c
+        tests/test_neighbor_bearer.c
         tests/test_endpoint.c
         tests/test_candidate_route.c
         tests/test_adapter.c
         tests/test_v3.c
         tests/test_path_trace.c
         tests/test_node_snapshot.c
+        tests/test_path_control.c
+        tests/test_policy.c
+        tests/test_policy_diagnostic.c
+        tests/test_service.c
+        tests/test_service_bridge.c
     )
 
     target_link_libraries(ucn_tests PRIVATE ucn_core)

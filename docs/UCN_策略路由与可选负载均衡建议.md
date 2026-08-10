@@ -1,8 +1,9 @@
 # UCN 策略路由与可选负载均衡建议
 
-> 状态：**后续设计建议，未实现**。基于 UCN v4 C99 Core 源码快照（2026-08-08）整理；不改变当前 v4 线格式、Core API 或测试结论。  
+> 状态：**T22.1 已实现固定数据模型和质量快照，T22.2 已实现 Path ID 与安全控制面，T22.3 已实现固定严格/主备，T22.4 已实现 Q1 流亲和均衡**。未配置或 `AUTO_BEST` 的 Endpoint 仍保持当前自动转发语义。
 > 关联任务：[T21 同对端多介质主备 Link](00-任务表.md#任务清单) → T22 策略路由与可选负载均衡。  
 > 设计目标：让不同业务可选择固定端到端路径、固定主备路径或可选自动分担，同时保持 MCU-first、固定内存、无 Linux 依赖和默认简单行为。
+> 执行顺序、容量边界、验证门禁与正式子任务以[路由策略与负载均衡执行建议](UCN_路由策略与负载均衡执行建议.md)为准；本文件保留策略语义与协议约束。
 
 ## 1. 结论与当前边界
 
@@ -69,14 +70,11 @@ T21 和本建议解决的不是同一层问题：
 
 这样中继只按 Path ID 转发，不需要理解业务 Payload，也不需要解密端到端密文。Path 由受限控制面安装、探测和确认，而不是让每个业务帧携带完整源路由。
 
-### 4.1 协议兼容边界
+### 4.1 已冻结的协议兼容边界
 
-当前 v4 基础头/Route Extension 没有独立业务 `Path ID`，`route_epoch` 也不可复用。因此实现 T22 前必须冻结以下之一：
+v4 已新增独立 `Path ID`：普通头为 32 B，Route Extension 为 36 B，带 Path ID 的业务帧为 40 B。Path 头必须同时带 Route Extension 与 Path Flag，`path_id` 为非零；旧实现会拒绝未知 Flag/头尺寸，不能把 Path 帧误作普通路由帧。`route_epoch` 继续只标记 Active/Previous 切换期，绝不复用为 Path 身份。
 
-1. 新的受版本保护的路由扩展字段；或
-2. 后续协议版本/明确 Profile 的固定 `Path ID` 线格式。
-
-无论选择哪一种，旧节点都必须显式拒绝无法理解的版本/标志/格式，不能把 `Path ID` 偷塞进现有保留含义的字段。路径安装、Path ID 与策略权限也必须接受认证/ACL 约束；不允许网络中的任意节点通过伪造控制帧指定某条业务路线。若帧使用端到端保护，Path ID 的完整性覆盖范围也需要在安全 AAD 契约中冻结，防止被中途篡改。
+路径安装、更新和撤销由 `PATH_INSTALL/PATH_REVOKE` 控制帧完成。接收方既需已有 Security Provider 授权，又需显式 Path 控制面授权回调；没有回调即默认拒绝，不能让任意节点伪造控制帧修改路线。受保护业务把 Path ID 放入 30 B 不可变 AAD，继电器不解密 Payload，但也不能改写 Path ID。
 
 ### 4.2 建议的有限状态
 
@@ -111,9 +109,17 @@ P2 不存在或不可用：若策略允许，受限 RREQ 建立新路径；否�
 - 已交给旧驱动的帧不能撤回；Q1 Payload 仍建议带序号/时间戳，Q0 必须预建 Path 或有本地失效安全动作。
 - 任何路径恢复、探测和切换仍受现有控制 Token 与 Q0/Q1 调度约束，不能因策略功能挤占控制业务。
 
+### 5.1 当前 T22.3 的精确触发条件
+
+Policy 通过 `primary_local_path_id` 和可选 `backup_local_path_id` 指向本地固定表；该表以 `wire_path_id` 连接已经安装的 T22.2 Path。`PINNED_STRICT` 只调用 Primary；`PINNED_FAILOVER` 只有收到 `UCN_ERR_LINK_DOWN` 或 `UCN_ERR_NOT_FOUND` 时才将该 Path 视为硬失效并尝试 Backup。`NO_SPACE`、Security/ACL、配置错误和其它发送失败不会悄悄切换。
+
+若 Primary/Backup 都不可用，`allow_discovery_on_hard_failure` 只对 Q1 有效：它会进入既有受限 RREQ/固定等待槽，成功后允许该次业务按普通自动 Route 发送。此选择必须由产品显式开启，且不再是固定路线；Q0 始终只接受预安装 Path 或本地失败。Strict 策略禁止设置此选项。Cost、RTT、队列压力只供后续健康/均衡判断，本阶段不会让已固定 Primary 因分数波动切换。
+
 ## 6. 可选自动负载均衡
 
 自动均衡必须默认关闭，且只从通过 Probe/ACK、没有处于 `SUSPECT` 的 Path 中选择。它不应把所有帧按轮询方式交替发送：逐帧条带化会带来乱序、抖动和中继排队放大。
+
+T22.4 已将这个边界写入 Core：`AUTO_BALANCE` 只接受精确 Q1 Policy，Primary 必填、Backup 可选且均须是已验证 Path；Flow 键为当前最小 `(destination, endpoint, Q1)`，零 `balance_flow_lease_ms` 使用默认 2 s。首次/租约到期以平滑 Cost、RTT、失败率、队列压力和当前 Flow 数选择成员；质量相同的两个 Flow 可分散，单一 Flow 不会逐帧轮换。默认连续 3 个 500 ms 队列压力快照达到 800‰，或 Path Down 时，才将受影响 Flow 重绑到另一成员。Q0、自动发现、帧复制和带宽聚合均未实现。
 
 初版建议如下：
 
@@ -151,11 +157,11 @@ ucn_node_send_endpoint(&node, destination, endpoint, UCN_TRAFFIC_Q1_REALTIME,
 
 | 子任务 | 实现内容 | 单元测试 | 虚拟/实机验收 |
 | --- | --- | --- | --- |
-| T22.1 | 冻结固定容量 Policy / Path / Flow 数据模型、模式和编译期上限；保持未配置业务的 `AUTO_BEST` 兼容行为。 | 表满、重复键、非法模式、Endpoint 匹配、旧 API 回归。 | 记录 RAM/Flash/栈增量。 |
-| T22.2 | 冻结兼容的 `Path ID` 线格式与受认证的安装/撤销控制面；中继建立有限转发表。 | 编解码、未知格式拒绝、伪造/未授权安装拒绝、TTL/重复/过期。 | A→B→C 和 A→D→C 可独立安装 P1/P2。 |
-| T22.3 | 实现 `PINNED_STRICT` 与 `PINNED_FAILOVER`；只在硬故障/RERR 时失效 P1，按策略改走 P2 或受限寻路。 | 直连优先边界、静态路由兼容、单 Path RERR 不误清 P2、禁止自动发现。 | 持续 IMU 流经 P1；拔掉 P1 后验证 P2 与 Q0/Q1 行为。 |
-| T22.4 | 实现可关闭的 Q1 流亲和自动均衡、租约和有界重绑定；不做逐帧轮询。 | 多流分散、单流顺序、关闭后不分流、拥塞/Down 重绑、Q0 排除。 | 多块板、多 Path 压力下测每路径负载、P50/P95 时延、乱序、丢包。 |
-| T22.5 | 让 T21 Bearer 选择与 T22 Path 选择联动，并补 Route/安全/Endpoint/64 B Profile 回归。 | 单 Bearer 切换不改变 Path ID；全 Bearer Down 的 Path 状态与 RERR；受保护 Path ID 完整性。 | WiFi+UART（或 CAN-FD）与两个中继路径混合拓扑。 |
-| T22.6 | 完成真实 Adapter、多板资源和故障注入验证。 | Driver Down、队列满、空口/总线错误、恢复抖动。 | 测 RAM/Flash/CPU、功耗、控制面开销、收敛时间和干扰下稳定性。 |
+| T22.1 | 已实现固定容量 Policy/当地 Path/Q1 Flow/Link 质量快照、模式和编译期上限；未配置业务保持 `AUTO_BEST`。`local_path_id` 未上帧。 | `test_policy.c` 覆盖表满、重复、非法模式、Endpoint 匹配、质量窗口/EWMA 与旧 API；四 CTest Profile 全绿。 | S3 A/WROOM 已构建；真实 RTT/Cost 标定和硬件资源峰值待实测。 |
+| T22.2 | 已完成 40 B Path Header、固定逐跳转发表、受认证 `PATH_INSTALL/PATH_REVOKE`、Path AAD 和 Path 范围 RERR；T22.3 已把已验证 Path 接入发送 API。 | `test_path_control.c`：编解码、默认拒绝/显式授权、伪造 Path AAD 拒绝、重复/过期/撤销、P1 RERR 不误清 P2；四 CTest Profile 全绿。 | 虚拟 A→B→D(P1) 和 A→C→D(P2) 已验证透明中继；真实多板留 T22.7。 |
+| T22.3 | 已完成 `PINNED_STRICT` 与 `PINNED_FAILOVER`；只在 `LINK_DOWN`/Path 不存在时失效 P1，按策略走 P2；仅 Q1 无 Backup 时可显式受限寻路。 | `test_path_control.c` 覆盖 Strict 不回退、Failover P1→P2、Q0 预装 Backup/Q0 不发现、Q1 无 Backup RREQ 与静态/AutoBest 回归；四 CTest Profile 全绿。 | 虚拟双中继完成；真实拔掉 P1、切换时延/丢失/乱序和本地安全留 T22.7。 |
+| T22.4 | 已完成可关闭的 Q1 流亲和自动均衡、租约和有界重绑定；不做逐帧轮询。 | `test_policy.c` 的配置拒绝、`test_path_control.c` 的同流固定/两流分散/持续拥塞与 Down 重绑/租约过期、四 CTest Profile。 | 虚拟双中继已通过；多块板、多 Path 压力下的负载比例、P50/P95、乱序、丢包仍待 T22.7。 |
+| T22.5 | 已让 T21 Bearer 选择与 T22 Path 选择联动，并完成 Route/安全/Endpoint/64 B Profile 回归。 | 单 Bearer 切换保持 Path ID；全 Bearer Down 仅撤销受影响 Path、同步本地 Policy Down，且中继经上游 Bearer 回 Path RERR。 | C99 虚拟 A⇄B⇄D 双 Bearer + 独立 P2 已通过；WiFi+UART（或 CAN-FD）实机留 T22.7。 |
+| T22.6 | 已完成受授权、限频的单 Node 策略诊断：`POLICY_DIAGNOSTIC_REQ/REPLY`、三页 Summary、固定 Policy/Path/Flow/质量槽位和超时回收。 | `test_policy_diagnostic.c` 覆盖权限、令牌、表满、空槽、Q0 优先、Path/Bearer/Flow/质量查询与超时；四 CTest Profile。 | C99 虚拟管理 Node→目标 Node 已通过；真实 Adapter、多板资源、故障注入和控制面开销测量留 T22.7。 |
 
-在 T22.1～T22.5 的 C99 单测、虚拟多拓扑和三档构建全绿前，本建议不得表述为当前 v4 已有“指定完整路径”或“自动负载均衡”。在 T22.6 完成前，也不能承诺实际 ESP-NOW/WiFi/CAN/UART 的吞吐、无缝切换或最优分担效果。
+T22.1～T22.6 的 C99 单测、虚拟双中继/管理查询和四套构建已全绿，因此可表述为“已实现受限的 Q1 流亲和均衡、Path/Bearer 联动和受授权按需诊断”；但在 T22.7 的真实多板压力验收前，不能承诺实际 ESP-NOW/WiFi/CAN/UART 的吞吐、无缝切换、负载比例、时延、乱序或最优分担效果。

@@ -14,13 +14,15 @@ extern "C" {
 #define UCN_FRAME_MAGIC_1 ((uint8_t)0x43U)
 #define UCN_FRAME_HEADER_SIZE ((size_t)32U)
 #define UCN_FRAME_ROUTE_HEADER_SIZE ((size_t)36U)
+#define UCN_FRAME_PATH_HEADER_SIZE ((size_t)40U)
 #define UCN_E2E_TAG_SIZE ((size_t)16U)
 #define UCN_FRAME_FLAG_ROUTE_EXTENSION ((uint8_t)0x01U)
 #define UCN_FRAME_FLAG_E2E_PROTECTED ((uint8_t)0x02U)
 #define UCN_FRAME_FLAG_DIAGNOSTIC ((uint8_t)0x04U)
+#define UCN_FRAME_FLAG_PATH_ID ((uint8_t)0x08U)
 #define UCN_FRAME_KNOWN_FLAGS \
     (UCN_FRAME_FLAG_ROUTE_EXTENSION | UCN_FRAME_FLAG_E2E_PROTECTED | \
-     UCN_FRAME_FLAG_DIAGNOSTIC)
+     UCN_FRAME_FLAG_DIAGNOSTIC | UCN_FRAME_FLAG_PATH_ID)
 #ifndef UCN_MAX_FRAME_BYTES
 #define UCN_MAX_FRAME_BYTES ((size_t)256U)
 #endif
@@ -85,6 +87,10 @@ typedef enum ucn_message_type {
     UCN_MSG_PATH_TRACE_REPLY = 0x19,
     UCN_MSG_NODE_SNAPSHOT_REQ = 0x1A,
     UCN_MSG_NODE_SNAPSHOT_REPLY = 0x1B,
+    UCN_MSG_PATH_INSTALL = 0x1C,
+    UCN_MSG_PATH_REVOKE = 0x1D,
+    UCN_MSG_POLICY_DIAGNOSTIC_REQ = 0x1E,
+    UCN_MSG_POLICY_DIAGNOSTIC_REPLY = 0x1F,
     UCN_MSG_DATA_Q0 = 0x20,
     UCN_MSG_DATA_Q1 = 0x21
 } ucn_message_type_t;
@@ -101,6 +107,8 @@ typedef struct ucn_frame {
     ucn_session_id_t session_id;
     bool has_route_extension;
     uint16_t route_epoch;
+    bool has_path_id;
+    uint32_t path_id;
     const uint8_t *payload;
     uint16_t payload_length;
     const uint8_t *auth_tag;

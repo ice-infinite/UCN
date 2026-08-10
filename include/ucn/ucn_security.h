@@ -34,7 +34,8 @@ typedef struct ucn_security_policy {
 /*
  * 安全 Provider 由产品接入。Core 不实现密码算法：生产 Provider 必须使用
  * 经审计的 AEAD 实现。seal/open 的 AAD 由 ucn_frame_write_e2e_aad() 生成；
- * 它仅含不可变路由身份字段，故中继可修改 Hop Limit/Route Epoch 后透明转发。
+ * 它仅含不可变路由身份字段，并在 T22.2 Path 扩展存在时覆盖 Path ID；中继
+ * 仍可修改 Hop Limit/Route Epoch 后透明转发，却不能篡改已保护业务的 Path ID。
  */
 typedef struct ucn_security_ops {
     ucn_result_t (*load_next_sequence)(void *context, ucn_sequence_t *next_sequence);

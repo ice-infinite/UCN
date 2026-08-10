@@ -25,11 +25,19 @@ int test_link_metrics(void);
 int test_neighbor_lifecycle(void);
 int test_hello_join(void);
 int test_neighbor_heartbeat(void);
+int test_neighbor_bearer(void);
+int test_neighbor_quality(void);
+int test_neighbor_route_bearer(void);
 int test_endpoint(void);
 int test_candidate_route(void);
 int test_adapter(void);
 int test_v3(void);
 int test_path_trace(void);
 int test_node_snapshot(void);
+int test_path_control(void);
+int test_policy(void);
+int test_policy_diagnostic(void);
+int test_service(void);
+int test_service_bridge(void);
 
 #endif

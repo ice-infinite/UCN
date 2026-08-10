@@ -14,7 +14,7 @@ UCN_MSG_PATH_TRACE_REPLY = 0x19
 UCN_FRAME_FLAG_DIAGNOSTIC = 0x04
 ```
 
-- Flag 不改变现有 32 B/36 B 头尺寸，只表明该帧属于可选诊断 Profile。
+- `DIAGNOSTIC` Flag 本身不改变 Trace 控制帧的 32 B/36 B 头尺寸；控制帧禁止 Path ID，因此不会使用 40 B Path Header。
 - v4 Core 将 Trace 消息视为控制帧；v3 帧会先在版本检查阶段明确拒绝，不会被当作普通业务交给应用或错误转发。
 - 因而路径上的所有中继都必须运行 v4 并支持 T23，Trace 才能成功；旧节点不能与 v4 节点在同一 Network ID 内通信。
 - Trace 控制帧不允许 `E2E_PROTECTED`：中继必须能读取、追加 Node ID 并按反向表返回。生产网络是否允许诊断由 Provider/ACL 决定；T23 不声称提供拓扑保密。
@@ -79,7 +79,7 @@ ucn_node_request_path_trace(node, destination, record_limit, callback, context);
 - `record_limit=0` 表示使用当前 `UCN_PATH_TRACE_MAX_NODES`；非零值可让调用方主动限制诊断载荷，达到上限返回 `TRUNCATED`。回调一次性拿到 `status`、`trace_id`、`node_count` 和固定数组 `node_ids[]`；不分配堆内存。
 - Trace 仅允许单播，使用独立的、低频的诊断 Token；不占用 Q0 关键控制预算，也不应抢占 Q0/Q1 业务队列。
 - 当前 Core 固定编入这组按需诊断代码，但不会自行发送 Trace；产品若要进一步裁剪代码，需要在目标 Profile 增加专门的构建开关，当前仓库尚未提供该开关。安全 Provider 存在时，既有入站 `authorize_rx()` 必须先通过；没有授权的 Link 仍不能进入 Trace 处理。
-- Trace 不是路径锁定或负载均衡机制。收到结果后，普通业务仍按照当时 Active/Previous Route 与 Cost 规则发送；T22 的业务 `Path ID` 尚未实现。
+- Trace 不是路径锁定或负载均衡机制。T22.2～T22.5 已提供可安装的业务 Path、固定主备、Q1 流亲和均衡和同 Neighbor Bearer 联动，但 Trace 结果不会自动创建、更新或选择任何 Path；只有已配置 Policy 的 `PINNED_*` 或 `AUTO_BALANCE` Endpoint 才按其规则发送，其他业务仍按当时 Active/Previous Route 与 Cost 规则发送。
 
 ## 5. T23 实施门禁
 

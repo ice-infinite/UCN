@@ -11,5 +11,5 @@ bool ucn_message_type_is_control(uint8_t message_type)
            message_type == UCN_MSG_JOIN_CHALLENGE ||
            message_type == UCN_MSG_JOIN_ACCEPT ||
            (message_type >= UCN_MSG_ROUTE_REQ &&
-            message_type <= UCN_MSG_NODE_SNAPSHOT_REPLY);
+            message_type <= UCN_MSG_POLICY_DIAGNOSTIC_REPLY);
 }

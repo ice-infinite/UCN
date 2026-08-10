@@ -1,7 +1,7 @@
 # UCN 多介质同对端主备 Link 建议
 
-> 状态：**建议 / T21 待实施**；本文不代表当前 v4 Core 已支持同一 Node ID 的自动多介质主备。  
-> 日期：2026-08-08  
+> 状态：**T21.1～T21.4 已完成 C99/虚拟闭环；T21.6.1 已完成两块 ESP32-S3 的真实独立双 Link 接入与准入/恢复控制实验**；目标板物理拔线时延、持续负载和三板多跳仍待实施。
+> 日期：2026-08-09
 > 适用范围：同一对 UCN 节点同时拥有 WiFi/ESP-NOW、UART/RS485、CAN-FD、BLE、LoRa 等两个或更多物理 Bearer 时的固定资源主备；保持 MCU-first、无动态内存、应用不感知介质。
 
 ## 1. 为什么需要这一层
@@ -18,8 +18,9 @@
 
 | 当前事实 | 含义 |
 | --- | --- |
-| 静态注册多个 `peer_node_id` 相同的 Link 时，直连发送会选择其中 `route_cost` 更低的一条。 | Core 已有“多个直接出口择低 Cost”的基础。 |
-| 自动 `HELLO`/邻居准入时，已 `ADMITTED` 的同一 Node ID 再从不同 Link 出现会返回 `UCN_ERR_CONFIG`。 | 当前不能把 WiFi 与 UART 自动绑定为同一个邻居的两个 Bearer。 |
+| 同一 Node ID 通过多条 `HELLO` Link 出现时，Core 将它们绑定进同一个固定 Bearer 集。 | 默认每 Neighbor 两条；第三条返回 `UCN_ERR_NO_SPACE`，不会占用第二个 Neighbor 身份槽。 |
+| Join Provider 会对每条新 Bearer 调用一次。 | 第二条物理链路不能借第一条已入网身份绕过 ACL。 |
+| 当前 Primary 在健康时保持；明显更优的 Backup 需连续采样和一跳 ACK 才切换。 | 已有受控质量切换，不把单次 Cost 波动写成“自动最优”或“无缝”。 |
 | 每个远端目的地的正常业务只有一条 Active 路径；可保留 Candidate 与 Previous/grace。 | 当前不做业务复制、负载均衡或帧级多链路聚合。 |
 | Core 只使用 Adapter 提供的通用 `route_cost`。 | WiFi RSSI、UART 超时、CAN Bus-Off 等不得泄漏到路由 Core。 |
 
@@ -88,7 +89,7 @@ Primary Bearer 健康？
 ```
 
 - **硬故障切换**：Driver Down、Bus-Off、明确发送失败等事件出现时，立即禁止故障 Bearer；若同一 Neighbor 还有健康 Backup，不移除 Neighbor、不清经该 Neighbor 的整条逻辑路径，下一帧改走 Backup。
-- **质量切换**：只因 Cost 长期恶化时，不应立即切换。建议 Candidate Bearer 比 Primary 低至少 20%～30%，连续多个采样窗口成立，并进行固定次数的轻量 Probe/ACK 后才切换。
+- **质量切换**：当前默认 Candidate Bearer 必须比 Primary 低至少 20%，连续 3 个 500 ms 采样窗口成立，再在候选 Bearer 上得到 2 次一跳 `HEARTBEAT` ACK（最多 3 次、间隔 100 ms）才切换。宏均可按产品 Profile 覆盖；采样的 Cost 仍由 Adapter 归一并可自行平滑。
 - **切换期**：已经交给旧驱动的帧不撤回；Q1 应带业务序号/时间戳并允许少量旧帧/乱序，Q0 必须预建路径或使用本地失效安全。
 - **心跳**：每条 Bearer 独立一跳 Heartbeat。一个 Bearer 的心跳失败不应使整个 Neighbor 离网，只改变该 Bearer 健康状态；全部 Bearer 失效才触发现有 Neighbor 移除。
 
@@ -128,11 +129,21 @@ Core 不判断哪种介质“天生更好”。每个 Adapter 在后台采样、
 
 | 子任务 | 实现内容 | 单元测试 | 虚拟/实机验收 |
 | --- | --- | --- | --- |
-| T21.1 | 将 Neighbor 从“单 Link”扩展为固定 Bearer 集；新增编译期上限和容量拒绝。 | 同 Node ID 的两 Link 准入、第三条超限、重复/伪造身份拒绝。 | 不增加动态内存；关闭宏时保持旧单 Link 行为。 |
-| T21.2 | 每 Bearer 的 Heartbeat、状态、`last_seen` 与健康统计；全部失效才移除 Neighbor。 | 单 Bearer Down 不移除、两 Bearer 均 Down 后移除、SUSPECT 恢复。 | A/B 双 Bearer下拔掉 WiFi，邻居仍保持 ADMITTED。 |
-| T21.3 | Primary/Backup 选择、硬故障立即切换、Cost 滞回和固定 Probe。 | 主/备选择、单次抖动不切换、20%～30%门限、Probe 失败保持旧主链。 | 持续 Q1 下切换；统计时延、乱序和丢包。 |
-| T21.4 | 与 Route/Candidate/RERR 的联动。 | Bearer 切换不误清逻辑 Route；全部 Bearer 失效才 RERR；静态路由边界。 | `A→B→C` 中 B→C 的 WiFi/UART 主备切换和全失效恢复。 |
-| T21.5 | 完整 C99 虚拟 Link 回归、64 B Profile、资源报告。 | 原有单 Link、路由、安全、Endpoint 测试不回退。 | Debug/Release/64 B 全绿，记录 RAM/Flash/栈增量。 |
-| T21.6 | 实际 Adapter 与多板测试。 | Adapter 地址/身份绑定、队列满、Down 事件。 | 至少一个 ESP-NOW + UART 或 CAN-FD 组合，测切换 P50/P95、控制流量、空口/总线负载和功耗。 |
+| T21.1 | 将 Neighbor 从“单 Link”扩展为固定 Bearer 集；新增编译期上限和容量拒绝。 | 同 Node ID 的两 Link 准入、第三条超限、Provider 第二 Bearer 拒绝。 | **已完成（C99）**：无动态内存，`Bearer=1` Profile CTest 仍全绿。 |
+| T21.2 | 每 Bearer 的 Heartbeat、状态、`last_seen` 与健康统计；全部失效才移除 Neighbor。 | 单 Bearer Down 不移除、两 Bearer 均 Down 后移除、单 Link SUSPECT 恢复。 | **已完成（C99）**：真实 WiFi/UART 拔链仍待验收。 |
+| T21.3 | Primary/Backup 选择、硬故障立即切换、Cost 滞回和固定 Probe。 | 覆盖主/备初选、硬 Down 下一帧切备、5% 抖动保持、Probe ACK 丢失保持，以及成功 2 ACK 后切换和统计。 | **已完成（C99/虚拟）**：Probe 复用一跳 Heartbeat，不新增线格式；真实切换时延、丢失/乱序与功耗待实测。 |
+| T21.4 | 与 Route/Candidate/RERR 的联动。 | A→B→C 覆盖 Active/Candidate 的 Probe/Activate 经 Backup、下游 RERR 经 Backup 清理动态状态、全 Down 回收和静态 Route 保留边界。 | **已完成（C99/虚拟）**：不新增线格式；真实多板断链收敛待验收。 |
+| T21.5 | 完整 C99 虚拟 Link 回归、64 B Profile、资源报告。 | 原有单 Link、路由、安全、Endpoint 测试不回退。 | **进行中**：四个 CTest Profile 已绿；静态资源与实机空闲 Heap/栈已有记录，峰值/功耗仍待补。 |
+| T21.6 | 实际 Adapter 与多板测试。 | Adapter 地址/身份绑定、队列满、Down 事件。 | **进行中**：两块 S3 已确认 ESP-NOW Peer Link + UART Link 各自进入 Core、合并为一个 Neighbor 的两个 Bearer；远端 Wi-Fi-only 控制实验保持 Neighbor 并在恢复后自动重新合并。物理拔线、P50/P95、丢失/乱序、功耗与三板多跳待测。 |
 
 实施前必须先冻结：目标板每节点最大物理 Link 数、同对端 Bearer 上限、可接受切换时间、Q0/Q1 行为、介质组合、生产身份绑定方式和 RAM 预算。未通过 T21.5/T21.6 前，不得把该建议表述为已实现的链路聚合或无缝冗余。
+
+## 8. 当前代码与验证证据（2026-08-09）
+
+- `include/ucn/ucn_neighbor.h` 新增 `UCN_MAX_BEARERS_PER_NEIGHBOR`（默认 2）、`ucn_neighbor_bearer_t` 与 `primary_bearer_index`；只增加固定数组，不引入堆或动态表。
+- `src/ucn_node.c` 以 `(Neighbor, Bearer)` 维护自动准入、Provider 授权、Heartbeat、`last_seen`、Down、移除和 egress 解析。Active/Previous Route 与 Candidate 在业务、Probe、Activate 或中继转发时，都会将学习时保存的物理 egress Link 解析为同一 Neighbor 当前 Primary。单 Bearer Down 时仍保留同一 Node ID 的健康 Bearer；全部 Down 才回收 Neighbor、注册 Link 和相关动态 Route/Candidate。
+- 正常业务只走 Primary。首次建立时从健康、已准入 Bearer 中选较低 Cost；Primary 保持健康时不因瞬时 Cost 改变。Driver 明确 Down 后，下一次常规选路改用健康 Backup；质量切换只有满足滞回和 Probe ACK 后才发生。
+- 为 Bearer 增加固定的质量采样/Probe 状态和三个统计：Probe 已发送、匹配 ACK、质量切换次数。Probe 直接复用现有 8 B、一跳 `HEARTBEAT` request/ACK，按候选 Link 定向收发；中继不参与，业务帧和线格式不增加字段。`ucn_node_step()` 仍先处理 Q0/Q1 待发业务，空闲时才处理 Heartbeat/质量 Probe，因此 Probe 不抢占 Q0。
+- `tests/test_neighbor_bearer.c` 现覆盖双 Bearer 自动入网、容量拒绝、逐 Bearer Provider 拒绝、Primary Down 后经 Backup 收发、全 Down 后回收、5% 抖动保持、3 次 ACK 丢失保持、恢复后 2 ACK 切换，以及 A→B→C 的动态 Route/Candidate Probe/Activate、下游 RERR 回传和静态 Route 边界。`build`、`build-release`、`build-mtu64` 和 `build-bearer1` 的 CTest 均通过。
+- ESP32 测试工程的默认诊断 Profile 已把 ESP-NOW Peer Slot Link 与 UART Link（ID `0x70`）分别排入 Core；`DualMediaLink` 仅保留为 `legacy_dual` 对照。两块 S3 同时复位后均记录到 `links=2`、`admitted=1`、`count=2`，UART Cost 5 为 Primary、ESP-NOW Cost 10 为 Backup，空闲 Queue 丢弃为 0。B 临时刷同 Node ID 的 Wi-Fi-only 镜像时，A 保留 `admitted=1/count=1` 且 Ping 持续；恢复 B 独立镜像后 A 回到 `count=2`。
+- 未完成：Adapter 端 Cost 的 EWMA/RTT/拥塞映射和实机标定、**物理** ESP-NOW+UART/CAN-FD 拔链切换 P50/P95、持续业务丢失/乱序、功耗、Wi-Fi 反向故障和三板 RERR。当前不承诺业务零丢包、零乱序或“无缝”切换。

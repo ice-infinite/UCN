@@ -20,7 +20,7 @@ enum {
     UCN_OFFSET_CRC = 30
 };
 
-#define UCN_E2E_AAD_BYTES ((size_t)26U)
+#define UCN_E2E_AAD_BYTES ((size_t)30U)
 
 static void write_u16_be(uint8_t *output, uint16_t value)
 {
@@ -69,13 +69,15 @@ ucn_result_t ucn_frame_write_e2e_aad(const ucn_frame_t *frame,
     output[0] = UCN_PROTOCOL_VERSION;
     output[1] = frame->message_type;
     output[2] = (uint8_t)frame->traffic_class;
-    output[3] = frame->flags & UCN_FRAME_FLAG_E2E_PROTECTED;
+    output[3] = frame->flags &
+                (UCN_FRAME_FLAG_E2E_PROTECTED | UCN_FRAME_FLAG_PATH_ID);
     write_u32_be(&output[4], frame->network_id);
     write_u32_be(&output[8], frame->source);
     write_u32_be(&output[12], frame->destination);
     write_u32_be(&output[16], frame->sequence);
     write_u32_be(&output[20], frame->session_id);
     write_u16_be(&output[24], frame->payload_length);
+    write_u32_be(&output[26], frame->has_path_id ? frame->path_id : 0U);
     *output_length = UCN_E2E_AAD_BYTES;
     return UCN_OK;
 }
@@ -107,6 +109,9 @@ uint16_t ucn_crc16_ccitt(const uint8_t *data, size_t length, uint16_t seed)
 
 static size_t frame_header_size(const ucn_frame_t *frame)
 {
+    if (frame->has_path_id) {
+        return UCN_FRAME_PATH_HEADER_SIZE;
+    }
     return frame->has_route_extension ? UCN_FRAME_ROUTE_HEADER_SIZE :
                                         UCN_FRAME_HEADER_SIZE;
 }
@@ -144,6 +149,8 @@ size_t ucn_frame_encoded_size(const ucn_frame_t *frame)
         (frame->flags & (uint8_t)~UCN_FRAME_KNOWN_FLAGS) != 0U ||
         (((frame->flags & UCN_FRAME_FLAG_ROUTE_EXTENSION) != 0U) !=
          frame->has_route_extension) ||
+        (((frame->flags & UCN_FRAME_FLAG_PATH_ID) != 0U) != frame->has_path_id) ||
+        (frame->has_path_id && (!frame->has_route_extension || frame->path_id == 0U)) ||
         (frame_is_protected(frame) && frame->auth_tag == NULL)) {
         return 0U;
     }
@@ -199,6 +206,9 @@ ucn_result_t ucn_frame_encode(const ucn_frame_t *frame,
         output[UCN_OFFSET_CRC + 2U] = 0U;
         output[UCN_OFFSET_CRC + 3U] = 0U;
     }
+    if (frame->has_path_id) {
+        write_u32_be(&output[UCN_OFFSET_CRC + 4U], frame->path_id);
+    }
 
     if (frame->payload_length != 0U) {
         size_t index;
@@ -249,12 +259,15 @@ ucn_result_t ucn_frame_decode(const uint8_t *input,
 
     header_size = input[UCN_OFFSET_HEADER_SIZE];
     if (header_size != UCN_FRAME_HEADER_SIZE &&
-        header_size != UCN_FRAME_ROUTE_HEADER_SIZE) {
+        header_size != UCN_FRAME_ROUTE_HEADER_SIZE &&
+        header_size != UCN_FRAME_PATH_HEADER_SIZE) {
         return UCN_ERR_MALFORMED;
     }
     if ((input[UCN_OFFSET_FLAGS] & (uint8_t)~UCN_FRAME_KNOWN_FLAGS) != 0U ||
         (((input[UCN_OFFSET_FLAGS] & UCN_FRAME_FLAG_ROUTE_EXTENSION) != 0U) !=
-         (header_size == UCN_FRAME_ROUTE_HEADER_SIZE))) {
+         (header_size != UCN_FRAME_HEADER_SIZE)) ||
+        (((input[UCN_OFFSET_FLAGS] & UCN_FRAME_FLAG_PATH_ID) != 0U) !=
+         (header_size == UCN_FRAME_PATH_HEADER_SIZE))) {
         return UCN_ERR_MALFORMED;
     }
 
@@ -290,9 +303,15 @@ ucn_result_t ucn_frame_decode(const uint8_t *input,
     frame->destination = read_u32_be(&input[UCN_OFFSET_DESTINATION]);
     frame->sequence = read_u32_be(&input[UCN_OFFSET_SEQUENCE]);
     frame->session_id = read_u32_be(&input[UCN_OFFSET_SESSION_ID]);
-    frame->has_route_extension = header_size == UCN_FRAME_ROUTE_HEADER_SIZE;
+    frame->has_route_extension = header_size != UCN_FRAME_HEADER_SIZE;
     frame->route_epoch = frame->has_route_extension ?
                          read_u16_be(&input[UCN_OFFSET_CRC]) : 0U;
+    frame->has_path_id = header_size == UCN_FRAME_PATH_HEADER_SIZE;
+    frame->path_id = frame->has_path_id ?
+                     read_u32_be(&input[UCN_OFFSET_CRC + 4U]) : 0U;
+    if (frame->has_path_id && frame->path_id == 0U) {
+        return UCN_ERR_MALFORMED;
+    }
     frame->payload_length = payload_length;
     frame->payload = &input[header_size];
     frame->auth_tag = (frame->flags & UCN_FRAME_FLAG_E2E_PROTECTED) != 0U ?

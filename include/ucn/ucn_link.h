@@ -22,6 +22,17 @@ typedef struct ucn_link_status {
 typedef struct ucn_link_metrics {
     bool route_cost_valid;
     uint16_t route_cost;
+    /* Optional Adapter-owned quality snapshot.  The Core never reads media
+     * specific values such as RSSI directly: an Adapter may expose a smoothed
+     * RTT, failure rate and bounded queue pressure alongside its composite
+     * route_cost.  Callers zero-initialize this structure before invoking an
+     * older Adapter, so the original two-field contract remains safe. */
+    bool rtt_valid;
+    uint16_t rtt_ms;
+    bool tx_failure_rate_valid;
+    uint16_t tx_failure_per_mille;
+    bool queue_pressure_valid;
+    uint16_t queue_pressure_per_mille;
 } ucn_link_metrics_t;
 
 typedef struct ucn_link ucn_link_t;

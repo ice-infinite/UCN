@@ -1,6 +1,6 @@
 # UCN 更新后设计方案：MCU 自组网、稳定入离网与受限自动选路
 
-> 状态：**UCN v4 Core 已实现：Route Epoch/grace、受保护业务 Provider、透明中继、Endpoint Q1 等待、按需路径追踪与按需节点快照；真实 Adapter、生产密码/身份和实机验证仍未完成。**  
+> 状态：**UCN v4 Core 已实现：Route Epoch/grace、受保护业务 Provider、透明中继、Endpoint Q1 等待、受认证 Path ID 逐跳表、按需路径追踪、按需节点快照与受授权策略诊断；真实 Adapter、生产密码/身份和多板 Path 验证仍未完成。**
 > 日期：2026-08-08  
 > 适用范围：MCU-first 的 UCN-Core、跨介质 Adapter、可选 Linux Host；覆盖节点入离网、动态路由刷新、候选路径验证与故障恢复。  
 > 关联资料：[整体架构设计](UCN_整体架构设计.md) · [协议分层与配置档案](UCN_协议分层与配置档案.md) · [路由缓存与自动选路建议](UCN_路由缓存与自动选路建议.md) · [节点入离网与网络稳定性建议](UCN_节点入离网与网络稳定性建议.md) · [任务表](00-任务表.md)
@@ -40,9 +40,11 @@
 | 控制面保护 | RREQ/Probe/Activate/Heartbeat 有固定源端 Token、最小间隔、固定统计和队列上限。 | HELLO 随机退避、每 Adapter/每 Link 空口配额。 |
 | 路径诊断 | `PATH_TRACE_REQ/REPLY` 逐跳记录 Node ID，固定 Pending/Reverse 表反向返回，独立低频 Token；仅查询当前 Cache，不触发 RREQ。 | 三板 Trace 时延/断链/重组网、产品 Trace ACL 与拓扑保密策略。 |
 | 节点快照 | `NODE_SNAPSHOT_REQ/REPLY` 受限泛洪，一次窗口汇总可达 Node ID 与直接 Link 数；中继只存短期 Reverse，源端固定结果表。 | 五节点收集率、空口负载、网络分区、默认 ACL 的产品授权表与完整邻接图策略。 |
+| 策略诊断 | `POLICY_DIAGNOSTIC_REQ/REPLY` 经目标 ACL 授权后单播查询一个固定 Policy/Path/Flow/quality 槽位或 Summary 页；8 B 请求、32 B 回复、独立 Token。 | 管理 ACL/Security Provider、真实时延/控制开销、多板并发诊断与故障环境。 |
+| 指定 Path、固定主备与 Q1 均衡 | 40 B Path Header、默认 8 项逐跳表、受认证安装/撤销、Path AAD、透明 E2E 中继、Path 范围 RERR；Endpoint `PINNED_STRICT`/`PINNED_FAILOVER`；以及默认不配置的 `AUTO_BALANCE`。均衡仅 Q1，按 Flow 租约绑定 Primary/Backup Path 集成员，持续拥塞或 Down 才重绑。 | 至少四板实测授权/故障/资源/时延、实际负载比例、P50/P95、丢失与乱序。 |
 | 同节点多类数据 | 已有静态 Endpoint `0x40～0xBF`、专用发送 API、固定分发表；`latest_value` 按“目的节点 + Message Type”合并。 | 产品 ABI、Endpoint ACL 与动态目录另列 T19/T15。 |
 
-其中 `HEARTBEAT`、`CANDIDATE`、`PATH_PROBE/ACK`、`PATH_TRACE_REQ/REPLY`、`NODE_SNAPSHOT_REQ/REPLY`、Route Epoch、36 B 路由扩展、grace、Tag 线格式和透明中继已在 v4 Core 实现。测试覆盖的是 C99 虚拟 Link；生产安全和真实无线性能仍不可由此宣传。
+其中 `HEARTBEAT`、`CANDIDATE`、`PATH_PROBE/ACK`、`PATH_INSTALL/REVOKE`、`PATH_TRACE_REQ/REPLY`、`NODE_SNAPSHOT_REQ/REPLY`、`POLICY_DIAGNOSTIC_REQ/REPLY`、Route Epoch、36 B 路由扩展、40 B Path Header、grace、Tag 线格式和透明中继已在 v4 Core 实现。测试覆盖的是 C99 虚拟 Link；生产安全和真实无线性能仍不可由此宣传。
 
 ## 3. 总体架构
 
@@ -198,6 +200,18 @@ C → A：ENDPOINT_DATA（endpoint_id、instance、版本、业务数据）
 
 Endpoint ACL 必须细化到 `(源 Node、目标 Node、Endpoint、操作)`。例如温度 Endpoint 可以允许订阅，`MOTOR0_COMMAND` 则只能允许明确控制节点的 Q0 命令。
 
+#### 4.4.3 节点内任务通信：Endpoint 挂载到 Service，而不是把 Task 变成 Node（T25）
+
+一个 MCU 对外仍只有一个 Node ID、一个 Neighbor/Route/Security 实例和一个协议任务；IMU、控制、舵机和电源等 FreeRTOS 任务是该 Node 内的静态 Service。每个 Service 绑定一个或多个 Endpoint 与固定 Inbox。业务任务使用统一 `destination Node ID + Endpoint + QoS + Payload` 语义：目标为本机时直接投递 Inbox；目标为远端时经固定 TX Request Queue 交由唯一协议任务调用 `ucn_node_send_endpoint()`。
+
+```text
+Task A → Service Router
+       ├─ 本机 Node + Endpoint → Task B Inbox（无帧、无 Link、无寻路）
+       └─ 远端 Node + Endpoint → Protocol Task → UCN Core → 路由/Link
+```
+
+当前 v4 Core 仍只具备协议任务上下文的固定 Endpoint 回调；T25.1 已在 Core 外实现纯 C `ucn_service` Router，T25.2 已以独立 Bridge 让唯一 Protocol Task 有界地将 Remote TX 交给 Core，且将目标 Endpoint callback 投递回 Router。T25.3 才接 FreeRTOS Queue/任务通知。整个 T25 均保持 Core 无 RTOS 依赖、静态表和静态队列；Q1 使用按 Endpoint 的 Latest Value Inbox，Q0 使用有界 FIFO，舵机的 PWM/限位/超时安全始终在本机任务完成。任务重启不得触发 Node 离网；Service 未就绪、Endpoint 未注册或 Inbox 满必须显式失败/计数。Endpoint callback 没有端到端 ACK 返回值，因此目标 Service 拒绝只能记本机统计，可靠确认留给后续独立能力。完整设计与测试门禁见[节点内任务通信建议](UCN_节点内任务通信建议.md)。
+
 ### 4.5 按需安全策略与透明加密转发（T15）
 
 安全不是按“无线/有线”隐式决定，也不要求所有 Node 的所有帧都加密。产品按 **Node 默认策略 + Endpoint 覆盖策略 + 对端身份/密钥表** 配置：一个 Node 可默认发送明文、加密或按策略自动选择；接收端可设为 `PLAIN_ONLY`、`ENCRYPTED_ONLY` 或显式允许 `BOTH`。`BOTH` 不表示认证失败后可降级为明文；对 `ENCRYPTED_ONLY` Endpoint，没有可用密钥或 Tag 校验失败必须拒绝。
@@ -306,6 +320,8 @@ frame_bytes = 36 B + business_payload_bytes
 | 路径激活 | `PATH_ACTIVATE/ACK (0x16/0x17)` | 32 B | 6 B：Candidate ID + Route Epoch。 |
 | 路径追踪 | `PATH_TRACE_REQ (0x18)` | 32 B | 8 B 前缀 + Node ID 列表：Trace ID、记录数/上限、状态、逐跳 Node ID。 |
 | 路径追踪回复 | `PATH_TRACE_REPLY (0x19)` | 32 B | 同一载荷，沿中继短期 Reverse 表返回 `OK/NO_ROUTE/TTL/TRUNCATED`。 |
+| 策略诊断请求 | `POLICY_DIAGNOSTIC_REQ (0x1E)` | 32 B | 8 B：Request ID、Section、固定槽/页 Index、保留。目标必须显式授权请求 Node。 |
+| 策略诊断回复 | `POLICY_DIAGNOSTIC_REPLY (0x1F)` | 32 B | 32 B：Request ID、Section、Index、状态和 24 B 固定记录；适配 64 B Profile。 |
 
 控制帧只在入网、心跳、路径刷新、故障或候选切换时出现；它们不是每个普通 IMU/温度业务帧都必须附带的额外字段。
 
@@ -322,19 +338,21 @@ Payload：endpoint_id(2 B) + instance_id(1 B) + schema_version(1 B) + business_d
 
 ### 5.2 版本与兼容性
 
-当前实现为 `UCN_PROTOCOL_VERSION = 4`，支持 32 B 基础头和 36 B 路径头；v3/v4 不在同一 Network ID 内直接互通。升级采用全网同批升级，或由后续独立 Gateway 显式转换，不能静默混用。
+当前实现为 `UCN_PROTOCOL_VERSION = 4`，支持 32 B 基础头、36 B Route Extension 和 40 B Path Header；v3/v4 不在同一 Network ID 内直接互通。升级采用全网同批升级，或由后续独立 Gateway 显式转换，不能静默混用。
 
 v4 保留 32 B 基础头，并实现受标志位控制的 4 B 路由扩展：
 
 | 内容 | 目标设计 |
 | --- | --- |
 | 基础头 | 延续 Magic、Version、Network ID、源/目的 Node ID、序号、Session、TTL 等既有基本语义。 |
-| `header_size` | v4 解码器支持 32 B 正常头，或 36 B 路径扩展头；Payload 从 `header_size` 指定的位置开始。 |
-| CRC 位置/范围 | 32 B 头的 CRC 位于 30..31；36 B 头的 CRC 移到 34..35，覆盖 CRC 之前的全部头字段（含 Route Extension）及 Payload。 |
+| `header_size` | v4 解码器支持 32 B 正常头、36 B Route Extension，或同时带 Route Extension/Path Flag 的 40 B Path Header；Payload 从 `header_size` 指定的位置开始。 |
+| CRC 位置/范围 | 32 B 头的 CRC 位于 30..31；36 B 头的 CRC 位于 34..35；40 B Path Header 的 CRC 位于 38..39，均覆盖 CRC 之前的全部头字段及 Payload/可选 Tag。 |
 | Route Extension | `route_epoch`（16 bit）+ 16 bit 保留；动态业务帧携带它。 |
+| Path Extension | 40 B 头在 Route Extension 后加入非零 `path_id`（32 bit）；它由 `(owner Node, owner Session, Path ID, Destination)` 的固定逐跳表解释，不能替代 `route_epoch`。 |
 | 按需端到端加密 | `E2E_PROTECTED` Flag 表示 `Payload` 后固定附加 16 B Tag；明文/加密由 Node 默认策略和 Endpoint 覆盖决定，Tag 不计入 `Payload Length`。 |
 | 按需路径追踪 | `DIAGNOSTIC=0x04` 标识 Trace 控制帧，不改变 32 B 头；Trace 控制帧不得带 `E2E_PROTECTED`，中继需读取并追加 Node ID。 |
 | 按需节点快照 | `NODE_SNAPSHOT_REQ/REPLY` 共用 `DIAGNOSTIC=0x04`，Request 为 8 B、Reply 为 12 B Payload；请求泛洪、Reply 沿短期 Reverse 回源，默认 ACL 拒绝。 |
+| 按需策略诊断 | `POLICY_DIAGNOSTIC_REQ/REPLY` 共用 `DIAGNOSTIC=0x04`，Request 为 8 B、Reply 为 32 B Payload；只单播到一个已可达目标、默认 ACL 拒绝，独立 Token 和固定 Pending/Reply Queue。 |
 | 小 MTU 影响 | 带扩展的帧可用载荷比基础头少 4 B；小于基础头的 Carrier 仍由 T16 Adapter 分段/重组解决。 |
 
 字节序、标志位、CRC 覆盖范围和 v3→v4 拒绝已由 v4 编解码器和协议向量测试冻结。
@@ -350,10 +368,14 @@ v4 保留 32 B 基础头，并实现受标志位控制的 4 B 路由扩展：
 | `PATH_PROBE_ACK`（建议 `0x15`） | 目标回源，沿候选反向路径 | 回显 12 B。 | 证明候选路径双向可达。 |
 | `PATH_ACTIVATE`（建议 `0x16`） | 沿已验证候选路径 | `destination`、`candidate_id`、新 `route_epoch`、grace 参数。 | 让候选路径的所有中继安装新 Epoch 转发表。 |
 | `PATH_ACTIVATE_ACK`（建议 `0x17`） | 目标回源 | 回显激活信息。 | 源节点收到后才让新业务帧改走新 Epoch。 |
+| `PATH_INSTALL`（`0x1C`） | 已授权管理节点到指定 Node | 16 B：Path ID、目标、下一跳、租约。 | 在源/中继/终端安装或更新一项固定逐跳 Path；既需 Provider 又需显式 Path 授权。 |
+| `PATH_REVOKE`（`0x1D`） | 已授权管理节点到指定 Node | 8 B：Path ID、目标。 | 幂等撤销一项固定 Path；不影响同目标的其它 Path。 |
 | `PATH_TRACE_REQ`（`0x18`） | 当前 Route Cache 单播 | Trace ID、记录数量/上限、状态 0 与源 Node ID。 | 逐跳追加实际经过的 Node；没有 Cache 立即返回，不触发 RREQ。 |
 | `PATH_TRACE_REPLY`（`0x19`） | 目标/失败中继回源 | 同一列表与结果状态。 | 中继按 `(origin, trace_id)` 的固定 Reverse 表回送，源端回调一次结果。 |
 | `NODE_SNAPSHOT_REQ`（`0x1A`） | 受限广播 | 8 B：Query ID + 保留。 | 所有被授权节点只首次处理/转发，建立 `(origin, query_id)` 短期 Reverse 并排队自身回包。 |
 | `NODE_SNAPSHOT_REPLY`（`0x1B`） | 每个响应节点回源 | 12 B：Query ID、Node ID、直接 Link 数、标志。 | Reply 沿 Reverse 回送；源端固定表按 Node ID 去重，窗口结束交付完整或截断结果。 |
+| `POLICY_DIAGNOSTIC_REQ`（`0x1E`） | 管理 Node 到一个目标 | 8 B：Request ID、Section、Index、保留。 | 只读取目标自身已有固定 Policy/Path/Flow/quality/统计，不触发 RREQ、不泛洪、不增加业务帧字段。 |
+| `POLICY_DIAGNOSTIC_REPLY`（`0x1F`） | 目标回管理 Node | 32 B：Request ID、Section、Index、状态、24 B 记录。 | 目标经显式 ACL 后低优先级排队回复；源端固定 Pending 超时交付结果。 |
 | 静态 Endpoint 数据 | 端到端，按 Route Cache 转发 | 不新增控制载荷；`message_type=0x40～0xBF`，Payload 按产品静态表解释。 | 用零额外业务帧开销区分同节点的不同数据。 |
 
 所有控制报文都必须先经过 Network ID、邻居准入和 Security Provider 校验。候选 `PATH_PROBE/ACTIVATE` 不交给应用回调；Trace 仅在源端匹配 Pending 项后调用专用 Trace 回调，不能用真实电机命令、参数写入或传感器业务帧冒充控制面。
@@ -529,6 +551,7 @@ WiFi/ESP-NOW Adapter 可以提供 RSSI、重试、丢包、发送完成回调等
 | D：T17.2 | 已实现 Candidate 表、`PATH_PROBE/ACK`、含 Epoch 的 `PATH_ACTIVATE/ACK`、36 B Route Extension 与固定 grace。 | 不只在源节点保存候选路由，也不能承诺实机零丢包切换。 |
 | E：T17.3/T17.4 | 切换策略、Q0/Q1 语义、统计、故障恢复。 | 不承诺绝对无丢包切换。 |
 | F：T19.1 | 冻结 `0x40～0xBF` 静态 Endpoint 表、产品编码 ABI 与 Q0/Q1 映射。 | 不在未定义静态表时用 Payload 长度或临时常量猜测数据类型。 |
+| F1：T25 | 在 Core 外实现固定 Service/Task Adapter：Endpoint→Inbox、本机直投、固定 TX Request Queue 与协议任务独占 Core。 | 不把每个任务注册为 Node，不把本机消息发送到 Link，也不让任务并发调用 `ucn_node_t`。 |
 | G：T14/T15 | ESP32 实机 Adapter、真实身份/ACL、规模/功耗/干扰测试。 | 不以 Host/虚拟 Link 结果宣称实际无线性能。 |
 | H：T19.2（按需） | 动态服务查询、订阅、固定目录/租约表与 Endpoint ACL。 | 不让动态目录常驻占用所有 MCU 的 RAM，或自动全网广播服务表。 |
 
@@ -542,7 +565,9 @@ WiFi/ESP-NOW Adapter 可以提供 RSSI、重试、丢包、发送完成回调等
 | Probe/激活 | candidate ID 不匹配、ACK 超时、认证拒绝、激活 ACK 丢失、旧 Epoch grace 到期。 |
 | QoS | Q0 不被控制队列饿死，Q1 切换期 `latest_value` 覆盖和乱序过滤。 |
 | Endpoint | 控制值不能冒充业务 Endpoint、同一目的地 IMU/气压计 `latest_value` 不互相覆盖、静态 ABI 解码、Endpoint ACL 拒绝。 |
-| 帧兼容 | v4 32/36 B 头、长度、CRC、错误标志、v4 节点拒绝 v3。 |
+| Task Adapter | 本机直投不调用 Link、远端请求只由协议任务出队、Endpoint/任务未就绪、Queue 满、Q1 覆盖、Q0 FIFO、固定表满与 Payload 所有权。 |
+| 帧兼容 | v4 32/36/40 B 头、Path Flag/长度、CRC、错误标志、Path AAD 与 v4 节点拒绝 v3。 |
+| 指定 Path | 默认拒绝控制、显式授权、重复安装更新、租约/撤销、P1 RERR 不误清 P2、透明 E2E 中继不解密。 |
 
 ### 10.3 虚拟拓扑与集成测试
 
@@ -552,6 +577,7 @@ WiFi/ESP-NOW Adapter 可以提供 RSSI、重试、丢包、发送完成回调等
 拓扑 3：多节点同时接入                验证 HELLO/RREQ 预算与 Q0/Q1 连续性
 拓扑 4：A ─ WiFi ─ B，A ─ CAN ─ D ─ C  验证跨介质 Cost 与候选优先级
 拓扑 5：C → A 同一路径多 Endpoint       IMU/气压计/温度并发，验证分发与 latest_value 不互相覆盖
+拓扑 6：C 内 IMU → Control → Servo          本机直投与远端 Q0 并发，验证任务队列与本地安全动作
 ```
 
 集成通过的最低条件是：所有单测通过；模拟中不存在路由环路、固定表越界或无限控制重试；故障和加入压力下 Q0 语义保持；文档记录每个 Profile 的控制帧数量、候选次数、收敛时间、丢包与 RAM 上界。
