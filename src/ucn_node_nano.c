@@ -92,15 +92,39 @@ static ucn_result_t nano_send_frame(ucn_node_t *node,
     ucn_link_status_t status;
     ucn_result_t result;
 
-    if (frame->wire_profile == UCN_WIRE_PROFILE_UNSPECIFIED) {
-        frame->wire_profile = node->tx_wire_profile;
-    }
     result = nano_link_status(link, &status);
     if (result != UCN_OK) {
         return result;
     }
     if (!status.is_up) {
         return UCN_ERR_LINK_DOWN;
+    }
+    if (frame->wire_profile == UCN_WIRE_PROFILE_UNSPECIFIED) {
+        ucn_wire_profile_t maximum_profile = node->tx_wire_profile;
+        size_t mtu = link->mtu;
+
+        if (link->peer_wire_profile != UCN_WIRE_PROFILE_UNSPECIFIED &&
+            link->peer_wire_profile < maximum_profile) {
+            maximum_profile = link->peer_wire_profile;
+        }
+        if (status.mtu != 0U && status.mtu < mtu) {
+            mtu = status.mtu;
+        }
+        if (node->automatic_wire_profile) {
+            result = ucn_frame_select_min_wire_profile(
+                frame, maximum_profile, mtu, &frame->wire_profile);
+            if (result != UCN_OK) {
+                return result;
+            }
+        } else {
+            if (node->tx_wire_profile > maximum_profile) {
+                return UCN_ERR_UNSUPPORTED;
+            }
+            frame->wire_profile = node->tx_wire_profile;
+        }
+    } else if (link->peer_wire_profile != UCN_WIRE_PROFILE_UNSPECIFIED &&
+               frame->wire_profile > link->peer_wire_profile) {
+        return UCN_ERR_UNSUPPORTED;
     }
     result = ucn_frame_encode(frame, encoded, sizeof(encoded), &encoded_length);
     if (result != UCN_OK) {
@@ -222,6 +246,48 @@ ucn_wire_profile_t ucn_node_get_max_receive_wire_profile(
 {
     return node == NULL ? UCN_WIRE_PROFILE_UNSPECIFIED :
                           node->max_receive_wire_profile;
+}
+
+ucn_result_t ucn_node_set_wire_profile_auto(ucn_node_t *node, bool enabled)
+{
+    if (node == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    node->automatic_wire_profile = enabled;
+    return UCN_OK;
+}
+
+bool ucn_node_wire_profile_auto(const ucn_node_t *node)
+{
+    return node != NULL && node->automatic_wire_profile;
+}
+
+ucn_result_t ucn_node_set_link_wire_profile_limit(
+    ucn_node_t *node,
+    ucn_link_t *link,
+    ucn_wire_profile_t maximum_profile)
+{
+    if (node == NULL || link == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (!nano_link_is_registered(node, link)) {
+        return UCN_ERR_NOT_FOUND;
+    }
+    if (maximum_profile != UCN_WIRE_PROFILE_UNSPECIFIED &&
+        ucn_wire_profile_get_descriptor(maximum_profile) == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    link->peer_wire_profile = maximum_profile;
+    return UCN_OK;
+}
+
+ucn_wire_profile_t ucn_node_get_link_wire_profile_limit(
+    const ucn_node_t *node,
+    const ucn_link_t *link)
+{
+    return node == NULL || link == NULL ||
+           !nano_link_is_registered(node, link) ?
+               UCN_WIRE_PROFILE_UNSPECIFIED : link->peer_wire_profile;
 }
 
 ucn_result_t ucn_node_set_plain_session_id(ucn_node_t *node,
@@ -363,6 +429,7 @@ ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
             return result;
         }
     }
+    link->peer_wire_profile = UCN_WIRE_PROFILE_UNSPECIFIED;
     node->links[node->link_count++] = link;
     return UCN_OK;
 }
@@ -504,7 +571,9 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
     (void)memset(&frame, 0, sizeof(frame));
     frame.message_type = message_type;
     frame.traffic_class = traffic_class;
-    frame.hop_limit = node->config.default_hop_limit;
+    frame.hop_limit = node->automatic_wire_profile &&
+                      link->peer_node_id == destination ?
+                          1U : node->config.default_hop_limit;
     frame.network_id = node->config.network_id;
     frame.source = node->config.node_id;
     frame.destination = destination;

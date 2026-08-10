@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "test_support.h"
+#include "ucn/ucn_frame.h"
 #include "ucn/ucn_node.h"
 
 typedef struct integration_security_state {
@@ -12,6 +13,7 @@ typedef struct integration_link_context {
     ucn_node_t *peer;
     ucn_link_t *peer_ingress;
     bool *is_up;
+    ucn_wire_profile_t last_wire_profile;
 } integration_link_context_t;
 
 typedef struct integration_receive_state {
@@ -72,6 +74,11 @@ static ucn_result_t integration_link_send(ucn_link_t *link,
                                           size_t length)
 {
     integration_link_context_t *context = (integration_link_context_t *)link->context;
+    ucn_frame_t decoded;
+
+    if (ucn_frame_decode(frame, length, &decoded) == UCN_OK) {
+        context->last_wire_profile = decoded.wire_profile;
+    }
     return ucn_node_receive(context->peer, context->peer_ingress, frame, length);
 }
 
@@ -94,7 +101,7 @@ static int integration_init_node(ucn_node_t *node, ucn_node_id_t id)
 {
     ucn_config_t config;
 
-    config.network_id = UINT32_C(0x98765432);
+    config.network_id = UINT32_C(42);
     config.node_id = id;
     config.default_hop_limit = 4U;
     return ucn_node_init(node, &config) == UCN_OK ? 0 : 1;
@@ -124,10 +131,10 @@ int test_integration(void)
     ucn_node_t a, b, c, host;
     ucn_link_t ab, ba, bc, cb, bh, hb;
     integration_link_context_t cab, cba, cbc, ccb, cbh, chb;
-    integration_security_state_t a_security = { 1U, UINT32_C(0xABCDEF01) };
-    integration_security_state_t b_security = { 10U, UINT32_C(0xABCDEF01) };
-    integration_security_state_t c_security = { 20U, UINT32_C(0xABCDEF01) };
-    integration_security_state_t host_security = { 30U, UINT32_C(0xABCDEF01) };
+    integration_security_state_t a_security = { 1U, UINT32_C(0x77) };
+    integration_security_state_t b_security = { 10U, UINT32_C(0x77) };
+    integration_security_state_t c_security = { 20U, UINT32_C(0x77) };
+    integration_security_state_t host_security = { 30U, UINT32_C(0x77) };
     integration_receive_state_t received;
     ucn_send_request_t q1_request;
     ucn_send_request_t q0_request;
@@ -179,6 +186,7 @@ int test_integration(void)
     ucn_node_set_rx_handler(&c, integration_rx, &received);
 
     TEST_ASSERT(ucn_node_discover_route(&a, UINT32_C(3), 100U) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profile_auto(&a, true) == UCN_OK);
     q1_request.destination = UINT32_C(3); q1_request.message_type = UCN_MSG_DATA_Q1;
     q1_request.traffic_class = UCN_TRAFFIC_Q1_REALTIME;
     q1_request.delivery = UCN_DELIVERY_BEST_EFFORT;
@@ -194,6 +202,8 @@ int test_integration(void)
     TEST_ASSERT(received.count == 2U);
     TEST_ASSERT(received.payloads[0] == q0_payload);
     TEST_ASSERT(received.payloads[1] == q1_payload);
+    TEST_ASSERT(cab.last_wire_profile == UCN_WIRE_PROFILE_W0_LOCAL);
+    TEST_ASSERT(cbc.last_wire_profile == UCN_WIRE_PROFILE_W0_LOCAL);
 
     TEST_ASSERT(ucn_node_discover_route(&host, UINT32_C(3), 120U) == UCN_OK);
     TEST_ASSERT(ucn_node_send(&host, UINT32_C(3), UCN_MSG_DATA_Q1,

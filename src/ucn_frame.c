@@ -28,6 +28,12 @@ static const ucn_wire_profile_descriptor_t UCN_WIRE_PROFILES[] = {
       UINT32_MAX, UINT32_MAX - UINT32_C(1) }
 };
 
+static bool frame_is_protected(const ucn_frame_t *frame);
+static ucn_result_t validate_frame_fields(
+    const ucn_frame_t *frame,
+    bool require_auth_tag,
+    const ucn_wire_profile_descriptor_t **descriptor_out);
+
 static const ucn_wire_profile_descriptor_t *resolve_profile(
     ucn_wire_profile_t profile)
 {
@@ -153,6 +159,50 @@ size_t ucn_frame_max_payload(uint8_t flags)
 {
     return ucn_frame_max_payload_for_profile(UCN_WIRE_PROFILE_W3_BACKBONE,
                                              flags);
+}
+
+ucn_result_t ucn_frame_select_min_wire_profile(
+    const ucn_frame_t *frame,
+    ucn_wire_profile_t maximum_profile,
+    size_t mtu,
+    ucn_wire_profile_t *selected_profile)
+{
+    ucn_wire_profile_t profile;
+    bool saw_size_failure = false;
+
+    if (frame == NULL || selected_profile == NULL ||
+        ucn_wire_profile_get_descriptor(maximum_profile) == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    for (profile = UCN_WIRE_PROFILE_W0_LOCAL;
+         profile <= maximum_profile; ++profile) {
+        const ucn_wire_profile_descriptor_t *descriptor;
+        ucn_frame_t candidate = *frame;
+        size_t total_size;
+        ucn_result_t result;
+
+        candidate.wire_profile = profile;
+        result = validate_frame_fields(&candidate, false, &descriptor);
+        if (result == UCN_ERR_TOO_LARGE) {
+            saw_size_failure = true;
+            continue;
+        }
+        if (result != UCN_OK) {
+            return result;
+        }
+        total_size = ucn_frame_header_size_for_profile(profile,
+                                                        candidate.flags) +
+                     (size_t)candidate.payload_length +
+                     (frame_is_protected(&candidate) ? UCN_E2E_TAG_SIZE : 0U);
+        if (total_size > UCN_MAX_FRAME_BYTES ||
+            (mtu != 0U && total_size > mtu)) {
+            saw_size_failure = true;
+            continue;
+        }
+        *selected_profile = profile;
+        return UCN_OK;
+    }
+    return saw_size_failure ? UCN_ERR_TOO_LARGE : UCN_ERR_UNSUPPORTED;
 }
 
 size_t ucn_frame_e2e_aad_size(void)

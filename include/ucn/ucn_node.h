@@ -879,6 +879,18 @@ ucn_result_t ucn_node_set_wire_profiles(
 ucn_wire_profile_t ucn_node_get_tx_wire_profile(const ucn_node_t *node);
 ucn_wire_profile_t ucn_node_get_max_receive_wire_profile(
     const ucn_node_t *node);
+/* Automatic selection is disabled by default.  Fixed TX remains the maximum
+ * and the fallback/domain-discovery profile. */
+ucn_result_t ucn_node_set_wire_profile_auto(ucn_node_t *node, bool enabled);
+bool ucn_node_wire_profile_auto(const ucn_node_t *node);
+/* A registered Link may carry an explicit/HELLO-learned peer ceiling. */
+ucn_result_t ucn_node_set_link_wire_profile_limit(
+    ucn_node_t *node,
+    ucn_link_t *link,
+    ucn_wire_profile_t maximum_profile);
+ucn_wire_profile_t ucn_node_get_link_wire_profile_limit(
+    const ucn_node_t *node,
+    const ucn_link_t *link);
 /* Plain deployments should set a non-zero boot/session value before network
  * traffic so a reboot cannot reuse an old Source/Session sequence window.
  * A Security Provider replaces this value with its authenticated Session. */

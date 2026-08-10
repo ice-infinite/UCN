@@ -274,6 +274,69 @@ static int test_profile_extensions(void)
     return 0;
 }
 
+static int test_minimum_profile_selection(void)
+{
+    static const uint8_t payload = 0x7AU;
+    ucn_frame_t frame;
+    ucn_wire_profile_t selected = UCN_WIRE_PROFILE_UNSPECIFIED;
+
+    init_wire_frame(&frame, UCN_WIRE_PROFILE_UNSPECIFIED, &payload);
+    frame.hop_limit = 1U;
+    TEST_ASSERT(ucn_frame_select_min_wire_profile(
+                    &frame, UCN_WIRE_PROFILE_W3_BACKBONE, 0U,
+                    &selected) == UCN_OK);
+    TEST_ASSERT(selected == UCN_WIRE_PROFILE_W0_LOCAL);
+
+    frame.destination = 255U;
+    TEST_ASSERT(ucn_frame_select_min_wire_profile(
+                    &frame, UCN_WIRE_PROFILE_W3_BACKBONE, 0U,
+                    &selected) == UCN_OK);
+    TEST_ASSERT(selected == UCN_WIRE_PROFILE_W1_EDGE);
+    frame.destination = 51U;
+    frame.network_id = 70000U;
+    TEST_ASSERT(ucn_frame_select_min_wire_profile(
+                    &frame, UCN_WIRE_PROFILE_W3_BACKBONE, 0U,
+                    &selected) == UCN_OK);
+    TEST_ASSERT(selected == UCN_WIRE_PROFILE_W2_MESH);
+    frame.network_id = UINT32_C(0x01000000);
+    TEST_ASSERT(ucn_frame_select_min_wire_profile(
+                    &frame, UCN_WIRE_PROFILE_W3_BACKBONE, 0U,
+                    &selected) == UCN_OK);
+    TEST_ASSERT(selected == UCN_WIRE_PROFILE_W3_BACKBONE);
+    TEST_ASSERT(ucn_frame_select_min_wire_profile(
+                    &frame, UCN_WIRE_PROFILE_W2_MESH, 0U,
+                    &selected) == UCN_ERR_TOO_LARGE);
+
+    init_wire_frame(&frame, UCN_WIRE_PROFILE_UNSPECIFIED, &payload);
+    frame.hop_limit = 1U;
+    frame.flags = UCN_FRAME_FLAG_ROUTE_EXTENSION | UCN_FRAME_FLAG_PATH_ID;
+    frame.has_route_extension = true;
+    frame.route_epoch = 1U;
+    frame.has_path_id = true;
+    frame.path_id = 256U;
+    TEST_ASSERT(ucn_frame_select_min_wire_profile(
+                    &frame, UCN_WIRE_PROFILE_W3_BACKBONE, 0U,
+                    &selected) == UCN_OK);
+    TEST_ASSERT(selected == UCN_WIRE_PROFILE_W1_EDGE);
+
+    init_wire_frame(&frame, UCN_WIRE_PROFILE_UNSPECIFIED, &payload);
+    frame.hop_limit = 1U;
+    frame.flags = UCN_FRAME_FLAG_E2E_PROTECTED;
+    TEST_ASSERT(ucn_frame_select_min_wire_profile(
+                    &frame, UCN_WIRE_PROFILE_W3_BACKBONE,
+                    UCN_FRAME_W0_HEADER_SIZE + 1U + UCN_E2E_TAG_SIZE,
+                    &selected) == UCN_OK);
+    TEST_ASSERT(selected == UCN_WIRE_PROFILE_W0_LOCAL);
+    TEST_ASSERT(ucn_frame_select_min_wire_profile(
+                    &frame, UCN_WIRE_PROFILE_W3_BACKBONE,
+                    UCN_FRAME_W0_HEADER_SIZE + UCN_E2E_TAG_SIZE,
+                    &selected) == UCN_ERR_TOO_LARGE);
+    TEST_ASSERT(ucn_frame_select_min_wire_profile(
+                    &frame, UCN_WIRE_PROFILE_UNSPECIFIED, 0U,
+                    &selected) == UCN_ERR_ARGUMENT);
+    return 0;
+}
+
 int test_wire_profile(void)
 {
     int result = 0;
@@ -282,5 +345,6 @@ int test_wire_profile(void)
     result |= test_profile_golden_vectors();
     result |= test_profile_boundaries_and_rejection();
     result |= test_profile_extensions();
+    result |= test_minimum_profile_selection();
     return result;
 }

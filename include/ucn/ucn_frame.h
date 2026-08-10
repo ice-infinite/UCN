@@ -28,6 +28,15 @@ size_t ucn_frame_encoded_size(const ucn_frame_t *frame);
 size_t ucn_frame_max_payload(uint8_t flags);
 size_t ucn_frame_max_payload_for_profile(ucn_wire_profile_t profile,
                                          uint8_t flags);
+/* Select the smallest official profile up to maximum_profile that can
+ * represent the frame and fit mtu (0 means only UCN_MAX_FRAME_BYTES).  The
+ * input wire_profile and auth_tag pointer are ignored for selection; a
+ * protected frame still reserves the fixed E2E tag bytes. */
+ucn_result_t ucn_frame_select_min_wire_profile(
+    const ucn_frame_t *frame,
+    ucn_wire_profile_t maximum_profile,
+    size_t mtu,
+    ucn_wire_profile_t *selected_profile);
 size_t ucn_frame_e2e_aad_size(void);
 ucn_result_t ucn_frame_write_e2e_aad(const ucn_frame_t *frame,
                                      uint8_t *output,

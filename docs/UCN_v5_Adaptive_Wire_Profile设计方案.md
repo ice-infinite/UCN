@@ -193,7 +193,7 @@ V5-04 已用 W0 A→B→C 专项测试冻结上述边界：A/C 使用测试 E2E 
 
 中继不得升级/降级一个已受 E2E 保护的帧。只有安全终止 Gateway 或未来 Outer Envelope Gateway 可以重新编码。
 
-v5 第一代码阶段先实现“固定 Domain Profile + 官方 Decoder”，Route-aware 自动选级在基础 Codec、控制帧和路由元数据稳定后再启用。
+V5-05 已实现可选 Route-aware 自动选级，默认仍关闭。固定 TX Profile 同时是产品上限和 HELLO/RREQ 的域能力证明；HELLO 将固定档记录为每条 Link 的 Peer Ceiling，未知路由用固定档 RREQ 穿越成功后，后续更小档位满足单调接收条件。自动业务帧按地址/Session/Path/Route Epoch、实际 Route Hop、MTU 和可选 Tag 选择最小档；中继只转发已经明确的原档位，不升降已受保护帧。固定模式、控制面域探测和产品策略覆盖保持不变。
 
 ## 12. v4/v5 迁移
 

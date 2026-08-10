@@ -1519,6 +1519,7 @@ static void unregister_link(ucn_node_t *node, ucn_link_t *link)
             }
             --node->link_count;
             node->links[node->link_count] = NULL;
+            link->peer_wire_profile = UCN_WIRE_PROFILE_UNSPECIFIED;
             return;
         }
     }
@@ -1846,6 +1847,52 @@ static bool link_is_usable(const ucn_link_t *link)
     return get_link_status(link, &status) == UCN_OK && status.is_up;
 }
 
+static size_t effective_link_mtu(const ucn_link_t *link,
+                                 const ucn_link_status_t *status)
+{
+    size_t mtu = link->mtu;
+
+    if (status->mtu != 0U && (mtu == 0U || status->mtu < mtu)) {
+        mtu = status->mtu;
+    }
+    return mtu;
+}
+
+static ucn_result_t prepare_outbound_wire_profile(
+    const ucn_node_t *node,
+    const ucn_link_t *link,
+    const ucn_link_status_t *status,
+    ucn_frame_t *frame)
+{
+    ucn_wire_profile_t maximum_profile = node->tx_wire_profile;
+
+    if (link->peer_wire_profile != UCN_WIRE_PROFILE_UNSPECIFIED) {
+        if (ucn_wire_profile_get_descriptor(link->peer_wire_profile) == NULL) {
+            return UCN_ERR_CONFIG;
+        }
+        if (maximum_profile > link->peer_wire_profile) {
+            maximum_profile = link->peer_wire_profile;
+        }
+    }
+    if (frame->wire_profile != UCN_WIRE_PROFILE_UNSPECIFIED) {
+        if (link->peer_wire_profile != UCN_WIRE_PROFILE_UNSPECIFIED &&
+            frame->wire_profile > link->peer_wire_profile) {
+            return UCN_ERR_UNSUPPORTED;
+        }
+        return UCN_OK;
+    }
+    if (!node->automatic_wire_profile) {
+        if (node->tx_wire_profile > maximum_profile) {
+            return UCN_ERR_UNSUPPORTED;
+        }
+        frame->wire_profile = node->tx_wire_profile;
+        return UCN_OK;
+    }
+    return ucn_frame_select_min_wire_profile(
+        frame, maximum_profile, effective_link_mtu(link, status),
+        &frame->wire_profile);
+}
+
 static ucn_result_t send_frame_on_link(ucn_node_t *node,
                                        ucn_link_t *link,
                                        const ucn_frame_t *frame)
@@ -1860,18 +1907,8 @@ static ucn_result_t send_frame_on_link(ucn_node_t *node,
         return UCN_ERR_ARGUMENT;
     }
     prepared = *frame;
-    if (prepared.wire_profile == UCN_WIRE_PROFILE_UNSPECIFIED) {
-        prepared.wire_profile = node->tx_wire_profile;
-    }
     if (!ucn_node_security_ready(node)) {
         return UCN_ERR_SECURITY;
-    }
-    if (node->security_ops != NULL) {
-        result = node->security_ops->authorize_tx(node->security_context,
-                                                  &prepared);
-        if (result != UCN_OK) {
-            return result;
-        }
     }
 
     result = get_link_status(link, &status);
@@ -1882,13 +1919,25 @@ static ucn_result_t send_frame_on_link(ucn_node_t *node,
         mark_neighbor_bearer_down(node, link);
         return UCN_ERR_LINK_DOWN;
     }
+    result = prepare_outbound_wire_profile(node, link, &status, &prepared);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (node->security_ops != NULL) {
+        result = node->security_ops->authorize_tx(node->security_context,
+                                                  &prepared);
+        if (result != UCN_OK) {
+            return result;
+        }
+    }
 
     result = ucn_frame_encode(&prepared, encoded, sizeof(encoded),
                               &encoded_length);
     if (result != UCN_OK) {
         return result;
     }
-    if (encoded_length > link->mtu || encoded_length > status.mtu) {
+    if (encoded_length > link->mtu ||
+        (status.mtu != 0U && encoded_length > status.mtu)) {
         return UCN_ERR_TOO_LARGE;
     }
 
@@ -1902,6 +1951,8 @@ static ucn_result_t send_frame_on_link(ucn_node_t *node,
 }
 
 static ucn_result_t protect_outbound_business(ucn_node_t *node,
+                                              ucn_link_t *link,
+                                              const ucn_link_status_t *status,
                                               ucn_frame_t *frame,
                                               uint8_t *ciphertext,
                                               uint8_t auth_tag[UCN_E2E_TAG_SIZE])
@@ -1910,9 +1961,6 @@ static ucn_result_t protect_outbound_business(ucn_node_t *node,
     bool protected_frame = false;
     ucn_result_t result;
 
-    if (frame->wire_profile == UCN_WIRE_PROFILE_UNSPECIFIED) {
-        frame->wire_profile = node->tx_wire_profile;
-    }
     if (ucn_message_type_is_control(frame->message_type)) {
         return (frame->flags & UCN_FRAME_FLAG_E2E_PROTECTED) != 0U ?
                UCN_ERR_MALFORMED : UCN_OK;
@@ -1929,15 +1977,17 @@ static ucn_result_t protect_outbound_business(ucn_node_t *node,
             return result;
         }
     }
-    if (!protected_frame) {
-        return UCN_OK;
+    if (protected_frame) {
+        if (node->security_ops == NULL || node->security_ops->seal == NULL ||
+            node->security_ops->open == NULL) {
+            return UCN_ERR_SECURITY;
+        }
+        frame->flags |= UCN_FRAME_FLAG_E2E_PROTECTED;
     }
-    if (node->security_ops == NULL || node->security_ops->seal == NULL ||
-        node->security_ops->open == NULL) {
-        return UCN_ERR_SECURITY;
+    result = prepare_outbound_wire_profile(node, link, status, frame);
+    if (result != UCN_OK || !protected_frame) {
+        return result;
     }
-
-    frame->flags |= UCN_FRAME_FLAG_E2E_PROTECTED;
     result = node->security_ops->seal(node->security_context, frame, frame->payload,
                                       frame->payload_length, ciphertext, auth_tag);
     if (result != UCN_OK) {
@@ -2014,6 +2064,7 @@ static ucn_result_t send_control_on_link(ucn_node_t *node,
 
     (void)memset(&frame, 0, sizeof(frame));
     frame.message_type = message_type;
+    frame.wire_profile = node->tx_wire_profile;
     frame.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
     frame.hop_limit = (message_type == UCN_MSG_HELLO ||
                        message_type == UCN_MSG_HEARTBEAT) ? 1U :
@@ -4638,7 +4689,16 @@ static ucn_result_t handle_hello(ucn_node_t *node,
     }
 
     ingress_link->peer_node_id = peer_node_id;
-    return ucn_node_observe_neighbor(node, ingress_link, node->now_ms);
+    {
+        const ucn_result_t result =
+            ucn_node_observe_neighbor(node, ingress_link, node->now_ms);
+
+        if (result != UCN_OK) {
+            return result;
+        }
+    }
+    return ucn_node_set_link_wire_profile_limit(node, ingress_link,
+                                                 frame->wire_profile);
 }
 
 ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config)
@@ -4719,6 +4779,47 @@ ucn_wire_profile_t ucn_node_get_max_receive_wire_profile(
 {
     return node == NULL ? UCN_WIRE_PROFILE_UNSPECIFIED :
                           node->max_receive_wire_profile;
+}
+
+ucn_result_t ucn_node_set_wire_profile_auto(ucn_node_t *node, bool enabled)
+{
+    if (node == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    node->automatic_wire_profile = enabled;
+    return UCN_OK;
+}
+
+bool ucn_node_wire_profile_auto(const ucn_node_t *node)
+{
+    return node != NULL && node->automatic_wire_profile;
+}
+
+ucn_result_t ucn_node_set_link_wire_profile_limit(
+    ucn_node_t *node,
+    ucn_link_t *link,
+    ucn_wire_profile_t maximum_profile)
+{
+    if (node == NULL || link == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (!link_is_registered(node, link)) {
+        return UCN_ERR_NOT_FOUND;
+    }
+    if (maximum_profile != UCN_WIRE_PROFILE_UNSPECIFIED &&
+        ucn_wire_profile_get_descriptor(maximum_profile) == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    link->peer_wire_profile = maximum_profile;
+    return UCN_OK;
+}
+
+ucn_wire_profile_t ucn_node_get_link_wire_profile_limit(
+    const ucn_node_t *node,
+    const ucn_link_t *link)
+{
+    return node == NULL || link == NULL || !link_is_registered(node, link) ?
+               UCN_WIRE_PROFILE_UNSPECIFIED : link->peer_wire_profile;
 }
 
 ucn_result_t ucn_node_set_plain_session_id(ucn_node_t *node,
@@ -5165,6 +5266,7 @@ ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
     }
 
     node->links[node->link_count] = link;
+    link->peer_wire_profile = UCN_WIRE_PROFILE_UNSPECIFIED;
     ++node->link_count;
     return UCN_OK;
 }
@@ -5579,6 +5681,10 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
     frame.destination = destination;
     frame.session_id = node->session_id;
     route = find_active_route(node, destination);
+    if (node->automatic_wire_profile) {
+        frame.hop_limit = route != NULL && route->hop_count != 0U ?
+                              route->hop_count : 1U;
+    }
     if (route != NULL && link == route->egress_link && route->route_epoch != 0U) {
         frame.flags |= UCN_FRAME_FLAG_ROUTE_EXTENSION;
         frame.has_route_extension = true;
@@ -5591,7 +5697,8 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
     frame.session_id = node->session_id;
     frame.payload = payload;
     frame.payload_length = payload_length;
-    result = protect_outbound_business(node, &frame, ciphertext, auth_tag);
+    result = protect_outbound_business(node, link, &status, &frame,
+                                       ciphertext, auth_tag);
     if (result != UCN_OK) {
         return result;
     }
@@ -5658,6 +5765,7 @@ ucn_result_t ucn_node_send_path(ucn_node_t *node,
     const ucn_path_forward_entry_t *path;
     ucn_frame_t frame;
     ucn_link_t *link;
+    ucn_link_status_t status;
     ucn_result_t result;
     uint8_t ciphertext[UCN_MAX_PAYLOAD_BYTES];
     uint8_t auth_tag[UCN_E2E_TAG_SIZE];
@@ -5682,6 +5790,10 @@ ucn_result_t ucn_node_send_path(ucn_node_t *node,
     if (path == NULL || path->terminal || path->egress_link == NULL) {
         return UCN_ERR_NOT_FOUND;
     }
+    link = resolve_egress_link(node, path->egress_link);
+    if (link == NULL) {
+        return UCN_ERR_LINK_DOWN;
+    }
 
     (void)memset(&frame, 0, sizeof(frame));
     frame.message_type = message_type;
@@ -5702,7 +5814,15 @@ ucn_result_t ucn_node_send_path(ucn_node_t *node,
     frame.session_id = node->session_id;
     frame.payload = payload;
     frame.payload_length = payload_length;
-    result = protect_outbound_business(node, &frame, ciphertext, auth_tag);
+    result = get_link_status(link, &status);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (!status.is_up) {
+        return UCN_ERR_LINK_DOWN;
+    }
+    result = protect_outbound_business(node, link, &status, &frame,
+                                       ciphertext, auth_tag);
     if (result != UCN_OK) {
         return result;
     }

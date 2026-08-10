@@ -177,11 +177,15 @@ int test_hello_join(void)
     TEST_ASSERT(context_a_to_b.last_receive_result == UCN_OK);
     TEST_ASSERT(node_b.link_count == 1U);
     TEST_ASSERT(link_b_to_a.peer_node_id == config_a.node_id);
+    TEST_ASSERT(link_b_to_a.peer_wire_profile ==
+                UCN_WIRE_PROFILE_W3_BACKBONE);
     TEST_ASSERT(ucn_node_neighbor_count(&node_b, UCN_NEIGHBOR_ADMITTED) == 1U);
     TEST_ASSERT(ucn_node_broadcast_hello(&node_b, &link_b_to_a, 101U) == UCN_OK);
     TEST_ASSERT(context_b_to_a.last_receive_result == UCN_OK);
     TEST_ASSERT(node_a.link_count == 1U);
     TEST_ASSERT(link_a_to_b.peer_node_id == config_b.node_id);
+    TEST_ASSERT(link_a_to_b.peer_wire_profile ==
+                UCN_WIRE_PROFILE_W3_BACKBONE);
     TEST_ASSERT(ucn_node_neighbor_count(&node_a, UCN_NEIGHBOR_ADMITTED) == 1U);
 
     ucn_node_set_rx_handler(&node_b, hello_receive_callback, &receive_b);
