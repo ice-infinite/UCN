@@ -50,7 +50,7 @@ S19 给 Path 管理写状态增加独立门禁：目标 Node 只有依次通过 
 
 S04 后，本调用树以默认 `FULL + Service ON` 展示完整可达关系。`LITE` 仍走动态 `ucn_node.c` 的 HELLO/Neighbor/Heartbeat/AODV/Security 主链，但 Candidate、Path、Policy 和 Diagnostic 分支在编译期不存在；`NANO` 改走 `ucn_node_nano.c`，只保留静态 Link/Route、Q0/Q1、转发和 Endpoint 分发，不存在自动 Mesh 主链。Service 树仅在 `UCN_FEATURE_SERVICE=ON` 时成立。关闭能力对应的高级 API 只进入 `ucn_profile_stubs.c` 并返回 `UCN_ERR_CONFIG`。
 
-V5-05 后，默认发送仍固定 W3。产品只有显式调用 `ucn_node_set_wire_profile_auto(true)` 才进入自动最小档路径；控制帧使用固定 TX 档，中继保留来源帧档位。业务发送先确定是否带 16 B Tag，再结合地址/Hop/Route/Path、Link MTU 和 Peer Ceiling 选档，最后才 Seal/Encode。
+V5-10 后，默认发送仍固定 W3。产品只有显式调用 `ucn_node_set_wire_profile_auto(true)` 才进入自动最小档路径；HELLO 使用固定 TX 档并以 1 B 发布独立 Peer RX Ceiling，中继保留来源帧档位。业务发送先确定是否带 16 B Tag，再结合地址/Hop/Route/Path、Link MTU 和 Peer RX Ceiling 选档，最后才 Seal/Encode。
 
 ## 2. 目录和阅读顺序
 

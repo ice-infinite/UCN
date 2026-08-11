@@ -1,6 +1,6 @@
 # UCN 协议分层与配置档案
 
-> 状态：**UCN v5 V5-07 软件闭环（2026-08-11）**；Nano/Lite/Full 与 W0～W3 是正交维度。固定域、控制帧压缩、安全绑定和自动选档已完成；真实 Adapter、生产 AEAD 和目标板资源仍待接入。
+> 状态：**UCN v5 V5-10 软件闭环（2026-08-11）**；Nano/Lite/Full 与 W0～W3 是正交维度，三种 Build Profile 均使用四档 Decoder。固定域、全档接收、控制帧压缩、安全绑定、自动选档、全局公共配置以及单档/混档极限模拟已完成；真实 Adapter、生产 AEAD 和目标板资源仍待接入。
 > 日期：2026-08-04  
 > 关联文档：[UCN 整体架构设计](UCN_整体架构设计.md)
 
@@ -20,7 +20,7 @@ UCN-Host      只有 Linux、地面站、ROS2 等外部主机使用
 
 上层只能依赖下层，不能反向依赖：关闭 `Extended` 或完全不部署 `Host` 时，`Core` 的认证、发现、路由、转发和失联恢复仍完整可用。
 
-当前仓库已实现 v5 W0～W3 Codec、Node 固定 TX/最大 RX 档、零载荷 HELLO、压缩 RREQ、Profile 绑定安全、显式自动最小档，以及从 v4 继承的邻居保活/回收、Route Epoch/grace、受限 Candidate 选路、静态 Endpoint、Q0/Q1、透明密文中继、受认证 Path ID 逐跳表、按需诊断和 Adapter 模拟。默认固定 W3；`Extended`、真实 Linux Host、生产密码库和真实介质驱动仍未实现。
+当前仓库已实现 v5 W0～W3 Codec、所有 Build Profile 四档接收、Node 固定 TX/最大 RX 档、1 B RX Ceiling HELLO、压缩 RREQ、Profile 绑定安全、显式自动最小档，以及从 v4 继承的邻居保活/回收、Route Epoch/grace、受限 Candidate 选路、静态 Endpoint、Q0/Q1、透明密文中继、受认证 Path ID 逐跳表、按需诊断和 Adapter 模拟。公开编译参数集中在 `ucn_config.h`，产品头可覆盖且原文件默认保留。默认固定 W3；`Extended`、真实 Linux Host、生产密码库和真实介质驱动仍未实现。
 
 ## 2. 三个档案的边界
 

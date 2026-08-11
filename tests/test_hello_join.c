@@ -52,7 +52,7 @@ static const ucn_link_ops_t HELLO_LINK_OPS = {
 
 static void hello_init_config(ucn_config_t *config, ucn_node_id_t node_id)
 {
-    config->network_id = UINT32_C(0x2468ACE0);
+    config->network_id = UINT32_C(42);
     config->node_id = node_id;
     config->default_hop_limit = 3U;
 }
@@ -86,13 +86,13 @@ static void hello_receive_callback(void *context, const ucn_frame_t *frame)
 static ucn_result_t encode_hello(ucn_network_id_t network_id,
                                  ucn_node_id_t source,
                                  ucn_node_id_t destination,
-                                 ucn_node_id_t payload_node_id,
+                                 const uint8_t *payload,
+                                 uint16_t payload_length,
                                  ucn_sequence_t sequence,
                                  uint8_t *encoded,
                                  size_t encoded_capacity,
                                  size_t *encoded_length)
 {
-    uint8_t payload[4];
     ucn_frame_t frame;
 
     (void)memset(&frame, 0, sizeof(frame));
@@ -103,14 +103,8 @@ static ucn_result_t encode_hello(ucn_network_id_t network_id,
     frame.source = source;
     frame.destination = destination;
     frame.sequence = sequence;
-    if (payload_node_id != 0U) {
-        payload[0] = (uint8_t)(payload_node_id >> 24U);
-        payload[1] = (uint8_t)(payload_node_id >> 16U);
-        payload[2] = (uint8_t)(payload_node_id >> 8U);
-        payload[3] = (uint8_t)payload_node_id;
-        frame.payload = payload;
-        frame.payload_length = (uint16_t)sizeof(payload);
-    }
+    frame.payload = payload;
+    frame.payload_length = payload_length;
     return ucn_frame_encode(&frame, encoded, encoded_capacity, encoded_length);
 }
 
@@ -138,11 +132,14 @@ static ucn_result_t encode_data(ucn_network_id_t network_id,
 int test_hello_join(void)
 {
     static const uint8_t payload[] = { 0x5AU, 0xA5U };
+    static const uint8_t hello_w3[] = { UCN_WIRE_PROFILE_W3_BACKBONE };
+    static const uint8_t bad_hello_payload[] = { 0U, 0U, 0U, 2U };
+    static const uint8_t bad_hello_profile[] = { UINT8_C(99) };
     ucn_node_t node_a, node_b, node_c;
     ucn_config_t config_a, config_b, config_c;
     ucn_link_t link_a_to_b, link_b_to_a, candidate_ingress;
     hello_link_context_t context_a_to_b, context_b_to_a, candidate_context;
-    hello_receive_state_t receive_b;
+    hello_receive_state_t receive_a, receive_b;
     uint8_t encoded[UCN_MAX_FRAME_BYTES];
     size_t encoded_length = 0U;
 
@@ -155,6 +152,7 @@ int test_hello_join(void)
     (void)memset(&context_a_to_b, 0, sizeof(context_a_to_b));
     (void)memset(&context_b_to_a, 0, sizeof(context_b_to_a));
     (void)memset(&candidate_context, 0, sizeof(candidate_context));
+    (void)memset(&receive_a, 0, sizeof(receive_a));
     (void)memset(&receive_b, 0, sizeof(receive_b));
     hello_init_config(&config_a, UINT32_C(1));
     hello_init_config(&config_b, UINT32_C(2));
@@ -162,6 +160,9 @@ int test_hello_join(void)
 
     TEST_ASSERT(ucn_node_init(&node_a, &config_a) == UCN_OK);
     TEST_ASSERT(ucn_node_init(&node_b, &config_b) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profiles(
+                    &node_a, UCN_WIRE_PROFILE_W0_LOCAL,
+                    UCN_WIRE_PROFILE_W3_BACKBONE) == UCN_OK);
     TEST_ASSERT(ucn_node_set_join_policy(&node_a, UCN_JOIN_OPEN, NULL, NULL) == UCN_OK);
     TEST_ASSERT(ucn_node_set_join_policy(&node_b, UCN_JOIN_OPEN, NULL, NULL) == UCN_OK);
     hello_setup_link(&link_a_to_b, &context_a_to_b, 1U, 0U);
@@ -197,6 +198,13 @@ int test_hello_join(void)
     TEST_ASSERT(receive_b.message_type == UCN_MSG_DATA_Q1);
     TEST_ASSERT(receive_b.payload_length == sizeof(payload));
     TEST_ASSERT(memcmp(receive_b.payload, payload, sizeof(payload)) == 0);
+    ucn_node_set_rx_handler(&node_a, hello_receive_callback, &receive_a);
+    TEST_ASSERT(ucn_node_send(&node_b, config_a.node_id, UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, payload,
+                              (uint16_t)sizeof(payload)) == UCN_OK);
+    TEST_ASSERT(receive_a.count == 1U);
+    TEST_ASSERT(receive_a.source == config_b.node_id);
+    TEST_ASSERT(receive_a.payload_length == sizeof(payload));
 
     TEST_ASSERT(ucn_node_init(&node_c, &config_c) == UCN_OK);
     TEST_ASSERT(ucn_node_set_join_policy(&node_c, UCN_JOIN_OPEN, NULL, NULL) == UCN_OK);
@@ -207,8 +215,10 @@ int test_hello_join(void)
                                  encoded_length) == UCN_ERR_ACCESS);
     TEST_ASSERT(ucn_node_neighbor_count(&node_c, UCN_NEIGHBOR_CANDIDATE) == 0U);
 
-    TEST_ASSERT(encode_hello(config_c.network_id, config_a.node_id, config_c.node_id,
-                             config_b.node_id, 2U, encoded, sizeof(encoded),
+    TEST_ASSERT(encode_hello(config_c.network_id, config_a.node_id,
+                             config_c.node_id, bad_hello_payload,
+                             (uint16_t)sizeof(bad_hello_payload), 2U,
+                             encoded, sizeof(encoded),
                              &encoded_length) == UCN_OK);
     TEST_ASSERT(ucn_node_receive(&node_c, &candidate_ingress, encoded,
                                  encoded_length) == UCN_ERR_MALFORMED);
@@ -216,13 +226,25 @@ int test_hello_join(void)
     TEST_ASSERT(ucn_node_neighbor_count(&node_c, UCN_NEIGHBOR_CANDIDATE) == 0U);
 
     TEST_ASSERT(encode_hello(config_c.network_id + 1U, config_a.node_id,
-                             config_c.node_id, 0U, 3U, encoded,
+                             config_c.node_id, hello_w3,
+                             (uint16_t)sizeof(hello_w3), 3U, encoded,
                              sizeof(encoded), &encoded_length) == UCN_OK);
     TEST_ASSERT(ucn_node_receive(&node_c, &candidate_ingress, encoded,
                                  encoded_length) == UCN_ERR_NETWORK);
 
-    TEST_ASSERT(encode_hello(config_c.network_id, config_a.node_id, config_c.node_id,
-                             0U, 4U, encoded, sizeof(encoded),
+    TEST_ASSERT(encode_hello(config_c.network_id, config_a.node_id,
+                             config_c.node_id, bad_hello_profile,
+                             (uint16_t)sizeof(bad_hello_profile), 4U,
+                             encoded, sizeof(encoded),
+                             &encoded_length) == UCN_OK);
+    TEST_ASSERT(ucn_node_receive(&node_c, &candidate_ingress, encoded,
+                                 encoded_length) == UCN_ERR_MALFORMED);
+    TEST_ASSERT(candidate_ingress.peer_node_id == 0U);
+
+    TEST_ASSERT(encode_hello(config_c.network_id, config_a.node_id,
+                             config_c.node_id, hello_w3,
+                             (uint16_t)sizeof(hello_w3), 5U,
+                             encoded, sizeof(encoded),
                              &encoded_length) == UCN_OK);
     TEST_ASSERT(ucn_node_receive(&node_c, &candidate_ingress, encoded,
                                  encoded_length) == UCN_OK);

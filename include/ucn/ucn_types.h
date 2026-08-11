@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ucn/ucn_config.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -8,9 +8,15 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 option(UCN_BUILD_TESTS "Build UCN unit and simulation tests" ON)
 option(UCN_BUILD_SCALE_SIM "Build the host-only UCN scale simulator" ON)
+option(UCN_BUILD_CONFIG_CONTRACT_TESTS
+    "Build standalone global/default/fallback configuration contract tests" OFF)
 set(UCN_PROFILE "FULL" CACHE STRING "UCN feature profile: NANO, LITE, or FULL")
 set_property(CACHE UCN_PROFILE PROPERTY STRINGS NANO LITE FULL)
 option(UCN_FEATURE_SERVICE "Build the orthogonal Service Router/Bridge" ON)
+set(UCN_USER_CONFIG_HEADER "" CACHE STRING
+    "Optional product configuration header name included before UCN defaults")
+set(UCN_USER_CONFIG_INCLUDE_DIR "" CACHE PATH
+    "Optional include directory containing UCN_USER_CONFIG_HEADER")
 
 string(TOUPPER "${UCN_PROFILE}" UCN_PROFILE_UPPER)
 if(UCN_PROFILE_UPPER STREQUAL "NANO")
@@ -66,11 +72,28 @@ target_include_directories(ucn_core
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+if(UCN_USER_CONFIG_INCLUDE_DIR)
+    if(NOT IS_DIRECTORY "${UCN_USER_CONFIG_INCLUDE_DIR}")
+        message(FATAL_ERROR
+            "UCN_USER_CONFIG_INCLUDE_DIR is not a directory: ${UCN_USER_CONFIG_INCLUDE_DIR}")
+    endif()
+    target_include_directories(ucn_core PUBLIC
+        ${UCN_USER_CONFIG_INCLUDE_DIR}
+    )
+endif()
+
 target_compile_definitions(ucn_core
     PUBLIC
         UCN_PROFILE=${UCN_PROFILE_VALUE}
         UCN_FEATURE_SERVICE=${UCN_FEATURE_SERVICE_VALUE}
 )
+
+if(UCN_USER_CONFIG_HEADER)
+    target_compile_definitions(ucn_core PUBLIC
+        "UCN_USER_CONFIG_HEADER=\"${UCN_USER_CONFIG_HEADER}\""
+    )
+    message(STATUS "UCN user config header: ${UCN_USER_CONFIG_HEADER}")
+endif()
 
 target_compile_options(ucn_core PRIVATE
     $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
@@ -154,15 +177,75 @@ if(UCN_BUILD_TESTS)
     )
 
     add_test(NAME ucn_tests COMMAND ucn_tests)
-    if(TARGET ucn_scale_sim)
-        add_test(NAME ucn_scale_smoke COMMAND ucn_scale_sim
-            --nodes 8
-            --ticks 20
-            --warmup-ticks 40
-            --drain-ticks 120
-            --traffic two-hop
-            --quiet
+
+    if(UCN_BUILD_CONFIG_CONTRACT_TESTS)
+        add_executable(ucn_config_defaults_test tests/test_config_contract.c)
+        target_include_directories(ucn_config_defaults_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
         )
+        target_compile_options(ucn_config_defaults_test PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+        )
+        add_test(NAME ucn_config_defaults_test COMMAND ucn_config_defaults_test)
+
+        add_executable(ucn_config_fallback_test tests/test_config_contract.c)
+        target_include_directories(ucn_config_fallback_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+        target_compile_definitions(ucn_config_fallback_test PRIVATE
+            UCN_CONFIG_NO_DEFAULTS=1
+        )
+        target_compile_options(ucn_config_fallback_test PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+        )
+        add_test(NAME ucn_config_fallback_test COMMAND ucn_config_fallback_test)
+
+        add_executable(ucn_config_override_test tests/test_config_contract.c)
+        target_include_directories(ucn_config_override_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/config
+        )
+        target_compile_definitions(ucn_config_override_test PRIVATE
+            UCN_USER_CONFIG_HEADER="ucn_test_user_config.h"
+            UCN_TEST_EXPECT_USER_OVERRIDES=1
+        )
+        target_compile_options(ucn_config_override_test PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+        )
+        add_test(NAME ucn_config_override_test COMMAND ucn_config_override_test)
+    endif()
+
+    if(TARGET ucn_scale_sim)
+        foreach(UCN_SCALE_WIRE_PROFILE w0 w1 w2 w3 mixed)
+            add_test(NAME ucn_scale_${UCN_SCALE_WIRE_PROFILE}_smoke
+                COMMAND ucn_scale_sim
+                    --nodes 8
+                    --ticks 20
+                    --warmup-ticks 40
+                    --drain-ticks 120
+                    --traffic two-hop
+                    --wire-profile ${UCN_SCALE_WIRE_PROFILE}
+                    --quiet
+            )
+        endforeach()
+        add_test(NAME ucn_scale_w0_address_limit_reject
+            COMMAND ucn_scale_sim
+                --nodes 255
+                --ticks 1
+                --wire-profile w0
+                --quiet
+        )
+        set_tests_properties(ucn_scale_w0_address_limit_reject
+            PROPERTIES WILL_FAIL TRUE)
+        add_test(NAME ucn_scale_mixed_address_limit_reject
+            COMMAND ucn_scale_sim
+                --nodes 255
+                --ticks 1
+                --wire-profile mixed
+                --quiet
+        )
+        set_tests_properties(ucn_scale_mixed_address_limit_reject
+            PROPERTIES WILL_FAIL TRUE)
         add_test(NAME ucn_scale_auto_smoke COMMAND ucn_scale_sim
             --nodes 8
             --ticks 20
@@ -170,6 +253,7 @@ if(UCN_BUILD_TESTS)
             --drain-ticks 120
             --traffic two-hop
             --wire-mode auto
+            --wire-profile w3
             --quiet
         )
     endif()

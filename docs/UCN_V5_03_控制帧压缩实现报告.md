@@ -5,7 +5,7 @@
 
 ## 结果
 
-HELLO Payload 从 4 B 改为 0 B，节点身份只使用已经受 CRC/Link 准入检查的 Frame Source。旧 4 B HELLO 不再被猜测兼容，必须按坏长度拒绝。
+V5-03 最初把 HELLO Payload 从重复 Node ID 的 4 B 改为 0 B，节点身份只使用已经受 CRC/Link 准入检查的 Frame Source。V5-10 混档极限测试发现 TX 档不能代表 RX Ceiling，因此当前 HELLO 使用独立 1 B `max_receive_wire_profile`；它不重复 Source，旧 0 B/4 B 格式和非法档位都按坏长度/坏能力拒绝。
 
 RREQ 删除重复 Origin，Origin 始终等于 Frame Source。v5 载荷为：
 
@@ -24,9 +24,9 @@ Request ID 和 Cost 按设计继续保持 32/16 bit，不因短地址牺牲并�
 
 ## 验证
 
-- 四档控制向量：HELLO 零载荷及 RREQ 9/10/11/12 B、目标地址与非零 Request ID。
+- 四档控制向量：HELLO 1 B RX Ceiling 及 RREQ 9/10/11/12 B、目标地址与非零 Request ID。
 - W0 A→B→C：路由发现、RREP、业务中继、RERR 与修复继续通过。
-- 负向：旧 4 B HELLO、旧 16 B W0 RREQ 均返回 `UCN_ERR_MALFORMED`。
+- 负向：0 B/旧 4 B/非法或小于发送档的 HELLO 能力、旧 16 B W0 RREQ 均返回 `UCN_ERR_MALFORMED`。
 - 控制预算：W3 新偏移下的 RREQ Replay、Better Cost、Token 耗尽/恢复与来源隔离继续通过。
 - Windows Debug：Full/Service ON 2/2、Lite/Service ON 2/2、Nano/Service OFF 1/1。
 

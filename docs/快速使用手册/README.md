@@ -58,7 +58,7 @@ include/ucn/
 
 ## 先完成这四项，再让业务入网
 
-1. 冻结 `network_id`、每块板稳定且不重复的 `node_id`、固定 TX/最大 RX Wire Profile、Endpoint ABI、QoS 和最大 Payload。
+1. 冻结 `network_id`、每块板稳定且不重复的 `node_id`、最低够用 TX/默认 W3 RX Wire Profile、Endpoint ABI、QoS 和最大 Payload；编译期容量统一通过 `ucn_config.h`/产品 `UCN_USER_CONFIG_HEADER` 管理。
 2. 实现至少一种 Link 的 `open/send/poll_rx/get_status/close/get_metrics`，并把它注册到 Node。
 3. 让完整帧遵守“驱动队列 → Protocol Task → `ucn_adapter_rx_pump()`”路径；验证队列满会丢弃并计数，不会卡死回调。
 4. 先以一个 Endpoint 的 Q1 数据做两节点收发，再接 Service Router、多 Bearer、Path、策略和安全 Provider。

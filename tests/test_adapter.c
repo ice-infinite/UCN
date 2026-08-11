@@ -72,11 +72,12 @@ static ucn_result_t adapter_encode_frame(uint8_t message_type,
                                          ucn_network_id_t network_id,
                                          ucn_node_id_t source,
                                          ucn_node_id_t destination,
-                                         ucn_node_id_t hello_node_id,
+                                         ucn_wire_profile_t hello_rx_profile,
                                          ucn_sequence_t sequence,
                                          uint8_t *encoded,
                                          size_t *encoded_length)
 {
+    uint8_t hello_payload;
     ucn_frame_t frame;
 
     (void)memset(&frame, 0, sizeof(frame));
@@ -88,7 +89,11 @@ static ucn_result_t adapter_encode_frame(uint8_t message_type,
     frame.source = source;
     frame.destination = destination;
     frame.sequence = sequence;
-    (void)hello_node_id;
+    if (message_type == UCN_MSG_HELLO) {
+        hello_payload = hello_rx_profile;
+        frame.payload = &hello_payload;
+        frame.payload_length = 1U;
+    }
     return ucn_frame_encode(&frame, encoded, UCN_MAX_FRAME_BYTES, encoded_length);
 }
 
@@ -167,7 +172,8 @@ int test_adapter(void)
     TEST_ASSERT(ucn_adapter_rx_get_stats(&queue)->rejected_by_core == 1U);
 
     TEST_ASSERT(adapter_encode_frame(UCN_MSG_HELLO, config.network_id,
-                                     UINT32_C(1), config.node_id, UINT32_C(1),
+                                     UINT32_C(1), config.node_id,
+                                     UCN_WIRE_PROFILE_W3_BACKBONE,
                                      2U, encoded, &encoded_length) == UCN_OK);
     TEST_ASSERT(ucn_adapter_rx_enqueue(&queue, &candidate_link, encoded,
                                        encoded_length) == UCN_OK);

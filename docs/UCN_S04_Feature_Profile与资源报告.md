@@ -76,7 +76,7 @@ GCC 严格构建已验证 33/50/64 B 的 `ucn_core` 分别可编译；32/49/63 B
 - Lite：直接运行 AODV/RERR、Neighbor/HELLO/Heartbeat、多 Bearer、安全 Provider、Control Budget、Stress；Candidate/Path/Policy/Diagnostic 返回 `UCN_ERR_CONFIG`。
 - API 完整性：头文件声明的 56 个 `ucn_node_*`/`ucn_path_*`/`ucn_policy_*` 符号在 Nano、Lite、Full 静态库中均存在；低档 Profile 不会在链接阶段才暴露缺失能力。
 - Full：现有完整单元、虚拟拓扑、动态压力和 Profile 测试全部通过。
-- v5：四档固定域、零载荷 HELLO、压缩 RREQ、AAD Profile 绑定、W0 透明密文中继和固定/自动选档对照均通过。
+- v5：四档固定域、1 B RX Ceiling HELLO、压缩 RREQ、AAD Profile 绑定、W0 透明密文中继和固定/自动选档对照均通过。
 - Service：Nano/OFF 证明源码可移除；Lite/ON 证明正交组合可初始化 Router；Full/OFF 与 Full/ON 均可构建测试。
 - 编译器：MSVC Debug 与 GCC 14.2 Release 均验证；GCC 启用 `-Wall -Wextra -Wpedantic -Werror`。
 - CI：工作流已加入 Nano/OFF、Lite/ON、Full/ON 矩阵；只有远端 Actions 实际运行成功后，才能写成远端 CI 已通过。

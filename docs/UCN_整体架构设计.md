@@ -1,6 +1,6 @@
 # UCN 整体架构设计：MCU 自组网优先
 
-> 状态：**UCN v5 V5-01～V5-07 软件闭环（2026-08-11）**；W0～W3 Codec、Node 固定域、控制帧压缩、安全绑定、路由感知自动选档和 Host 发布门禁已完成。v4 已独立冻结；生产密码库、目标板资源和多介质多跳实机仍待验证。
+> 状态：**UCN v5 V5-01～V5-10 软件闭环（2026-08-11）**；W0～W3 Codec、Node 固定域、全 Build Profile 四档接收、控制帧压缩、安全绑定、路由感知自动选档、全局公共配置、单档/混档极限模拟和 Host 软件门禁已完成。v4 已独立冻结；生产密码库、目标板资源和多介质多跳实机仍待验证。
 > 日期：2026-08-11
 > 目标：以 MCU 为主体完成安全自组网；Linux 仅作为兼容接入端；协议小而可裁剪；资源占用由目标硬件配置决定。
 
@@ -10,7 +10,7 @@ UCN 是一个可移植的 C 通信协议栈。它的最小运行形态不是 Lin
 
 Linux、ROS2、PX4/MAVLink、地面站与 AI 系统可以通过 `UCN-Host` 接入同一网络，但它们不拥有路由中心、入网中心或控制中心的地位，更不替代 Linux 自己已有的网络体系。
 
-当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Node 固定发送档/最大接收档、零载荷 HELLO、压缩 RREQ、Profile 绑定 AAD、透明密文中继、显式开启的路由感知最小档选择、Route Epoch/grace、受限 AODV-Lite、Candidate Probe/Activate、Endpoint Q1 首包自动寻路、固定邻居表、通用 Link Cost、Path ID 逐跳表、固定/主备与 Q1 流亲和策略，以及按需诊断**。默认仍是固定 W3，保证未显式配置的产品行为保守且可预测；自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、真实无线多板和小 MTU Carrier 仍是后续任务，不能由软件测试替代。
+当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 固定发送档/最大接收档、1 B RX Ceiling HELLO、压缩 RREQ、Profile 绑定 AAD、透明密文中继、显式开启的路由感知最小档选择、Route Epoch/grace、受限 AODV-Lite、Candidate Probe/Activate、Endpoint Q1 首包自动寻路、固定邻居表、通用 Link Cost、Path ID 逐跳表、固定/主备与 Q1 流亲和策略，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、真实无线多板和小 MTU Carrier 仍是后续任务，不能由软件测试替代。
 
 这份架构只围绕四项约束设计：
 
@@ -73,7 +73,7 @@ flowchart TB
 
 | 模块 | 当前已实现 | 明确尚未实现 |
 | --- | --- | --- |
-| Packet | v5 W0～W3 基础头 17/21/26/30 B；Route/Path Header 由 Profile+Flags 唯一推导；固定域和最大接收档可配置，自动模式按字段、路由 Hop、Path、MTU、对端上限及 Tag 选择最小可用档。长度/CRC/Network/Hop/Flag/字段范围失败关闭并拒绝 v4。 | 跨 Link 分片仍未实现。 |
+| Packet | v5 W0～W3 基础头 17/21/26/30 B；Nano/Lite/Full 都解析四档。固定域和最大接收档可配置，推荐最低够用 TX/W3 RX；自动模式按字段、路由 Hop、Path、MTU、对端上限及 Tag 选择最小可用档。长度/CRC/Network/Hop/Flag/字段范围失败关闭并拒绝 v4。 | 跨 Link 分片仍未实现。 |
 | Identity & Join | 最小 `HELLO`、Candidate/Admitted/Suspect/Removed/Rejected/Expired 邻居表、`Manual`/`Open`/`Provider` 准入。 | `JOIN_REQ`/挑战/接受状态机、出厂身份格式。 |
 | Session & Replay | 可注入 Provider 的会话 ID、发送序号持久化、TX/RX 授权、固定 `seal/open`、30 B 不可变 AAD（Path 帧含 Path ID）、明文/受保护策略和入站去重缓存。 | 生产 AEAD、密钥轮换、完整重放窗口与产品 ACL 表。 |
 | Route / Forwarding | 固定 Active/Candidate 表、受限 AODV-Lite、RREQ/RREP/RERR、`PATH_PROBE/ACK`、携带 Candidate ID + Epoch 的 `PATH_ACTIVATE/ACK`、TTL、断链清表、保守 Link Cost；业务按 `(destination, route_epoch)` 区分 Current/Previous，默认 1 s grace。 | 自动业务重发、全网拓扑。 |

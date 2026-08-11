@@ -1,6 +1,6 @@
 # UCN 使用与调用手册
 
-> 适用版本：UCN v5 V5-07 当前 Core。默认固定 W3；产品可在注册 Link/安装 Security 前设置固定域，或显式开启路由感知自动选档。产品工程的 Adapter、密钥、板级引脚和业务 Endpoint 仍需自行实现。
+> 适用版本：UCN v5 V5-09 当前 Core。Nano/Lite/Full 都解析 W0～W3；默认固定 W3，产品可在注册 Link/安装 Security 前使用“最低够用 TX/W3 RX”，或显式开启路由感知自动选档。产品工程的 Adapter、密钥、板级引脚和业务 Endpoint 仍需自行实现。
 > 目标：让业务代码只关心“发给哪个 Node 的哪个 Endpoint、什么 QoS”，而不关心数据当前经过 Wi-Fi、UART、CAN、BLE 或其他 Bearer。
 
 ## 1. 先理解 UCN 在系统中的位置
@@ -34,7 +34,8 @@ Linux、ROS 2、地面站可以通过一个 Link/Adapter 作为普通 Node 接�
 | --- | --- | --- |
 | `network_id` | 哪些设备属于同一 UCN 网络 | 同一网络必须一致；不同网络的帧会被拒绝。 |
 | `node_id` | 每块 MCU 的稳定逻辑身份 | 可由 MAC 派生作默认值，但产品建议支持 Flash/编译期手动指定，网络内不得重复。 |
-| Wire Profile | 固定发送档、最大接收档、是否自动最小档 | 默认固定 W3；`ucn_node_set_wire_profiles()` 必须在 Link/Security 前调用，自动模式需显式开启。 |
+| Wire Profile | 固定发送档、最大接收档、是否自动最小档 | 推荐最低够用 TX/W3 RX；`ucn_node_set_wire_profiles()` 必须在 Link/Security 前调用。极小 MTU/安全域可主动收窄 RX，自动模式需显式开启。 |
+| 全局编译配置 | Profile、MTU、表深、队列、超时和预算 | 默认集中在 `ucn_config.h`；产品用 `UCN_USER_CONFIG_HEADER` 覆盖，所有相关 Translation Unit 必须一致。 |
 | Endpoint ABI | 数据代表什么、长度/字节序/单位/QoS/消费者 | 静态冻结；语义变化新分配 Endpoint，不复用旧 ID。 |
 | Service Binding | 哪个本机任务拥有哪个 Endpoint | R1 是一 Endpoint 一消费者，固定表、无动态注册。 |
 | Link/Bearer | UART、ESP-NOW、CAN 等如何发收、MTU、对端身份 | 一个 Neighbor 可有多个 Bearer；业务不直接选择物理介质。 |
@@ -46,7 +47,8 @@ Linux、ROS 2、地面站可以通过一个 Link/Adapter 作为普通 Node 接�
 
 | 模块/头文件 | 解决什么 | 调用者 | 绝不能做什么 |
 | --- | --- | --- | --- |
-| `ucn.h`、`ucn_types.h` | 版本、配置、错误码、帧和 QoS 基础类型 | 启动初始化、所有层 | 直接伪造线帧。 |
+| `ucn_config.h` | 全部公开编译期默认值与产品覆盖入口 | 构建系统、产品配置头 | 写入 Node ID、密钥、引脚等逐设备运行配置。 |
+| `ucn.h`、`ucn_types.h` | 版本、运行配置、错误码、帧和 QoS 基础类型 | 启动初始化、所有层 | 直接伪造线帧。 |
 | `ucn_frame.h` | 帧编码、解码、CRC 与 E2E AAD 辅助 | Core 单测、Adapter/安全 Provider 的低层实现 | 业务 Task 手工编码业务帧。 |
 | `ucn_endpoint.h` | 静态 Endpoint/控制消息编号合法性判断 | 产品 ABI 定义、配置检查 | 把动态 Endpoint 当作当前 R1 产品 ABI。 |
 | `ucn_node.h` | 邻居、路由、Endpoint 发送/接收、控制面、调度 | **唯一 Protocol Task** | 被多个业务 Task 或 ISR 直接调用。 |

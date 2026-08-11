@@ -7,14 +7,15 @@ Linux、ROS 2、MAVLink 或地面站可以作为普通 Host/Adapter 接入，但
 ## 当前能力
 
 - 固定长度上限的帧、固定表和静态内存模型，不依赖动态内存。
-- v5 线协议 Codec：官方 W0/W1/W2/W3 基础头为 17/21/26/30 B；Node 可固定本地域与接收上限，也可显式开启路由感知的最小档自动选择。地址、Hop、Path、MTU、对端上限及可选 16 B Tag 任一不满足时失败关闭，不静默截断。
-- 零 Payload 的一跳 HELLO/准入、Heartbeat、压缩 RREQ、受限 AODV-Lite 路由发现、RERR 与路由/邻居老化。
+- v5 线协议 Codec：官方 W0/W1/W2/W3 基础头为 17/21/26/30 B；Nano/Lite/Full 共用四档 Decoder，推荐发送采用最低够用档、接收默认开放至 W3。Node 也可按 MTU/安全策略收窄接收上限，或显式开启路由感知的最小档自动选择；任何字段不能表达时失败关闭，不静默截断。
+- 全局公共编译配置位于 `include/ucn/ucn_config.h`；产品可用独立 `UCN_USER_CONFIG_HEADER` 只覆盖需要调整的项，未配置项继续使用统一默认和原头文件回退。
+- 1 B 最大接收档声明的一跳 HELLO/准入、Heartbeat、压缩 RREQ、受限 AODV-Lite 路由发现、RERR 与路由/邻居老化；发送档与接收上限相互独立。
 - Q0/Q1 有界发送调度、静态 Endpoint 业务分发和跨介质通用 `route_cost`。
 - Adapter 将物理地址和驱动回调转换为有界 RX 队列；协议任务中再执行路由和应用回调。
 - 按需路径追踪与低频节点快照诊断。节点快照默认拒绝远端请求，产品必须显式配置管理节点授权。
 - 编译期 Nano/Lite/Full Feature Profile；Service Router/Bridge 可独立开启或移除。
 
-仓库同时发布 Core 源码、单元/虚拟拓扑测试、CMake 配置，以及 `docs/` 下的架构、协议设计、任务表和项目操作记录。开始接入时先阅读 [UCN 网络容量与关键参数总览](docs/UCN_网络容量与关键参数总览.md)，再按运行环境阅读 [UCN 快速使用手册](docs/快速使用手册/README.md) 和 [UCN 使用与调用手册](docs/UCN_使用与调用手册.md)；Adapter 实现者还必须遵守 [Link Metrics 与 Cost 契约](docs/UCN_Link_Metrics与Cost契约.md)。需要追踪实际函数路径时进入 [UCN 调用关系树](docs/calltree/README.md)。v5 的最终软件证据、资源与未完成硬件边界集中在 [V5-07 发布门禁报告](docs/UCN_V5_07_发布门禁与软件验证报告.md)，设计依据见 [Adaptive Wire Profile 方案](docs/UCN_v5_Adaptive_Wire_Profile设计方案.md)，继续开发时以 [任务表](docs/00-任务表.md) 为准。
+仓库同时发布 Core 源码、单元/虚拟拓扑测试、CMake 配置，以及 `docs/` 下的架构、协议设计、任务表和项目操作记录。开始接入时先阅读 [UCN 网络容量与关键参数总览](docs/UCN_网络容量与关键参数总览.md)，再按运行环境阅读 [UCN 快速使用手册](docs/快速使用手册/README.md) 和 [UCN 使用与调用手册](docs/UCN_使用与调用手册.md)；编译参数集中入口见 [UCN 全局公共配置说明](docs/UCN_全局公共配置说明.md)，跨档接收证据见 [V5-08 全档接收互操作报告](docs/UCN_V5_08_全档接收互操作报告.md)，Wire Profile 单档/混档极限结果见 [V5-10 极限模拟报告](docs/UCN_V5_10_单档与混档极限模拟报告.md)。Adapter 实现者还必须遵守 [Link Metrics 与 Cost 契约](docs/UCN_Link_Metrics与Cost契约.md)。需要追踪实际函数路径时进入 [UCN 调用关系树](docs/calltree/README.md)。继续开发时以 [任务表](docs/00-任务表.md) 为准。
 
 ## 目录
 
@@ -43,7 +44,8 @@ ctest --test-dir build --output-on-failure
 ```powershell
 cmake --build build --target ucn_scale_sim --parallel
 .\tools\run_ucn_scale_ladder.ps1 -BuildDir build -Traffic local
-.\build\ucn_scale_sim.exe --nodes 256 --traffic local --wire-mode auto --quiet
+.\tools\run_ucn_scale_ladder.ps1 -BuildDir build -Traffic local -WireProfiles w0,w1,w2,w3,mixed
+.\build\ucn_scale_sim.exe --nodes 254 --traffic local --wire-profile mixed --wire-mode fixed --quiet
 ```
 
 选择裁剪档位：

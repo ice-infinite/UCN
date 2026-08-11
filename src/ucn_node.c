@@ -12,7 +12,7 @@
 #define UCN_ROUTE_REPLY_PAYLOAD_BYTES ((size_t)18U)
 #define UCN_ROUTE_ERROR_PAYLOAD_BYTES ((size_t)4U)
 #define UCN_PATH_ROUTE_ERROR_PAYLOAD_BYTES ((size_t)16U)
-#define UCN_HELLO_PAYLOAD_BYTES ((size_t)0U)
+#define UCN_HELLO_PAYLOAD_BYTES ((size_t)1U)
 #define UCN_HEARTBEAT_PAYLOAD_BYTES ((size_t)8U)
 #define UCN_PATH_PROBE_PAYLOAD_BYTES ((size_t)12U)
 #define UCN_PATH_ACTIVATE_PAYLOAD_BYTES ((size_t)6U)
@@ -4673,10 +4673,16 @@ static ucn_result_t handle_hello(ucn_node_t *node,
                                  const ucn_frame_t *frame)
 {
     ucn_node_id_t peer_node_id;
+    ucn_wire_profile_t peer_receive_profile;
 
     if (frame->payload_length != UCN_HELLO_PAYLOAD_BYTES ||
         (frame->destination != node->config.node_id &&
          frame->destination != UCN_NODE_BROADCAST)) {
+        return UCN_ERR_MALFORMED;
+    }
+    peer_receive_profile = frame->payload[0];
+    if (ucn_wire_profile_get_descriptor(peer_receive_profile) == NULL ||
+        peer_receive_profile < frame->wire_profile) {
         return UCN_ERR_MALFORMED;
     }
 
@@ -4698,7 +4704,7 @@ static ucn_result_t handle_hello(ucn_node_t *node,
         }
     }
     return ucn_node_set_link_wire_profile_limit(node, ingress_link,
-                                                 frame->wire_profile);
+                                                 peer_receive_profile);
 }
 
 ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config)
@@ -5157,6 +5163,7 @@ ucn_result_t ucn_node_probe_neighbor(ucn_node_t *node,
                                      ucn_link_t *link,
                                      uint32_t now_ms)
 {
+    uint8_t payload;
     ucn_result_t result;
 
     result = ucn_node_observe_neighbor(node, link, now_ms);
@@ -5165,22 +5172,26 @@ ucn_result_t ucn_node_probe_neighbor(ucn_node_t *node,
     }
 
     node->now_ms = now_ms;
+    payload = node->max_receive_wire_profile;
     return send_control_on_link(node, link, link->peer_node_id, UCN_MSG_HELLO,
-                                NULL, 0U);
+                                &payload, (uint16_t)UCN_HELLO_PAYLOAD_BYTES);
 }
 
 ucn_result_t ucn_node_broadcast_hello(ucn_node_t *node,
                                       ucn_link_t *link,
                                       uint32_t now_ms)
 {
+    uint8_t payload;
+
     if (node == NULL || link == NULL || link->ops == NULL ||
         link->ops->send == NULL || link->ops->get_status == NULL) {
         return UCN_ERR_ARGUMENT;
     }
 
     node->now_ms = now_ms;
+    payload = node->max_receive_wire_profile;
     return send_control_on_link(node, link, UCN_NODE_BROADCAST, UCN_MSG_HELLO,
-                                NULL, 0U);
+                                &payload, (uint16_t)UCN_HELLO_PAYLOAD_BYTES);
 }
 
 ucn_result_t ucn_node_admit_neighbor(ucn_node_t *node,

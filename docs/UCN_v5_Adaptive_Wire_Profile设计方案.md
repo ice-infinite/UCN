@@ -14,7 +14,7 @@ v5 不再让所有帧固定携带 32 B 基础头，而是由协议官方定义�
 
 1. MCU 小包中 32 B 固定头占比过高；
 2. 小型局部节点不应天然拥有骨干级广播、Hop 和控制预算；
-3. Linux/高性能节点应能解析所有官方档位，但不应迫使每个本地小包使用最大头部。
+3. 所有 Node Build Profile 都应解析所有官方档位，但不应迫使低资源节点的本地小包使用最大头部。
 
 ## 2. 四种不同的“等级”必须分开
 
@@ -121,7 +121,7 @@ Session Slot 同样延期。若未来用短 Slot 映射完整 Session/Key Epoch�
 
 ## 8. HELLO 与 RREQ
 
-v4 HELLO 的 4 B Payload 只重复 `frame.source`。v5 删除该重复字段，HELLO 允许零 Payload，仍检查 Source、Ingress Link、Network、Wire Profile 和准入策略。
+v4 HELLO 的 4 B Payload 只重复 `frame.source`。v5 删除该重复字段；V5-10 为了让固定低 TX/W3 RX 节点能被高档对端正确识别，当前 HELLO 改用 1 B Payload 发布 `max_receive_wire_profile`。帧 Source 仍只来自 Header；接收端同时检查 Source、Ingress Link、Network、Wire Profile、RX Ceiling 声明和准入策略。旧 0 B/4 B Payload 与非法/矛盾 Ceiling 均失败关闭。
 
 v4 RREQ Payload 重复 Origin。v5 控制载荷压缩阶段删除该字段，Origin 使用 `frame.source`。目标格式为：
 
@@ -148,6 +148,10 @@ Wire Profile 是上限，不强迫每个 W1 帧都跑 16 Hop。源端和每个�
 - 产品配置允许发送的最大 Wire Profile；
 - 已认证 Origin 的授权上限；
 - 直接 Ingress Peer 允许转发的上限。
+
+V5-08 将第一项进一步冻结为统一实现规则：Nano、Lite、Full 都编译同一个 W0～W3 Frame Decoder；Build Profile 只裁剪路由、Path、Policy、诊断等状态机，不裁剪官方基础帧格式。产品推荐使用“最低够用 TX/W3 RX”，让 W0/W1 小节点能够接收 W2/W3 节点下发的普通静态 Endpoint 指令。最大接收档仍是显式安全/资源上限：小 MTU、严格安全域或极小产品可以主动收窄，超过上限的帧在状态变更前返回 `UCN_ERR_UNSUPPORTED`。
+
+统一解码不等于统一功能。Nano 可以解析 W3 Endpoint 数据，但对未编译的动态 Mesh、Path、Policy 或诊断控制消息继续失败关闭；Network、地址、Hop、MTU、Endpoint ABI 和 Security Provider 也必须同时满足。
 
 只保存 `neighbor.max_wire_profile` 不能证明多跳帧的远端 Source 身份。受保护业务可由 E2E Provider 约束 Origin；RREQ 等控制帧还需要 S02 的逐跳/邻居控制面认证，当前仅有 CRC 时不能把 Profile Ceiling 宣称为抗伪造安全机制。
 
@@ -193,7 +197,7 @@ V5-04 已用 W0 A→B→C 专项测试冻结上述边界：A/C 使用测试 E2E 
 
 中继不得升级/降级一个已受 E2E 保护的帧。只有安全终止 Gateway 或未来 Outer Envelope Gateway 可以重新编码。
 
-V5-05 已实现可选 Route-aware 自动选级，默认仍关闭。固定 TX Profile 同时是产品上限和 HELLO/RREQ 的域能力证明；HELLO 将固定档记录为每条 Link 的 Peer Ceiling，未知路由用固定档 RREQ 穿越成功后，后续更小档位满足单调接收条件。自动业务帧按地址/Session/Path/Route Epoch、实际 Route Hop、MTU 和可选 Tag 选择最小档；中继只转发已经明确的原档位，不升降已受保护帧。固定模式、控制面域探测和产品策略覆盖保持不变。
+V5-05 已实现可选 Route-aware 自动选级，默认仍关闭。固定 TX Profile 是本机控制帧的域编码上限；V5-10 将 Peer RX Ceiling 从 TX 档中分离，HELLO 以 1 B Payload 明确发布 `max_receive_wire_profile`。未知路由仍用固定档 RREQ，自动业务帧按地址/Session/Path/Route Epoch、实际 Route Hop、MTU、Peer RX Ceiling 和可选 Tag 选择最小档；中继只转发已经明确的原档位，不升降已受保护帧。固定模式、控制面域探测和产品策略覆盖保持不变。
 
 ## 12. v4/v5 迁移
 

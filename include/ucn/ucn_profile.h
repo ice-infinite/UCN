@@ -8,9 +8,17 @@
  * layout.  CMake exports both definitions from the ucn_core target; products
  * that build the C sources directly must provide them globally.
  */
+#include "ucn/ucn_config.h"
+
+#ifndef UCN_PROFILE_NANO
 #define UCN_PROFILE_NANO 1
+#endif
+#ifndef UCN_PROFILE_LITE
 #define UCN_PROFILE_LITE 2
+#endif
+#ifndef UCN_PROFILE_FULL
 #define UCN_PROFILE_FULL 3
+#endif
 
 #ifndef UCN_PROFILE
 #define UCN_PROFILE UCN_PROFILE_FULL

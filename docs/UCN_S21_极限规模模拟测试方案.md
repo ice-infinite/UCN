@@ -11,6 +11,8 @@ S21 用电脑直接实例化大量真实 `ucn_node_t`，回答四个不同问题
 
 本测试不以一个孤立的“最大节点数”代替产品边界。最终结论必须写成“Profile + 拓扑 + 活跃目的地 + 负载 + 故障条件 + 验收门槛”下的最大稳定规模。
 
+V5-10 在本方案上新增 `--wire-profile w0|w1|w2|w3|mixed`。单档网络的每个节点固定使用对应发送档并开放至 W3 接收；混档网络按 W0～W3 分配节点。由于 W0 扁平域只能表达 254 个单播 Node ID，W0 和包含 W0 的 mixed 组合超过 254 Node 时必须拒绝；更大网络需要 Domain/Gateway/Alias，而不是截断地址。
+
 ## 2. 证据边界
 
 - 每个模拟节点运行仓库当前真实 Core、Node、AODV-Lite、QoS、Neighbor 和统计代码。
@@ -75,6 +77,7 @@ S21 用电脑直接实例化大量真实 `ucn_node_t`，回答四个不同问题
 | 分类 | 字段 |
 | --- | --- |
 | 拓扑/表 | Node ID、Degree、Admitted、Route 当前/峰值、Discovery/Candidate/Path/Flow 峰值。 |
+| Wire档 | 每节点固定 TX Wire Profile。 |
 | 队列 | Q0/Q1/Pending Q1 峰值。 |
 | 业务 | Generated、Accepted、Delivered、交付率、Payload Bytes。 |
 | 线效率 | Origin Wire Bytes、Wire Efficiency、TX/RX/Forward/Control/Business 帧。 |
@@ -82,7 +85,7 @@ S21 用电脑直接实例化大量真实 `ucn_node_t`，回答四个不同问题
 | 错误 | No Space、No Route、Link Down、其他拒绝、Core 控制预算丢弃。 |
 | 资源 | Host ABI 的 `sizeof(ucn_node_t)`、该 Node 的 Host `step+receive` 工作时间。 |
 
-`${prefix}_summary.csv` 记录全网总量、Jain 公平性、事件堆峰值、Harness 背压、重复业务、Route Loop、Node 固定存储总量、Host 分配量和墙钟耗时。
+`${prefix}_profiles.csv` 按 W0～W3 聚合节点数、收发/交付、线效率、时延、错误、表/队列峰值与 Host 工作量。`${prefix}_summary.csv` 记录 Wire 布局和各档节点数，以及全网总量、Jain 公平性、事件堆峰值、Harness 背压、重复业务、Route Loop、Node 固定存储总量、Host 分配量和墙钟耗时。
 
 ## 7. 判定规则
 
@@ -111,6 +114,16 @@ cmake --build build_scale --target ucn_scale_sim --parallel
   --messages-per-node 1 `
   --report-prefix docs\results\S21\full_256_two_hop
 ```
+
+Wire Profile 单档与混档极限矩阵可用：
+
+```powershell
+.\tools\run_ucn_scale_ladder.ps1 `
+  -BuildDir build_scale -BuildProfile FULL -Traffic local `
+  -WireProfiles w0,w1,w2,w3,mixed -Nodes 8,16,64,254,1024,4096
+```
+
+脚本会跳过 W0/mixed 超过 254 Node 的无效组合；V5-10 实际结果见 [单档与混档极限模拟报告](UCN_V5_10_单档与混档极限模拟报告.md)。
 
 故障组合：
 

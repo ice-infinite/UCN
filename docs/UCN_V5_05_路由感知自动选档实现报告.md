@@ -20,7 +20,7 @@ ucn_node_set_wire_profile_auto(&node, true);
 - 直连业务使用 1 Hop。
 - AODV Active Route 使用已学习的 `hop_count`；RREQ 曾用固定 TX 档穿越整条路径，因此该路径接收更小档位是单调安全的。
 - 固定 Path 当前没有端到端 Hop 元数据，继续使用产品 `default_hop_limit`，选择更保守。
-- HELLO 把对端固定 TX 档写入每个 `ucn_link_t.peer_wire_profile`；静态 Link 也可通过 `ucn_node_set_link_wire_profile_limit()` 显式设置或清除。每个 Bearer 独立保存 Ceiling。
+- HELLO 的线上档仍是对端固定 TX 档，但 1 B Payload 独立发布对端最大 RX 档；`ucn_link_t.peer_wire_profile` 只记录该 RX Ceiling。静态 Link 也可通过 `ucn_node_set_link_wire_profile_limit()` 显式设置或清除，每个 Bearer 独立保存。
 - 已解码/转发帧已有明确 Profile，Core 保持原值；若下一 Bearer 的已知 Ceiling 更小则失败，不升级、降级或截断。
 
 ## 软件验证
@@ -28,7 +28,7 @@ ucn_node_set_wire_profile_auto(&node, true);
 - Selector：W0/W1/W2/W3 地址边界、Hop、Path ID、配置上限、MTU 和 Protected Tag。
 - Node：固定模式不因对端较小档位静默改变；自动模式小地址直连选 W0，目标 300 选 W1，对端只支持 W0 时显式失败。
 - 路由：先以 W3 RREQ 建立 A→B→C 路径，再开启 A 自动模式；2-Hop 业务在 A/B 两段均保持 W0。
-- HELLO：双向入网后两条 Link 均记录对端 W3 固定档。
+- HELLO：W0 TX/W3 RX 与 W3 TX/W3 RX 双向入网后，两条 Link 均记录对端 W3 RX Ceiling，W3→W0 节点业务不再被错误拦截。
 - Full/Lite/Nano Debug 分别通过 2/2、2/2、1/1。
 
 当前结果证明协议选择逻辑和固定资源边界，不等于 Wi-Fi/CAN/UART 实际吞吐提升；规模效率、目标 ELF 和多板切换仍需 V5-07/S06。

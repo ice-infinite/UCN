@@ -77,9 +77,9 @@ struct ucn_link {
     uint8_t link_id;
     size_t mtu;
     ucn_node_id_t peer_node_id;
-    /* Learned from an admitted v5 HELLO or set explicitly after registration.
-     * UNSPECIFIED means a statically provisioned fixed domain with no learned
-     * per-peer ceiling. */
+    /* Peer maximum RX profile advertised by an admitted v5 HELLO, or set
+     * explicitly after registration.  It is not the peer's TX profile.
+     * UNSPECIFIED means a statically provisioned Link with no learned ceiling. */
     ucn_wire_profile_t peer_wire_profile;
 };
 

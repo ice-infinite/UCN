@@ -51,6 +51,16 @@ typedef enum scale_wire_mode {
     SCALE_WIRE_AUTO = 1
 } scale_wire_mode_t;
 
+typedef enum scale_wire_layout {
+    SCALE_WIRE_LAYOUT_W0 = 0,
+    SCALE_WIRE_LAYOUT_W1 = 1,
+    SCALE_WIRE_LAYOUT_W2 = 2,
+    SCALE_WIRE_LAYOUT_W3 = 3,
+    SCALE_WIRE_LAYOUT_MIXED = 4
+} scale_wire_layout_t;
+
+#define SCALE_WIRE_PROFILE_COUNT ((size_t)4U)
+
 typedef struct scale_options {
     size_t node_count;
     uint32_t ticks;
@@ -71,6 +81,7 @@ typedef struct scale_options {
     scale_topology_t topology;
     scale_traffic_t traffic;
     scale_wire_mode_t wire_mode;
+    scale_wire_layout_t wire_layout;
     const char *report_prefix;
     bool quiet;
 } scale_options_t;
@@ -154,6 +165,7 @@ struct scale_network {
     scale_link_context_t *link_contexts;
     scale_rx_context_t *rx_contexts;
     scale_node_metrics_t *metrics;
+    ucn_wire_profile_t *wire_profiles;
     uint32_t *latency_histograms;
     uint8_t *degrees;
     size_t *fixed_destinations;
@@ -176,6 +188,7 @@ struct scale_network {
     uint64_t receive_rejections;
     uint64_t link_flaps;
     uint64_t allocated_bytes;
+    size_t wire_profile_counts[SCALE_WIRE_PROFILE_COUNT];
     uint64_t wall_started_ns;
     uint64_t wall_elapsed_ns;
     bool measuring;
@@ -261,6 +274,77 @@ static const char *scale_traffic_name(scale_traffic_t traffic)
     default:
         return "unknown";
     }
+}
+
+static const char *scale_wire_profile_name(ucn_wire_profile_t profile)
+{
+    switch (profile) {
+    case UCN_WIRE_PROFILE_W0_LOCAL:
+        return "W0";
+    case UCN_WIRE_PROFILE_W1_EDGE:
+        return "W1";
+    case UCN_WIRE_PROFILE_W2_MESH:
+        return "W2";
+    case UCN_WIRE_PROFILE_W3_BACKBONE:
+        return "W3";
+    default:
+        return "INVALID";
+    }
+}
+
+static const char *scale_wire_layout_name(scale_wire_layout_t layout)
+{
+    switch (layout) {
+    case SCALE_WIRE_LAYOUT_W0:
+        return "w0";
+    case SCALE_WIRE_LAYOUT_W1:
+        return "w1";
+    case SCALE_WIRE_LAYOUT_W2:
+        return "w2";
+    case SCALE_WIRE_LAYOUT_W3:
+        return "w3";
+    case SCALE_WIRE_LAYOUT_MIXED:
+        return "mixed";
+    default:
+        return "invalid";
+    }
+}
+
+static const char *scale_build_profile_name(void)
+{
+#if UCN_PROFILE == UCN_PROFILE_FULL
+    return "FULL";
+#elif UCN_PROFILE == UCN_PROFILE_LITE
+    return "LITE";
+#else
+    return "NANO";
+#endif
+}
+
+static ucn_wire_profile_t scale_wire_profile_for_layout(
+    scale_wire_layout_t layout,
+    size_t node_index)
+{
+    if (layout != SCALE_WIRE_LAYOUT_MIXED) {
+        return (ucn_wire_profile_t)(UCN_WIRE_PROFILE_W0_LOCAL +
+                                    (ucn_wire_profile_t)layout);
+    }
+    if (node_index < (size_t)UINT8_C(254) && node_index % 4U == 0U) {
+        return UCN_WIRE_PROFILE_W0_LOCAL;
+    }
+    switch (node_index % 3U) {
+    case 0U:
+        return UCN_WIRE_PROFILE_W1_EDGE;
+    case 1U:
+        return UCN_WIRE_PROFILE_W2_MESH;
+    default:
+        return UCN_WIRE_PROFILE_W3_BACKBONE;
+    }
+}
+
+static size_t scale_wire_profile_index(ucn_wire_profile_t profile)
+{
+    return (size_t)(profile - UCN_WIRE_PROFILE_W0_LOCAL);
 }
 
 static bool scale_event_precedes(const scale_event_t *first,
@@ -645,6 +729,44 @@ static bool scale_build_topology(scale_network_t *network)
     return true;
 }
 
+static size_t scale_addressable_node_count(const scale_network_t *network,
+                                           size_t source)
+{
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(network->wire_profiles[source]);
+    size_t limit;
+
+    if (descriptor == NULL) {
+        return 0U;
+    }
+    limit = descriptor->max_node_id > (uint32_t)SIZE_MAX ?
+                SIZE_MAX : (size_t)descriptor->max_node_id;
+    return limit < network->options.node_count ?
+               limit : network->options.node_count;
+}
+
+static size_t scale_constrain_destination(const scale_network_t *network,
+                                          size_t source,
+                                          size_t destination,
+                                          uint32_t salt)
+{
+    size_t limit = scale_addressable_node_count(network, source);
+    size_t offset;
+
+    if (limit < 2U || source >= limit) {
+        return source;
+    }
+    if (destination < limit && destination != source) {
+        return destination;
+    }
+    offset = 1U + ((size_t)salt % (limit - 1U));
+    destination = (source + offset) % limit;
+    if (destination == source) {
+        destination = (destination + 1U) % limit;
+    }
+    return destination;
+}
+
 static void scale_choose_destinations(scale_network_t *network)
 {
     size_t source;
@@ -690,7 +812,8 @@ static void scale_choose_destinations(scale_network_t *network)
         } else if (network->options.traffic == SCALE_TRAFFIC_INCAST) {
             destination = source == 0U ? 1U : 0U;
         }
-        network->fixed_destinations[source] = destination;
+        network->fixed_destinations[source] = scale_constrain_destination(
+            network, source, destination, (uint32_t)source);
     }
 }
 
@@ -894,11 +1017,15 @@ static size_t scale_destination_for(const scale_network_t *network,
                                     size_t source,
                                     uint32_t tick)
 {
+    size_t destination;
+
     if (network->options.traffic != SCALE_TRAFFIC_ALL_TO_ALL) {
         return network->fixed_destinations[source];
     }
-    return (source + 1U + (tick % (network->options.node_count - 1U))) %
-           network->options.node_count;
+    destination = (source + 1U +
+                   (tick % (network->options.node_count - 1U))) %
+                  network->options.node_count;
+    return scale_constrain_destination(network, source, destination, tick);
 }
 
 static ucn_result_t scale_send_one(scale_network_t *network,
@@ -1094,6 +1221,8 @@ static bool scale_network_init(scale_network_t *network,
         options->node_count, sizeof(*network->rx_contexts));
     network->metrics = (scale_node_metrics_t *)calloc(
         options->node_count, sizeof(*network->metrics));
+    network->wire_profiles = (ucn_wire_profile_t *)calloc(
+        options->node_count, sizeof(*network->wire_profiles));
     network->latency_histograms = (uint32_t *)calloc(
         options->node_count * SCALE_LATENCY_BUCKETS,
         sizeof(*network->latency_histograms));
@@ -1108,7 +1237,8 @@ static bool scale_network_init(scale_network_t *network,
     network->delivery_capacity = message_capacity;
     if (network->nodes == NULL || network->links == NULL ||
         network->link_contexts == NULL || network->rx_contexts == NULL ||
-        network->metrics == NULL || network->latency_histograms == NULL ||
+        network->metrics == NULL || network->wire_profiles == NULL ||
+        network->latency_histograms == NULL ||
         network->degrees == NULL || network->fixed_destinations == NULL ||
         network->events == NULL || network->delivery_counts == NULL) {
         return false;
@@ -1119,6 +1249,7 @@ static bool scale_network_init(scale_network_t *network,
         flat_count * sizeof(*network->link_contexts) +
         options->node_count * sizeof(*network->rx_contexts) +
         options->node_count * sizeof(*network->metrics) +
+        options->node_count * sizeof(*network->wire_profiles) +
         options->node_count * SCALE_LATENCY_BUCKETS *
             sizeof(*network->latency_histograms) +
         options->node_count * sizeof(*network->degrees) +
@@ -1126,21 +1257,40 @@ static bool scale_network_init(scale_network_t *network,
         network->event_capacity * sizeof(*network->events) +
         message_capacity * sizeof(*network->delivery_counts);
 
+    for (node = 0U; node < options->node_count; ++node) {
+        ucn_wire_profile_t profile = scale_wire_profile_for_layout(
+            options->wire_layout, node);
+        const ucn_wire_profile_descriptor_t *descriptor =
+            ucn_wire_profile_get_descriptor(profile);
+        size_t profile_index = scale_wire_profile_index(profile);
+
+        if (descriptor == NULL || profile_index >= SCALE_WIRE_PROFILE_COUNT ||
+            (uint64_t)(node + 1U) > descriptor->max_node_id) {
+            return false;
+        }
+        network->wire_profiles[node] = profile;
+        network->wire_profile_counts[profile_index]++;
+    }
     if (!scale_build_topology(network)) {
         return false;
     }
     scale_choose_destinations(network);
     for (node = 0U; node < options->node_count; ++node) {
         ucn_config_t config;
+        ucn_wire_profile_t profile = network->wire_profiles[node];
+        const ucn_wire_profile_descriptor_t *descriptor =
+            ucn_wire_profile_get_descriptor(profile);
         size_t slot;
 
-        config.network_id = options->wire_mode == SCALE_WIRE_AUTO ?
-                                UINT32_C(42) : SCALE_NETWORK_ID;
+        config.network_id = options->wire_layout == SCALE_WIRE_LAYOUT_W3 ?
+                                SCALE_NETWORK_ID : UINT32_C(42);
         config.node_id = (ucn_node_id_t)(node + 1U);
-        config.default_hop_limit = UCN_MAX_HOPS;
+        config.default_hop_limit = descriptor != NULL &&
+                                   descriptor->max_hops < UCN_MAX_HOPS ?
+                                       descriptor->max_hops : UCN_MAX_HOPS;
         if (ucn_node_init(&network->nodes[node], &config) != UCN_OK ||
             ucn_node_set_wire_profiles(
-                &network->nodes[node], UCN_WIRE_PROFILE_W3_BACKBONE,
+                &network->nodes[node], profile,
                 UCN_WIRE_PROFILE_W3_BACKBONE) != UCN_OK ||
             ucn_node_set_wire_profile_auto(
                 &network->nodes[node],
@@ -1186,6 +1336,7 @@ static void scale_network_free(scale_network_t *network)
     free(network->fixed_destinations);
     free(network->degrees);
     free(network->latency_histograms);
+    free(network->wire_profiles);
     free(network->metrics);
     free(network->rx_contexts);
     free(network->link_contexts);
@@ -1308,7 +1459,7 @@ static bool scale_write_node_csv(const scale_network_t *network,
         return false;
     }
     (void)fprintf(file,
-        "node_id,degree,admitted,routes_current,routes_hwm,discoveries_hwm,"
+        "node_id,wire_profile,degree,admitted,routes_current,routes_hwm,discoveries_hwm,"
         "candidates_hwm,q0_hwm,q1_hwm,pending_q1_hwm,paths_hwm,flows_hwm,"
         "app_generated,app_accepted,origin_delivered,duplicate_deliveries,"
         "q0_generated,q0_accepted,q0_delivered,q1_generated,q1_accepted,"
@@ -1332,7 +1483,7 @@ static bool scale_write_node_csv(const scale_network_t *network,
             (double)metrics->origin_wire_bytes;
 
         (void)fprintf(file,
-            "%zu,%u,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,"
+            "%zu,%s,%u,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,"
             "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
             "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
             "%" PRIu64 ",%" PRIu64 ",%.6f,"
@@ -1342,7 +1493,9 @@ static bool scale_write_node_csv(const scale_network_t *network,
             ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
             ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
             ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%zu\n",
-            node + 1U, (unsigned)network->degrees[node],
+            node + 1U,
+            scale_wire_profile_name(network->wire_profiles[node]),
+            (unsigned)network->degrees[node],
             ucn_node_neighbor_count(&network->nodes[node],
                                     UCN_NEIGHBOR_ADMITTED),
             metrics->routes_current, metrics->routes_hwm,
@@ -1469,6 +1622,139 @@ static uint32_t scale_global_percentile(const scale_network_t *network,
            SCALE_LATENCY_BUCKET_MS;
 }
 
+static uint32_t scale_profile_percentile(const scale_network_t *network,
+                                         ucn_wire_profile_t profile,
+                                         uint64_t samples,
+                                         uint32_t percentile)
+{
+    uint64_t target;
+    uint64_t cumulative = 0U;
+    size_t bucket;
+
+    if (samples == 0U) {
+        return 0U;
+    }
+    target = (samples * percentile + 99U) / 100U;
+    for (bucket = 0U; bucket < SCALE_LATENCY_BUCKETS; ++bucket) {
+        size_t node;
+
+        for (node = 0U; node < network->options.node_count; ++node) {
+            if (network->wire_profiles[node] == profile) {
+                cumulative += network->latency_histograms[
+                    scale_latency_index(node, bucket)];
+            }
+        }
+        if (cumulative >= target) {
+            return (uint32_t)bucket * SCALE_LATENCY_BUCKET_MS;
+        }
+    }
+    return (uint32_t)(SCALE_LATENCY_BUCKETS - 1U) *
+           SCALE_LATENCY_BUCKET_MS;
+}
+
+static bool scale_write_profile_csv(const scale_network_t *network,
+                                    const char *path)
+{
+    FILE *file = fopen(path, "w");
+    ucn_wire_profile_t profile;
+
+    if (file == NULL) {
+        return false;
+    }
+    (void)fprintf(file,
+        "build_profile,wire_layout,wire_profile,nodes,generated,accepted,"
+        "delivered,delivery_pct,payload_delivered_bytes,origin_wire_bytes,"
+        "wire_efficiency_pct,latency_p95_ms,latency_p99_ms,no_space,no_route,"
+        "link_down,other_rejected,duplicate_deliveries,routes_hwm_max,"
+        "discoveries_hwm_max,q0_hwm_max,q1_hwm_max,pending_q1_hwm_max,"
+        "host_work_ms,node_storage_bytes,total_node_storage_bytes\n");
+    for (profile = UCN_WIRE_PROFILE_W0_LOCAL;
+         profile <= UCN_WIRE_PROFILE_W3_BACKBONE; ++profile) {
+        uint64_t generated = 0U;
+        uint64_t accepted = 0U;
+        uint64_t delivered = 0U;
+        uint64_t payload_bytes = 0U;
+        uint64_t wire_bytes = 0U;
+        uint64_t no_space = 0U;
+        uint64_t no_route = 0U;
+        uint64_t link_down = 0U;
+        uint64_t other_rejected = 0U;
+        uint64_t duplicate_deliveries = 0U;
+        uint64_t host_work_ns = 0U;
+        size_t routes_hwm = 0U;
+        size_t discoveries_hwm = 0U;
+        size_t q0_hwm = 0U;
+        size_t q1_hwm = 0U;
+        size_t pending_q1_hwm = 0U;
+        size_t node_count = 0U;
+        size_t node;
+        double delivery_pct;
+        double wire_efficiency;
+
+        for (node = 0U; node < network->options.node_count; ++node) {
+            const scale_node_metrics_t *metrics;
+
+            if (network->wire_profiles[node] != profile) {
+                continue;
+            }
+            metrics = &network->metrics[node];
+            node_count++;
+            generated += metrics->app_generated;
+            accepted += metrics->app_accepted;
+            delivered += metrics->origin_delivered;
+            payload_bytes += metrics->origin_payload_delivered;
+            wire_bytes += metrics->origin_wire_bytes;
+            no_space += metrics->app_no_space;
+            no_route += metrics->app_no_route;
+            link_down += metrics->app_link_down;
+            other_rejected += metrics->app_other_rejected;
+            duplicate_deliveries += metrics->duplicate_deliveries;
+            host_work_ns += metrics->host_work_ns;
+            if (metrics->routes_hwm > routes_hwm) {
+                routes_hwm = metrics->routes_hwm;
+            }
+            if (metrics->discoveries_hwm > discoveries_hwm) {
+                discoveries_hwm = metrics->discoveries_hwm;
+            }
+            if (metrics->q0_hwm > q0_hwm) {
+                q0_hwm = metrics->q0_hwm;
+            }
+            if (metrics->q1_hwm > q1_hwm) {
+                q1_hwm = metrics->q1_hwm;
+            }
+            if (metrics->pending_q1_hwm > pending_q1_hwm) {
+                pending_q1_hwm = metrics->pending_q1_hwm;
+            }
+        }
+        if (node_count == 0U) {
+            continue;
+        }
+        delivery_pct = accepted == 0U ? 0.0 :
+            (double)delivered * 100.0 / (double)accepted;
+        wire_efficiency = wire_bytes == 0U ? 0.0 :
+            (double)payload_bytes * 100.0 / (double)wire_bytes;
+        (void)fprintf(file,
+            "%s,%s,%s,%zu,%" PRIu64 ",%" PRIu64 ",%" PRIu64
+            ",%.6f,%" PRIu64 ",%" PRIu64 ",%.6f,%" PRIu32
+            ",%" PRIu32 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+            ",%" PRIu64 ",%" PRIu64 ",%zu,%zu,%zu,%zu,%zu,%" PRIu64
+            ",%zu,%" PRIu64 "\n",
+            scale_build_profile_name(),
+            scale_wire_layout_name(network->options.wire_layout),
+            scale_wire_profile_name(profile), node_count,
+            generated, accepted, delivered, delivery_pct,
+            payload_bytes, wire_bytes, wire_efficiency,
+            scale_profile_percentile(network, profile, delivered, 95U),
+            scale_profile_percentile(network, profile, delivered, 99U),
+            no_space, no_route, link_down, other_rejected,
+            duplicate_deliveries, routes_hwm, discoveries_hwm,
+            q0_hwm, q1_hwm, pending_q1_hwm,
+            host_work_ns / UINT64_C(1000000), sizeof(ucn_node_t),
+            (uint64_t)sizeof(ucn_node_t) * node_count);
+    }
+    return fclose(file) == 0;
+}
+
 static bool scale_write_summary_csv(const scale_network_t *network,
                                     const char *path,
                                     bool passed)
@@ -1488,7 +1774,8 @@ static bool scale_write_summary_csv(const scale_network_t *network,
         return false;
     }
     (void)fprintf(file,
-        "status,profile,wire_mode,topology,traffic,nodes,ticks,step_ms,"
+        "status,profile,wire_mode,wire_layout,w0_nodes,w1_nodes,w2_nodes,"
+        "w3_nodes,topology,traffic,nodes,ticks,step_ms,"
         "messages_per_node,payload_bytes,warmup_ticks,warmup_batch,"
         "loss_per_mille,"
         "duplicate_per_mille,max_delay_ms,flap_every_ticks,"
@@ -1502,7 +1789,8 @@ static bool scale_write_summary_csv(const scale_network_t *network,
         "total_node_storage_bytes,host_allocated_bytes,host_work_ms,"
         "wall_elapsed_ms\n");
     (void)fprintf(file,
-        "%s,%s,%s,%s,%s,%zu,%" PRIu32 ",%" PRIu32 ",%u,%u,%" PRIu32
+        "%s,%s,%s,%s,%zu,%zu,%zu,%zu,%s,%s,%zu,%" PRIu32
+        ",%" PRIu32 ",%u,%u,%" PRIu32
         ",%" PRIu32 ",%u,%u,%u,"
         "%" PRIu32 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
         "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
@@ -1512,14 +1800,11 @@ static bool scale_write_summary_csv(const scale_network_t *network,
         ",%" PRIu64 ",%zu,%zu,%" PRIu64 ",%u,%u,%zu,%" PRIu64
         ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
         passed ? "PASS" : "FAIL",
-#if UCN_PROFILE == UCN_PROFILE_FULL
-        "FULL",
-#elif UCN_PROFILE == UCN_PROFILE_LITE
-        "LITE",
-#else
-        "NANO",
-#endif
+        scale_build_profile_name(),
         network->options.wire_mode == SCALE_WIRE_AUTO ? "auto" : "fixed",
+        scale_wire_layout_name(network->options.wire_layout),
+        network->wire_profile_counts[0], network->wire_profile_counts[1],
+        network->wire_profile_counts[2], network->wire_profile_counts[3],
         scale_topology_name(network->options.topology),
         scale_traffic_name(network->options.traffic),
         network->options.node_count, network->options.ticks,
@@ -1565,7 +1850,7 @@ static void scale_print_summary(const scale_network_t *network, bool passed)
          (double)totals.sum_squared_deliveries);
 
     (void)printf(
-        "SCALE_RESULT status=%s wire_mode=%s topology=%s traffic=%s nodes=%zu ticks=%"
+        "SCALE_RESULT status=%s wire_mode=%s wire_profile=%s topology=%s traffic=%s nodes=%zu ticks=%"
         PRIu32 " generated=%" PRIu64 " accepted=%" PRIu64
         " delivered=%" PRIu64 " delivery=%.3f%% wire_eff=%.3f%%"
         " p95=%" PRIu32 "ms p99=%" PRIu32 "ms fairness=%.6f"
@@ -1574,6 +1859,7 @@ static void scale_print_summary(const scale_network_t *network, bool passed)
         "B wall=%" PRIu64 "ms\n",
         passed ? "PASS" : "FAIL",
         network->options.wire_mode == SCALE_WIRE_AUTO ? "auto" : "fixed",
+        scale_wire_layout_name(network->options.wire_layout),
         scale_topology_name(network->options.topology),
         scale_traffic_name(network->options.traffic),
         network->options.node_count, network->options.ticks,
@@ -1592,8 +1878,10 @@ static void scale_print_summary(const scale_network_t *network, bool passed)
 static bool scale_write_reports(const scale_network_t *network, bool passed)
 {
     char node_path[1024];
+    char profile_path[1024];
     char summary_path[1024];
     int node_length;
+    int profile_length;
     int summary_length;
 
     if (network->options.report_prefix == NULL) {
@@ -1601,15 +1889,21 @@ static bool scale_write_reports(const scale_network_t *network, bool passed)
     }
     node_length = snprintf(node_path, sizeof(node_path), "%s_nodes.csv",
                            network->options.report_prefix);
+    profile_length = snprintf(profile_path, sizeof(profile_path),
+                              "%s_profiles.csv",
+                              network->options.report_prefix);
     summary_length = snprintf(summary_path, sizeof(summary_path),
                               "%s_summary.csv",
                               network->options.report_prefix);
     if (node_length <= 0 || (size_t)node_length >= sizeof(node_path) ||
+        profile_length <= 0 ||
+        (size_t)profile_length >= sizeof(profile_path) ||
         summary_length <= 0 ||
         (size_t)summary_length >= sizeof(summary_path)) {
         return false;
     }
     return scale_write_node_csv(network, node_path) &&
+           scale_write_profile_csv(network, profile_path) &&
            scale_write_summary_csv(network, summary_path, passed);
 }
 
@@ -1670,7 +1964,8 @@ static void scale_usage(const char *program)
         "  --payload-bytes N         12..UCN_MAX_PAYLOAD_BYTES\n"
         "  --topology tree|ring4     default tree\n"
         "  --traffic local|two-hop|pairs|incast|all-to-all|mixed\n"
-        "  --wire-mode fixed|auto    fixed W3 or route-aware minimum\n"
+        "  --wire-mode fixed|auto    declared fixed class or route-aware minimum\n"
+        "  --wire-profile w0|w1|w2|w3|mixed  per-node TX class (default w3)\n"
         "  --loss-per-mille N        0..1000\n"
         "  --duplicate-per-mille N   0..1000\n"
         "  --delay-ms N               virtual maximum delay\n"
@@ -1679,7 +1974,7 @@ static void scale_usage(const char *program)
         "  --q0-every N               mixed-mode Q0 period in ticks\n"
         "  --event-slots N            host event heap slots\n"
         "  --seed N                   reproducible random seed\n"
-        "  --report-prefix PATH       write PATH_nodes.csv/summary.csv\n"
+        "  --report-prefix PATH       write PATH_nodes/profiles/summary.csv\n"
         "  --quiet                    only final result\n",
         program);
 }
@@ -1714,6 +2009,7 @@ static bool scale_parse_options(int argc, char **argv, scale_options_t *options)
     options->topology = SCALE_TOPOLOGY_TREE;
     options->traffic = SCALE_TRAFFIC_TWO_HOP;
     options->wire_mode = SCALE_WIRE_FIXED;
+    options->wire_layout = SCALE_WIRE_LAYOUT_W3;
     for (index = 1; index < argc; ++index) {
         const char *argument = argv[index];
         const char *value;
@@ -1764,6 +2060,22 @@ static bool scale_parse_options(int argc, char **argv, scale_options_t *options)
                 options->wire_mode = SCALE_WIRE_FIXED;
             } else if (strcmp(value, "auto") == 0) {
                 options->wire_mode = SCALE_WIRE_AUTO;
+            } else {
+                return false;
+            }
+            continue;
+        }
+        if (strcmp(argument, "--wire-profile") == 0) {
+            if (strcmp(value, "w0") == 0) {
+                options->wire_layout = SCALE_WIRE_LAYOUT_W0;
+            } else if (strcmp(value, "w1") == 0) {
+                options->wire_layout = SCALE_WIRE_LAYOUT_W1;
+            } else if (strcmp(value, "w2") == 0) {
+                options->wire_layout = SCALE_WIRE_LAYOUT_W2;
+            } else if (strcmp(value, "w3") == 0) {
+                options->wire_layout = SCALE_WIRE_LAYOUT_W3;
+            } else if (strcmp(value, "mixed") == 0) {
+                options->wire_layout = SCALE_WIRE_LAYOUT_MIXED;
             } else {
                 return false;
             }
@@ -1828,6 +2140,9 @@ static bool scale_parse_options(int argc, char **argv, scale_options_t *options)
         }
     }
     return options->node_count >= 2U && options->node_count <= SCALE_MAX_NODES &&
+           ((options->wire_layout != SCALE_WIRE_LAYOUT_W0 &&
+             options->wire_layout != SCALE_WIRE_LAYOUT_MIXED) ||
+            options->node_count <= (size_t)UINT8_C(254)) &&
            options->ticks > 0U && options->ticks <= UINT32_C(1000000) &&
            options->warmup_ticks <= UINT32_C(1000000) &&
            options->warmup_batch <= options->node_count &&
@@ -1870,12 +2185,14 @@ int main(int argc, char **argv)
     if (!options.quiet) {
         (void)printf(
             "SCALE_START nodes=%zu topology=%s traffic=%s ticks=%" PRIu32
-            " warmup=%" PRIu32 " messages_per_node=%u wire_mode=%s event_slots=%zu"
+            " warmup=%" PRIu32 " messages_per_node=%u wire_mode=%s"
+            " wire_profile=%s event_slots=%zu"
             " node_storage=%zuB host_alloc=%" PRIu64 "B\n",
             options.node_count, scale_topology_name(options.topology),
             scale_traffic_name(options.traffic), options.ticks,
             options.warmup_ticks, (unsigned)options.messages_per_node,
             options.wire_mode == SCALE_WIRE_AUTO ? "auto" : "fixed",
+            scale_wire_layout_name(options.wire_layout),
             network.event_capacity, sizeof(ucn_node_t),
             network.allocated_bytes);
     }

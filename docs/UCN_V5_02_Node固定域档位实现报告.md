@@ -20,7 +20,7 @@ Node 初始化继续默认 W3，保持既有三字段 `ucn_config_t` 调用安�
 
 ## 软件证据
 
-`test_node_wire_profile.c` 覆盖 W0/W1/W2/W3 双节点编码长度与解码档位、默认 W3、错误档位组合、配置冻结、Session/Network/Node/Hop 越界、按最大接收档 MTU、W0 拒绝 W1 和宽接收节点接收 W0。
+`test_node_wire_profile.c` 覆盖 W0/W1/W2/W3 双节点编码长度与解码档位、默认 W3、错误档位组合、配置冻结、Session/Network/Node/Hop 越界、按最大接收档 MTU和 W0/W0 拒绝 W1。V5-08 又补充了 W0 TX/W3 RX Node 依次接收并分发 W0～W3 静态 Endpoint 指令，Nano/Lite/Full 均执行同一行为测试。
 
 `test_aodv_lite.c` 已改为 W0 固定域，覆盖 A→B→C 的 RREQ/RREP、业务转发、断链 RERR 与重新寻路。Windows Debug 结果：Full/Service ON 2/2、Lite/Service ON 2/2、Nano/Service OFF 1/1。
 

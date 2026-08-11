@@ -1,0 +1,2 @@
+build_profile,wire_layout,wire_profile,nodes,generated,accepted,delivered,delivery_pct,payload_delivered_bytes,origin_wire_bytes,wire_efficiency_pct,latency_p95_ms,latency_p99_ms,no_space,no_route,link_down,other_rejected,duplicate_deliveries,routes_hwm_max,discoveries_hwm_max,q0_hwm_max,q1_hwm_max,pending_q1_hwm_max,host_work_ms,node_storage_bytes,total_node_storage_bytes
+FULL,w2,W2,1024,419840,415960,119635,28.761179,3828320,46026736,8.317600,20,30,3855,22,3,0,0,8,1,0,0,4,1199,9400,9625600

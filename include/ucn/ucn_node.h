@@ -868,10 +868,14 @@ typedef struct ucn_node_stats {
 } ucn_node_stats_t;
 
 ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config);
-/* A new Node defaults to fixed W3 for source compatibility.  Configure a
- * smaller fixed domain before registering links or installing Security.
- * max_receive_profile may be wider than tx_profile so a gateway-capable Node
- * can accept and transparently forward narrower frames without truncation. */
+/* A new Node defaults to fixed W3 TX and W3 RX.  All Build Profiles use the
+ * same W0..W3 decoder.  Products should normally select the smallest TX
+ * profile that represents their local domain while keeping RX at W3, so a
+ * small Node can receive ordinary Endpoint traffic encoded by a wider peer.
+ * max_receive_profile remains configurable for constrained MTU/resource or
+ * security policies.  Decoding a wider frame does not add Build-Profile
+ * features that were not compiled into the Node.  Configure this before
+ * registering links or installing Security. */
 ucn_result_t ucn_node_set_wire_profiles(
     ucn_node_t *node,
     ucn_wire_profile_t tx_profile,
@@ -883,7 +887,8 @@ ucn_wire_profile_t ucn_node_get_max_receive_wire_profile(
  * and the fallback/domain-discovery profile. */
 ucn_result_t ucn_node_set_wire_profile_auto(ucn_node_t *node, bool enabled);
 bool ucn_node_wire_profile_auto(const ucn_node_t *node);
-/* A registered Link may carry an explicit/HELLO-learned peer ceiling. */
+/* A registered Link may carry an explicit or HELLO-advertised peer RX
+ * ceiling.  The ceiling is independent of the peer's fixed TX profile. */
 ucn_result_t ucn_node_set_link_wire_profile_limit(
     ucn_node_t *node,
     ucn_link_t *link,
