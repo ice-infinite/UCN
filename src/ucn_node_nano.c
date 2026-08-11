@@ -843,6 +843,10 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
     if (frame.network_id != node->config.network_id) {
         return UCN_ERR_NETWORK;
     }
+    if (frame.hop_limit > node->config.default_hop_limit) {
+        node->stats.hop_scope_rejected++;
+        return UCN_ERR_TTL;
+    }
     if (frame.source == 0U || frame.source == UCN_NODE_BROADCAST ||
         frame.source == node->config.node_id || frame.sequence == 0U) {
         return UCN_ERR_MALFORMED;

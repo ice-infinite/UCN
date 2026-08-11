@@ -2,7 +2,7 @@
 
 > 日期：2026-08-11
 > 基线：`codex/v5-adaptive-wire@84880ce`
-> 状态：方案与任务已建立；本轮不修改协议代码。
+> 状态：V5-17～V5-20 已实现并已在远端基线中发布；V5-21 继续阻塞于 S02。后续 V5-22～V5-26 见[最新审计交叉问题修复建议](UCN_V5_最新审计交叉问题修复建议.md)。
 
 ## 1. 目的
 
@@ -18,7 +18,7 @@ UCN 后续必须同时约束 Wire 表达范围、产品运行范围、业务实�
 | --- | --- | --- |
 | HELLO/RREQ/RREP 固定使用 Node TX 档 | 原问题已修复；HELLO/Heartbeat 可自动最小选档，RREQ 选择完整搜索域最小档，RREP 保持请求档 | 不重复修改；补做有界逐级扩散 |
 | 没有 Expanding Ring | 属实；当前 RREQ 一次选择覆盖 `default_hop_limit` 的档位 | V5-19 实现 |
-| 累计 Route Cost 只有 16 bit | 已修复；内部 `uint32_t`，Wire Cost 为 1/2/3/4 B | 不再修改累计位宽 |
+| 累计 Route Cost 只有 16 bit | V5-14 已修复内部 `uint32_t`；V5-23 又将 Wire Cost 修正为 3/3/3/4 B | 不再修改累计位宽；当前格式以 V5-23 为准 |
 | Path 可安装当前固定 TX 域不能表达的字段 | 已修复；本地、远端发送和远端接收均在写表前校验 | 保持现状 |
 | Pinned Path 使用 Node 默认 Hop | 属实；普通 Route 已用 `route->hop_count`，Path 发送仍用 `default_hop_limit` | V5-18 实现 |
 | RREP 重复 Origin/Target、缺一致性检查 | 已修复；重复字段已删除，Header 是唯一语义来源 | 保持现状 |
@@ -88,8 +88,9 @@ Wire 可表达
 
 本阶段不在每个 RREQ/RREP 中直接增加独立延迟字段，避免先增加 Wire 开销再等待硬件证明用途。延迟先通过两条路径进入决策：
 
-1. Adapter 的单跳 `route_cost` 必须按 Cost 契约纳入 RTT、丢包和队列拥塞惩罚；
-2. Candidate/Path Probe 增加发送时刻和 ACK RTT EWMA，作为端到端已验证 RTT。
+1. Adapter 的单跳 `route_cost` 只提供稳定、可加的介质/产品基础 Cost，不重复揉入本次 RTT、失败率和队列压力；
+2. RTT、发送失败率与 Adapter 队列压力继续作为独立有效位指标，由 Policy 在需要时组合一次；
+3. Candidate/Path Probe 增加发送时刻和 ACK RTT EWMA，作为端到端已验证 RTT。
 
 如实机证明 Cost+Probe 仍无法满足业务 Deadline，再单独评审 Profile-aware 累计延迟字段，不能在本轮顺带扩展 RREQ/RREP。
 
@@ -199,7 +200,7 @@ V5-18 在 V5-19 前完成，是为了让指定 Path 和自动 Route 使用同一
 ## 11. 实际执行结果（2026-08-11）
 
 - V5-17 已实现 Node 默认/Policy 路由约束、路由质量查询、直接/动态/指定 Path 的 Hop/Cost/RTT 门禁，以及 Candidate Probe ACK 的端到端 RTT EWMA；动态 Route 实质更新会清除旧 RTT，不在 RREQ/RREP 里增加延迟字段。
-- V5-18 已实现 Path `remaining_hops`，PATH_INSTALL 四档载荷为 8/11/14/17 B，旧长度失败关闭；源、中继、终端按真实剩余跳数校验和递减。公开 Path 安装 API 因此发生 v5 阶段允许的签名更新，Node Storage Layout 升级到版本 3。
+- V5-18 已实现 Path `remaining_hops`，PATH_INSTALL 四档载荷为 8/11/14/17 B，旧长度失败关闭；源、中继、终端按真实剩余跳数校验和递减。公开 Path 安装 API 因此发生 v5 阶段允许的签名更新，当时 Node Storage Layout 升级到版本 3；V5-24 因 Candidate Profile 连续性继续升到版本 4。
 - V5-19 已实现 2→4→8→16 有界 Expanding Ring；单 Ring 默认 250 ms，总预算仍为 1000 ms，每轮新 Request ID、重新选择可表达 Profile。自动首包不会重复重启活动 Discovery，避免 Pending 饥饿。
 - V5-20 已实现公开 3 B Prefix Peek；Full/Lite/Nano 都在完整 Decode/CRC 前执行 per-Link 本地 RX Ceiling 门禁。损坏 W3 帧在 W0 Link 上先返回不支持，在 W3 Link 上继续返回 CRC 错误。
 - V5-21 未实现且仍阻塞于 S02。没有生产 Principal、逐跳控制认证、Session Generation、吊销与持久 Replay 时，不允许把 Wire Profile、Node ID 或 Bearer 当权限凭据。
@@ -208,4 +209,4 @@ V5-18 在 V5-19 前完成，是为了让指定 Path 和自动 Route 使用同一
 
 ## 12. 本轮边界
 
-本轮完成 V5-17～V5-20 的源码、公开接口、单元/模拟回归和文档闭环；已按用户后续授权创建本地提交，尚未推送远端，也未访问硬件/COM。生产安全与 Authorized Class 执行层不越过 S02 阻塞条件。
+本阶段完成 V5-17～V5-20 的源码、公开接口、单元/模拟回归和文档闭环，相关提交已进入远端 `codex/v5-adaptive-wire` 基线；本文件不把后续 V5-22～V5-26 或硬件结果倒写成当时结论。生产安全与 Authorized Class 执行层继续不越过 S02 阻塞条件。

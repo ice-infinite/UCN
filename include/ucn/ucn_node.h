@@ -802,6 +802,7 @@ typedef struct ucn_node_stats {
     uint32_t rx_delivered;
     uint32_t duplicate_frames_dropped;
     uint32_t duplicate_source_window_full;
+    uint32_t hop_scope_rejected;
 #if UCN_FEATURE_DYNAMIC_MESH
     uint32_t route_requests_sent;
     uint32_t route_request_ring_expansions;
@@ -839,6 +840,10 @@ typedef struct ucn_node_stats {
     uint32_t path_trace_rx_rate_dropped;
     uint32_t q1_route_wait_queued;
     uint32_t q1_route_wait_expired;
+    uint32_t q1_route_wait_latest_overwritten;
+    uint32_t q1_route_wait_retried;
+    uint32_t q1_route_wait_sent;
+    uint32_t q1_route_wait_permanent_failed;
 #endif
 #if UCN_FEATURE_DIAGNOSTICS
     uint32_t path_trace_requests_sent;

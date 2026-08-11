@@ -99,7 +99,7 @@ min(Profile Length 上限,
 | Sequence | 4 B | 4 B | 4 B | 4 B | 不压缩，继续用于乱序、去重和 Replay 边界。 |
 | CRC | 2 B | 2 B | 2 B | 2 B | 不压缩。 |
 
-V5-14 已完成 Route Cost 专项：Adapter 的单跳输入继续为 16 bit，Route/Candidate/RREQ/RREP 的累计值升级为 32 bit；线上 W0/W1/W2/W3 分别使用 1/2/3/4 B。各档全 1 值是 Unknown，最高 Known 为全 1 减 1；不可表达或真实加法溢出时失败关闭。200 Edge/累计 200,000 的 Host 长链和 80,000 对 100,000 双路径已经验证，真实介质标定仍归 S06/S07。
+V5-14 已完成 Route Cost 内部 32 bit 化，V5-23 又闭合了 Wire 表示域：Adapter 的单跳输入继续为 16 bit，Route/Candidate/RREQ/RREP 的累计值为 32 bit；线上 W0/W1/W2/W3 使用 `3/3/3/4 B`。各档全 1 值是 Unknown，最高 Known 为全 1 减 1；3 B 已覆盖 254 Hop × 65,534 的官方最坏合法累计值，不可表达或真实加法溢出时失败关闭。200 Edge/累计 200,000 的 Host 长链和 80,000 对 100,000 双路径已经验证，真实介质标定仍归 S06/S07。
 
 Request ID 保持固定 32 bit，不随 Profile 缩窄；这避免引入回绕、活动请求冲突和额外迁移状态。
 
@@ -129,7 +129,7 @@ v4 RREQ Payload 重复 Origin。v5 控制载荷压缩阶段删除该字段，Ori
 Target + Request ID + Route Cost + Hop Count + RREQ Flags
 ```
 
-当前 RREQ 为 `Target(A)+RequestID(4)+Cost(C)+Hop(1)+Flags(1)`，四档 Payload 为 8/10/12/14 B。RREP 删除重复 Origin/Target，使用 Header Source/Destination，Payload 为 `RequestID(4)+Cost(C)+Hop(1)+Flags(1)+Epoch(E)`，四档为 8/10/11/12 B。RREQ/RREP 的详细边界见 [V5-14 实现报告](UCN_V5_14_长距离Cost与RREQ_RREP实现报告.md)。
+当前 RREQ 为 `Target(A)+RequestID(4)+Cost(C)+Hop(1)+Flags(1)`，四档 Payload 为 `10/11/12/14 B`。RREP 删除重复 Origin/Target，使用 Header Source/Destination，Payload 为 `RequestID(4)+Cost(C)+Hop(1)+Flags(1)+Epoch(E)`，四档为 `10/11/11/12 B`。RREQ/RREP 的详细边界见 [V5-14/V5-23 实现报告](UCN_V5_14_长距离Cost与RREQ_RREP实现报告.md)。
 
 ## 9. Hop、预算与权限
 

@@ -57,6 +57,7 @@ nodes:
         reason: 路线必须满足当前业务的 Hop、Cost 与已验证 RTT 约束。
     notes:
       - Q0 绝不等待 RREQ/Route；没有路径立即向本机返回失败。
+      - 应用首次提交允许建立 Pending；Protocol Task 内部 Retry 关闭重新排队入口，防止旧 Q1 刷新绝对 Deadline。
 
   - id: route.ucn_node_send
     symbol: ucn_node_send
@@ -185,7 +186,7 @@ nodes:
     notes:
       - 同 Cost/更差请求返回 Replay且不申请 RREQ RX Token；New/Better 只有取得 Token后才提交。
       - 该表与普通业务的 Source/Session Sequence 位图窗口完全分离。
-      - Best Cost 为 32 bit 累计值；线上按 W0/W1/W2/W3 使用 1/2/3/4 B，全 1 为 Unknown。
+      - Best Cost 为 32 bit 累计值；线上按 W0/W1/W2/W3 使用 3/3/3/4 B，全 1 为 Unknown。
 
   - id: route.handle_route_reply_static
     symbol: handle_route_reply
@@ -242,19 +243,20 @@ nodes:
     calls: []
     notes:
       - 默认数量和超时均是编译期上限；Q0 不进入该队列。
+      - 同键的新应用 Latest Value 可覆盖并刷新 Deadline；内部 Retry 不能调用本节点重新生成 Deadline。
 
   - id: route.send_pending_q1_if_ready_static
     symbol: send_pending_q1_if_ready
     type: function
     file: src/ucn_node.c
     layer: routing
-    role: 在 Node step 中检查 Route 是否就绪并发送一个等待 Q1 项。
+    role: 在 Node step 中检查 Route 是否就绪并发送一个等待 Q1 项；可恢复失败保留原槽和绝对 Deadline。
     called_by:
       - node_runtime.ucn_node_step
     calls:
       - target: route.ucn_node_send_endpoint
         type: direct
-        reason: 重新执行原 Policy 与 Hop/Cost/RTT 门禁后发送，不绕过业务约束。
+        reason: 通过禁止重新排队的内部入口重新执行原 Policy 与 Hop/Cost/RTT 门禁，不绕过业务约束也不续命。
 
   - id: route.route_constraint_helpers_static
     symbol: resolve_route_constraints/route_quality_satisfies_constraints/ucn_node_get_route_quality
@@ -314,7 +316,7 @@ nodes:
     type: module
     file: src/ucn_node.c
     layer: routing
-    role: 维护 Active、Previous 和 Candidate Route 的固定表、32 bit 累计 Cost、已验证 RTT 及 Route Epoch。
+    role: 维护 Active、Previous 和 Candidate Route 的固定表、32 bit 累计 Cost、实际 Wire Profile、已验证 RTT 及 Route Epoch，并拒绝超出运行期 Hop 范围的学习。
     called_by:
       - route.handle_route_request_static
       - route.handle_route_reply_static
@@ -325,7 +327,7 @@ nodes:
     type: module
     file: src/ucn_node.c
     layer: routing
-    role: 用现有 12 B PATH_PROBE/ACK 回显发送时刻，累计 ACK 并计算有界端到端 RTT EWMA；验证完成后把质量复制到 Active Route。
+    role: 用 Candidate 发现时的 Wire Profile 发送现有 12 B PATH_PROBE/ACK，回显发送时刻、累计 ACK 并计算有界端到端 RTT EWMA；验证完成后按同一 Profile/Epoch 激活并复制质量到 Active Route。
     called_by:
       - node_runtime.ucn_node_step
       - node_runtime.ucn_node_receive
@@ -338,6 +340,7 @@ nodes:
         reason: 达到 Probe ACK 门禁后激活候选并保留 verified RTT。
     notes:
       - 不扩展 RREQ/RREP Wire Payload；超时、乱序或不匹配 ACK 不会伪造 RTT。
+      - Probe/Activate/ACK 的 Profile 必须与 Candidate 一致；W0 Route Epoch 只分配 1..254。
 
   - id: route.route_invalidation_helpers_static
     symbol: invalidate_route_to/invalidate_routes_by_link

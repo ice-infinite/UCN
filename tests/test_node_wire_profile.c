@@ -229,6 +229,7 @@ static int verify_low_tx_node_accepts_all_profiles(void)
         UCN_WIRE_PROFILE_W3_BACKBONE
     };
     static const ucn_endpoint_t COMMAND_ENDPOINT = (ucn_endpoint_t)0x40U;
+    static const uint8_t OVER_SCOPE_COMMAND = 0xEFU;
     ucn_config_t config = { 42U, 1U, 4U };
     ucn_node_t node;
     ucn_link_t link;
@@ -280,6 +281,20 @@ static int verify_low_tx_node_accepts_all_profiles(void)
         TEST_ASSERT(receive_context.last_profile == PROFILES[index]);
         TEST_ASSERT(receive_context.last_command == command);
     }
+
+    /* Decoder capability and forwarding scope are independent: this W0-TX/
+     * W3-RX node can parse W3, but its product configuration refuses to
+     * participate in a frame whose remaining scope exceeds four hops. */
+    frame.wire_profile = UCN_WIRE_PROFILE_W3_BACKBONE;
+    frame.hop_limit = 64U;
+    frame.sequence = 10U;
+    frame.payload = &OVER_SCOPE_COMMAND;
+    TEST_ASSERT(ucn_frame_encode(&frame, encoded, sizeof(encoded),
+                                 &encoded_length) == UCN_OK);
+    TEST_ASSERT(ucn_node_receive(&node, &link, encoded, encoded_length) ==
+                UCN_ERR_TTL);
+    TEST_ASSERT(receive_context.count == 4U &&
+                node.stats.hop_scope_rejected == 1U);
     return 0;
 }
 

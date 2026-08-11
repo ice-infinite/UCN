@@ -30,7 +30,7 @@ static int test_profile_descriptors(void)
     };
     static const uint8_t address_bytes[] = { 1U, 2U, 3U, 4U };
     static const uint8_t length_bytes[] = { 1U, 1U, 2U, 2U };
-    static const uint8_t route_cost_bytes[] = { 1U, 2U, 3U, 4U };
+    static const uint8_t route_cost_bytes[] = { 3U, 3U, 3U, 4U };
     static const uint8_t max_hops[] = { 4U, 16U, 64U, 254U };
     static const size_t base_sizes[] = { 17U, 21U, 26U, 30U };
     static const size_t route_sizes[] = { 18U, 23U, 28U, 32U };

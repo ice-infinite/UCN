@@ -15,7 +15,7 @@
 | `tx_failure_per_mille` | Adapter | 本 Link 发送失败比，`0..1000`；超范围视为未知 | 采样/EWMA/诊断；当前不参与自动重绑。 |
 | `queue_pressure_per_mille` | Adapter | **Adapter 自己**的发送队列占用比，`0..1000`；超范围视为未知 | 采样/EWMA；当前 `AUTO_BALANCE` 仅用它的连续拥塞样本决定 Q1 Flow 是否重绑。 |
 
-指标接口中的“未知”由对应 `*_valid=false` 表示。单跳 Link 输入仍以 `UINT16_MAX` 为 Unknown 哨兵，正常有效单跳 Cost 不得使用这个值；Route/Candidate/RREQ/RREP 的**累计值**已在 V5-14 升级为 `uint32_t`，其中 `0xFFFFFFFF` 为 Unknown、`0xFFFFFFFE` 为最高 Known。线上累计 Cost 按 W0/W1/W2/W3 使用 1/2/3/4 B，并在各宽度保留全 1 为 Unknown；不可表达或真实加法溢出时失败关闭，不能截断。Known Cost 永远优先于 Unknown，即使 Known=2000 也不会被 Unknown 错误压过；只有全部候选都 Unknown 时，才按活动 Flow 数和稳定顺序回退。调用方应在调用旧 Adapter 前清零整个指标结构。Core 不把 `0` RTT、`0‰` 失败率或 `0‰` 队列压力误认为未知。
+指标接口中的“未知”由对应 `*_valid=false` 表示。单跳 Link 输入仍以 `UINT16_MAX` 为 Unknown 哨兵，正常有效单跳 Cost 不得使用这个值；Route/Candidate/RREQ/RREP 的**累计值**已在 V5-14 升级为 `uint32_t`，其中 `0xFFFFFFFF` 为 Unknown、`0xFFFFFFFE` 为最高 Known。V5-23 将线上累计 Cost 固定为 W0/W1/W2/W3=`3/3/3/4 B`，前三档的 3 B 最大 Known `0xFFFFFE` 足以覆盖官方最大 Hop × 合法单跳最大 Cost；各宽度仍保留全 1 为 Unknown。不可表达或真实加法溢出时失败关闭，不能截断。Known Cost 永远优于 Unknown，即使 Known=2000 也不会被 Unknown 错误压过；只有全部候选都 Unknown 时，才按活动 Flow 数和稳定顺序回退。调用方应在调用旧 Adapter 前清零整个指标结构。Core 不把 `0` RTT、`0‰` 失败率或 `0‰` 队列压力误认为未知。
 
 ## 2. 防止重复惩罚的规则
 
@@ -46,6 +46,6 @@ v4 当前处于两者之前：没有把四项直接相加。`AUTO_BALANCE` 只�
 
 ## 5. 当前验证与后续实机标定
 
-软件测试已覆盖：Known 2000 优于 Unknown、四档累计 Cost 的最高 Known/Unknown/溢出边界、80,000 对 100,000 的双路径选择、200,000 的 200 Edge 长链、极端 RTT/失败率不被裸加进 `AUTO_BALANCE`、可选指标 EWMA、采样间隔、超过 `1000‰` 的非法值拒绝，以及 Link Down 导致 Policy Path Down。Route Refresh 也覆盖了持续 Q1 背景下取得维护槽。
+软件测试已覆盖：Known 2000 优于 Unknown、四档累计 Cost 的最高 Known/Unknown/溢出边界、W0/W1 最大合法 Hop × 65,534 的表示域、80,000 对 100,000 的双路径选择、200,000 的 200 Edge 长链、极端 RTT/失败率不被裸加进 `AUTO_BALANCE`、可选指标 EWMA、采样间隔、超过 `1000‰` 的非法值拒绝，以及 Link Down 导致 Policy Path Down。Route Refresh 也覆盖了持续 Q1 背景下取得维护槽。
 
 尚未用真实 Wi-Fi/UART/CAN/LoRa 标定以下数据：不同介质窗口长度、`route_cost` 基础等级、真实 RTT/丢包/队列的相关性、拥塞阈值和 Flow 重绑收益。这些属于 S03/S06 的实机阶段；在日志和复现实验之前，不能把任何推荐 Cost 数值当作通用默认值。

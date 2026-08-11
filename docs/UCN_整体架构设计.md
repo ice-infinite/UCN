@@ -1,6 +1,6 @@
 # UCN 整体架构设计：MCU 自组网优先
 
-> 状态：**UCN v5 V5-01～V5-20 软件范围闭环（V5-16 为设计、V5-21 阻塞，2026-08-11）**；W0～W3、全 Build Profile 四档接收、Profile-aware 控制面、32 bit Cost、业务路由约束、Pinned Path Remaining Hops、有界 Expanding Ring、Ingress 早拒绝和 Host 软件门禁已完成。v4 已独立冻结；生产密码库、Authorized Class 执行层、目标板资源和多介质多跳实机仍待验证。
+> 状态：**UCN v5 V5-01～V5-20、V5-22～V5-26 软件范围闭环（V5-16 为设计、V5-21 阻塞，2026-08-11）**；W0～W3、全 Build Profile 四档接收、Profile-aware 控制面、32 bit Cost 与 3/3/3/4 B Wire Cost、Q1 绝对 Deadline、Candidate Profile 连续性、业务路由约束、运行期 Hop Scope、Pinned Path Remaining Hops、有界 Expanding Ring、Ingress 早拒绝和 Host 软件门禁已完成。v4 已独立冻结；生产密码库、Authorized Class 执行层、目标板资源和多介质多跳实机仍待验证。
 > 日期：2026-08-11
 > 目标：以 MCU 为主体完成安全自组网；Linux 仅作为兼容接入端；协议小而可裁剪；资源占用由目标硬件配置决定。
 
@@ -10,7 +10,7 @@ UCN 是一个可移植的 C 通信协议栈。它的最小运行形态不是 Lin
 
 Linux、ROS2、PX4/MAVLink、地面站与 AI 系统可以通过 `UCN-Host` 接入同一网络，但它们不拥有路由中心、入网中心或控制中心的地位，更不替代 Linux 自己已有的网络体系。
 
-当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 与 per-Link 接收上限、1 B RX Ceiling HELLO、3 B Ingress Profile Peek、Profile-aware RREQ/RREP/RERR/Path/诊断控制载荷、32 bit 累计 Cost、Node/Policy Hop-Cost-已验证 RTT 门禁、Profile 绑定 AAD、透明密文中继、显式开启的路由感知最小档选择、Route Epoch/grace、2→4→8→16 受限 AODV-Lite、Candidate Probe/Activate 与端到端 RTT EWMA、Endpoint Q1 首包自动寻路、固定邻居表、通用 Link Cost、带 Remaining Hops 的 Path ID 逐跳表、固定/主备与 Q1 流亲和策略，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、Authorized Class 执行层、真实无线多板和小 MTU Carrier 仍是后续任务，不能由软件测试替代。
+当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 与 per-Link 接收上限、1 B RX Ceiling HELLO、3 B Ingress Profile Peek、Profile-aware RREQ/RREP/RERR/Path/诊断控制载荷、32 bit 累计 Cost 与 3/3/3/4 B Wire Cost、Node/Policy Hop-Cost-已验证 RTT 门禁、运行期 Ingress/学习/Path Hop Scope、Profile 绑定 AAD、透明密文中继、显式开启的路由感知最小档选择、Route Epoch/grace、2→4→8→16 受限 AODV-Lite、保持发现 Profile 的 Candidate Probe/Activate 与端到端 RTT EWMA、Endpoint Q1 首包自动寻路和绝对 Deadline、固定邻居表、通用 Link Cost、带 Remaining Hops 的 Path ID 逐跳表、固定/主备与 Q1 流亲和策略，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、Authorized Class 执行层、真实无线多板和小 MTU Carrier 仍是后续任务，不能由软件测试替代。
 
 这份架构只围绕四项约束设计：
 
@@ -175,7 +175,7 @@ UCN 没有全网总发送队列，也没有要求一条路径传完后另一条�
 - `ucn_node_send_endpoint()` 的 Q1 在未知路径时自动发起一次受限 RREQ，并把最新值放入固定等待槽；旧 `ucn_node_send()` 保持显式寻路兼容。
 - “Route 存在”不等于该业务可用：Node 默认和单 Policy 可以限制 Hop、累计 Cost、最大已验证 RTT/是否强制 RTT。有限 Cost 遇 Unknown、必需 RTT 未验证时失败关闭。
 
-等待槽仅服务 Endpoint Q1，默认 `UCN_PENDING_Q1_DEPTH=4`、`UCN_PENDING_Q1_TIMEOUT_MS=1000`，同目的同 Endpoint 覆盖旧值；Q0 永不进入等待槽。这保持了 RAM、时延和 RREQ 数量的上限。
+等待槽仅服务 Endpoint Q1，默认 `UCN_PENDING_Q1_DEPTH=4`、`UCN_PENDING_Q1_TIMEOUT_MS=1000`，同目的同 Endpoint 的**新应用值**覆盖旧值并刷新 Deadline；Protocol Task 内部重试保留原绝对 Deadline，不重新排队续命，成功、到期或永久错误后才清槽。Q0 永不进入等待槽。这保持了 RAM、时延和 RREQ 数量的上限。
 
 ### 4.4.1 策略路由、Path 转发表与可选负载均衡（T22.1～T22.5 已实现基础）
 
@@ -369,7 +369,7 @@ UCN_ADAPTER_RX_QUEUE_DEPTH // 公共 Adapter 收包队列深度
 UCN_MAX_STEP_INTERVAL_MS // Protocol Task 两次 ucn_node_step() 的产品最大允许间隔
 ```
 
-`UCN_MAX_HOPS` 默认 16，支持全工程统一编译期覆盖并限制在 1～254。V5-14 已完成 32 bit 累计 Cost 和 201 Node/200 Edge Host 正向验证；这只证明线格式与状态机，不代表 100～200 Hop 在真实无线/总线上具有可接受收敛、内存、空口或故障恢复性能。产品扩大 Hop 前仍必须重标 RREQ 超时、控制预算和介质容量，并完成 S06/S07 实机验证。
+`UCN_MAX_HOPS` 默认 16，支持全工程统一编译期覆盖并限制在 1～254；每个 Node 的 `default_hop_limit` 可进一步收窄实际参与范围。完整 Decode/Network 检查后、Security 与状态修改前，Full/Lite/Nano 都拒绝超范围帧；RREQ 原始 Ring Scope、RREP/Route/Candidate 学习和 Path Remaining Hops 同步执行该边界。V5-14 已完成 32 bit 累计 Cost 和 201 Node/200 Edge Host 正向验证；这只证明线格式与状态机，不代表 100～200 Hop 在真实无线/总线上具有可接受收敛、内存、空口或故障恢复性能。产品扩大 Hop 前仍必须重标 RREQ 超时、控制预算和介质容量，并完成 S06/S07 实机验证。
 
 Protocol Task 同样是资源边界。Core 使用以下保守式把“每若干业务帧让出维护槽”换算成时间上界：`(UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE + 1) × UCN_MAX_STEP_INTERVAL_MS × UCN_MAX_NEIGHBORS × UCN_MAX_BEARERS_PER_NEIGHBOR`。默认值为 800 ms，叠加 1 s Heartbeat 后仍早于 3 s Suspect；不安全的组合在编译期失败关闭。Node 只保存三个固定统计字段观察实际 Step，不新增动态内存、线字段或网络流量。产品 Port 还必须冻结任务优先级、最大阻塞、Adapter/Bridge 预算并实测 Link `send()` WCET。
 

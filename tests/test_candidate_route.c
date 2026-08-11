@@ -82,9 +82,9 @@ static int candidate_init_node(ucn_node_t *node, ucn_node_id_t id)
 {
     ucn_config_t config;
 
-    config.network_id = UINT32_C(0xCA11D1DA);
+    config.network_id = UINT32_C(42);
     config.node_id = id;
-    config.default_hop_limit = 5U;
+    config.default_hop_limit = 4U;
     return ucn_node_init(node, &config) == UCN_OK ? 0 : 1;
 }
 
@@ -99,6 +99,7 @@ static void candidate_setup_link(ucn_link_t *link,
     link->link_id = link_id;
     link->mtu = UCN_MAX_FRAME_BYTES;
     link->peer_node_id = peer_node_id;
+    link->peer_wire_profile = UCN_WIRE_PROFILE_W0_LOCAL;
     context->route_cost = route_cost;
     context->deliver = true;
 }
@@ -122,6 +123,14 @@ static void reset_send_counts(candidate_link_context_t *contexts, size_t count)
     }
 }
 
+static void candidate_write_u32_be(uint8_t *output, uint32_t value)
+{
+    output[0] = (uint8_t)(value >> 24U);
+    output[1] = (uint8_t)(value >> 16U);
+    output[2] = (uint8_t)(value >> 8U);
+    output[3] = (uint8_t)value;
+}
+
 int test_candidate_route(void)
 {
     uint8_t first_payload = 0x51U;
@@ -133,6 +142,10 @@ int test_candidate_route(void)
     ucn_send_request_t q0_request;
     ucn_send_request_t q1_request;
     ucn_route_quality_t route_quality;
+    uint8_t mismatched_ack_payload[12U] = { 0U };
+    uint8_t mismatched_ack_encoded[UCN_MAX_FRAME_BYTES];
+    size_t mismatched_ack_length = 0U;
+    uint32_t ack_count_before_mismatch;
     uint16_t initial_route_epoch;
     uint32_t now_ms;
 
@@ -150,6 +163,19 @@ int test_candidate_route(void)
     TEST_ASSERT(candidate_init_node(&b, UINT32_C(2)) == 0);
     TEST_ASSERT(candidate_init_node(&c, UINT32_C(3)) == 0);
     TEST_ASSERT(candidate_init_node(&d, UINT32_C(4)) == 0);
+    TEST_ASSERT(ucn_node_set_wire_profiles(
+                    &a, UCN_WIRE_PROFILE_W3_BACKBONE,
+                    UCN_WIRE_PROFILE_W3_BACKBONE) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profile_auto(&a, true) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profiles(
+                    &b, UCN_WIRE_PROFILE_W0_LOCAL,
+                    UCN_WIRE_PROFILE_W0_LOCAL) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profiles(
+                    &c, UCN_WIRE_PROFILE_W0_LOCAL,
+                    UCN_WIRE_PROFILE_W0_LOCAL) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profiles(
+                    &d, UCN_WIRE_PROFILE_W0_LOCAL,
+                    UCN_WIRE_PROFILE_W0_LOCAL) == UCN_OK);
 
     candidate_setup_link(&ab, &contexts[0], 1U, UINT32_C(2), 10U);
     candidate_setup_link(&ba, &contexts[1], 2U, UINT32_C(1), 10U);
@@ -248,10 +274,48 @@ int test_candidate_route(void)
     TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 29100U) == UCN_OK);
     TEST_ASSERT(a.stats.route_refreshes_started >= 3U);
     TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 29101U) == UCN_OK);
+    TEST_ASSERT(a.candidates[0].wire_profile == UCN_WIRE_PROFILE_W0_LOCAL);
+
+    /* A candidate learned on W0 must not accept a probe ACK with the same
+     * Candidate ID encoded under another profile.  This prevents profile
+     * confusion from advancing the make-before-break state machine. */
+    {
+        ucn_frame_t mismatched_ack;
+
+        candidate_write_u32_be(mismatched_ack_payload,
+                               a.candidates[0].candidate_id);
+        candidate_write_u32_be(mismatched_ack_payload + 4U, UINT32_C(1));
+        candidate_write_u32_be(mismatched_ack_payload + 8U, UINT32_C(29101));
+        (void)memset(&mismatched_ack, 0, sizeof(mismatched_ack));
+        mismatched_ack.message_type = UCN_MSG_PATH_PROBE_ACK;
+        mismatched_ack.wire_profile = UCN_WIRE_PROFILE_W1_EDGE;
+        mismatched_ack.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
+        mismatched_ack.hop_limit = 2U;
+        mismatched_ack.network_id = UINT32_C(42);
+        mismatched_ack.source = UINT32_C(3);
+        mismatched_ack.destination = UINT32_C(1);
+        mismatched_ack.session_id = c.session_id;
+        mismatched_ack.sequence = c.next_sequence;
+        mismatched_ack.payload = mismatched_ack_payload;
+        mismatched_ack.payload_length =
+            (uint16_t)sizeof(mismatched_ack_payload);
+        TEST_ASSERT(ucn_frame_encode(&mismatched_ack, mismatched_ack_encoded,
+                                     sizeof(mismatched_ack_encoded),
+                                     &mismatched_ack_length) == UCN_OK);
+    }
+    ack_count_before_mismatch = a.stats.path_probe_acks_received;
+    TEST_ASSERT(ucn_node_receive(&a, &ad, mismatched_ack_encoded,
+                                 mismatched_ack_length) == UCN_ERR_NOT_FOUND);
+    c.next_sequence++;
+    TEST_ASSERT(a.stats.path_probe_acks_received == ack_count_before_mismatch);
+
     TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 29201U) == UCN_OK);
     TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 29301U) == UCN_OK);
     TEST_ASSERT(a.stats.path_probes_sent == (uint32_t)UCN_PATH_PROBE_REQUIRED_ACKS * 2U);
     TEST_ASSERT(a.stats.path_probe_acks_received == UCN_PATH_PROBE_REQUIRED_ACKS);
+    /* W0 carries an 8-bit route epoch.  Force the allocator to its boundary
+     * and prove activation wraps into the legal non-zero domain. */
+    a.next_route_epoch = UINT16_C(0x00FF);
     TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 29401U) == UCN_OK);
     TEST_ASSERT(a.stats.route_switches == 1U);
     TEST_ASSERT(ucn_node_get_route_quality(&a, UINT32_C(3), &route_quality) ==
@@ -266,6 +330,7 @@ int test_candidate_route(void)
     TEST_ASSERT(contexts[6].send_count == 1U);
     TEST_ASSERT(contexts[4].last_business_has_route_extension &&
                 contexts[4].last_business_route_epoch != 0U &&
+                contexts[4].last_business_route_epoch <= UINT16_C(0x00FE) &&
                 contexts[4].last_business_route_epoch != initial_route_epoch);
     TEST_ASSERT(received.last_payload == second_payload);
     return 0;

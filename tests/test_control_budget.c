@@ -152,6 +152,7 @@ int test_control_budget(void)
     frame.payload_length = (uint16_t)sizeof(route_request);
     budget_write_u32(route_request + 8U, 100U);
     budget_write_u32(route_request + 4U, UINT32_C(1));
+    route_request[12] = 1U;
     frame.sequence = UINT32_C(100);
     TEST_ASSERT(budget_inject(&node, &ingress, &frame) == UCN_OK);
     for (index = 0U; index < 3U; ++index) {

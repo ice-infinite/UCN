@@ -56,7 +56,7 @@ Windows x64、GCC 14.2、Release `-O3`、Service OFF：
 
 自动选档状态已包含在上述 Node 大小中，没有运行时堆内存；每个 Link 的 Peer Ceiling 是固定字段。Archive `.text` 是 Host 裁剪证据，不等于任何 MCU 的 Flash。Adapter 队列、Service Router、RTOS Task 栈、驱动 DMA 和生产 Security Provider 均在 Node 对象之外。
 
-> 当前值更新：V5-20 后重新测得 Nano/Lite/Full Node 为 `2648/5944/9728 B`，Archive `.text` 为 `19692/65720/123876 B`，Link 仍为 40 B，Storage Layout Version=3。本表保留 V5-07 当时的发布证据。
+> 当前值更新：V5-26 后重新测得 Nano/Lite/Full Node 为 `2648/5960/9744 B`，Archive `.text` 为 `19724/67316/125448 B`，Link 仍为 40 B，Storage Layout Version=4。本表保留 V5-07 当时的发布证据。
 
 ## 5. 仍需真实硬件完成的门禁
 

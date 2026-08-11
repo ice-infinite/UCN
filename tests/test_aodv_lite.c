@@ -310,7 +310,9 @@ int test_aodv_lite(void)
 {
     uint8_t first_payload = 0x31U;
     uint8_t repaired_payload = 0x32U;
-    uint8_t duplicate_payload[8];
+    uint8_t duplicate_payload[10] = { 0U };
+    uint8_t old_w0_request_payload[8] = { 0U };
+    uint8_t old_w1_request_payload[10] = { 0U };
     uint8_t legacy_reply_payload[18] = { 0U };
     uint8_t legacy_request_payload[16] = { 0U };
     uint8_t duplicate_encoded[UCN_MAX_FRAME_BYTES];
@@ -342,6 +344,9 @@ int test_aodv_lite(void)
     TEST_ASSERT(aodv_init_node(&a, UINT32_C(1)) == 0);
     TEST_ASSERT(aodv_init_node(&b, UINT32_C(2)) == 0);
     TEST_ASSERT(aodv_init_node(&c, UINT32_C(3)) == 0);
+    TEST_ASSERT(ucn_node_set_wire_profiles(&b, UCN_WIRE_PROFILE_W0_LOCAL,
+                                            UCN_WIRE_PROFILE_W3_BACKBONE) ==
+                UCN_OK);
     TEST_ASSERT(test_route_error_profile_payloads() == 0);
     TEST_ASSERT(test_adaptive_wire_control_chain() == 0);
     TEST_ASSERT(test_expanding_ring_budget() == 0);
@@ -364,6 +369,44 @@ int test_aodv_lite(void)
     TEST_ASSERT(ucn_node_register_link(&c, &cb) == UCN_OK);
     ucn_node_set_rx_handler(&c, aodv_rx, &received);
 
+    /* V5-23 widened W0/W1 route Cost to three bytes.  Frames emitted by the
+     * immediately preceding V5 layout must fail closed instead of being
+     * decoded with shifted Hop/Flags fields. */
+    old_w0_request_payload[0] = 3U;
+    old_w0_request_payload[4] = 1U;
+    old_w0_request_payload[6] = 1U;
+    (void)memset(&duplicate_request, 0, sizeof(duplicate_request));
+    duplicate_request.message_type = UCN_MSG_ROUTE_REQ;
+    duplicate_request.wire_profile = UCN_WIRE_PROFILE_W0_LOCAL;
+    duplicate_request.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
+    duplicate_request.hop_limit = 4U;
+    duplicate_request.network_id = UINT32_C(42);
+    duplicate_request.source = UINT32_C(1);
+    duplicate_request.destination = UCN_NODE_BROADCAST;
+    duplicate_request.session_id = UINT32_C(1);
+    duplicate_request.sequence = UINT32_C(0xA7);
+    duplicate_request.payload = old_w0_request_payload;
+    duplicate_request.payload_length =
+        (uint16_t)sizeof(old_w0_request_payload);
+    TEST_ASSERT(ucn_frame_encode(&duplicate_request, duplicate_encoded,
+                                 sizeof(duplicate_encoded), &duplicate_length) ==
+                UCN_OK);
+    TEST_ASSERT(ucn_node_receive(&b, &ba, duplicate_encoded, duplicate_length) ==
+                UCN_ERR_MALFORMED);
+
+    old_w1_request_payload[1] = 3U;
+    old_w1_request_payload[5] = 2U;
+    old_w1_request_payload[8] = 1U;
+    duplicate_request.wire_profile = UCN_WIRE_PROFILE_W1_EDGE;
+    duplicate_request.sequence = UINT32_C(0xA8);
+    duplicate_request.payload = old_w1_request_payload;
+    duplicate_request.payload_length =
+        (uint16_t)sizeof(old_w1_request_payload);
+    TEST_ASSERT(ucn_frame_encode(&duplicate_request, duplicate_encoded,
+                                 sizeof(duplicate_encoded), &duplicate_length) ==
+                UCN_OK);
+    TEST_ASSERT(ucn_node_receive(&b, &ba, duplicate_encoded, duplicate_length) ==
+                UCN_ERR_MALFORMED);
     /* The pre-V5-14 18-byte RREP (including duplicate Origin/Target) is not
      * accepted as the new profile-aware compressed format. */
     legacy_reply_payload[3] = 1U;
@@ -413,7 +456,8 @@ int test_aodv_lite(void)
     duplicate_payload[1] = 0U; duplicate_payload[2] = 0U;
     duplicate_payload[3] = 0U; duplicate_payload[4] = 1U;
     duplicate_payload[5] = 0U; duplicate_payload[6] = 0U;
-    duplicate_payload[7] = 0U;
+    duplicate_payload[7] = 0U; duplicate_payload[8] = 1U;
+    duplicate_payload[9] = 0U;
     duplicate_request.message_type = UCN_MSG_ROUTE_REQ;
     duplicate_request.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
     duplicate_request.hop_limit = 4U;

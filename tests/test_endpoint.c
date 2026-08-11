@@ -167,6 +167,57 @@ int test_endpoint(void)
                                        UCN_TRAFFIC_Q0_CRITICAL,
                                        &imu_first, 1U) == UCN_OK);
     TEST_ASSERT(imu_received.count == 3U);
+
+    /* A physical/dynamic route can exist while its current quality does not
+     * satisfy this business constraint.  Internal Pending retries must keep
+     * the original absolute deadline; only a new application Latest Value may
+     * refresh it. */
+    {
+        uint32_t first_deadline;
+        uint32_t refreshed_deadline;
+        uint32_t queued_before = a.stats.q1_route_wait_queued;
+
+        constraints.max_route_cost = 100U;
+        TEST_ASSERT(ucn_node_set_default_route_constraints(&a, &constraints) ==
+                    UCN_OK);
+        TEST_ASSERT(ucn_node_send_endpoint(&a, UINT32_C(2), IMU_ENDPOINT,
+                                           UCN_TRAFFIC_Q1_REALTIME,
+                                           &imu_first, 1U) == UCN_OK);
+        first_deadline = a.pending_q1[0].deadline_ms;
+        (void)ucn_node_step(&a, first_deadline - 1U);
+        TEST_ASSERT(a.pending_q1[0].occupied &&
+                    a.pending_q1[0].deadline_ms == first_deadline &&
+                    a.stats.q1_route_wait_retried >= 1U &&
+                    imu_received.count == 3U);
+        TEST_ASSERT(ucn_node_step(&a, first_deadline) == UCN_ERR_TTL);
+        TEST_ASSERT(!a.pending_q1[0].occupied &&
+                    a.stats.q1_route_wait_expired >= 1U);
+
+        TEST_ASSERT(ucn_node_send_endpoint(&a, UINT32_C(2), IMU_ENDPOINT,
+                                           UCN_TRAFFIC_Q1_REALTIME,
+                                           &imu_first, 1U) == UCN_OK);
+        first_deadline = a.pending_q1[0].deadline_ms;
+        (void)ucn_node_step(&a, first_deadline - 10U);
+        TEST_ASSERT(a.pending_q1[0].occupied &&
+                    a.pending_q1[0].deadline_ms == first_deadline);
+        TEST_ASSERT(ucn_node_send_endpoint(&a, UINT32_C(2), IMU_ENDPOINT,
+                                           UCN_TRAFFIC_Q1_REALTIME,
+                                           &imu_latest, 1U) == UCN_OK);
+        refreshed_deadline = a.pending_q1[0].deadline_ms;
+        TEST_ASSERT(refreshed_deadline != first_deadline &&
+                    a.pending_q1[0].payload[0] == imu_latest &&
+                    a.stats.q1_route_wait_latest_overwritten == 1U);
+
+        constraints.max_route_cost = UCN_ROUTE_COST_MAX;
+        TEST_ASSERT(ucn_node_set_default_route_constraints(&a, &constraints) ==
+                    UCN_OK);
+        TEST_ASSERT(ucn_node_step(&a, refreshed_deadline - 1U) == UCN_OK);
+        TEST_ASSERT(!a.pending_q1[0].occupied &&
+                    a.stats.q1_route_wait_sent == 1U &&
+                    a.stats.q1_route_wait_queued == queued_before + 3U &&
+                    imu_received.count == 4U &&
+                    imu_received.last_payload == imu_latest);
+    }
 #else
     (void)constraints;
     (void)readback;

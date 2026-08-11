@@ -421,6 +421,9 @@ static int test_path_wire_scope(void)
                                              UINT32_C(255), 1U,
                                              UINT32_C(1000)) ==
                 UCN_ERR_TOO_LARGE);
+    TEST_ASSERT(ucn_node_install_local_path(&node, UINT32_C(1), UINT32_C(2),
+                                             UINT32_C(2), 5U,
+                                             UINT32_C(1000)) == UCN_ERR_TTL);
     TEST_ASSERT(ucn_node_find_path_forward(&node, UINT32_C(1),
                                             security.session_id,
                                             UINT32_C(256), UINT32_C(1)) == NULL);
@@ -494,6 +497,24 @@ static int test_remote_path_wire_scope(void)
     TEST_ASSERT(auth_b.calls == 0U);
     TEST_ASSERT(ucn_node_find_path_forward(&b, UINT32_C(1), sb.session_id,
                                             UINT32_C(256), UINT32_C(2)) == NULL);
+
+    /* A correctly sized Path Install still cannot ask a runtime-cap-4 Node
+     * to retain five remaining hops.  Reject it before authorization or path
+     * state mutation. */
+    (void)memset(payload, 0, sizeof(payload));
+    payload[0] = 7U;
+    payload[1] = 2U;
+    payload[2] = 3U;
+    payload[5] = 3U;
+    payload[6] = 0xE8U;
+    payload[7] = 5U;
+    frame.sequence = UINT32_C(2);
+    frame.payload_length = 8U;
+    TEST_ASSERT(ucn_frame_encode(&frame, encoded, sizeof(encoded),
+                                 &encoded_length) == UCN_OK);
+    TEST_ASSERT(ucn_node_receive(&b, &ba, encoded, encoded_length) ==
+                UCN_ERR_TTL);
+    TEST_ASSERT(auth_b.calls == 0U && b.stats.hop_scope_rejected == 1U);
 
     /* The real W0 codec is 1 B Path ID + 1 B Destination + 1 B Next Hop +
      * 4 B Lease.  Install and revoke prove both narrow control layouts. */

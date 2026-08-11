@@ -22,7 +22,7 @@
 | --- | --- | --- |
 | 普通 RERR | Unreachable(A) | 1 / 2 / 3 / 4 B |
 | Path RERR | Unreachable(A) + OwnerSession(S) + PathID(P)；Owner Node 使用 Header Destination | 3 / 6 / 9 / 12 B |
-| PATH_INSTALL | PathID(P) + Destination(A) + NextHop(A) + Lease(4) | 7 / 10 / 13 / 16 B |
+| PATH_INSTALL | PathID(P) + Destination(A) + NextHop(A) + Lease(4) + RemainingHops(1) | 8 / 11 / 14 / 17 B |
 | PATH_REVOKE | PathID(P) + Destination(A) | 2 / 4 / 6 / 8 B |
 | Path Trace | Trace 固定域(8) + N×NodeID(A) | 请求含 1 节点为 9 / 10 / 11 / 12 B |
 | Node Snapshot Request | Query/Flags 固定域 | 四档均 8 B |
@@ -44,11 +44,11 @@ Path Trace 的回复随记录节点数增长，例如两个节点为 10/12/14/16
 - Path Trace：四档请求/回复、精确 MTU、坏长度、W3 Auto→W0、记录截断。
 - Node Snapshot：四档请求/回复、精确 MTU、坏长度、W3 Auto→W0、回复保持请求 Profile。
 - Path 控制 authorizer 与 token 调用次数保持原顺序，非法帧不会提前消耗授权预算或写入表。
-- Full Debug 单测通过，当前 Host Full `ucn_node_t=9464 B`、`ucn_link_t=40 B`；增加量来自累计 Cost/诊断待发状态的静态字段，不使用动态内存。
+- Full Debug 单测通过；V5-15 当时的 Host Full `ucn_node_t=9464 B`、`ucn_link_t=40 B`。V5-26 后当前 Full 为 9,744 B；增加量来自后续路由约束、Q1 Freshness、Hop Scope 和 Candidate Profile 等固定状态，不使用动态内存。
 
 ## 5. 经评估保持不变的 Schema
 
-Candidate `PATH_PROBE/ACK/ACTIVATE` 的 Candidate ID/Epoch 是该控制状态机自己的固定标识，不是通用 Node/Path 地址字段；Policy Diagnostic 是独立、固定 32 B、分页/Section 化的诊断 Schema。两者不为追求表面压缩而在 V5-15 改线格式，未来若升级必须单独版本化和测试。
+Candidate `PATH_PROBE/ACK/ACTIVATE` 的 Candidate ID/Epoch 是该控制状态机自己的固定标识，不是通用 Node/Path 地址字段；Policy Diagnostic 是独立、固定 32 B、分页/Section 化的诊断 Schema。两者不为追求表面压缩而在 V5-15 改载荷布局。V5-24 没有改变该布局，但要求 Candidate 保存实际 Wire Profile，Probe/Activate 使用该 Profile，ACK 继承且核对同一 Profile，Route Epoch 也按该 Profile 的可表示域分配。
 
 ## 6. 安全边界
 

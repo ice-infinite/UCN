@@ -103,7 +103,7 @@ nodes:
     type: function
     file: src/ucn_node.c
     layer: core
-    role: 所有接收帧的唯一 Core 入口：先按 3 B Prefix 与 per-Link RX Ceiling 早拒绝，再完整解码、网络/安全/去重检查、控制面处理、转发或目标 Endpoint 分发。
+    role: 所有接收帧的唯一 Core 入口：先按 3 B Prefix 与 per-Link RX Ceiling 早拒绝，再完整解码；Network 通过后执行运行期 Hop Scope，然后才进入安全/去重、控制面、转发或目标 Endpoint 分发。
     called_by:
       - adapter.ucn_adapter_rx_pump
     calls:
@@ -116,6 +116,9 @@ nodes:
       - target: frame.ucn_frame_decode
         type: direct
         reason: 通过早期 Profile 门禁后验证完整线格式、长度、字段和 CRC。
+      - target: node_runtime.validate_inbound_hop_scope_static
+        type: direct
+        reason: 在 Security 与任何 Route/Path/去重状态改变前拒绝超出 Node 运行期参与范围的帧。
       - target: security.validate_inbound_business_security
         type: direct
         reason: 执行 Provider 授权、端点安全策略、必要时解密。
@@ -155,6 +158,19 @@ nodes:
     notes:
       - 控制帧不能带 E2E/Path 组合；未准入 Link 的普通业务帧会被拒绝。
       - 去重键为线上帧身份，不把同一帧多次投递业务任务。
+
+  - id: node_runtime.validate_inbound_hop_scope_static
+    symbol: validate_inbound_hop_scope
+    type: function
+    file: src/ucn_node.c
+    layer: core
+    role: 统一执行 Frame 当前 Hop、RREQ 原始 Ring Scope、RREP 已走 Hop 和 PATH_INSTALL Remaining Hops 的运行期硬边界。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls: []
+    notes:
+      - 上限来自 default_hop_limit，且配置校验保证它不超过编译期 UCN_MAX_HOPS。
+      - Nano 在独立静态收包实现中执行相同的普通 Frame Hop 门禁。
 
   - id: node_runtime.forward_or_dispatch_static
     symbol: forward_or_dispatch_static

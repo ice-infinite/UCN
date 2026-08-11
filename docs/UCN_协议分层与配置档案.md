@@ -67,7 +67,7 @@ Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个�
 | 路由 | `ROUTE_REQ`、`ROUTE_REPLY`、`ROUTE_ERROR` | 已处理。 |
 | 健康 | `HEARTBEAT` | 已处理：一跳 8 B 请求/ACK 和邻居状态机；`LINK_STATE` 尚未定义为线协议消息。 |
 | 路径验证 | `PATH_PROBE`、`PATH_PROBE_ACK`、`PATH_ACTIVATE`、`PATH_ACTIVATE_ACK` | v5 继续使用现有控制语义；Activate/ACK 载荷为 Candidate ID + Route Epoch，业务按 Epoch 查 Current/Previous。 |
-| Path 控制 | `PATH_INSTALL`、`PATH_REVOKE` | 已处理：字段按 Wire Profile 宽度编码，Payload 分别为 7/10/13/16 B 与 2/4/6/8 B；依次需要 Provider、显式控制面授权和按 `(Source, Session)` 的固定管理预算，同源换 Bearer 不会重置预算。 |
+| Path 控制 | `PATH_INSTALL`、`PATH_REVOKE` | 已处理：字段按 Wire Profile 宽度编码，带 `remaining_hops` 的 Payload 分别为 8/11/14/17 B 与 2/4/6/8 B；依次需要 Provider、显式控制面授权和按 `(Source, Session)` 的固定管理预算，同源换 Bearer 不会重置预算。 |
 | 按需诊断 | `PATH_TRACE_REQ`、`PATH_TRACE_REPLY` | 已处理：`DIAGNOSTIC=0x04`、逐跳 Node ID、固定 Pending/Reverse 表和回调结果；只查当前 Cache，不触发 RREQ，也不锁定业务路径。 |
 | 按需诊断 | `NODE_SNAPSHOT_REQ`、`NODE_SNAPSHOT_REPLY` | 已处理：受限泛洪、短期 Reverse、随机短延迟 Reply、源端固定结果表与默认拒绝 ACL；不常驻保存全网节点或拓扑。 |
 | 按需诊断 | `POLICY_DIAGNOSTIC_REQ`、`POLICY_DIAGNOSTIC_REPLY` | 已处理：受授权单 Node 查询、三页 Summary 或一个固定 Policy/Path/Flow/quality 槽位、8 B 请求/32 B 回复、独立 Token 与 Pending/Reply 固定表；普通业务帧零额外字段。 |
@@ -75,7 +75,7 @@ Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个�
 
 Core 只需要单播、受限广播和有限多跳。组播、服务调用、文件传输和任意长度分片不是 Core 的前置条件。
 
-`ROUTE_REQ`/`ROUTE_REPLY` 的控制载荷携带 32 bit 语义的累计 `route_cost` 与 hop 数；Cost 在线上按 W0/W1/W2/W3 使用 1/2/3/4 B，Route Epoch 使用 1/2/2/2 B。Link 未上报质量时先以 16 bit 单跳 Unknown 输入，累计 Unknown 为 `0xFFFFFFFF`；因此 WiFi、BLE、LoRa、CAN、UART 的质量指标必须先由各自 Adapter 归一化，不能把 RSSI 等无线字段写入共同线协议。
+`ROUTE_REQ`/`ROUTE_REPLY` 的控制载荷携带 32 bit 语义的累计 `route_cost` 与 hop 数；Cost 在线上按 W0/W1/W2/W3 使用 `3/3/3/4 B`，Route Epoch 使用 1/2/2/2 B。Link 未上报质量时先以 16 bit 单跳 Unknown 输入，累计 Unknown 为 `0xFFFFFFFF`；因此 WiFi、BLE、LoRa、CAN、UART 的质量指标必须先由各自 Adapter 归一化，不能把 RSSI 等无线字段写入共同线协议。
 
 ### 3.3 Core 的资源纪律
 
@@ -117,7 +117,7 @@ UCN_ADAPTER_RX_QUEUE_DEPTH
 UCN_MAX_STEP_INTERVAL_MS
 ```
 
-上述宏当前定义在公共头文件中，可由构建参数覆盖；`UCN_MAX_HOPS=16` 是当前固定协议上限。实际产品需按 MCU 的 RAM、Flash、Link MTU、节点数和安全算法测量后冻结。
+上述宏当前定义在公共头文件中，可由构建参数覆盖；`UCN_MAX_HOPS=16` 是默认编译期上限，Node 的 `default_hop_limit` 是不得超过它的运行期参与范围。Ingress、RREQ/RREP 学习和 Path 安装都执行运行期上限；实际产品需按 MCU 的 RAM、Flash、Link MTU、节点数和安全算法测量后冻结。
 
 `UCN_MAX_STEP_INTERVAL_MS` 不是协议线字段，而是 Product Port 的调度 Profile。Core 将它与业务 Burst、最大 Neighbor、每 Neighbor Bearer 数换算成保守维护服务上界，并要求 Heartbeat 间隔加该上界严格早于 Suspect 门限。默认 10 ms 档案得到 800 ms；将 Step 放宽到 50 ms 会在当前默认资源档案下编译失败。运行时只用固定计数记录最大 Gap/违规，实际任务抢占和 Link `send()` WCET 仍需目标板测量。
 

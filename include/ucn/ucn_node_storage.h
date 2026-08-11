@@ -13,7 +13,7 @@
  * mutate them outside the Core/Port owner and always compile every translation
  * unit with the same UCN_PROFILE and UCN_FEATURE_SERVICE definitions.
  */
-#define UCN_NODE_STORAGE_LAYOUT_VERSION UINT32_C(3)
+#define UCN_NODE_STORAGE_LAYOUT_VERSION UINT32_C(4)
 
 typedef struct ucn_endpoint_handler_entry {
     bool occupied;
@@ -184,6 +184,7 @@ typedef struct ucn_candidate_route {
     bool valid;
     bool originated_here;
     bool activation_sent;
+    ucn_wire_profile_t wire_profile;
     ucn_node_id_t destination;
     uint32_t candidate_id;
     ucn_link_t *egress_link;

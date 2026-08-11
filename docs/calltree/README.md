@@ -53,7 +53,7 @@ S04 后，本调用树以默认 `FULL + Service ON` 展示完整可达关系。`
 
 V5-10 后，默认发送仍固定 W3。产品只有显式调用 `ucn_node_set_wire_profile_auto(true)` 才进入自动最小档路径；HELLO 使用固定 TX 档并以 1 B 发布独立 Peer RX Ceiling，中继保留来源帧档位。业务发送先确定是否带 16 B Tag，再结合地址/Hop/Route/Path、Link MTU 和 Peer RX Ceiling 选档，最后才 Seal/Encode。
 
-V5-17～V5-20 后，Wire 可表达与业务可用分开判断：Node/Policy 可限制 Hop、32 bit Cost 与已验证 RTT；Pinned Path 使用逐跳安装的 `remaining_hops`；未知 Q1 路线默认按 2→4→8→16 有界扩圈；Ingress 在完整 Decode/CRC 前先用 3 B Prefix 执行 per-Link RX Ceiling 门禁。V5-21 Authorized Class 仍阻塞于生产安全 S02，不在调用树中伪造执行分支。
+V5-17～V5-20、V5-22～V5-26 后，Wire 可表达与业务可用分开判断：Node/Policy 可限制 Hop、32 bit Cost 与已验证 RTT；线上 Cost 为 3/3/3/4 B；Pinned Path 使用逐跳安装的 `remaining_hops`；未知 Q1 路线默认按 2→4→8→16 有界扩圈且 Pending 内部重试不刷新绝对 Deadline；Candidate 验证保持发现时的 Wire Profile；Ingress 在完整 Decode/CRC 前先用 3 B Prefix 执行 per-Link RX Ceiling，完整 Decode/Network 后再在 Security/状态前执行运行期 Hop Scope。V5-21 Authorized Class 仍阻塞于生产安全 S02，不在调用树中伪造执行分支。
 
 ## 2. 目录和阅读顺序
 

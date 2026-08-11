@@ -82,7 +82,7 @@ nodes:
     type: function
     file: src/ucn_node.c
     layer: routing
-    role: 验证 PATH_INSTALL 权限、Payload 与下一跳后安装中继/终端 Path 表项。
+    role: 先验证 PATH_INSTALL Profile/长度与运行期 Remaining Hops，再执行权限、预算和下一跳检查，最后安装中继/终端 Path 表项。
     called_by:
       - node_runtime.ucn_node_receive
     calls:

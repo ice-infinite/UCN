@@ -10,7 +10,8 @@ Linux、ROS 2、MAVLink 或地面站可以作为普通 Host/Adapter 接入，但
 - v5 线协议 Codec：官方 W0/W1/W2/W3 基础头为 17/21/26/30 B；Nano/Lite/Full 共用四档 Decoder，推荐发送采用最低够用档、接收默认开放至 W3。Node 也可按 MTU/安全策略收窄接收上限，或显式开启路由感知的最小档自动选择；任何字段不能表达时失败关闭，不静默截断。
 - 全局公共编译配置位于 `include/ucn/ucn_config.h`；产品可用独立 `UCN_USER_CONFIG_HEADER` 只覆盖需要调整的项，未配置项继续使用统一默认和原头文件回退。
 - 1 B 最大接收档声明的一跳 HELLO/准入、Heartbeat、压缩 RREQ、受限 AODV-Lite 路由发现、RERR 与路由/邻居老化；发送档与接收上限相互独立。
-- Q0/Q1 有界发送调度、静态 Endpoint 业务分发和跨介质通用 `route_cost`。
+- Q0/Q1 有界发送调度、Pending Q1 绝对 Deadline、静态 Endpoint 业务分发和跨介质通用 `route_cost`。
+- W0/W1/W2/W3=`3/3/3/4 B` 的累计 Cost 控制域、Candidate Wire Profile 连续性，以及 Full/Lite/Nano 一致的运行期 Hop Scope 门禁。
 - Adapter 将物理地址和驱动回调转换为有界 RX 队列；协议任务中再执行路由和应用回调。
 - 按需路径追踪与低频节点快照诊断。节点快照默认拒绝远端请求，产品必须显式配置管理节点授权。
 - 编译期 Nano/Lite/Full Feature Profile；Service Router/Bridge 可独立开启或移除。

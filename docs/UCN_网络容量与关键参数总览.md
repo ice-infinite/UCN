@@ -115,8 +115,8 @@ Q1进入固定 Pending
 - Pending Q1：4；
 - RREQ 超时：1000 ms；
 - 同目标最短 RREQ 间隔：100 ms；
-- v5 RREQ 删除重复 Origin，当前 Payload 为 8/10/12/14 B，W0～W3 整帧分别为 25/31/38/44 B；
-- v5 RREP 删除重复 Origin/Target，当前 Payload 为 8/10/11/12 B，W0～W3 整帧分别为 25/31/37/42 B；
+- v5 RREQ 删除重复 Origin，当前 Payload 为 10/11/12/14 B，W0～W3 整帧分别为 27/32/38/44 B；
+- v5 RREP 删除重复 Origin/Target，当前 Payload 为 10/11/11/12 B，W0～W3 整帧分别为 27/32/37/42 B；
 - Q0 永不等待或主动发起 RREQ，必须预先具备直连、静态 Route、缓存 Route 或安装好的 Path。
 
 一次冷寻路的 UCN 线字节可粗略表示为：
@@ -144,7 +144,7 @@ RREQ档位帧长 × 实际扩散次数 + RREP档位帧长 × 返回跳数
 ### 4.4 Cost 与负载均衡
 
 - Link `route_cost` 输入合法范围为 `1..65534`，越小越优；`65535` 是单跳 Unknown 保留值。
-- Route/Candidate 的累计 Cost 为 32 bit，最高 Known 为 `0xFFFFFFFE`、Unknown 为 `0xFFFFFFFF`；线上按 Wire Profile 使用 1/2/3/4 B。Known 永远优于 Unknown，不可表达或真实溢出失败关闭。
+- Route/Candidate 的累计 Cost 为 32 bit，最高 Known 为 `0xFFFFFFFE`、Unknown 为 `0xFFFFFFFF`；线上 W0/W1/W2/W3 使用 `3/3/3/4 B`。Known 永远优于 Unknown，不可表达或真实溢出失败关闭。
 - Full 的 `AUTO_BALANCE` 只支持 Q1，默认最多 8 个 Flow。
 - 同一 `(Destination, Endpoint, Q1)` 在 2 s 租期内保持 Path 亲和，避免逐帧乱序。
 - 选择分数使用基础 Cost 与活动 Flow 数；Queue Pressure 达 800‰ 且连续 3 个 500 ms 样本后可触发重绑。
@@ -230,11 +230,11 @@ Windows x64、GCC 14.2、Release、Service OFF的当前静态证据：
 
 | Profile | `sizeof(ucn_node_t)` | Core静态库`.text` |
 | --- | ---: | ---: |
-| Nano | 2,648 B | 19,692 B |
-| Lite | 5,944 B | 65,720 B |
-| Full | 9,728 B | 123,876 B |
+| Nano | 2,648 B | 19,724 B |
+| Lite | 5,960 B | 67,316 B |
+| Full | 9,744 B | 125,448 B |
 
-这是 V5-20 后的 Host x64 GCC 14.2 Release/Service OFF 结果；`ucn_link_t=40 B`，Storage Layout Version=3。它只证明固定对象与代码裁剪，不等于目标 MCU ELF/栈/功耗；历史基线见[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)。
+这是 V5-26 后的 Host x64 GCC 14.2 Release/Service OFF 结果；`ucn_link_t=40 B`，Storage Layout Version=4。它只证明固定对象与代码裁剪，不等于目标 MCU ELF/栈/功耗；历史基线见[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)。
 
 特性：
 

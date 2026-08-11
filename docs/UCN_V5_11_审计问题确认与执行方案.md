@@ -19,7 +19,7 @@ v5 的可变 Wire Header、失败关闭、统一内部 32 bit 身份和低 TX/�
 | --- | --- | --- | --- |
 | 自动选档没有覆盖 HELLO/RREQ/RREP 等控制面 | 属实。`send_control_on_link()` 与 `begin_route_discovery()` 当前写死 `node->tx_wire_profile`。 | 是，P1 | V5-12 让普通控制帧走最小可表达档，并给路由发现建立显式 Profile/Hop 选择；完整覆盖 HELLO→RREQ→RREP→Data。 |
 | Path 安装可写入当前 TX 域不可表达的 Path ID/地址 | 属实。Local Install 只做 Security/Path 表校验，远端 Payload 仍是 32 bit 固定字段。 | 是，P1 | V5-11 在状态写入前按有效 Wire 能力校验 Path ID、Destination、Next Hop；非法远端安装不消费表项、不污染 Path 状态。 |
-| W2/W3 长跳数与 16 bit 累计 Route Cost 不匹配 | 属实。Link Cost 与累计 Route Cost 都是 `uint16_t`，累加在 65534 饱和。 | 是，P1 | V5-14 保留单跳 Link Cost 的有界输入，累计 Route Cost 升级为 32 bit；RREQ/RREP 按 W0/W1/W2/W3 使用 1/2/3/4 B Cost。 |
+| W2/W3 长跳数与 16 bit 累计 Route Cost 不匹配 | 属实。Link Cost 与累计 Route Cost 当时都是 `uint16_t`，累加在 65534 饱和。 | 是，P1 | V5-14 将累计 Route Cost 升级为 32 bit；V5-23 又把 RREQ/RREP Cost Width 从历史 1/2/3/4 B 修正为当前 3/3/3/4 B，使各档合法 Hop×单跳 Cost 都可表示。 |
 | Node 只有全局 RX Profile，不能给不同 Link 独立收窄 | 能力缺口属实，但不是当前契约错误。仓库把 `link->mtu` 定义为 Adapter 分段/重组后的 UCN 逻辑 MTU。 | 是，P1 能力 | V5-13 增加每 Link 本地 RX Ceiling；Ingress 上限取 Node 与 Link 较小值。默认继承 Node 上限，不破坏现有 Adapter。 |
 | Wire Profile 尚未成为权限/限流等级 | 属实，但不是 Bug。当前 Wire Profile 只表示编码能力，不能由帧自报档位获得权限。 | 设计更新，不在本轮直接赋权 | V5-16 单独定义认证身份上的 Authorized Class；在 S02 身份/密钥没有完成前，不把它伪装成已实现安全功能。 |
 | Linux 不能统一访问多个 W0 扁平域 | 属实且已知。V5-10 已明确 W0/mixed 单域 254 Node。 | 不改小 Core | 继续归 V5-06 `ucn_gateway_ext`；等待 S02 的身份、Session 与安全信封前置条件。 |

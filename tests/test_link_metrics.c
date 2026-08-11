@@ -125,7 +125,9 @@ static ucn_result_t metrics_inject_route_request(
     ucn_link_t *ingress,
     ucn_wire_profile_t profile,
     uint32_t request_id,
-    uint32_t route_cost)
+    uint32_t route_cost,
+    uint8_t hop_count,
+    uint8_t frame_hop_limit)
 {
     const ucn_wire_profile_descriptor_t *descriptor =
         ucn_wire_profile_get_descriptor(profile);
@@ -146,14 +148,14 @@ static ucn_result_t metrics_inject_route_request(
     metrics_write_uint_be(payload + descriptor->address_bytes, 4U, request_id);
     metrics_write_uint_be(payload + cost_offset, descriptor->route_cost_bytes,
                           route_cost);
-    payload[cost_offset + descriptor->route_cost_bytes] = 0U;
+    payload[cost_offset + descriptor->route_cost_bytes] = hop_count;
     payload[cost_offset + descriptor->route_cost_bytes + 1U] = 0U;
 
     (void)memset(&frame, 0, sizeof(frame));
     frame.message_type = UCN_MSG_ROUTE_REQ;
     frame.wire_profile = profile;
     frame.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
-    frame.hop_limit = 4U;
+    frame.hop_limit = frame_hop_limit;
     frame.network_id = UINT32_C(0x2A);
     frame.source = UINT32_C(1);
     frame.destination = UCN_NODE_BROADCAST;
@@ -184,6 +186,9 @@ static int test_route_cost_profile_boundaries(void)
             ucn_wire_profile_get_descriptor(profile);
         const uint32_t wire_maximum =
             metrics_wire_maximum(descriptor->route_cost_bytes);
+        const uint32_t maximum_legal_path_cost =
+            (uint32_t)descriptor->max_hops *
+            (uint32_t)UCN_LINK_ROUTE_COST_MAX;
         const size_t cost_offset = (size_t)descriptor->address_bytes + 4U;
         const size_t expected_payload_length =
             cost_offset + descriptor->route_cost_bytes + 2U;
@@ -217,10 +222,38 @@ static int test_route_cost_profile_boundaries(void)
         egress.peer_wire_profile = profile;
         TEST_ASSERT(ucn_node_register_link(&relay, &ingress) == UCN_OK);
         TEST_ASSERT(ucn_node_register_link(&relay, &egress) == UCN_OK);
+        TEST_ASSERT(maximum_legal_path_cost < wire_maximum);
+
+        TEST_ASSERT(metrics_inject_route_request(
+                        &relay, &ingress, profile, UINT32_C(9), 0U, 2U, 4U) ==
+                    UCN_ERR_TTL);
+        TEST_ASSERT(relay.stats.hop_scope_rejected == 1U &&
+                    !relay.routes[0].valid && !relay.rreq_cache[0].valid);
+        if (profile == UCN_WIRE_PROFILE_W3_BACKBONE) {
+            TEST_ASSERT(metrics_inject_route_request(
+                            &relay, &ingress, profile, UINT32_C(8), 0U, 1U,
+                            64U) == UCN_ERR_TTL);
+            TEST_ASSERT(relay.stats.hop_scope_rejected == 2U &&
+                        !relay.routes[0].valid && !relay.rreq_cache[0].valid);
+        }
+
+        egress_context.route_cost = UCN_LINK_ROUTE_COST_MAX;
+        TEST_ASSERT(metrics_inject_route_request(
+                        &relay, &ingress, profile, UINT32_C(10),
+                        maximum_legal_path_cost -
+                            (uint32_t)UCN_LINK_ROUTE_COST_MAX, 1U, 4U) == UCN_OK);
+        TEST_ASSERT(ucn_frame_decode(egress_context.last_frame,
+                                     egress_context.last_frame_length,
+                                     &forwarded) == UCN_OK);
+        TEST_ASSERT(metrics_read_uint_be(
+                        forwarded.payload + cost_offset,
+                        descriptor->route_cost_bytes) ==
+                    maximum_legal_path_cost);
+        egress_context.route_cost = 1U;
 
         TEST_ASSERT(metrics_inject_route_request(
                         &relay, &ingress, profile, UINT32_C(1),
-                        wire_maximum - UINT32_C(2)) == UCN_OK);
+                        wire_maximum - UINT32_C(2), 1U, 4U) == UCN_OK);
         TEST_ASSERT(ucn_frame_decode(egress_context.last_frame,
                                      egress_context.last_frame_length,
                                      &forwarded) == UCN_OK);
@@ -233,7 +266,7 @@ static int test_route_cost_profile_boundaries(void)
 
         TEST_ASSERT(metrics_inject_route_request(
                         &relay, &ingress, profile, UINT32_C(2),
-                        wire_maximum) == UCN_OK);
+                        wire_maximum, 1U, 4U) == UCN_OK);
         TEST_ASSERT(ucn_frame_decode(egress_context.last_frame,
                                      egress_context.last_frame_length,
                                      &forwarded) == UCN_OK);
@@ -244,7 +277,8 @@ static int test_route_cost_profile_boundaries(void)
         sends_before_overflow = egress_context.send_count;
         TEST_ASSERT(metrics_inject_route_request(
                         &relay, &ingress, profile, UINT32_C(3),
-                        wire_maximum - UINT32_C(1)) == UCN_ERR_TOO_LARGE);
+                        wire_maximum - UINT32_C(1), 1U, 4U) ==
+                    UCN_ERR_TOO_LARGE);
         TEST_ASSERT(egress_context.send_count == sends_before_overflow);
     }
     return 0;

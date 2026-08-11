@@ -20,11 +20,11 @@ Target(Address Width) | Request ID(4) | Route Cost(2) | Hop Count(1) | Flags(1)
 | W2 | 11 B | 37 B | 42 B | 5 B |
 | W3 | 12 B | 42 B | 46 B | 4 B |
 
-Request ID 保持 32 bit。这里的固定 16 bit Cost 已在 V5-14 被累计 32 bit、线上按 Profile 使用 1/2/3/4 B 的格式取代；当前 RREQ Payload 为 8/10/12/14 B，RREP 为 8/10/11/12 B。详见 [V5-14 实现报告](UCN_V5_14_长距离Cost与RREQ_RREP实现报告.md)。协议 v5 + Wire Profile 共同确定唯一载荷版本，不做启发式解析。
+Request ID 保持 32 bit。这里的固定 16 bit Cost 已在 V5-14 被累计 32 bit 语义取代，V5-23 又把线上 Cost Width 修正为 W0/W1/W2/W3=`3/3/3/4 B`；当前 RREQ Payload 为 10/11/12/14 B，RREP 为 10/11/11/12 B。详见 [V5-14/V5-23 实现报告](UCN_V5_14_长距离Cost与RREQ_RREP实现报告.md)。协议 v5 + Wire Profile 共同确定唯一载荷版本，不做启发式解析。
 
 ## 验证
 
-- 本节的 RREQ 9/10/11/12 B 是 V5-03 历史验证值；当前四档向量由 V5-14 的 8/10/12/14 B 覆盖。
+- 本节的 RREQ 9/10/11/12 B 是 V5-03 历史验证值；当前四档向量由 V5-23 的 10/11/12/14 B 覆盖。
 - W0 A→B→C：路由发现、RREP、业务中继、RERR 与修复继续通过。
 - 负向：0 B/旧 4 B/非法或小于发送档的 HELLO 能力、旧 16 B W0 RREQ 均返回 `UCN_ERR_MALFORMED`。
 - 控制预算：W3 新偏移下的 RREQ Replay、Better Cost、Token 耗尽/恢复与来源隔离继续通过。
