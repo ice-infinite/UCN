@@ -30,7 +30,7 @@ nodes:
     type: function
     file: src/ucn_node.c
     layer: core
-    role: 将已打开的统一 Link 注册到 Node 固定 Link 表。
+    role: 将已打开的统一 Link 注册到 Node 固定 Link 表；静态 mtu=0 允许由 get_status().mtu 在运行时提供逻辑上限。
     called_by:
       - external.adapter_init
       - neighbor.admit_neighbor_entry_static
@@ -267,7 +267,10 @@ nodes:
         reason: 评估主备质量、Probe ACK 和切换滞回。
       - target: policy_path.ucn_policy_refresh_link_quality
         type: direct
-        reason: 采样通用 Cost/RTT/失败率/队列压力。
+        reason: 采样每条物理 Link 的通用 Cost/RTT/失败率/队列压力。
+      - target: policy_path.refresh_policy_path_bearers_static
+        type: direct
+        reason: 采样完成后按逻辑 Neighbor 当前实际 Bearer 更新 Policy Path 活性和拥塞。
       - target: policy_path.ucn_policy_expire_flows
         type: direct
         reason: 回收到期 Q1 Flow 绑定。

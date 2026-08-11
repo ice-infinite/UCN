@@ -2,12 +2,12 @@
 
 > 日期：2026-08-11  
 > 分支：`codex/v5-adaptive-wire`  
-> 结论：v5 的代码、Host 单元/模拟、资源复测和文档同步已完成；生产密码与目标板实机仍是独立门禁。
+> 结论：本文记录 V5-07 当时的软件发布门禁；V5-08～V5-33 后续变化以本文的“当前值更新”、[文档与代码一致性审计](UCN_V5_文档与代码一致性审计.md)、[异构 Bearer、动态 MTU 与 Policy 修复报告](UCN_V5_27_异构Bearer与动态MTU修复报告.md)和[PATH_INSTALL 兼容与 API 符号修复报告](UCN_V5_31_PATH_INSTALL兼容与API符号修复报告.md)为准。生产密码与目标板实机始终是独立门禁。
 
 ## 1. 本轮完成内容
 
 - 将规模模拟器从旧版固定字节偏移统计改为调用 `ucn_frame_decode()`，因此 W0～W3 的 Source、Message Type 和 Wire Bytes 都按真实帧解释；解码失败会标记模拟失败。
-- 新增 `--wire-mode fixed|auto`。`fixed` 使用保守 W3；`auto` 保持控制帧固定 W3，但业务帧按 Node/Route/Link/MTU/Tag 选择最小官方档。
+- 新增 `--wire-mode fixed|auto`。V5-07 当时 `fixed` 使用保守 W3，`auto` 保持控制帧固定 W3、只对业务选最小档；V5-12～V5-15 已在当前源码中补齐控制面的选档/继承规则。
 - 三节点安全测试改为固定域 W3 建路、源端显式自动选档、受保护业务实际以 W0 通过 A→B→C；B 只转发密文且不调用 Open，C 解密后断言收到 W0。
 - `test_profile` 同时报告 `sizeof(ucn_node_t)` 和 `sizeof(ucn_link_t)`。
 - 同步架构、配置档案、Adapter 契约、使用手册、六种平台快速手册、网络参数总览、调用树和知识库。
@@ -56,7 +56,7 @@ Windows x64、GCC 14.2、Release `-O3`、Service OFF：
 
 自动选档状态已包含在上述 Node 大小中，没有运行时堆内存；每个 Link 的 Peer Ceiling 是固定字段。Archive `.text` 是 Host 裁剪证据，不等于任何 MCU 的 Flash。Adapter 队列、Service Router、RTOS Task 栈、驱动 DMA 和生产 Security Provider 均在 Node 对象之外。
 
-> 当前值更新：V5-26 后重新测得 Nano/Lite/Full Node 为 `2648/5960/9744 B`，Archive `.text` 为 `19724/67316/125448 B`，Link 仍为 40 B，Storage Layout Version=4。本表保留 V5-07 当时的发布证据。
+> 当前值更新：V5-33 后重新测得 Nano/Lite/Full Node 为 `2648/5960/9752 B`，Archive `.text` 为 `19884/68244/127792 B`，Link 仍为 40 B，Storage Layout Version=5。本表保留 V5-07 当时的发布证据。
 
 ## 5. 仍需真实硬件完成的门禁
 
@@ -72,6 +72,6 @@ Windows x64、GCC 14.2、Release `-O3`、Service OFF：
 
 上述项分别留在 S02、S06、S07；在它们完成前，v5 可以称为“Host 软件实现与模拟验证完成”，不能称为“生产安全完成”或“多介质实机性能已验证”。
 
-## 6. 发布结论
+## 6. 当前发布结论
 
-V5-01～V5-05 已进入 Core，V5-06 已形成独立 Extended Gateway RFC，V5-07 完成软件发布门禁。Extended Gateway 不混入小 Core；没有 Linux 时，Lite/Full MCU 仍能独立发现、寻路、转发和恢复。下一阶段只进入生产密码与实机产品化，不再把缺少硬件的项目伪装成软件未完成。
+V5-01～V5-15、V5-17～V5-20、V5-22～V5-30 已进入当前代码/软件验证；V5-16 是设计冻结，V5-21 严格阻塞于 S02。Extended Gateway 不混入小 Core；没有 Linux 时，Lite/Full MCU 仍能独立发现、寻路、转发和恢复。剩余主要门禁是生产密码/身份、Authorized Class 执行层和 S06/S07 实机产品化，不把缺少硬件写成软件已经验证。

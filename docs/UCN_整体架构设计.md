@@ -73,7 +73,7 @@ flowchart TB
 
 | 模块 | 当前已实现 | 明确尚未实现 |
 | --- | --- | --- |
-| Packet | v5 W0～W3 基础头 17/21/26/30 B；Nano/Lite/Full 都解析四档。固定域和最大接收档可配置，推荐最低够用 TX/W3 RX；自动模式按字段、路由 Hop、Path、MTU、对端上限及 Tag 选择最小可用档。Ingress 先用 3 B Prefix 按 per-Link RX Ceiling 早拒绝，再执行完整长度/CRC/Network/Hop/Flag/字段校验。 | 跨 Link 分片仍未实现。 |
+| Packet | v5 W0～W3 基础头 17/21/26/30 B；Nano/Lite/Full 都解析四档。固定域和最大接收档可配置，推荐最低够用 TX/W3 RX；自动模式按字段、路由 Hop、Path 共同 Profile/MTU、对端上限及 Tag 选择最小可用档。Ingress 先用 3 B Prefix 按 per-Link RX Ceiling 早拒绝，再执行完整长度/CRC/Network/Hop/Flag/字段校验。 | 跨 Link 分片仍未实现。 |
 | Identity & Join | 最小 `HELLO`、Candidate/Admitted/Suspect/Removed/Rejected/Expired 邻居表、`Manual`/`Open`/`Provider` 准入。 | `JOIN_REQ`/挑战/接受状态机、出厂身份格式。 |
 | Session & Replay | 可注入 Provider 的会话 ID、发送序号持久化、TX/RX 授权、固定 `seal/open`、30 B 不可变 AAD（Path 帧含 Path ID）、明文/受保护策略和入站去重缓存。 | 生产 AEAD、密钥轮换、完整重放窗口与产品 ACL 表。 |
 | Route / Forwarding | 固定 Active/Candidate 表、2→4→8→16 有界 AODV-Lite、RREQ/RREP/RERR、`PATH_PROBE/ACK` 的端到端 RTT EWMA、携带 Candidate ID + Epoch 的 `PATH_ACTIVATE/ACK`、TTL、断链清表、32 bit Route Cost；Node/Policy 可按 Hop/Cost/已验证 RTT 门禁业务路线，按 `(destination, route_epoch)` 区分 Current/Previous，默认 1 s grace。 | 自动业务重发、全网拓扑。 |
@@ -181,7 +181,7 @@ UCN 没有全网总发送队列，也没有要求一条路径传完后另一条�
 
 当前 Active/Candidate 解决的是“同一目标 Node 的自动换路”，不是“不同业务固定走不同路径”或“多路径同时分担”。T22.1 已在 `ucn_node_t` 中加入固定 Policy、当地 Path、Q1 Flow 和 Link 质量快照表；默认上限为 8/8/8/4，均可按 RAM Profile 编译期调整。Policy 按 `(destination, Endpoint[, traffic_class])` 精确或 traffic-class 通配匹配；未配置业务仍保持原有 `AUTO_BEST`。它已提供 `ucn_node_set_route_policy()`、`ucn_node_set_policy_path()`、`ucn_node_bind_q1_flow()` 和质量/统计查询 API。
 
-T22.2 已引入真正的线上 Path ID，但它与 T22.1 的本地 `local_path_id` 仍不是同一个概念。v5 Path 业务帧按 Profile 使用 19/25/31/36 B Header；固定模式使用 Node 发送档，自动模式选择能表达 Path ID、地址、真实 Remaining Hops、Tag 且满足 MTU/对端上限的最小档。表项以 `(源 Node、源 Session、Path ID、目标)` 识别，并在每一跳保存固定的“下一跳/egress 或终端 + remaining_hops”关系。PATH_INSTALL 四档 Payload 为 8/11/14/17 B；中继 Scope 逐跳递减，终端为 0，旧长度或错误 Scope 失败关闭。默认每节点最多 8 项，租约到期自动回收；中继保留源端已选 Wire Profile，只按表转发，端到端密文只由目标解密。
+T22.2 已引入真正的线上 Path ID，但它与 T22.1 的本地 `local_path_id` 仍不是同一个概念。v5 Path 业务帧按 Profile 使用 19/25/31/36 B Header；固定模式使用 Node 发送档，自动模式选择能表达 Path ID、地址、真实 Remaining Hops、Tag 且满足整条 Path 共同 Profile/MTU 的最小档。表项以 `(源 Node、源 Session、Path ID、目标)` 识别，并在每一跳保存固定的“下一跳/egress 或终端 + remaining_hops + maximum_wire_profile + minimum_mtu”关系。PATH_INSTALL 基础四档 Payload 为 8/11/14/17 B，扩展能力格式为 11/14/17/20 B；旧 API 固定发送基础格式，capability API 才显式发送扩展格式，新节点只接受两组精确长度。中继 Scope 逐跳递减，终端为 0，坏中间长度或错误 Scope 失败关闭。默认每节点最多 8 项，租约到期自动回收；中继保留源端已选 Wire Profile，只按表转发，端到端密文只由目标解密。若后续跳发现既有 E2E 帧超出能力，会撤销 Path 并返回 Path-RERR，不会静默保留黑洞。
 
 T22.3 将 Policy 的 Primary/Backup 本地句柄绑定到已经验证的线上 Path ID，并接入 `ucn_node_send_endpoint()`。`PINNED_STRICT` 只发送 Primary，任何失败都直接返回；`PINNED_FAILOVER` 仅在 Link Down 或 Path 不存在时标记该本地 Path Down 并尝试 Backup，Cost、队列抖动、背压和 Security 错误均不会触发切换。Primary/Backup 都不可用时，只有配置显式允许的 Q1 才会进入既有 RREQ/等待槽；这代表该次业务已经允许退回普通 Route，Q0 永不自动寻路。
 
@@ -252,7 +252,7 @@ ESP32 T21.6 正常诊断镜像已经让 ESP-NOW Peer Link 和 UART Link（ID `0x
 
 Adapter 的默认收包队列是两个最大帧缓存，可按 MCU RAM 编译期缩小。队列满必须显式丢弃并计数。接口、状态机、各介质映射和实际限制见 [UCN Adapter 契约](UCN_Adapter_契约.md)。
 
-所有处于同一 Core Profile 的 Link 还必须共享可承载的最大帧上限：当前 Core 不做跨 Link 分片/重组，故 `UCN_MAX_FRAME_BYTES` 必须不大于最小有效 MTU。64 B CAN-FD 可使用 64 B Build Profile；经典 CAN 的 8 B 载荷既不能直接承载当前默认 W3 的 30 B 基础头，也不能承载未来 W0 的 17 B 基础头，仍需有界 Carrier 分段/重组。
+当前 Core 不做跨 Link 分片/重组。每个发送帧必须小于实际 Path/Bearer 的有效 MTU；静态 `link->mtu` 和动态 `get_status().mtu` 同时存在时取较小值，任一为零时使用另一方，两者均零时 Link 暂不可发送。64 B CAN-FD 可使用更小的 Build Frame 配置或严格限制业务帧；经典 CAN 的 8 B 载荷不能直接承载 W0 的 17 B 基础头，仍需 Adapter 侧有界 Carrier 分段/重组。
 
 ## 5. UCN-Extended：仅给需要它的 MCU 开启
 

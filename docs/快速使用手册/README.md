@@ -1,6 +1,6 @@
 # UCN 快速使用手册
 
-> 适用：当前 `codex/v5-adaptive-wire` 的 UCN Core 5.0.0 / 线协议 v5 V5-07 软件状态。默认固定 W3；固定域和显式自动最小档已可用。本文档组以公开 C99 API 和现有 ESP32 FreeRTOS 参考实现为准。
+> 适用：当前 `codex/v5-adaptive-wire` 的 UCN Core 5.0.0 / 线协议 v5 V5-33 软件工作树；`f941ae9` 是本轮缺陷修复前基线。默认固定 W3；固定域、显式自动最小档、Profile-aware 控制面、PATH_INSTALL 基础/扩展双格式、动态 MTU、异构 Bearer Path 能力、逻辑 Bearer Policy、Q1 绝对 Deadline、运行期 Hop Scope 与有界 Expanding Ring 已可用。本文档组以公开 C99 API 和现有 ESP32 FreeRTOS 参考实现为准；生产安全和真实多板/多介质仍未由本手册替代验证。
 
 ## 选择你的运行环境
 

@@ -3,6 +3,7 @@
 > 日期：2026-08-11
 > 范围：累计路由代价、RREQ/RREP 线格式、长链 Host 软件验证；不包含真实介质时延或 MCU 性能结论。
 > 当前线格式：V5-23 已在 V5-14 的 32 bit 累计语义上，把 Cost Width 更新为 `3/3/3/4 B`；本文件以下表格均按当前源码描述。
+> 当前基线：已对照 `codex/v5-adaptive-wire@f941ae9` 的 Descriptor、RREQ/RREP Codec 与正式测试复核。
 
 ## 1. 结果
 

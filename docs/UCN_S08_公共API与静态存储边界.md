@@ -1,6 +1,6 @@
 # UCN S08 公共 API 与静态存储边界
 
-> v5 后续说明：本文保留为 `v4.0.0-final-before-v5` 的 API/资源历史证据。当前 v5 V5-01 已把帧 Codec 升为 W0～W3，但没有改变 Node API/Storage owner 边界；当前资源和线格式以 `UCN_V5_01_官方Wire_Profile_Codec实现报告.md` 为准。
+> v5 后续说明：本文保留为 `v4.0.0-final-before-v5` 的 API/资源历史证据。当前 v5 V5-33 已把帧、控制面、路由约束、Path 能力、动态 MTU 与 Storage Layout 继续演进，但没有改变 Node API/Storage owner 边界；PATH_INSTALL 双格式和公共符号以 `UCN_V5_31_PATH_INSTALL兼容与API符号修复报告.md` 为准。
 
 ## 1. 当前结论
 
@@ -89,8 +89,8 @@ S08 继续沿用 S04 已实现的编译期门禁和实际 Payload helper：
 | MSVC Debug，Nano/OFF、Lite/ON、Full/ON | 全部构建并 CTest 通过 |
 | 最小 MTU 33/46/64 B | 全部编译通过 |
 | 低一字节 32/45/63 B | 全部按预期编译拒绝 |
-| 三档公共 Node/Path/Policy 符号 | 每档 56 个，无缺失 |
-| Host `sizeof(ucn_node_t)` | V5-26 后 Nano/Lite/Full 为 2648/5960/9744 B；Storage Layout Version=4 |
+| 三档公共 Node/Path/Policy 符号 | V5-33 当前筛选口径每档 74 个，无缺失；两个 capability API 均直接链接验证 |
+| Host `sizeof(ucn_node_t)` | V5-33 后 Nano/Lite/Full 为 2648/5960/9752 B；Storage Layout Version=5 |
 | ESP32-S3 Full/Service ON 正常 Node | 构建成功，RAM 48124 B，Flash 600819 B |
 | ESP32-S3 Full/Service OFF UART Bench | 构建成功，RAM 22152 B，Flash 185947 B |
 | ESP-WROOM-32 Full/Service ON | 构建成功，RAM 50184 B，Flash 626803 B |

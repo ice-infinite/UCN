@@ -1,6 +1,6 @@
 # UCN 网络容量与关键参数总览
 
-> 版本口径：UCN v5 V5-10 软件状态，分支 `codex/v5-adaptive-wire`，2026-08-11。
+> 版本口径：UCN v5 V5-33 软件工作树，分支 `codex/v5-adaptive-wire`；`f941ae9` 是本轮修复前审计基线，2026-08-11。
 > 目的：集中说明当前网络规模、直连能力、跳数、寻址范围、寻路效率、帧效率、资源占用和关键默认参数。
 > 边界：源码与 Host 模拟是当前事实；ESP32 两板结果只代表对应测试镜像，不能外推为多板、多跳或其他介质性能。
 
@@ -230,11 +230,11 @@ Windows x64、GCC 14.2、Release、Service OFF的当前静态证据：
 
 | Profile | `sizeof(ucn_node_t)` | Core静态库`.text` |
 | --- | ---: | ---: |
-| Nano | 2,648 B | 19,724 B |
-| Lite | 5,960 B | 67,316 B |
-| Full | 9,744 B | 125,448 B |
+| Nano | 2,648 B | 19,884 B |
+| Lite | 5,960 B | 68,244 B |
+| Full | 9,752 B | 127,792 B |
 
-这是 V5-26 后的 Host x64 GCC 14.2 Release/Service OFF 结果；`ucn_link_t=40 B`，Storage Layout Version=4。它只证明固定对象与代码裁剪，不等于目标 MCU ELF/栈/功耗；历史基线见[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)。
+这是 V5-33 后的 Host x64 GCC 14.2 Release/Service OFF 结果；`ucn_link_t=40 B`，Storage Layout Version=5。它只证明固定对象与代码裁剪，不等于目标 MCU ELF/栈/功耗；历史基线见[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)。
 
 特性：
 

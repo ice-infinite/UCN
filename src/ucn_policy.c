@@ -211,7 +211,7 @@ static void update_optional_ewma(bool *valid,
     *value = policy_ewma(*value, sample);
 }
 
-void ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
+bool ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
                                      ucn_link_t *const *links,
                                      size_t link_count,
                                      uint32_t now_ms)
@@ -219,12 +219,12 @@ void ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
     size_t index;
 
     if (state == NULL || links == NULL || link_count > UCN_MAX_LINKS) {
-        return;
+        return false;
     }
     if (state->quality_sampled &&
         (uint32_t)(now_ms - state->last_quality_sample_ms) <
             UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS) {
-        return;
+        return false;
     }
 
     state->quality_sampled = true;
@@ -236,15 +236,6 @@ void ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
         if (snapshot->occupied &&
             !policy_link_is_present(links, link_count, snapshot->link)) {
             (void)memset(snapshot, 0, sizeof(*snapshot));
-        }
-    }
-
-    for (index = 0U; index < UCN_MAX_POLICY_PATHS; ++index) {
-        ucn_policy_path_entry_t *path = &state->paths[index];
-
-        if (path->occupied &&
-            !policy_link_is_present(links, link_count, path->egress_link)) {
-            path->state = UCN_POLICY_PATH_DOWN;
         }
     }
 
@@ -311,26 +302,44 @@ void ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
         state->stats.quality_samples++;
     }
 
-    for (index = 0U; index < UCN_MAX_POLICY_PATHS; ++index) {
-        ucn_policy_path_entry_t *path = &state->paths[index];
-        ucn_policy_link_quality_snapshot_t *snapshot;
+    return true;
+}
 
-        if (!path->occupied) {
-            continue;
-        }
-        snapshot = find_quality_snapshot(state, path->egress_link);
-        if (snapshot == NULL || !snapshot->is_up ||
-            !snapshot->queue_pressure_valid ||
-            snapshot->queue_pressure_ewma_per_mille <
-                UCN_POLICY_BALANCE_QUEUE_PRESSURE_THRESHOLD_PER_MILLE) {
-            path->congestion_samples = 0U;
-        } else if (path->congestion_samples <
-                   UCN_POLICY_BALANCE_CONGESTED_SAMPLE_LIMIT) {
-            path->congestion_samples++;
-        }
-        if (snapshot != NULL && !snapshot->is_up) {
-            path->state = UCN_POLICY_PATH_DOWN;
-        }
+/* Policy Paths are logical forwarding objects.  Their configured Link is a
+ * stable binding key, while liveness and congestion must follow the physical
+ * Bearer selected for that logical next hop at this sample. */
+void ucn_policy_refresh_path_egress(ucn_policy_state_t *state,
+                                    uint16_t local_path_id,
+                                    ucn_link_t *active_egress_link,
+                                    bool path_available)
+{
+    ucn_policy_path_entry_t *path;
+    ucn_policy_link_quality_snapshot_t *snapshot;
+
+    if (state == NULL || local_path_id == 0U) {
+        return;
+    }
+    path = find_policy_path_entry(state, local_path_id);
+    if (path == NULL) {
+        return;
+    }
+    snapshot = path_available && active_egress_link != NULL ?
+        find_quality_snapshot(state, active_egress_link) : NULL;
+    if (snapshot == NULL || !snapshot->is_up) {
+        path->congestion_samples = 0U;
+        path->state = UCN_POLICY_PATH_DOWN;
+        return;
+    }
+    if (path->state == UCN_POLICY_PATH_DOWN) {
+        path->state = UCN_POLICY_PATH_VERIFIED;
+    }
+    if (!snapshot->queue_pressure_valid ||
+        snapshot->queue_pressure_ewma_per_mille <
+            UCN_POLICY_BALANCE_QUEUE_PRESSURE_THRESHOLD_PER_MILLE) {
+        path->congestion_samples = 0U;
+    } else if (path->congestion_samples <
+               UCN_POLICY_BALANCE_CONGESTED_SAMPLE_LIMIT) {
+        path->congestion_samples++;
     }
 }
 

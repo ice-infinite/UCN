@@ -16,7 +16,7 @@ Linux、ROS 2、MAVLink 或地面站可以作为普通 Host/Adapter 接入，但
 - 按需路径追踪与低频节点快照诊断。节点快照默认拒绝远端请求，产品必须显式配置管理节点授权。
 - 编译期 Nano/Lite/Full Feature Profile；Service Router/Bridge 可独立开启或移除。
 
-仓库同时发布 Core 源码、单元/虚拟拓扑测试、CMake 配置，以及 `docs/` 下的架构、协议设计、任务表和项目操作记录。开始接入时先阅读 [UCN 网络容量与关键参数总览](docs/UCN_网络容量与关键参数总览.md)，再按运行环境阅读 [UCN 快速使用手册](docs/快速使用手册/README.md) 和 [UCN 使用与调用手册](docs/UCN_使用与调用手册.md)；编译参数集中入口见 [UCN 全局公共配置说明](docs/UCN_全局公共配置说明.md)，跨档接收证据见 [V5-08 全档接收互操作报告](docs/UCN_V5_08_全档接收互操作报告.md)，Wire Profile 单档/混档极限结果见 [V5-10 极限模拟报告](docs/UCN_V5_10_单档与混档极限模拟报告.md)，当前路由控制线格式见 [V5-14 Cost/RREQ/RREP 报告](docs/UCN_V5_14_长距离Cost与RREQ_RREP实现报告.md) 与 [V5-15 控制载荷报告](docs/UCN_V5_15_Profile感知控制载荷实现报告.md)。Adapter 实现者还必须遵守 [Link Metrics 与 Cost 契约](docs/UCN_Link_Metrics与Cost契约.md)。需要追踪实际函数路径时进入 [UCN 调用关系树](docs/calltree/README.md)。继续开发时以 [任务表](docs/00-任务表.md) 为准。
+仓库同时发布 Core 源码、单元/虚拟拓扑测试、CMake 配置，以及 `docs/` 下的架构、协议设计、任务表和项目操作记录。开始接入时先阅读 [UCN 网络容量与关键参数总览](docs/UCN_网络容量与关键参数总览.md)，再按运行环境阅读 [UCN 快速使用手册](docs/快速使用手册/README.md) 和 [UCN 使用与调用手册](docs/UCN_使用与调用手册.md)；所有 v5 文档与源码的状态入口见 [v5 文档与代码一致性审计](docs/UCN_V5_文档与代码一致性审计.md)，V5-27～V5-30 当前增量见 [异构 Bearer、动态 MTU 与 Policy 修复报告](docs/UCN_V5_27_异构Bearer与动态MTU修复报告.md)，V5-31～V5-33 的 Wire/API 发布修复见 [PATH_INSTALL 兼容与 API 符号修复报告](docs/UCN_V5_31_PATH_INSTALL兼容与API符号修复报告.md)。编译参数集中入口见 [UCN 全局公共配置说明](docs/UCN_全局公共配置说明.md)，跨档接收证据见 [V5-08 全档接收互操作报告](docs/UCN_V5_08_全档接收互操作报告.md)，Wire Profile 单档/混档极限结果见 [V5-10 极限模拟报告](docs/UCN_V5_10_单档与混档极限模拟报告.md)，当前路由控制线格式见 [V5-14 Cost/RREQ/RREP 报告](docs/UCN_V5_14_长距离Cost与RREQ_RREP实现报告.md) 与 [V5-15 控制载荷报告](docs/UCN_V5_15_Profile感知控制载荷实现报告.md)。Adapter 实现者还必须遵守 [Link Metrics 与 Cost 契约](docs/UCN_Link_Metrics与Cost契约.md)。需要追踪实际函数路径时进入 [UCN 调用关系树](docs/calltree/README.md)。继续开发时以 [任务表](docs/00-任务表.md) 为准。
 
 ## 目录
 

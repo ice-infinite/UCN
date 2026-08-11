@@ -205,6 +205,10 @@ static int test_profile_contract(void)
     ucn_path_forward_entry_t path_entry;
     ucn_path_state_t path_state;
     ucn_policy_state_t policy_state;
+    const ucn_path_capability_t capability = {
+        UCN_WIRE_PROFILE_W0_LOCAL,
+        64U
+    };
 
     (void)memset(&path_config, 0, sizeof(path_config));
     (void)memset(&path_entry, 0, sizeof(path_entry));
@@ -212,6 +216,12 @@ static int test_profile_contract(void)
     (void)memset(&policy_state, 0, sizeof(policy_state));
     TEST_ASSERT(ucn_node_set_route_policy(&node, &policy) == UCN_ERR_CONFIG);
     TEST_ASSERT(ucn_node_install_local_path(&node, 1U, 11U, 11U, 1U, 1000U) ==
+                UCN_ERR_CONFIG);
+    TEST_ASSERT(ucn_node_install_local_path_capable(
+                    &node, 1U, 11U, 11U, 1U, 1000U, &capability) ==
+                UCN_ERR_CONFIG);
+    TEST_ASSERT(ucn_node_send_path_install_capable(
+                    &node, 11U, 1U, 11U, 0U, 0U, 1000U, &capability) ==
                 UCN_ERR_CONFIG);
     TEST_ASSERT(ucn_node_request_path_trace(&node, 11U, 1U, NULL, NULL) ==
                 UCN_ERR_CONFIG);

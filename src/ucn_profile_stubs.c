@@ -82,7 +82,7 @@ void ucn_path_expire(ucn_path_state_t *state, uint32_t now_ms)
     (void)now_ms;
 }
 
-void ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
+bool ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
                                      ucn_link_t *const *links,
                                      size_t link_count,
                                      uint32_t now_ms)
@@ -91,6 +91,18 @@ void ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
     (void)links;
     (void)link_count;
     (void)now_ms;
+    return false;
+}
+
+void ucn_policy_refresh_path_egress(ucn_policy_state_t *state,
+                                    uint16_t local_path_id,
+                                    ucn_link_t *active_egress_link,
+                                    bool path_available)
+{
+    (void)state;
+    (void)local_path_id;
+    (void)active_egress_link;
+    (void)path_available;
 }
 
 void ucn_policy_expire_flows(ucn_policy_state_t *state, uint32_t now_ms)
@@ -261,6 +273,24 @@ ucn_result_t ucn_node_install_local_path(ucn_node_t *node,
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
 
+ucn_result_t ucn_node_install_local_path_capable(
+    ucn_node_t *node,
+    ucn_path_id_t path_id,
+    ucn_node_id_t destination,
+    ucn_node_id_t next_hop,
+    uint8_t remaining_hops,
+    uint32_t lease_ms,
+    const ucn_path_capability_t *capability)
+{
+    (void)path_id;
+    (void)destination;
+    (void)next_hop;
+    (void)remaining_hops;
+    (void)lease_ms;
+    (void)capability;
+    return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
+}
+
 ucn_result_t ucn_node_revoke_local_path(ucn_node_t *node,
                                         ucn_path_id_t path_id,
                                         ucn_node_id_t destination)
@@ -284,6 +314,26 @@ ucn_result_t ucn_node_send_path_install(ucn_node_t *node,
     (void)next_hop;
     (void)remaining_hops;
     (void)lease_ms;
+    return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
+}
+
+ucn_result_t ucn_node_send_path_install_capable(
+    ucn_node_t *node,
+    ucn_node_id_t control_target,
+    ucn_path_id_t path_id,
+    ucn_node_id_t destination,
+    ucn_node_id_t next_hop,
+    uint8_t remaining_hops,
+    uint32_t lease_ms,
+    const ucn_path_capability_t *capability)
+{
+    (void)control_target;
+    (void)path_id;
+    (void)destination;
+    (void)next_hop;
+    (void)remaining_hops;
+    (void)lease_ms;
+    (void)capability;
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
 

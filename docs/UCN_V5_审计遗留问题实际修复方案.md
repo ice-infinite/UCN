@@ -3,6 +3,7 @@
 > 日期：2026-08-11
 > 基线：`codex/v5-adaptive-wire@84880ce`
 > 状态：V5-17～V5-20 已实现并已在远端基线中发布；V5-21 继续阻塞于 S02。后续 V5-22～V5-26 见[最新审计交叉问题修复建议](UCN_V5_最新审计交叉问题修复建议.md)。
+> 当前一致性说明：V5-22～V5-26 已完成并发布到 `f941ae9`；V5-27～V5-30 已完成异构 Bearer、动态 MTU 与 Policy 修复，V5-31～V5-33 已完成 PATH_INSTALL/API 发布修复，均纳入当前 `codex/v5-adaptive-wire` 分支。本文第 4～10 节保留修复前设计过程，第 11 节是 V5-17～V5-20 当时结果，当前资源与回归以 [V5-27～V5-30 修复报告](UCN_V5_27_异构Bearer与动态MTU修复报告.md)和[V5-31～V5-33 修复报告](UCN_V5_31_PATH_INSTALL兼容与API符号修复报告.md)为准。
 
 ## 1. 目的
 
@@ -205,7 +206,7 @@ V5-18 在 V5-19 前完成，是为了让指定 Path 和自动 Route 使用同一
 - V5-20 已实现公开 3 B Prefix Peek；Full/Lite/Nano 都在完整 Decode/CRC 前执行 per-Link 本地 RX Ceiling 门禁。损坏 W3 帧在 W0 Link 上先返回不支持，在 W3 Link 上继续返回 CRC 错误。
 - V5-21 未实现且仍阻塞于 S02。没有生产 Principal、逐跳控制认证、Session Generation、吊销与持久 Replay 时，不允许把 Wire Profile、Node ID 或 Bearer 当权限凭据。
 
-本轮 Windows Debug/Release 的 Full/Lite 均为 CTest `10/10`，Nano 为 `1/1`，独立配置契约为 `4/4`，`git diff --check` 无空白错误。GCC 14.2 Release/Service OFF 的 Nano/Lite/Full Node 为 `2648/5944/9728 B`，Link 均为 40 B，Archive `.text` 为 `19692/65720/123876 B`；这些仅是 Host ABI/裁剪证据。WSL Ubuntu 24.04 新建 Full/Service OFF ASan+UBSan 构建为 `13/13`；首轮发现并修复一处坏长度测试缓冲自身越界，复跑无报告。未访问硬件/COM，真实介质 RTT、CPU、栈、功耗和多板切换继续归 S06/S07。
+V5-17～V5-20 当时 Windows Debug/Release 的 Full/Lite 均为 CTest `10/10`，Nano 为 `1/1`，独立配置契约为 `4/4`，`git diff --check` 无空白错误。当时 GCC 14.2 Release/Service OFF 的 Nano/Lite/Full Node 为 `2648/5944/9728 B`，Link 均为 40 B，Archive `.text` 为 `19692/65720/123876 B`。V5-26 后阶段值为 Node `2648/5960/9744 B`、Archive `.text` `19724/67316/125448 B`、Link `40 B`、Storage Layout Version=4；V5-30 阶段值为 Node `2648/5960/9752 B`、Archive `.text` `19820/68180/129124 B`、Link `40 B`；V5-33 当前值为 Node `2648/5960/9752 B`、Archive `.text` `19884/68244/127792 B`、Link `40 B`、Storage Layout Version=5。各组都只是 Host ABI/裁剪证据。WSL Ubuntu 24.04 Full ASan+UBSan 与配置契约当前为 `13/13`，GCC `-fanalyzer` 与配置契约也是 `13/13`。未访问硬件/COM，真实介质 RTT、CPU、栈、功耗和多板切换继续归 S06/S07。
 
 ## 12. 本轮边界
 

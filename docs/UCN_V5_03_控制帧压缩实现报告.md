@@ -2,6 +2,8 @@
 
 > 日期：2026-08-11  
 > 范围：记录 V5-03 当时的 HELLO/RREQ 迁移；RREQ/RREP 的**当前格式以 V5-14 为准**，其余控制载荷以 V5-15 为准。
+>
+> 当前一致性说明：V5-23 后当前 Cost Width 为 `3/3/3/4 B`，V5-24/V5-25 又增加 Candidate Profile 连续性和运行期 Hop Scope；下列旧长度只作为历史迁移证据。
 
 ## 结果
 
@@ -28,6 +30,6 @@ Request ID 保持 32 bit。这里的固定 16 bit Cost 已在 V5-14 被累计 32
 - W0 A→B→C：路由发现、RREP、业务中继、RERR 与修复继续通过。
 - 负向：0 B/旧 4 B/非法或小于发送档的 HELLO 能力、旧 16 B W0 RREQ 均返回 `UCN_ERR_MALFORMED`。
 - 控制预算：W3 新偏移下的 RREQ Replay、Better Cost、Token 耗尽/恢复与来源隔离继续通过。
-- Windows Debug：Full/Service ON 2/2、Lite/Service ON 2/2、Nano/Service OFF 1/1。
+- Windows Debug：V5-03 当时 Full/Service ON 2/2、Lite/Service ON 2/2、Nano/Service OFF 1/1；V5-33 当前为 Full/Lite 10/10、Nano 1/1、WSL Full ASan+UBSan 与配置契约 13/13，GCC `-fanalyzer` 与配置契约 13/13。
 
 本项没有改变生产控制面认证边界；仅有 CRC 的 HELLO/RREQ 仍不能抵抗有意伪造，逐跳认证继续归 S02。

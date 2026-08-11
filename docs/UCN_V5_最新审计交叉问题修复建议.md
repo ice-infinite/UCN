@@ -4,6 +4,7 @@
 > 源码基线：`codex/v5-adaptive-wire@a8567e0`
 > 适用范围：v5 Adaptive Wire、AODV-Lite、Candidate、Q1 Freshness 与产品 Hop Scope 的交叉行为。
 > 实施原则：MCU-first、固定内存、失败关闭；不把 Wire Profile 当权限，不以 Host/虚拟测试替代真实 MCU 与介质验证。
+> 阶段状态：V5-22～V5-26 已实现、测试并以 `f941ae9` 推送；第 1～8 节保留修复前问题与决策，第 9 节描述 V5-26 当时结果。V5-30 增量见 [异构 Bearer、动态 MTU 与 Policy 修复报告](UCN_V5_27_异构Bearer与动态MTU修复报告.md)，V5-33 当前发布修复见 [PATH_INSTALL 兼容与 API 符号修复报告](UCN_V5_31_PATH_INSTALL兼容与API符号修复报告.md)。
 
 ## 1. 结论
 

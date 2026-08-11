@@ -1,5 +1,6 @@
 #include <string.h>
 
+#include "ucn/ucn_frame.h"
 #include "ucn/ucn_path.h"
 #include "ucn/ucn_time.h"
 
@@ -58,7 +59,10 @@ ucn_result_t ucn_path_install(ucn_path_state_t *state,
         (config->next_hop == 0U && config->remaining_hops != 0U) ||
         (config->next_hop != 0U && config->remaining_hops == 0U) ||
         (config->next_hop == 0U && config->egress_link != NULL) ||
-        (config->next_hop != 0U && config->egress_link == NULL)) {
+        (config->next_hop != 0U && config->egress_link == NULL) ||
+        (config->minimum_mtu != 0U &&
+         ucn_wire_profile_get_descriptor(
+             (ucn_wire_profile_t)config->maximum_wire_profile) == NULL)) {
         return UCN_ERR_ARGUMENT;
     }
 
@@ -72,6 +76,10 @@ ucn_result_t ucn_path_install(ucn_path_state_t *state,
             }
             entry->next_hop = config->next_hop;
             entry->remaining_hops = config->remaining_hops;
+            entry->maximum_wire_profile = config->minimum_mtu == 0U ?
+                (uint8_t)UCN_WIRE_PROFILE_UNSPECIFIED :
+                config->maximum_wire_profile;
+            entry->minimum_mtu = config->minimum_mtu;
             entry->egress_link = config->egress_link;
             entry->terminal = config->next_hop == 0U;
             entry->expires_at_ms = config->expires_at_ms;
@@ -94,6 +102,10 @@ ucn_result_t ucn_path_install(ucn_path_state_t *state,
     free_entry->destination = config->destination;
     free_entry->next_hop = config->next_hop;
     free_entry->remaining_hops = config->remaining_hops;
+    free_entry->maximum_wire_profile = config->minimum_mtu == 0U ?
+        (uint8_t)UCN_WIRE_PROFILE_UNSPECIFIED :
+        config->maximum_wire_profile;
+    free_entry->minimum_mtu = config->minimum_mtu;
     free_entry->egress_link = config->egress_link;
     free_entry->terminal = config->next_hop == 0U;
     free_entry->expires_at_ms = config->expires_at_ms;

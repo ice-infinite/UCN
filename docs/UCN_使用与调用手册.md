@@ -1,6 +1,6 @@
 # UCN 使用与调用手册
 
-> 适用版本：UCN v5 V5-09 当前 Core。Nano/Lite/Full 都解析 W0～W3；默认固定 W3，产品可在注册 Link/安装 Security 前使用“最低够用 TX/W3 RX”，或显式开启路由感知自动选档。产品工程的 Adapter、密钥、板级引脚和业务 Endpoint 仍需自行实现。
+> 适用版本：UCN v5 V5-33 当前工作树（分支 `codex/v5-adaptive-wire`，`f941ae9` 为修复前基线）。Nano/Lite/Full 都解析 W0～W3；默认固定 W3，产品可在注册 Link/安装 Security 前使用“最低够用 TX/W3 RX”，或显式开启路由感知自动选档。产品工程的 Adapter、密钥、板级引脚和业务 Endpoint 仍需自行实现。
 > 目标：让业务代码只关心“发给哪个 Node 的哪个 Endpoint、什么 QoS”，而不关心数据当前经过 Wi-Fi、UART、CAN、BLE 或其他 Bearer。
 
 ## 1. 先理解 UCN 在系统中的位置
@@ -152,6 +152,8 @@ static void protocol_init(void)
 - `get_metrics()`：报告平滑后的通用 Cost，及可选 RTT、发送失败率、队列压力；
 - `close()`：释放本 Adapter 的硬件状态。
 
+MTU 有统一的动态语义：`.mtu != 0` 是静态硬上限；`get_status().mtu != 0` 是当前运行时上限；两者都存在取较小值。`.mtu = 0` 允许注册，表示只依赖运行时 MTU；若两者都为 0，发送暂时返回 `UCN_ERR_LINK_DOWN`，运行时 MTU 恢复后无需重新注册。这里的 MTU 必须是 Adapter 分段/重组后的 UCN 逻辑帧上限。
+
 ```c
 static ucn_link_t g_uart_link = {
     .ops = &g_uart_link_ops,       /* 产品实现的 6 个操作 */
@@ -242,6 +244,8 @@ if (rc != UCN_OK) {
 ```
 
 默认 `AUTO_BEST` 会以目的 Node ID 为目标使用直连 Link、Route Cache 或 Q1 的受限按需寻路。调用方不传 Wi-Fi MAC、UART 号、CAN ID 或中继 Node ID。
+
+Q1 首次发送若尚无满足 Hop/Cost/RTT 约束的路线，会在固定 Pending 槽保存该 `(destination, Endpoint)` 的最新值并启动有界发现。Deadline 是绝对值：Protocol Task 内部重试不会重新排队或延长期限；只有应用再次提交同一键的新值时才覆盖 Payload 并刷新 Deadline。发送成功、到期或永久错误后才清槽。Q0 不进入该等待机制。
 
 常见返回处理：
 
@@ -541,13 +545,13 @@ if (ucn_node_get_route_quality(&g_node, remote_node, &quality) == UCN_OK &&
 `local_path_id` 只是源端固定表的本地句柄；不能只写一个 Policy 就声称路径已上线。正确的安装顺序是：
 
 1. 产品配置安全 Provider 与 `ucn_node_set_path_control_authorizer()`；默认拒绝是故意的；
-2. 源 Node 为 P1/P2 调用 `ucn_node_install_local_path()`，显式填写从源端开始的 `remaining_hops`；
-3. 源 Node 依次向每个中继和终端调用 `ucn_node_send_path_install()`，每一跳的 `remaining_hops` 递减，终端必须为 `next_hop=0, remaining_hops=0`；中继不需要解密端到端业务；
+2. 控制器统计整条 Path 的共同能力 `{maximum_wire_profile, minimum_mtu}`；源 Node 为 P1/P2 调用 `ucn_node_install_local_path_capable()`，显式填写从源端开始的 `remaining_hops` 和共同能力；
+3. 源 Node 依次向每个中继和终端调用 `ucn_node_send_path_install_capable()`，每一跳的 `remaining_hops` 递减，非终端使用同一端到端瓶颈，终端必须为 `next_hop=0, remaining_hops=0`；中继不需要解密端到端业务；
 4. 源 Node 用 `ucn_node_set_policy_path()` 把本地句柄、已认证 `wire_path_id`、目的 Node、首跳 Link 关联，并设 `verified=true`；
 5. 用 `ucn_node_set_route_policy()` 为一个精确的 `(destination, endpoint, traffic_class)` 绑定策略；
 6. 业务继续调用原来的 `ucn_node_send_endpoint()` / Service `send()`，无需把路径号传给每次业务调用。
 
-远端 `PATH_INSTALL/PATH_REVOKE` 的接收顺序固定为 Security Provider、产品 Path Authorizer、认证管理源预算、最后才修改 Path 表。默认最多跟踪 4 个活动管理源，每个来源的 INSTALL/REVOKE 各允许突发 4 次并按 1 s/Token 恢复；来源身份是 `(source Node, source Session)`，不包含 Link，所以切换 Wi-Fi/UART Bearer 不能绕过。产品可用 `UCN_PATH_CONTROL_RX_SOURCE_DEPTH`、`UCN_PATH_CONTROL_RX_TOKEN_BURST`、`UCN_PATH_CONTROL_RX_TOKEN_REFILL_MS`、`UCN_PATH_CONTROL_RX_SOURCE_IDLE_MS` 按 MCU RAM 和管理频率调整。Session 更新必须先由产品 Security 接受；旧 Session 吊销仍是 Security Provider 的责任。
+远端 `PATH_INSTALL/PATH_REVOKE` 的接收顺序固定为 Security Provider、产品 Path Authorizer、认证管理源预算、最后才修改 Path 表。PATH_INSTALL 有两种 v5 精确格式：旧 `ucn_node_send_path_install()` 发送含 `RemainingHops` 的基础 `8/11/14/17 B`，`ucn_node_send_path_install_capable()` 才发送再含 `MaximumWireProfile + MinimumMTU` 的扩展 `11/14/17/20 B`。新接收端两种都接受；基础格式派生本跳能力，扩展能力与本跳逻辑 Neighbor 的 Bearer 交集求更窄值。旧 v5 节点不理解扩展长度，所以未确认目标支持时应继续使用旧 API。默认最多跟踪 4 个活动管理源，每个来源的 INSTALL/REVOKE 各允许突发 4 次并按 1 s/Token 恢复；来源身份是 `(source Node, source Session)`，不包含 Link，所以切换 Wi-Fi/UART Bearer 不能绕过。产品可用 `UCN_PATH_CONTROL_RX_SOURCE_DEPTH`、`UCN_PATH_CONTROL_RX_TOKEN_BURST`、`UCN_PATH_CONTROL_RX_TOKEN_REFILL_MS`、`UCN_PATH_CONTROL_RX_SOURCE_IDLE_MS` 按 MCU RAM 和管理频率调整。Session 更新必须先由产品 Security 接受；旧 Session 吊销仍是 Security Provider 的责任。
 
 调试时读取 `ucn_node_get_stats()`：`path_*_authorization_rejected` 表示 Security/产品授权拒绝，`path_*_budget_rejected` 表示对应操作 Token 耗尽，`path_control_budget_source_full` 表示活动管理源槽已满，`path_install_table_full` 才表示真正的 Path 转发表已满。以上拒绝均发生在 Path 表写入前。
 
@@ -578,11 +582,16 @@ ucn_route_policy_config_t policy = {
     },
 };
 
-(void)ucn_node_install_local_path(&g_node, 0x101U,
-                                  UINT32_C(0x0000000D),
-                                  UINT32_C(0x0000000B), 2U, 30000U);
+const ucn_path_capability_t p1_capability = {
+    .maximum_wire_profile = UCN_WIRE_PROFILE_W1_EDGE,
+    .minimum_mtu = 64U,
+};
+(void)ucn_node_install_local_path_capable(
+    &g_node, 0x101U, UINT32_C(0x0000000D),
+    UINT32_C(0x0000000B), 2U, 30000U, &p1_capability);
 /* 给中继 B 安装 next=D, remaining=1；给终端 D 安装 next=0,
- * remaining=0。每次远端安装都要通过 Security 与 Authorizer。 */
+ * remaining=0。非终端传入同一个 p1_capability；每次远端安装都要
+ * 通过 Security 与 Authorizer。 */
 (void)ucn_node_set_policy_path(&g_node, &p1);
 /* 同样安装 p2，然后再设置 policy。 */
 (void)ucn_node_set_route_policy(&g_node, &policy);

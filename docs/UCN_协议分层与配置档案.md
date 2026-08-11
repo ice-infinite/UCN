@@ -1,6 +1,6 @@
 # UCN 协议分层与配置档案
 
-> 状态：**UCN v5 V5-10 软件闭环（2026-08-11）**；Nano/Lite/Full 与 W0～W3 是正交维度，三种 Build Profile 均使用四档 Decoder。固定域、全档接收、控制帧压缩、安全绑定、自动选档、全局公共配置以及单档/混档极限模拟已完成；真实 Adapter、生产 AEAD 和目标板资源仍待接入。
+> 状态：**UCN v5 V5-01～V5-20、V5-22～V5-33 软件闭环（2026-08-11）**；V5-16 为设计冻结，V5-21 阻塞于 S02。Nano/Lite/Full 与 W0～W3 正交，三种 Build Profile 均使用四档 Decoder；当前还包含 3 B Ingress Peek、运行期 Hop Scope、3/3/3/4 B Wire Cost、Candidate Profile 连续性、Q1 绝对 Deadline、有界 Expanding Ring、动态 MTU、异构 Bearer Path 能力与 PATH_INSTALL 双格式兼容。真实 Adapter、生产 AEAD/身份与目标板资源仍待接入。
 > 日期：2026-08-04  
 > 关联文档：[UCN 整体架构设计](UCN_整体架构设计.md)
 
@@ -20,7 +20,7 @@ UCN-Host      只有 Linux、地面站、ROS2 等外部主机使用
 
 上层只能依赖下层，不能反向依赖：关闭 `Extended` 或完全不部署 `Host` 时，`Core` 的认证、发现、路由、转发和失联恢复仍完整可用。
 
-当前仓库已实现 v5 W0～W3 Codec、所有 Build Profile 四档接收、Node 固定 TX/最大 RX 档、per-Link 本地 RX 上限、1 B RX Ceiling HELLO、Profile-aware 控制载荷、32 bit 累计 Cost、Profile 绑定安全、显式自动最小档，以及从 v4 继承的邻居保活/回收、Route Epoch/grace、受限 Candidate 选路、静态 Endpoint、Q0/Q1、透明密文中继、受认证 Path ID 逐跳表、按需诊断和 Adapter 模拟。公开编译参数集中在 `ucn_config.h`，产品头可覆盖且原文件默认保留。默认固定 W3；`Extended`、真实 Linux Host、生产密码库、Authorized Class 执行层和真实介质驱动仍未实现。
+当前仓库已实现 v5 W0～W3 Codec、所有 Build Profile 四档接收、Node 固定 TX/最大 RX 档、per-Link 本地 RX 上限、1 B RX Ceiling HELLO、Profile-aware 控制载荷、32 bit 累计 Cost、3/3/3/4 B Wire Cost、3 B Ingress Peek、运行期 Hop Scope、Profile 绑定安全、显式自动最小档、Candidate Profile 连续性、2→4→8→16 有界发现和 Q1 绝对 Deadline，以及从 v4 继承并演进的邻居保活/回收、Route Epoch/grace、受限 Candidate 选路、静态 Endpoint、Q0/Q1、透明密文中继、受认证 Path ID 逐跳表、按需诊断和 Adapter 模拟。公开编译参数集中在 `ucn_config.h`，产品头可覆盖且原文件默认保留。默认固定 W3；`Extended Gateway`、真实 Linux Host 产品实现、生产密码库、Authorized Class 执行层和真实介质驱动仍未实现。
 
 ## 2. 三个档案的边界
 
@@ -67,7 +67,7 @@ Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个�
 | 路由 | `ROUTE_REQ`、`ROUTE_REPLY`、`ROUTE_ERROR` | 已处理。 |
 | 健康 | `HEARTBEAT` | 已处理：一跳 8 B 请求/ACK 和邻居状态机；`LINK_STATE` 尚未定义为线协议消息。 |
 | 路径验证 | `PATH_PROBE`、`PATH_PROBE_ACK`、`PATH_ACTIVATE`、`PATH_ACTIVATE_ACK` | v5 继续使用现有控制语义；Activate/ACK 载荷为 Candidate ID + Route Epoch，业务按 Epoch 查 Current/Previous。 |
-| Path 控制 | `PATH_INSTALL`、`PATH_REVOKE` | 已处理：字段按 Wire Profile 宽度编码，带 `remaining_hops` 的 Payload 分别为 8/11/14/17 B 与 2/4/6/8 B；依次需要 Provider、显式控制面授权和按 `(Source, Session)` 的固定管理预算，同源换 Bearer 不会重置预算。 |
+| Path 控制 | `PATH_INSTALL`、`PATH_REVOKE` | 已处理：字段按 Wire Profile 宽度编码；PATH_INSTALL 基础格式为 8/11/14/17 B，扩展能力格式为 11/14/17/20 B，REVOKE 为 2/4/6/8 B；旧 API 固定发送基础格式，capability API 显式发送扩展格式；依次需要 Provider、显式控制面授权和按 `(Source, Session)` 的固定管理预算，同源换 Bearer 不会重置预算。 |
 | 按需诊断 | `PATH_TRACE_REQ`、`PATH_TRACE_REPLY` | 已处理：`DIAGNOSTIC=0x04`、逐跳 Node ID、固定 Pending/Reverse 表和回调结果；只查当前 Cache，不触发 RREQ，也不锁定业务路径。 |
 | 按需诊断 | `NODE_SNAPSHOT_REQ`、`NODE_SNAPSHOT_REPLY` | 已处理：受限泛洪、短期 Reverse、随机短延迟 Reply、源端固定结果表与默认拒绝 ACL；不常驻保存全网节点或拓扑。 |
 | 按需诊断 | `POLICY_DIAGNOSTIC_REQ`、`POLICY_DIAGNOSTIC_REPLY` | 已处理：受授权单 Node 查询、三页 Summary 或一个固定 Policy/Path/Flow/quality 槽位、8 B 请求/32 B 回复、独立 Token 与 Pending/Reply 固定表；普通业务帧零额外字段。 |
@@ -145,7 +145,7 @@ Core 禁止以下实现方式：
 
 这套流程只要求 MCU 能使用至少一种 Link。STM32 没有无线收发器时，可以通过 CAN-FD/RS485 成网，或外挂无线模块；协议本身不要求 Linux。
 
-Adapter 不把 MAC、CAN ID 或蓝牙地址当作 UCN 身份。其统一接口、固定队列和物理地址映射见 [UCN Adapter 契约](UCN_Adapter_契约.md)。当前 Core 不做跨 Link 分片：各节点的 `UCN_MAX_FRAME_BYTES` 必须冻结为不大于该 Profile 最小有效 MTU；经典 CAN 需要后续的有界 Carrier 分段/重组。
+Adapter 不把 MAC、CAN ID 或蓝牙地址当作 UCN 身份。其统一接口、固定队列和物理地址映射见 [UCN Adapter 契约](UCN_Adapter_契约.md)。当前 Core 不做跨 Link 分片。`link->mtu=0` 表示静态值未知，由 `get_status().mtu` 动态提供；两者非零取较小值，两者都为零时 Link 暂不可发送。每个实际发送帧仍必须小于对应 Path/Bearer 的有效 MTU；经典 CAN 需要 Adapter 提供有界 Carrier 分段/重组。
 
 ## 4. UCN-Extended：按需增加而非默认常驻
 

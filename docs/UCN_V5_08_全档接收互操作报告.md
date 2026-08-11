@@ -2,6 +2,8 @@
 
 > 日期：2026-08-11
 > 范围：W0～W3 统一解码、低发送档/宽接收档、普通静态 Endpoint 指令跨档接收；不增加 Nano/Lite/Full 未编译的高级功能。
+>
+> 当前一致性说明：统一 Decoder 规则保持不变；V5-20/V5-25 已把 RX Ceiling 与运行期 Hop Scope 前移到状态修改之前，V5-28 还验证了低 TX/W3 RX 中继对 W3 E2E 帧的透明转发；V5-33 当前回归数量已高于本文最初里程碑。
 
 ## 结论
 
@@ -30,7 +32,7 @@ ucn_node_set_wire_profiles(&node,
 - `test_node_wire_profile.c` 新增低档 Node 专项：Node 固定 `W0 TX/W3 RX`，同一个静态命令 Endpoint 依次接收 W0、W1、W2、W3 帧，并核对实际 Profile、Payload 和分发次数。
 - 原有 `W0 TX/W0 RX` 节点拒绝 W1 帧的负向测试保留，证明产品主动收窄接收上限仍然失败关闭。
 
-Windows Debug 与 Release 的 Core/Scale 回归均通过：Nano `1/1`，Lite/Full `3/3`；V5-09 独立配置契约为 `3/3`，WSL Full 在显式启用配置契约后 ASan+UBSan `6/6`。当前 33/46/64 B 最小 MTU 门禁只证明 Core 编译通过；完整测试套件包含超过最小 MTU 的 W3 大载荷向量，不能在最小 MTU 配置下全跑。
+V5-08 当时 Windows Debug/Release 为 Nano `1/1`、Lite/Full `3/3`，配置契约 `3/3`，WSL Full ASan+UBSan `6/6`。V5-33 当前回归为 Nano `1/1`、Lite/Full `10/10`、WSL Full ASan+UBSan 与配置契约 `13/13`，GCC `-fanalyzer` 与配置契约 `13/13`。当前 33/46/64 B 最小 MTU 门禁只证明 Core 编译通过；完整测试套件包含超过最小 MTU 的 W3 大载荷向量，不能在最小 MTU 配置下全跑。
 
 ## “能解码”不等于“具备全部功能”
 

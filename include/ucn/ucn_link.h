@@ -79,6 +79,9 @@ struct ucn_link {
      * inherits the owning Node maximum.  uint8_t deliberately occupies the
      * existing alignment gap on common 32/64-bit ABIs. */
     uint8_t local_receive_wire_profile;
+    /* Static Adapter MTU ceiling.  Zero means that the Adapter supplies its
+     * current MTU only through get_status(); it does not mean a zero-byte
+     * Carrier.  When both ceilings are present, the smaller one wins. */
     size_t mtu;
     ucn_node_id_t peer_node_id;
     /* Peer maximum RX profile advertised by an admitted v5 HELLO, or set
@@ -86,6 +89,25 @@ struct ucn_link {
      * UNSPECIFIED means a statically provisioned Link with no learned ceiling. */
     ucn_wire_profile_t peer_wire_profile;
 };
+
+/* Resolve the single MTU contract shared by Full/Nano and Adapter-facing
+ * code.  A zero result means that no usable MTU is currently known, so the
+ * Link must not be selected for transmission until get_status() recovers. */
+static inline size_t ucn_link_effective_mtu(
+    const ucn_link_t *link,
+    const ucn_link_status_t *status)
+{
+    size_t mtu;
+
+    if (link == NULL || status == NULL) {
+        return 0U;
+    }
+    mtu = link->mtu;
+    if (status->mtu != 0U && (mtu == 0U || status->mtu < mtu)) {
+        mtu = status->mtu;
+    }
+    return mtu;
+}
 
 #ifdef __cplusplus
 }

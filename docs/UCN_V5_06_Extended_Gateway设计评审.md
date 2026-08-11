@@ -1,7 +1,8 @@
 # UCN V5-06 Extended Gateway 设计评审
 
-> 日期：2026-08-11  
+> 日期：2026-08-11
 > 决议：架构可行，但不进入 v5 小 Core；后续以独立 `ucn_gateway_ext` 组件实现，并以前置安全与资源门禁为条件。
+> 当前源码核对：截至 `codex/v5-adaptive-wire@f941ae9` 仓库仍没有 `ucn_gateway_ext` 实现；本文保持为设计评审，不得写成现有跨域能力。
 
 ## 1. 要解决的问题
 

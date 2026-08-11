@@ -1,6 +1,6 @@
 # UCN v5 Adaptive Wire Profile 设计方案
 
-> 状态：V5-00～V5-07 软件范围已完成；目标板与生产密码门禁仍待 S02/S06/S07。分项证据见 V5-01～V5-07 实现/验证报告。
+> 状态：V5-01～V5-15、V5-17～V5-20、V5-22～V5-26 软件范围已完成；V5-16 为设计冻结，V5-21 阻塞于 S02。目标板与生产密码门禁仍待 S02/S06/S07。
 >
 > 原则：MCU-first、固定资源、官方固定格式、无 Linux 也能组网；Linux/Gateway 只是可选扩展节点。
 >
@@ -8,7 +8,7 @@
 
 ## 1. 目标
 
-v5 不再让所有帧固定携带 32 B 基础头，而是由协议官方定义四种 Wire Profile。Wire Profile 同时约束字段宽度、最大传播范围、允许扩展和控制面上限；用户只能选择官方档位，不能自定义 13 bit Node ID、37 Hop 或 19 bit Cost。
+v5 不再让所有帧固定携带 32 B 基础头，而是由协议官方定义四种 Wire Profile。Wire Profile 约束字段宽度、基础/扩展头长度和可编码最大 Hop；用户只能选择官方档位，不能自定义 13 bit Node ID、37 Hop 或 19 bit Cost。控制 Token、Fanout 和管理权限来自独立编译配置与未来认证身份，不由 Wire Profile 自动决定。
 
 这项设计解决三个问题：
 
@@ -23,9 +23,9 @@ v5 不再让所有帧固定携带 32 B 基础头，而是由协议官方定义�
 | 编译能力 | Nano / Lite / Full | 决定源码、状态表和 RAM/Flash 裁剪。 |
 | 线编码 | W0 / W1 / W2 / W3 Wire Profile | 决定单帧字段宽度、编码长度和协议传播上限。 |
 | 业务优先级 | Q0 / Q1 / Q2 / Q3 Traffic Class | 决定队列、实时性和交付语义。 |
-| 安全权限 | Authorized Max Wire Profile | 决定一个身份最多能声明和使用哪个 Wire Profile。 |
+| 安全权限 | Authorized Class C0～C3 + ACL | 绑定认证 Principal/Session Generation，决定允许执行的操作、预算和 Fanout；与 Wire Profile 正交。 |
 
-因此 v5 使用 `UCN_WIRE_W0_LOCAL`～`UCN_WIRE_W3_BACKBONE`，不把 Wire Profile 叫作新的 Traffic Class，也不等同于 Nano/Lite/Full。
+因此 v5 使用 `UCN_WIRE_PROFILE_W0_LOCAL`～`UCN_WIRE_PROFILE_W3_BACKBONE`，不把 Wire Profile 叫作新的 Traffic Class，也不等同于 Nano/Lite/Full。
 
 ## 3. 官方 Profile
 
@@ -93,7 +93,7 @@ min(Profile Length 上限,
 
 | 字段 | W0 | W1 | W2 | W3 | 说明 |
 | --- | ---: | ---: | ---: | ---: | --- |
-| Route Epoch | 1 B | 2 B | 2 B | 2 B | W0 必须使用安全的串行回绕比较。 |
+| Route Epoch | 1 B | 2 B | 2 B | 2 B | 当前按 Active/Previous 精确值与 grace 匹配，不做大小排序；Candidate 分配避开 0 和全 1 保留值。 |
 | Path ID | 1 B | 2 B | 3 B | 4 B | `0` 非法；命名空间仍绑定 Source + Session。 |
 | Payload Length | 1 B | 1 B | 2 B | 2 B | 仍受编译缓冲和 MTU 限制。 |
 | Sequence | 4 B | 4 B | 4 B | 4 B | 不压缩，继续用于乱序、去重和 Replay 边界。 |
@@ -110,8 +110,10 @@ Core 内部继续使用 32 bit Network/Node/Session。v5 第一阶段的 Wire �
 ```text
 Value 超过当前 Wire Profile 可表示范围
         ↓
-提升 Profile；超过节点授权上限则 UCN_ERR_SCOPE/CONFIG
+Auto 在已配置 TX 上限内尝试更高 Profile；仍不可表达则 UCN_ERR_TOO_LARGE
 ```
+
+当前公开错误枚举没有 `UCN_ERR_SCOPE`。固定档/组合配置非法使用 `UCN_ERR_ARGUMENT` 或 `UCN_ERR_CONFIG`；未来 Authorized Class 拒绝应使用安全/访问错误语义，不能预写一个代码中不存在的返回值。
 
 这样无需在小 MCU 中引入无界映射表，也不会产生跨 Gateway 地址歧义。
 
@@ -193,11 +195,13 @@ V5-04 已用 W0 A→B→C 专项测试冻结上述边界：A/C 使用测试 E2E 
 节点能力上限不等于每包都使用最大 Profile，但自动选级分两个阶段：
 
 - 已有 Route：按字段数值、Payload、扩展、Route Hop/最小 Profile 和授权上限选择最小 Profile；
-- 未知 Route：无法预先知道实际 Hop，使用 Domain 默认 Profile或受限的 W0→W1→W2 扩展寻路；不能无限重试。
+- 未知 Route：按产品 Hop 上限执行默认 2→4→8→16 Expanding Ring，每轮重新选择能表达当前字段和 Ring Scope 的最小 Profile，并使用新 Request ID；总预算有界，不能无限重试。
 
 中继不得升级/降级一个已受 E2E 保护的帧。只有安全终止 Gateway 或未来 Outer Envelope Gateway 可以重新编码。
 
 V5-05 已实现可选 Route-aware 自动选级，默认仍关闭；V5-10 将 Peer RX Ceiling 从 TX 档中分离；V5-12～V5-15 又补齐了控制面。HELLO/Heartbeat、RREQ/RREP、RERR、PATH_INSTALL/REVOKE、Path Trace 与 Node Snapshot 现在都会按完整字段、Hop、MTU、per-Link 本地 RX 上限和 Peer RX Ceiling 选择或保持合法 Profile。未知路由的 RREQ 会选择能表达完整搜索域的最小档并在转发中保持不变，RREP/诊断回复继承请求档。已编码中继帧仍不升降档，固定模式和产品策略覆盖保持不变。
+
+V5-27～V5-30 进一步关闭了异构 Bearer 交叉缺陷：静态 `link->mtu` 与动态 `get_status().mtu` 使用统一最小值语义；Path 对同一逻辑下一跳全部合格 Bearer 求共同 Profile/MTU，扩展 PATH_INSTALL 还能携带整条 Path 的端到端瓶颈。V5-31 又把旧发送 API 固定回 v5 基础 `8/11/14/17 B` Schema，仅 capability API 发送扩展 `11/14/17/20 B`，新接收端双格式解码，从而避免未协商地破坏旧 v5 节点。已封装 E2E 帧若在后续跳发现不兼容，中继不会改写 Profile，而是撤销 Path 并回送 Path-RERR。Policy 与 AUTO_BALANCE 的活性、拥塞和 Cost 则跟随当前实际 Bearer，不再绑定已经失效的原始主 Link。详细契约见 [V5-27～V5-30 修复报告](UCN_V5_27_异构Bearer与动态MTU修复报告.md)与 [V5-31～V5-33 发布修复报告](UCN_V5_31_PATH_INSTALL兼容与API符号修复报告.md)。
 
 Wire Profile、RX Ceiling 与管理权限相互正交。V5-16 已冻结 Authorized Class C0～C3、身份/Session Generation、ACL、Token 和 Fanout 方案；在 S02 生产身份与撤销基础完成前，不把该设计写成可被伪造的权限实现。
 

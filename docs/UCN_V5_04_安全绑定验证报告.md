@@ -2,6 +2,8 @@
 
 > 日期：2026-08-11  
 > 范围：Core/AAD/透明转发契约的软件验证；不宣称测试 Provider 是生产密码。
+>
+> 当前一致性说明：V5-04 的 AAD 与透明中继契约在后续 v5 修改中保持不变；V5-21 Authorized Class 执行层仍阻塞于 S02，当前代码仍不能称为生产安全实现。
 
 ## 已冻结的同域规则
 
@@ -22,4 +24,4 @@ v5 E2E AAD 绑定 Version/Profile、Message、Traffic/不可变 Flags、Network�
 - 修改 Ciphertext 并重新编码 CRC：目标 Open 返回 `UCN_ERR_SECURITY`；未重算 CRC 的线上篡改先由 Decoder 返回 CRC 错误。
 - Provider/明文策略失败关闭、生产 Security Ready 门禁和旧版本拒绝继续通过。
 
-Windows Full Debug/Service ON CTest 为 2/2。测试 Provider 是可逆的确定性 Fixture，只证明 Core 合约；生产身份、AEAD、密钥持久化/轮换、Replay Window 和逐跳控制面认证继续由 S02 验收。
+V5-04 当时 Windows Full Debug/Service ON CTest 为 2/2；V5-33 当前 Full/Lite 为 10/10、Nano 为 1/1，WSL Full ASan+UBSan 与配置契约为 13/13，GCC `-fanalyzer` 与配置契约为 13/13。测试 Provider 是可逆的确定性 Fixture，只证明 Core 合约；生产身份、AEAD、密钥持久化/轮换、Replay Window 和逐跳控制面认证继续由 S02 验收。

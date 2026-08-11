@@ -6,6 +6,7 @@
 
 typedef struct wire_link_context {
     bool is_up;
+    size_t status_mtu;
     uint8_t last_frame[UCN_MAX_FRAME_BYTES];
     size_t last_length;
 } wire_link_context_t;
@@ -37,7 +38,7 @@ static ucn_result_t wire_link_status(const ucn_link_t *link,
         (const wire_link_context_t *)link->context;
 
     status->is_up = context->is_up;
-    status->mtu = link->mtu;
+    status->mtu = context->status_mtu;
     status->tx_errors = 0U;
     status->rx_errors = 0U;
     return UCN_OK;
@@ -70,6 +71,7 @@ static void setup_link(ucn_link_t *link,
     (void)memset(link, 0, sizeof(*link));
     (void)memset(context, 0, sizeof(*context));
     context->is_up = true;
+    context->status_mtu = mtu;
     link->ops = &WIRE_LINK_OPS;
     link->context = context;
     link->link_id = link_id;
@@ -388,6 +390,65 @@ static int verify_per_link_local_receive_ceiling(void)
     return 0;
 }
 
+static int verify_dynamic_mtu_contract(void)
+{
+    const uint8_t payload = 0xD5U;
+    const size_t minimum_data_mtu = UCN_FRAME_W0_HEADER_SIZE + 1U;
+    ucn_config_t config = { 42U, 1U, 4U };
+    ucn_node_t node;
+    ucn_link_t link;
+    wire_link_context_t context;
+    ucn_link_status_t status;
+    ucn_frame_t decoded;
+
+    TEST_ASSERT(ucn_node_init(&node, &config) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profile_auto(&node, true) == UCN_OK);
+
+    /* A zero static MTU is a real dynamic-MTU Link, not a zero-byte Link. */
+    setup_link(&link, &context, 240U, 2U, 0U);
+    context.status_mtu = UCN_MAX_FRAME_BYTES;
+    TEST_ASSERT(ucn_node_register_link(&node, &link) == UCN_OK);
+    TEST_ASSERT(wire_link_status(&link, &status) == UCN_OK);
+    TEST_ASSERT(ucn_link_effective_mtu(&link, &status) == UCN_MAX_FRAME_BYTES);
+    TEST_ASSERT(ucn_node_send(&node, 2U, UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);
+    TEST_ASSERT(ucn_frame_decode(context.last_frame, context.last_length,
+                                 &decoded) == UCN_OK &&
+                decoded.wire_profile == UCN_WIRE_PROFILE_W0_LOCAL);
+
+    /* When both ceilings exist, the smaller runtime ceiling is authoritative. */
+    link.mtu = UCN_MAX_FRAME_BYTES;
+    context.status_mtu = minimum_data_mtu;
+    TEST_ASSERT(wire_link_status(&link, &status) == UCN_OK);
+    TEST_ASSERT(ucn_link_effective_mtu(&link, &status) == minimum_data_mtu);
+    TEST_ASSERT(ucn_node_send(&node, 2U, UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);
+    context.status_mtu = minimum_data_mtu - 1U;
+    TEST_ASSERT(ucn_node_send(&node, 2U, UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) ==
+                UCN_ERR_TOO_LARGE);
+
+    /* A zero runtime ceiling falls back to the non-zero static ceiling. */
+    context.status_mtu = 0U;
+    TEST_ASSERT(wire_link_status(&link, &status) == UCN_OK);
+    TEST_ASSERT(ucn_link_effective_mtu(&link, &status) == UCN_MAX_FRAME_BYTES);
+    TEST_ASSERT(ucn_node_send(&node, 2U, UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);
+
+    /* With neither ceiling known the Link is temporarily ineligible, then
+     * becomes usable again when the Adapter publishes a runtime MTU. */
+    link.mtu = 0U;
+    TEST_ASSERT(wire_link_status(&link, &status) == UCN_OK);
+    TEST_ASSERT(ucn_link_effective_mtu(&link, &status) == 0U);
+    TEST_ASSERT(ucn_node_send(&node, 2U, UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) ==
+                UCN_ERR_LINK_DOWN);
+    context.status_mtu = minimum_data_mtu;
+    TEST_ASSERT(ucn_node_send(&node, 2U, UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);
+    return 0;
+}
+
 int test_node_wire_profile(void)
 {
     ucn_config_t config = { UINT32_C(42), UINT32_C(1), 4U };
@@ -412,6 +473,7 @@ int test_node_wire_profile(void)
     TEST_ASSERT(verify_node_automatic_profile() == 0);
     TEST_ASSERT(verify_low_tx_node_accepts_all_profiles() == 0);
     TEST_ASSERT(verify_per_link_local_receive_ceiling() == 0);
+    TEST_ASSERT(verify_dynamic_mtu_contract() == 0);
 #if UCN_FEATURE_DYNAMIC_MESH
     TEST_ASSERT(verify_control_profile(UCN_WIRE_PROFILE_W0_LOCAL, 42U, 1U, 2U,
                                        4U) == 0);

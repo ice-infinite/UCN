@@ -122,16 +122,16 @@ static ucn_result_t nano_send_frame(ucn_node_t *node,
     if (!status.is_up) {
         return UCN_ERR_LINK_DOWN;
     }
+    if (ucn_link_effective_mtu(link, &status) == 0U) {
+        return UCN_ERR_LINK_DOWN;
+    }
     if (frame->wire_profile == UCN_WIRE_PROFILE_UNSPECIFIED) {
         ucn_wire_profile_t maximum_profile = node->tx_wire_profile;
-        size_t mtu = link->mtu;
+        const size_t mtu = ucn_link_effective_mtu(link, &status);
 
         if (link->peer_wire_profile != UCN_WIRE_PROFILE_UNSPECIFIED &&
             link->peer_wire_profile < maximum_profile) {
             maximum_profile = link->peer_wire_profile;
-        }
-        if (status.mtu != 0U && status.mtu < mtu) {
-            mtu = status.mtu;
         }
         if (node->automatic_wire_profile) {
             result = ucn_frame_select_min_wire_profile(
@@ -153,8 +153,7 @@ static ucn_result_t nano_send_frame(ucn_node_t *node,
     if (result != UCN_OK) {
         return result;
     }
-    if (encoded_length > link->mtu ||
-        (status.mtu != 0U && encoded_length > status.mtu)) {
+    if (encoded_length > ucn_link_effective_mtu(link, &status)) {
         return UCN_ERR_TOO_LARGE;
     }
     result = link->ops->send(link, encoded, encoded_length);
@@ -475,7 +474,8 @@ ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
     if (result != UCN_OK) {
         return result;
     }
-    if (link->mtu < ucn_frame_header_size_for_profile(local_receive_profile,
+    if (link->mtu != 0U &&
+        link->mtu < ucn_frame_header_size_for_profile(local_receive_profile,
                                                        0U)) {
         return UCN_ERR_ARGUMENT;
     }

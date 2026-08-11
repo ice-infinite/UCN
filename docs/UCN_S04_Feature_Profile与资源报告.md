@@ -62,11 +62,11 @@ GCC 严格构建已验证 33/46/64 B 的 `ucn_core` 分别可编译；32/45/63 B
 
 | Profile | `sizeof(ucn_node_t)` | 相对 Full | 静态库 `.text` 合计 | 相对 Full |
 | --- | ---: | ---: | ---: | ---: |
-| Nano | 2,648 B | -72.8% | 19,724 B | -84.3% |
-| Lite | 5,960 B | -38.8% | 67,316 B | -46.3% |
-| Full | 9,744 B | 基线 | 125,448 B | 基线 |
+| Nano | 2,648 B | -72.8% | 19,884 B | -84.4% |
+| Lite | 5,960 B | -38.9% | 68,244 B | -46.6% |
+| Full | 9,752 B | 基线 | 127,792 B | 基线 |
 
-该表已在 V5-26 后以 GCC 14.2 Release/Service OFF 重新测量。Node 为 `2648/5960/9744 B`，`ucn_link_t` 三档均为 40 B；相对 V5-20，Nano 增加通用 Hop Scope 统计，Lite/Full 增加 Q1 Freshness 统计，Full Candidate 记录实际 Wire Profile，Storage Layout Version 因此升到 4。固定状态仍无动态内存。Archive `.text` 只用于比较 Host 裁剪。历史变化见[S22 稳定化修复报告](UCN_S22_重复抑制与稳定化修复报告.md)和[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)。
+该表已在 V5-33 后以 GCC 14.2 Release/Service OFF 重新测量。Node 为 `2648/5960/9752 B`，`ucn_link_t` 三档均为 40 B；V5-28 的 Path 能力和诊断只增加 Full 固定状态，Storage Layout Version 升到 5，V5-32 只为非 Full 增加 capability API Stub。固定状态仍无动态内存。Archive `.text` 只用于比较 Host 裁剪。历史变化见[S22 稳定化修复报告](UCN_S22_重复抑制与稳定化修复报告.md)、[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)和[V5-31～V5-33 修复报告](UCN_V5_31_PATH_INSTALL兼容与API符号修复报告.md)。
 
 这些数字不是 MCU ELF 的最终 Flash/RAM：目标 ABI、编译器、LTO、表深度、`UCN_MAX_FRAME_BYTES` 和产品静态实例数都会改变结果。目标板必须另外报告 ELF 段、静态对象、运行时栈高水位和 Heap；不能把 Host `.a` 直接写成 ESP32/STM32 Flash。
 
@@ -74,9 +74,9 @@ GCC 严格构建已验证 33/46/64 B 的 `ucn_core` 分别可编译；32/45/63 B
 
 - Nano：直接运行 Frame/QoS/静态 Route/Endpoint/Adapter RX/Service/去重行为；动态寻路和 Security 返回 `UCN_ERR_CONFIG`。
 - Lite：直接运行 AODV/RERR、Neighbor/HELLO/Heartbeat、多 Bearer、安全 Provider、Control Budget、Stress；Candidate/Path/Policy/Diagnostic 返回 `UCN_ERR_CONFIG`。
-- API 完整性：头文件声明的 56 个 `ucn_node_*`/`ucn_path_*`/`ucn_policy_*` 符号在 Nano、Lite、Full 静态库中均存在；低档 Profile 不会在链接阶段才暴露缺失能力。
+- API 完整性：头文件声明的 `ucn_node_*`/`ucn_path_*`/`ucn_policy_*` 公共符号在 Nano、Lite、Full 静态库中均存在；V5-32 后按当前筛选口径三档各 74 个，两个 capability API 也由测试二进制直接引用，低档 Profile 不会在链接阶段才暴露缺失能力。
 - Full：现有完整单元、虚拟拓扑、动态压力和 Profile 测试全部通过。
-- v5：四档固定域、1 B RX Ceiling HELLO、3 B Ingress Peek、Profile-aware RREQ/Path、3/3/3/4 B Cost、Candidate Profile 连续性、Q1 绝对 Deadline、运行期 Hop Scope、AAD Profile 绑定、W0 透明密文中继、路由约束与 2→4→8→16 Expanding Ring 均通过。
+- v5：四档固定域、1 B RX Ceiling HELLO、3 B Ingress Peek、Profile-aware RREQ/Path、3/3/3/4 B Cost、Candidate Profile 连续性、Q1 绝对 Deadline、运行期 Hop Scope、动态 MTU、异构 Bearer Path 能力、逻辑 Bearer Policy、AAD Profile 绑定、跨档透明密文中继、路由约束与 2→4→8→16 Expanding Ring 均通过。
 - Service：Nano/OFF 证明源码可移除；Lite/ON 证明正交组合可初始化 Router；Full/OFF 与 Full/ON 均可构建测试。
 - 编译器：MSVC Debug 与 GCC 14.2 Release 均验证；GCC 启用 `-Wall -Wextra -Wpedantic -Werror`。
 - CI：工作流已加入 Nano/OFF、Lite/ON、Full/ON 矩阵；只有远端 Actions 实际运行成功后，才能写成远端 CI 已通过。

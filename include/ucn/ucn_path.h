@@ -17,8 +17,20 @@ extern "C" {
 
 typedef char ucn_max_path_forward_entries_must_be_positive[
     UCN_MAX_PATH_FORWARD_ENTRIES > 0U ? 1 : -1];
+typedef char ucn_path_mtu_field_must_cover_build_frame[
+    UCN_MAX_FRAME_BYTES <= UINT16_MAX ? 1 : -1];
 
 typedef uint32_t ucn_path_id_t;
+
+/* Optional end-to-end Path bottleneck supplied by a provisioning controller.
+ * minimum_mtu == 0 means unspecified and causes the Node to derive the local
+ * failover-safe Bearer intersection.  A valid capability is always intersected
+ * with the current local next-hop Bearer set; it can restrict but never widen
+ * what the physical next hop can carry. */
+typedef struct ucn_path_capability {
+    ucn_wire_profile_t maximum_wire_profile;
+    uint16_t minimum_mtu;
+} ucn_path_capability_t;
 
 typedef struct ucn_path_forward_config {
     ucn_node_id_t owner;
@@ -29,6 +41,8 @@ typedef struct ucn_path_forward_config {
     /* Number of Link hops from this Node to destination.  A terminal entry
      * must be zero; every forwarding entry must be non-zero. */
     uint8_t remaining_hops;
+    uint8_t maximum_wire_profile;
+    uint16_t minimum_mtu;
     ucn_link_t *egress_link;
     uint32_t expires_at_ms;
 } ucn_path_forward_config_t;
@@ -41,6 +55,8 @@ typedef struct ucn_path_forward_entry {
     ucn_node_id_t destination;
     ucn_node_id_t next_hop;
     uint8_t remaining_hops;
+    uint8_t maximum_wire_profile;
+    uint16_t minimum_mtu;
     ucn_link_t *egress_link;
     bool terminal;
     uint32_t expires_at_ms;

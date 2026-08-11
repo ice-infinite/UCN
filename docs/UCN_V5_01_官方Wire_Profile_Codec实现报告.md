@@ -3,12 +3,14 @@
 > 日期：2026-08-11
 >
 > 范围：官方 W0～W3 帧编解码、软件测试、Host 资源与版本基线；不包含 Node 固定域配置、自动选档、Gateway 或实机。
+>
+> 当前一致性说明：本文保留 V5-01 当时的测试与资源数据。当前源码仍为项目版本 `5.0.0`、协议版本 5，但 Node 档位、控制面选档、Cost、Hop Scope、Path 能力、动态 MTU、PATH_INSTALL 双格式与资源口径已经由 V5-02～V5-33 继续演进；当前总览见[异构 Bearer、动态 MTU 与 Policy 修复报告](UCN_V5_27_异构Bearer与动态MTU修复报告.md)和[PATH_INSTALL 兼容与 API 符号修复报告](UCN_V5_31_PATH_INSTALL兼容与API符号修复报告.md)。
 
 ## 1. 结论
 
 V5-00 和 V5-01 已完成。v4 最终底座已由 Git 提交、远端标签、本地 ZIP 和解压目录四种方式固化；v5 分支从同一个标签创建。当前源码版本为 `5.0.0`、协议版本为 5，W0/W1/W2/W3 使用唯一官方格式，用户不能自定义字段位数。
 
-V5-01 只让 Codec 具备四档能力。`ucn_config_t` 还没有 Wire Profile 字段，Node 内部零初始化的新发帧按兼容规则落到 W3；因此不能把本项表述成“产品已经自动使用 W0 小帧”。该能力属于 V5-02/V5-05。
+V5-01 当时只让 Codec 具备四档能力。`ucn_config_t` 至今仍保持 Network/Node/Hop 三字段，Wire Profile 由 Node 初始化后的专用 API 配置；未显式配置时仍落到 W3。V5-02/V5-05 现已完成固定档与显式自动选档，因此“V5-01 当时尚不能自动使用 W0”只能作为历史阶段结论。
 
 ## 2. v4 可追溯底座
 
@@ -71,7 +73,7 @@ CRC 位于实际 Header 最后 2 B，覆盖 CRC 之前的 Header、Payload 和�
 
 同一规模模拟的 32 B Payload Wire Efficiency 为 50.383%；v4 固化记录为 48.785%。这是 Host 虚拟链路中默认 W3 从 32 B Base Header 降为 30 B 的软件结果，不代表 Wi-Fi/UART/CAN 实机吞吐。
 
-## 6. Host 资源
+## 6. Host 资源（V5-01 历史里程碑）
 
 | Profile | `sizeof(ucn_node_t)` | Core `.text` |
 | --- | ---: | ---: |
@@ -79,8 +81,10 @@ CRC 位于实际 Header 最后 2 B，覆盖 CRC 之前的 Header、Payload 和�
 | Lite | 5,888 B | 56,216 B |
 | Full | 9,400 B | 113,996 B |
 
-Node 对象与 v4 相同；三档静态库 `.text` 均比 v4 增加 4,096 B。该结果来自 Windows x64 GCC Release/Service OFF，只证明当前 Host 对象与代码增量；MCU Flash、RAM、栈、CPU 和功耗必须在目标 ELF/实机测量。
+V5-01 当时 Node 对象与 v4 相同；三档静态库 `.text` 均比 v4 增加 4,096 B。该结果来自 Windows x64 GCC Release/Service OFF，只证明该阶段 Host 对象与代码增量。
 
-## 7. 下一项
+V5-33 后同一 Host 口径的当前 Nano/Lite/Full Node 为 `2648/5960/9752 B`，Archive `.text` 为 `19884/68244/127792 B`，Link 为 `40 B`，Storage Layout Version 为 5。历史表不能替代当前资源表，也不能替代 MCU ELF、RAM、栈、CPU 和功耗测量。
 
-V5-02 将把固定本地域 Wire Profile 和接收上限加入 Node 配置，并覆盖 Node 初始化、所有新发控制/业务帧、转发、HELLO/准入、MTU 与字段范围。完成前继续遵守：Node 新发帧默认 W3；应用若手工使用 W0～W2 Codec，必须自行保证同域字段全部可表示。
+## 7. 后续状态
+
+V5-02 已加入固定 TX/最大 RX 档 API；V5-05/V5-12/V5-15 已补齐业务与控制面自动选档；V5-20 加入 3 B Ingress Peek；V5-23～V5-25 又闭合 Cost、Candidate Profile 和运行期 Hop Scope。Node 默认发 W3 的兼容行为保持不变，产品只有显式开启 Auto 才会自动选择更小档位。

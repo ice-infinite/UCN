@@ -885,6 +885,7 @@ typedef struct ucn_node_stats {
     uint32_t path_forwards;
     uint32_t path_rejected;
     uint32_t path_route_errors_sent;
+    uint32_t path_capability_failures;
 #endif
 #if UCN_FEATURE_SECURITY
     uint32_t session_rotations;
@@ -1057,9 +1058,23 @@ ucn_result_t ucn_node_install_local_path(ucn_node_t *node,
                                          ucn_node_id_t next_hop,
                                          uint8_t remaining_hops,
                                          uint32_t lease_ms);
+/* Capability-aware form for a provisioning controller that already knows the
+ * full Path bottleneck.  Pass NULL to derive only this Node's logical
+ * next-hop Bearer intersection. */
+ucn_result_t ucn_node_install_local_path_capable(
+    ucn_node_t *node,
+    ucn_path_id_t path_id,
+    ucn_node_id_t destination,
+    ucn_node_id_t next_hop,
+    uint8_t remaining_hops,
+    uint32_t lease_ms,
+    const ucn_path_capability_t *capability);
 ucn_result_t ucn_node_revoke_local_path(ucn_node_t *node,
                                         ucn_path_id_t path_id,
                                         ucn_node_id_t destination);
+/* Stable v5 base-schema sender.  It emits only Path/Destination/NextHop/Lease/
+ * RemainingHops so that previously deployed v5 receivers keep accepting the
+ * control frame. */
 ucn_result_t ucn_node_send_path_install(ucn_node_t *node,
                                         ucn_node_id_t control_target,
                                         ucn_path_id_t path_id,
@@ -1067,6 +1082,19 @@ ucn_result_t ucn_node_send_path_install(ucn_node_t *node,
                                         ucn_node_id_t next_hop,
                                         uint8_t remaining_hops,
                                         uint32_t lease_ms);
+/* Capability-schema sender.  It appends MaximumWireProfile and MinimumMTU.
+ * Use this explicit API only when the target is known to support the extended
+ * v5 PATH_INSTALL schema.  Current receivers accept both base and extended
+ * schemas; older v5 receivers may reject the extended length. */
+ucn_result_t ucn_node_send_path_install_capable(
+    ucn_node_t *node,
+    ucn_node_id_t control_target,
+    ucn_path_id_t path_id,
+    ucn_node_id_t destination,
+    ucn_node_id_t next_hop,
+    uint8_t remaining_hops,
+    uint32_t lease_ms,
+    const ucn_path_capability_t *capability);
 ucn_result_t ucn_node_send_path_revoke(ucn_node_t *node,
                                        ucn_node_id_t control_target,
                                        ucn_path_id_t path_id,

@@ -1,6 +1,6 @@
 # UCN 调用关系树（Call Tree）
 
-> 数据依据：`E:\File\MESH\UCN` 当前 v5 V5-20 软件状态的 `include/ucn/`、`src/` 与测试入口；v4 调用树由 `v4.0.0-final-before-v5` 标签保留。
+> 数据依据：`E:\File\MESH\UCN` 当前 v5 V5-33 工作树的 `include/ucn/`、`src/` 与测试入口；`f941ae9` 是本轮修复前审计基线，v4 调用树由 `v4.0.0-final-before-v5` 标签保留。
 > 目的：回答“一个 API 被谁调用、它继续调用什么、在哪个上下文运行、会经过哪些固定队列/回调”。源码是最终事实；本文档不替代源码或测试。
 
 本目录参考 `E:\File\PlatformIO\F405_Zephyr_Parachute\docs\calltree` 的组织方式：以 YAML 为调用关系源数据，按模块拆分，节点使用唯一 ID，关系只记录真实的直接调用、回调或固定队列边界。
@@ -53,7 +53,7 @@ S04 后，本调用树以默认 `FULL + Service ON` 展示完整可达关系。`
 
 V5-10 后，默认发送仍固定 W3。产品只有显式调用 `ucn_node_set_wire_profile_auto(true)` 才进入自动最小档路径；HELLO 使用固定 TX 档并以 1 B 发布独立 Peer RX Ceiling，中继保留来源帧档位。业务发送先确定是否带 16 B Tag，再结合地址/Hop/Route/Path、Link MTU 和 Peer RX Ceiling 选档，最后才 Seal/Encode。
 
-V5-17～V5-20、V5-22～V5-26 后，Wire 可表达与业务可用分开判断：Node/Policy 可限制 Hop、32 bit Cost 与已验证 RTT；线上 Cost 为 3/3/3/4 B；Pinned Path 使用逐跳安装的 `remaining_hops`；未知 Q1 路线默认按 2→4→8→16 有界扩圈且 Pending 内部重试不刷新绝对 Deadline；Candidate 验证保持发现时的 Wire Profile；Ingress 在完整 Decode/CRC 前先用 3 B Prefix 执行 per-Link RX Ceiling，完整 Decode/Network 后再在 Security/状态前执行运行期 Hop Scope。V5-21 Authorized Class 仍阻塞于生产安全 S02，不在调用树中伪造执行分支。
+V5-17～V5-20、V5-22～V5-33 后，Wire 可表达与业务可用分开判断：Node/Policy 可限制 Hop、32 bit Cost 与已验证 RTT；线上 Cost 为 3/3/3/4 B；Pinned Path 使用逐跳安装的 `remaining_hops` 和共同 Profile/MTU 能力；PATH_INSTALL 旧 API 发送基础 8/11/14/17 B，capability API 发送扩展 11/14/17/20 B，接收端只接受这两组精确 Schema；未知 Q1 路线默认按 2→4→8→16 有界扩圈且 Pending 内部重试不刷新绝对 Deadline；Candidate 验证保持发现时的 Wire Profile；Ingress 在完整 Decode/CRC 前先用 3 B Prefix 执行 per-Link RX Ceiling，完整 Decode/Network 后再在 Security/状态前执行运行期 Hop Scope。动态 MTU 使用静态/状态最小值，Policy 与 AUTO_BALANCE 跟随逻辑 Neighbor 当前 Bearer；后续跳能力失败会撤销 Path 并回送 Path-RERR。V5-21 Authorized Class 仍阻塞于生产安全 S02，不在调用树中伪造执行分支。
 
 ## 2. 目录和阅读顺序
 

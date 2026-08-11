@@ -220,10 +220,14 @@ typedef struct ucn_policy_state {
 } ucn_policy_state_t;
 
 /* Internal Core maintenance hooks used by ucn_node_step(). */
-void ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
+bool ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
                                      ucn_link_t *const *links,
                                      size_t link_count,
                                      uint32_t now_ms);
+void ucn_policy_refresh_path_egress(ucn_policy_state_t *state,
+                                    uint16_t local_path_id,
+                                    ucn_link_t *active_egress_link,
+                                    bool path_available);
 void ucn_policy_expire_flows(ucn_policy_state_t *state, uint32_t now_ms);
 void ucn_policy_mark_path_down(ucn_policy_state_t *state,
                                uint16_t local_path_id);

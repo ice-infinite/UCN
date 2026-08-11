@@ -2,6 +2,8 @@
 
 > 日期：2026-08-11
 > 范围：Wire Profile W0/W1/W2/W3 单档节点、四档混合节点、Host 极限规模与故障压力。本文的“档位”不是 Nano/Lite/Full Build Profile。
+>
+> 当前一致性说明：CSV、交付率和 Host 工作量是 V5-10 的历史复现实验，不随协议文档改写；当前 Node/Archive 资源、Cost 线格式、Candidate Profile、Hop Scope、Path 能力、动态 MTU 与 PATH_INSTALL 双格式已由 V5-23～V5-33 更新。
 
 ## 1. 结论
 
@@ -81,9 +83,9 @@ Tree + two-hop；100 个测量 Tick；每 Node 每 Tick 1 帧、16 B Payload；�
 
 ## 7. Build Profile 与资源边界
 
-Wire档位与 Build Profile 正交。Full 是本轮主极限矩阵；Lite 另外重放 W3/4096 和 mixed/254 本地高负载，两组均 100% 交付。Host ABI 的 `sizeof(ucn_node_t)` 为 Full `9400 B`、Lite `5888 B`；4096 个 Node 对应纯 Node 固定存储约 `38,502,400 B` 与 `24,117,248 B`。
+Wire档位与 Build Profile 正交。Full 是本轮主极限矩阵；Lite 另外重放 W3/4096 和 mixed/254 本地高负载，两组均 100% 交付。V5-10 当时 Host ABI 的 `sizeof(ucn_node_t)` 为 Full `9400 B`、Lite `5888 B`；4096 个 Node 对应当时纯 Node 固定存储约 `38,502,400 B` 与 `24,117,248 B`。
 
-这些是当前 x64 Host ABI 数字。Harness 的事件堆、直方图和 CSV 内存不进入 MCU；也不能从 Host 工作时间推算 ESP32/STM32 CPU、Task 栈、功耗或真实空口容量。
+V5-33 后当前 x64 GCC 14.2 Release/Service OFF 的 Nano/Lite/Full Node 为 `2648/5960/9752 B`，Link 为 `40 B`，Archive `.text` 为 `19884/68244/127792 B`，Storage Layout Version=5。V5-10 的 4096 Node 固定存储估算不能套用到当前结构。Harness 的事件堆、直方图和 CSV 内存不进入 MCU；也不能从 Host 工作时间推算 ESP32/STM32 CPU、Task 栈、功耗或真实空口容量。
 
 ## 8. 复现入口与结果文件
 

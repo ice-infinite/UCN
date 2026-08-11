@@ -225,28 +225,46 @@ static const ucn_link_ops_t PATH_LINK_OPS = {
     NULL, path_link_send, NULL, path_link_status, NULL, path_link_metrics
 };
 
-static int path_init_node(ucn_node_t *node,
-                          ucn_node_id_t node_id,
-                          path_security_state_t *security)
+static int path_init_node_profiles(ucn_node_t *node,
+                                   ucn_node_id_t node_id,
+                                   path_security_state_t *security,
+                                   ucn_wire_profile_t tx_profile,
+                                   ucn_wire_profile_t max_receive_profile)
 {
     ucn_config_t config;
     ucn_security_policy_t policy;
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(tx_profile);
 
-    config.network_id = UINT32_C(0xA1B2C3D4);
+    /* Keep the shared fixture representable by W0 so individual tests may
+     * exercise automatic Wire Class down-selection. */
+    config.network_id = UINT32_C(42);
     config.node_id = node_id;
-    config.default_hop_limit = 5U;
+    config.default_hop_limit = descriptor != NULL && descriptor->max_hops < 5U ?
+        descriptor->max_hops : 5U;
     security->next_sequence = 1U;
     security->session_id = UINT32_C(0x99);
     security->seal_calls = 0U;
     security->open_calls = 0U;
     (void)memset(node, 0, sizeof(*node));
     TEST_ASSERT(ucn_node_init(node, &config) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profiles(node, tx_profile,
+                                            max_receive_profile) == UCN_OK);
     TEST_ASSERT(ucn_node_set_security(node, &PATH_SECURITY_OPS, security) == UCN_OK);
     policy.tx_mode = UCN_SECURITY_TX_E2E_PROTECTED;
     policy.rx_mode = UCN_SECURITY_RX_BOTH;
     policy.forward_mode = UCN_SECURITY_FORWARD_PLAIN_AND_OPAQUE_E2E;
     TEST_ASSERT(ucn_node_set_security_policy(node, &policy) == UCN_OK);
     return 0;
+}
+
+static int path_init_node(ucn_node_t *node,
+                          ucn_node_id_t node_id,
+                          path_security_state_t *security)
+{
+    return path_init_node_profiles(node, node_id, security,
+                                   UCN_WIRE_PROFILE_W3_BACKBONE,
+                                   UCN_WIRE_PROFILE_W3_BACKBONE);
 }
 
 static void path_prepare_pair(ucn_node_t *left,
@@ -509,7 +527,8 @@ static int test_remote_path_wire_scope(void)
     payload[6] = 0xE8U;
     payload[7] = 5U;
     frame.sequence = UINT32_C(2);
-    frame.payload_length = 8U;
+    payload[8] = (uint8_t)UCN_WIRE_PROFILE_UNSPECIFIED;
+    frame.payload_length = 11U;
     TEST_ASSERT(ucn_frame_encode(&frame, encoded, sizeof(encoded),
                                  &encoded_length) == UCN_OK);
     TEST_ASSERT(ucn_node_receive(&b, &ba, encoded, encoded_length) ==
@@ -517,7 +536,7 @@ static int test_remote_path_wire_scope(void)
     TEST_ASSERT(auth_b.calls == 0U && b.stats.hop_scope_rejected == 1U);
 
     /* The real W0 codec is 1 B Path ID + 1 B Destination + 1 B Next Hop +
-     * 4 B Lease.  Install and revoke prove both narrow control layouts. */
+     * 4 B Lease + 1 B Remaining + 1 B Profile + 2 B MTU. */
     TEST_ASSERT(ucn_node_send_path_install(&a, UINT32_C(2), UINT32_C(7),
                                             UINT32_C(2), 0U, 0U,
                                             UINT32_C(1000)) == UCN_OK);
@@ -540,7 +559,8 @@ static int test_path_control_profile_payloads(void)
         UCN_WIRE_PROFILE_W2_MESH,
         UCN_WIRE_PROFILE_W3_BACKBONE
     };
-    static const uint16_t install_lengths[] = { 8U, 11U, 14U, 17U };
+    static const uint16_t base_install_lengths[] = { 8U, 11U, 14U, 17U };
+    static const uint16_t capable_install_lengths[] = { 11U, 14U, 17U, 20U };
     static const uint16_t revoke_lengths[] = { 2U, 4U, 6U, 8U };
     size_t index;
 
@@ -552,8 +572,9 @@ static int test_path_control_profile_payloads(void)
         path_security_state_t sa = { 1U, UINT32_C(0x99), 0U, 0U };
         path_security_state_t sb = { 1U, UINT32_C(0x99), 0U, 0U };
         path_authorize_state_t auth_b = { true, 0U };
+        const ucn_path_capability_t capability = { profiles[index], 64U };
         ucn_security_policy_t policy;
-        uint8_t malformed_payload[18U] = { 0U };
+        uint8_t malformed_payload[21U] = { 0U };
         uint8_t encoded[UCN_MAX_FRAME_BYTES];
         size_t encoded_length = 0U;
         ucn_frame_t malformed;
@@ -583,7 +604,7 @@ static int test_path_control_profile_payloads(void)
                           (uint8_t)(40U + index * 2U),
                           &ab, &ba, &cab, &cba);
         ab.mtu = ucn_frame_header_size_for_profile(profiles[index], 0U) +
-                 install_lengths[index];
+                 capable_install_lengths[index];
         TEST_ASSERT(ucn_node_set_link_local_wire_profile_limit(
                         &a, &ab, profiles[index]) == UCN_OK);
         TEST_ASSERT(ucn_node_set_link_local_wire_profile_limit(
@@ -597,7 +618,13 @@ static int test_path_control_profile_payloads(void)
                         UINT32_C(1000)) == UCN_OK);
         TEST_ASSERT(cab.last_message_type == UCN_MSG_PATH_INSTALL &&
                     cab.last_wire_profile == profiles[index] &&
-                    cab.last_payload_length == install_lengths[index]);
+                    cab.last_payload_length == base_install_lengths[index]);
+        TEST_ASSERT(ucn_node_send_path_install_capable(
+                        &a, UINT32_C(2), UINT32_C(8), UINT32_C(2), 0U, 0U,
+                        UINT32_C(1000), &capability) == UCN_OK);
+        TEST_ASSERT(cab.last_message_type == UCN_MSG_PATH_INSTALL &&
+                    cab.last_wire_profile == profiles[index] &&
+                    cab.last_payload_length == capable_install_lengths[index]);
         ab.mtu = ucn_frame_header_size_for_profile(profiles[index], 0U) +
                  revoke_lengths[index];
         TEST_ASSERT(ucn_node_send_path_revoke(
@@ -605,7 +632,7 @@ static int test_path_control_profile_payloads(void)
         TEST_ASSERT(cab.last_message_type == UCN_MSG_PATH_REVOKE &&
                     cab.last_wire_profile == profiles[index] &&
                     cab.last_payload_length == revoke_lengths[index]);
-        TEST_ASSERT(auth_b.calls == 2U);
+        TEST_ASSERT(auth_b.calls == 3U);
 
         if (profiles[index] == UCN_WIRE_PROFILE_W3_BACKBONE) {
             TEST_ASSERT(ucn_node_set_wire_profile_auto(&a, true) == UCN_OK);
@@ -613,16 +640,16 @@ static int test_path_control_profile_payloads(void)
                             &a, &ab, UCN_WIRE_PROFILE_W0_LOCAL) == UCN_OK);
             ab.mtu = UCN_MAX_FRAME_BYTES;
             TEST_ASSERT(ucn_node_send_path_install(
-                            &a, UINT32_C(2), UINT32_C(8), UINT32_C(2), 0U, 0U,
+                            &a, UINT32_C(2), UINT32_C(9), UINT32_C(2), 0U, 0U,
                             UINT32_C(1000)) == UCN_OK);
             TEST_ASSERT(cab.last_wire_profile == UCN_WIRE_PROFILE_W0_LOCAL &&
-                        cab.last_payload_length == install_lengths[0]);
+                        cab.last_payload_length == base_install_lengths[0]);
             TEST_ASSERT(ucn_node_send_path_revoke(
-                            &a, UINT32_C(2), UINT32_C(8), UINT32_C(2)) ==
+                            &a, UINT32_C(2), UINT32_C(9), UINT32_C(2)) ==
                         UCN_OK);
             TEST_ASSERT(cab.last_wire_profile == UCN_WIRE_PROFILE_W0_LOCAL &&
                         cab.last_payload_length == revoke_lengths[0] &&
-                        auth_b.calls == 4U);
+                        auth_b.calls == 5U);
         }
 
         (void)memset(&malformed, 0, sizeof(malformed));
@@ -636,22 +663,23 @@ static int test_path_control_profile_payloads(void)
         malformed.sequence = (uint32_t)(100U + index);
         malformed.session_id = UINT32_C(0x99);
         malformed.payload = malformed_payload;
-        malformed.payload_length = (uint16_t)(install_lengths[index] + 1U);
+        malformed.payload_length =
+            (uint16_t)(base_install_lengths[index] + 1U);
         TEST_ASSERT(ucn_frame_encode(&malformed, encoded, sizeof(encoded),
                                      &encoded_length) == UCN_OK);
         TEST_ASSERT(ucn_node_receive(&b, &ba, encoded, encoded_length) ==
                     UCN_ERR_MALFORMED);
         TEST_ASSERT(auth_b.calls ==
-                    (profiles[index] == UCN_WIRE_PROFILE_W3_BACKBONE ? 4U : 2U));
+                    (profiles[index] == UCN_WIRE_PROFILE_W3_BACKBONE ? 5U : 3U));
     }
     return 0;
 }
 
 static int test_path_bearer_binding(void)
 {
-    const ucn_path_id_t path_p1 = UINT32_C(0x2201);
-    const ucn_path_id_t path_p2 = UINT32_C(0x2202);
-    const ucn_path_id_t path_p3 = UINT32_C(0x2203);
+    const ucn_path_id_t path_p1 = UINT32_C(0x21);
+    const ucn_path_id_t path_p2 = UINT32_C(0x22);
+    const ucn_path_id_t path_p3 = UINT32_C(0x23);
     const uint8_t payload = 0xC5U;
     ucn_node_t a, b, d;
     ucn_link_t ab_primary, ba_primary, ab_backup, ba_backup;
@@ -690,6 +718,15 @@ static int test_path_bearer_binding(void)
                                         &cdb_backup) == 0);
     TEST_ASSERT(path_connect_pair(&a, UINT32_C(1), &d, UINT32_C(4), 39U,
                                   &ad, &da, &cad, &cda) == 0);
+    /* Path frames must fit every eligible Bearer, not only today's primary.
+     * The backup set is intentionally narrower in both Wire Class and MTU. */
+    ab_backup.mtu = 40U;
+    bd_backup.mtu = 40U;
+    TEST_ASSERT(ucn_node_set_link_wire_profile_limit(
+                    &a, &ab_backup, UCN_WIRE_PROFILE_W0_LOCAL) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_link_wire_profile_limit(
+                    &b, &bd_backup, UCN_WIRE_PROFILE_W0_LOCAL) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profile_auto(&a, true) == UCN_OK);
     ucn_node_set_rx_handler(&d, path_receive, &received);
 
     (void)memset(&path_config, 0, sizeof(path_config));
@@ -744,16 +781,25 @@ static int test_path_bearer_binding(void)
 
     TEST_ASSERT(ucn_node_send_endpoint(&a, UINT32_C(4), (ucn_endpoint_t)0x50U,
                                        UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);
-    TEST_ASSERT(received.count == 1U && received.last_path_id == path_p1);
+    TEST_ASSERT(received.count == 1U && received.last_path_id == path_p1 &&
+                cab_primary.last_wire_profile == UCN_WIRE_PROFILE_W0_LOCAL &&
+                cbd_primary.last_wire_profile == UCN_WIRE_PROFILE_W0_LOCAL);
 
     /* A single A-B Bearer failure only changes the physical sender Link.
      * The source Path, relay Path and local Policy handle all remain valid. */
     cab_primary.is_up = false;
     cba_primary.is_up = false;
+    /* Exercise the periodic Policy refresh, including recovery from an old
+     * physical-Link DOWN mark while the logical Neighbor has a healthy backup. */
+    ucn_policy_mark_path_down(&a.policy_state, 1U);
+    TEST_ASSERT(path_step(&a, UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS) == 0);
+    TEST_ASSERT(ucn_node_find_policy_path(&a, 1U)->state ==
+                UCN_POLICY_PATH_VERIFIED);
     TEST_ASSERT(ucn_node_send_endpoint(&a, UINT32_C(4), (ucn_endpoint_t)0x50U,
                                        UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);
     TEST_ASSERT(received.count == 2U && received.last_path_id == path_p1 &&
-                cab_backup.last_path_id == path_p1);
+                cab_backup.last_path_id == path_p1 &&
+                cab_backup.last_wire_profile == UCN_WIRE_PROFILE_W0_LOCAL);
     TEST_ASSERT(ucn_node_find_path_forward(&a, UINT32_C(1), sa.session_id,
                                             path_p1, UINT32_C(4)) != NULL);
     TEST_ASSERT(ucn_node_find_path_forward(&b, UINT32_C(1), sa.session_id,
@@ -807,7 +853,8 @@ static int test_path_bearer_binding(void)
     TEST_ASSERT(ucn_node_set_policy_path(&a, &policy_path) == UCN_OK);
     cab_backup.is_up = false;
     cba_backup.is_up = false;
-    TEST_ASSERT(path_step(&a, 4U) == 0);
+    TEST_ASSERT(path_step(&a,
+                          UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS * 2U) == 0);
     TEST_ASSERT(ucn_node_find_path_forward(&a, UINT32_C(1), sa.session_id,
                                             path_p3, UINT32_C(4)) == NULL &&
                 ucn_node_find_policy_path(&a, 3U)->state == UCN_POLICY_PATH_DOWN);
@@ -815,6 +862,119 @@ static int test_path_bearer_binding(void)
                                             path_p2, UINT32_C(4)) != NULL &&
                 ucn_node_find_policy_path(&a, 2U)->state ==
                     UCN_POLICY_PATH_VERIFIED);
+    return 0;
+}
+
+static int install_three_node_test_path(ucn_node_t *source,
+                                        ucn_node_t *relay,
+                                        ucn_node_t *destination,
+                                        ucn_session_id_t owner_session_id,
+                                        ucn_path_id_t path_id,
+                                        ucn_link_t *source_egress,
+                                        ucn_link_t *relay_egress)
+{
+    ucn_path_forward_config_t config;
+
+    (void)memset(&config, 0, sizeof(config));
+    config.owner = UINT32_C(1);
+    config.owner_session_id = owner_session_id;
+    config.path_id = path_id;
+    config.destination = UINT32_C(3);
+    config.expires_at_ms = UINT32_C(10000);
+    config.next_hop = UINT32_C(2);
+    config.remaining_hops = 2U;
+    config.egress_link = source_egress;
+    TEST_ASSERT(ucn_path_install(&source->path_state, &config) == UCN_OK);
+    config.next_hop = UINT32_C(3);
+    config.remaining_hops = 1U;
+    config.egress_link = relay_egress;
+    TEST_ASSERT(ucn_path_install(&relay->path_state, &config) == UCN_OK);
+    config.next_hop = 0U;
+    config.remaining_hops = 0U;
+    config.egress_link = NULL;
+    TEST_ASSERT(ucn_path_install(&destination->path_state, &config) == UCN_OK);
+    return 0;
+}
+
+static int test_path_relay_capability_contract(void)
+{
+    const uint8_t payload = 0x6DU;
+    const ucn_path_id_t transparent_path = UINT32_C(0x31);
+    const ucn_path_id_t profile_failure_path = UINT32_C(0x32);
+    const ucn_path_id_t mtu_failure_path = UINT32_C(0x33);
+    ucn_node_t a, b, c;
+    ucn_link_t ab, ba, bc, cb;
+    path_link_context_t cab, cba, cbc, ccb;
+    path_security_state_t sa, sb, sc;
+    path_receive_state_t received;
+    ucn_result_t result;
+
+    (void)memset(&received, 0, sizeof(received));
+    TEST_ASSERT(path_init_node(&a, UINT32_C(1), &sa) == 0);
+    TEST_ASSERT(path_init_node_profiles(&b, UINT32_C(2), &sb,
+                                        UCN_WIRE_PROFILE_W0_LOCAL,
+                                        UCN_WIRE_PROFILE_W3_BACKBONE) == 0);
+    TEST_ASSERT(path_init_node(&c, UINT32_C(3), &sc) == 0);
+    TEST_ASSERT(path_connect_pair(&a, UINT32_C(1), &b, UINT32_C(2), 51U,
+                                  &ab, &ba, &cab, &cba) == 0);
+    TEST_ASSERT(path_connect_pair(&b, UINT32_C(2), &c, UINT32_C(3), 53U,
+                                  &bc, &cb, &cbc, &ccb) == 0);
+    ucn_node_set_rx_handler(&c, path_receive, &received);
+
+    /* A lower-TX relay still accepts and transparently forwards a received W3
+     * E2E frame when the next Bearer supports W3.  It never opens the payload. */
+    TEST_ASSERT(install_three_node_test_path(
+                    &a, &b, &c, sa.session_id, transparent_path,
+                    &ab, &bc) == 0);
+    TEST_ASSERT(ucn_node_send_path(&a, UINT32_C(3),
+                                   (uint8_t)0x52U,
+                                   UCN_TRAFFIC_Q1_REALTIME,
+                                   transparent_path, &payload, 1U) == UCN_OK);
+    TEST_ASSERT(received.count == 1U &&
+                cbc.last_wire_profile == UCN_WIRE_PROFILE_W3_BACKBONE &&
+                sb.open_calls == 0U);
+
+    /* If the source has no propagated bottleneck and a relay discovers a
+     * narrower next hop, reject deterministically, revoke the Path and return
+     * a Path-scoped RERR instead of retaining a black-hole entry. */
+    TEST_ASSERT(ucn_node_set_link_wire_profile_limit(
+                    &b, &bc, UCN_WIRE_PROFILE_W0_LOCAL) == UCN_OK);
+    TEST_ASSERT(install_three_node_test_path(
+                    &a, &b, &c, sa.session_id, profile_failure_path,
+                    &ab, &bc) == 0);
+    result = ucn_node_send_path(&a, UINT32_C(3), (uint8_t)0x52U,
+                                UCN_TRAFFIC_Q1_REALTIME,
+                                profile_failure_path, &payload, 1U);
+    TEST_ASSERT(result == UCN_ERR_UNSUPPORTED);
+    TEST_ASSERT(received.count == 1U &&
+                ucn_node_find_path_forward(&a, UINT32_C(1), sa.session_id,
+                                            profile_failure_path,
+                                            UINT32_C(3)) == NULL &&
+                ucn_node_find_path_forward(&b, UINT32_C(1), sa.session_id,
+                                            profile_failure_path,
+                                            UINT32_C(3)) == NULL &&
+                ucn_node_get_stats(&b)->path_route_errors_sent == 1U &&
+                ucn_node_get_stats(&b)->path_capability_failures == 1U);
+
+    TEST_ASSERT(ucn_node_set_link_wire_profile_limit(
+                    &b, &bc, UCN_WIRE_PROFILE_W3_BACKBONE) == UCN_OK);
+    bc.mtu = 40U;
+    TEST_ASSERT(install_three_node_test_path(
+                    &a, &b, &c, sa.session_id, mtu_failure_path,
+                    &ab, &bc) == 0);
+    result = ucn_node_send_path(&a, UINT32_C(3), (uint8_t)0x52U,
+                                UCN_TRAFFIC_Q1_REALTIME,
+                                mtu_failure_path, &payload, 1U);
+    TEST_ASSERT(result == UCN_ERR_TOO_LARGE);
+    TEST_ASSERT(received.count == 1U &&
+                ucn_node_find_path_forward(&a, UINT32_C(1), sa.session_id,
+                                            mtu_failure_path,
+                                            UINT32_C(3)) == NULL &&
+                ucn_node_find_path_forward(&b, UINT32_C(1), sa.session_id,
+                                            mtu_failure_path,
+                                            UINT32_C(3)) == NULL &&
+                ucn_node_get_stats(&b)->path_route_errors_sent == 2U &&
+                ucn_node_get_stats(&b)->path_capability_failures == 2U);
     return 0;
 }
 
@@ -843,6 +1003,7 @@ int test_path_control(void)
     TEST_ASSERT(test_remote_path_wire_scope() == 0);
     TEST_ASSERT(test_path_control_profile_payloads() == 0);
     TEST_ASSERT(test_path_bearer_binding() == 0);
+    TEST_ASSERT(test_path_relay_capability_contract() == 0);
     (void)memset(&received, 0, sizeof(received));
     TEST_ASSERT(path_init_node(&a, UINT32_C(1), &sa) == 0);
     TEST_ASSERT(path_init_node(&b, UINT32_C(2), &sb) == 0);
