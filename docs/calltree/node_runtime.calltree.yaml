@@ -58,11 +58,11 @@ nodes:
       - 已被 Bridge 或其他组件占用的 Endpoint 不应被覆盖；回调运行在 Protocol Task。
 
   - id: node_runtime.send_control_on_link_static
-    symbol: send_control_on_link
+    symbol: send_control_on_link/send_control_on_link_profile/send_control_on_link_adaptive
     type: function
     file: src/ucn_node.c
     layer: core
-    role: 组装一个控制帧并从指定 Link 发送。
+    role: 以固定、显式或自适应 Wire Profile 组装控制帧，并在字段可表达、Peer RX Ceiling 与 MTU 都满足后从指定 Link 发送。
     called_by:
       - neighbor.ucn_node_broadcast_hello
       - neighbor.send_due_heartbeat_static
@@ -76,6 +76,7 @@ nodes:
         reason: 复用统一帧编码和具体 Link 发送。
     notes:
       - 控制帧不能作为业务 E2E 帧发送，也不携带 Path ID。
+      - 已收到的控制帧在转发/回复时保持请求 Profile；新发控制帧的 Auto 模式选择能表达完整语义的最小档。
 
   - id: node_runtime.send_control_to_node_static
     symbol: send_control_to_node

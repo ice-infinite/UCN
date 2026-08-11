@@ -39,10 +39,10 @@ Host 墙钟时间只用于发现模拟异常，不能写成 MCU CPU 性能或真
 | GCC 14.2 Release，Full/Lite + Service OFF | 各 CTest 3/3 通过。 |
 | GCC 14.2 Release，Nano + Service OFF | CTest 1/1 通过。 |
 | WSL Ubuntu 24.04，Full/Service OFF，ASan+UBSan | CTest 3/3 通过；额外 256 Node 自动模式 M4/80‰ 重复通过，无 Sanitizer 报告。 |
-| 最小 Build MTU 正向 | Nano 33 B、Lite 50 B、Full 64 B 的 `ucn_core` 严格编译通过。 |
-| 最小 Build MTU 负向 | 32/49/63 B 分别由静态编译门禁拒绝。 |
+| 最小 Build MTU 正向 | 本阶段历史值为 Nano 33 B、Lite 50 B、Full 64 B；V5-14 后 Lite 当前边界为 46 B。 |
+| 最小 Build MTU 负向 | 当前 32/45/63 B 分别由静态编译门禁拒绝。 |
 
-33/50/64 B 是 Core 编译边界。通用测试程序含超出 33 B 的 Golden Vector/业务载荷，因此没有把“最小 Core 可编译”误写成“最小 MTU 下完整 CTest 通过”。
+当前 33/46/64 B 是 Core 编译边界。通用测试程序含超出最小边界的 Golden Vector/业务载荷，因此没有把“最小 Core 可编译”误写成“最小 MTU 下完整 CTest 通过”。
 
 ## 4. Host 静态资源
 
@@ -55,6 +55,8 @@ Windows x64、GCC 14.2、Release `-O3`、Service OFF：
 | Full | 9,400 B | 40 B | 117,164 B |
 
 自动选档状态已包含在上述 Node 大小中，没有运行时堆内存；每个 Link 的 Peer Ceiling 是固定字段。Archive `.text` 是 Host 裁剪证据，不等于任何 MCU 的 Flash。Adapter 队列、Service Router、RTOS Task 栈、驱动 DMA 和生产 Security Provider 均在 Node 对象之外。
+
+> 当前值更新：V5-15 后重新测得 Nano/Lite/Full Node 为 `2648/5888/9464 B`，Archive `.text` 为 `19384/58580/116360 B`，Link 仍为 40 B。本表保留 V5-07 当时的发布证据。
 
 ## 5. 仍需真实硬件完成的门禁
 

@@ -60,7 +60,7 @@ S08 继续沿用 S04 已实现的编译期门禁和实际 Payload helper：
 
 - 32 B 基础头、36 B Route Extension、40 B Path Header；E2E 保护再占 16 B Tag。
 - 调用方按实际 Flags 使用 Payload capacity helper，不能始终按 `UCN_MAX_FRAME_BYTES - 32` 假设可用净荷。
-- Nano/Lite/Full 在 Service OFF 时的最小帧上限分别为 33/50/64 B；32/49/63 B 会在编译期拒绝。
+- Nano/Lite/Full 在 Service OFF 时的当前最小帧上限分别为 33/46/64 B；32/45/63 B 会在编译期拒绝。Lite 原 50 B 门禁已随 V5-14 的 RREP 去重和 14 B W3 RREQ 更新。
 - Path Trace 容量先验证最小帧，再做无符号减法，不会在过小 MTU 下下溢成巨大容量。
 
 这些是 UCN Frame 的编译边界。经典 CAN 等更小 MTU 仍需 Carrier 分段，不能把编译通过理解为任意介质都可直接承载完整帧。
@@ -87,10 +87,10 @@ S08 继续沿用 S04 已实现的编译期门禁和实际 Payload helper：
 | --- | --- |
 | GCC 14.2 Release，Nano/OFF、Lite/ON、Full/ON、Lite/OFF、Full/OFF | 全部构建并 CTest 通过 |
 | MSVC Debug，Nano/OFF、Lite/ON、Full/ON | 全部构建并 CTest 通过 |
-| 最小 MTU 33/50/64 B | 全部编译通过 |
-| 低一字节 32/49/63 B | 全部按预期编译拒绝 |
+| 最小 MTU 33/46/64 B | 全部编译通过 |
+| 低一字节 32/45/63 B | 全部按预期编译拒绝 |
 | 三档公共 Node/Path/Policy 符号 | 每档 56 个，无缺失 |
-| Host `sizeof(ucn_node_t)` | S22 后 Nano/Lite/Full 为 2648/5888/9400 B；Storage Layout Version=2 |
+| Host `sizeof(ucn_node_t)` | V5-15 后 Nano/Lite/Full 为 2648/5888/9464 B；Storage Layout Version=2 |
 | ESP32-S3 Full/Service ON 正常 Node | 构建成功，RAM 48124 B，Flash 600819 B |
 | ESP32-S3 Full/Service OFF UART Bench | 构建成功，RAM 22152 B，Flash 185947 B |
 | ESP-WROOM-32 Full/Service ON | 构建成功，RAM 50184 B，Flash 626803 B |

@@ -10,7 +10,7 @@ UCN 是一个可移植的 C 通信协议栈。它的最小运行形态不是 Lin
 
 Linux、ROS2、PX4/MAVLink、地面站与 AI 系统可以通过 `UCN-Host` 接入同一网络，但它们不拥有路由中心、入网中心或控制中心的地位，更不替代 Linux 自己已有的网络体系。
 
-当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 固定发送档/最大接收档、1 B RX Ceiling HELLO、压缩 RREQ、Profile 绑定 AAD、透明密文中继、显式开启的路由感知最小档选择、Route Epoch/grace、受限 AODV-Lite、Candidate Probe/Activate、Endpoint Q1 首包自动寻路、固定邻居表、通用 Link Cost、Path ID 逐跳表、固定/主备与 Q1 流亲和策略，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、真实无线多板和小 MTU Carrier 仍是后续任务，不能由软件测试替代。
+当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 与 per-Link 接收上限、1 B RX Ceiling HELLO、Profile-aware RREQ/RREP/RERR/Path/诊断控制载荷、32 bit 累计 Cost、Profile 绑定 AAD、透明密文中继、显式开启的路由感知最小档选择、Route Epoch/grace、受限 AODV-Lite、Candidate Probe/Activate、Endpoint Q1 首包自动寻路、固定邻居表、通用 Link Cost、Path ID 逐跳表、固定/主备与 Q1 流亲和策略，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、Authorized Class 执行层、真实无线多板和小 MTU Carrier 仍是后续任务，不能由软件测试替代。
 
 这份架构只围绕四项约束设计：
 
@@ -226,7 +226,7 @@ T22.5 进一步把两层选择接起来：Path 表保留安装时的 egress Link
 
 ### 4.5 Link Cost：跨介质质量选路
 
-Core 不直接读取 WiFi RSSI、BLE RSSI、LoRa SNR 或 CAN 专有状态。每个 Link 可选上报一个统一的非零 `route_cost`，值越小表示越适合参与路由；v5 继续使用保留哨兵 `UCN_UNKNOWN_LINK_ROUTE_COST=UINT16_MAX`。任何 Known Cost 都优于 Unknown，Known 累加饱和在 `UINT16_MAX-1`，不会撞入 Unknown。
+Core 不直接读取 WiFi RSSI、BLE RSSI、LoRa SNR 或 CAN 专有状态。每个 Link 可选上报一个统一的 16 bit 非零 `route_cost`，值越小表示越适合参与路由；`UCN_UNKNOWN_LINK_ROUTE_COST=UINT16_MAX` 只表示单跳输入未知。多跳累计值为 32 bit，最高 Known 为 `0xFFFFFFFE`、Unknown 为 `0xFFFFFFFF`；任何 Known 都优于 Unknown，真实溢出失败关闭。
 
 | Link 类型 | Adapter 可映射为 `route_cost` 的输入 | 不能直接写入 Core 的原因 |
 | --- | --- | --- |
@@ -367,7 +367,7 @@ UCN_ADAPTER_RX_QUEUE_DEPTH // 公共 Adapter 收包队列深度
 UCN_MAX_STEP_INTERVAL_MS // Protocol Task 两次 ucn_node_step() 的产品最大允许间隔
 ```
 
-`UCN_MAX_HOPS` 默认 16，现已支持全工程统一编译期覆盖并限制在 1～254；当前软件与文档仍以 16 作为已验证默认值。仅扩大 Hop Limit 不代表 100 跳可用，超过 16 跳前还必须重新冻结累计 Cost 位宽/尺度、RREQ 超时与控制预算，并做长路径规模和实机验证。
+`UCN_MAX_HOPS` 默认 16，支持全工程统一编译期覆盖并限制在 1～254。V5-14 已完成 32 bit 累计 Cost 和 201 Node/200 Edge Host 正向验证；这只证明线格式与状态机，不代表 100～200 Hop 在真实无线/总线上具有可接受收敛、内存、空口或故障恢复性能。产品扩大 Hop 前仍必须重标 RREQ 超时、控制预算和介质容量，并完成 S06/S07 实机验证。
 
 Protocol Task 同样是资源边界。Core 使用以下保守式把“每若干业务帧让出维护槽”换算成时间上界：`(UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE + 1) × UCN_MAX_STEP_INTERVAL_MS × UCN_MAX_NEIGHBORS × UCN_MAX_BEARERS_PER_NEIGHBOR`。默认值为 800 ms，叠加 1 s Heartbeat 后仍早于 3 s Suspect；不安全的组合在编译期失败关闭。Node 只保存三个固定统计字段观察实际 Step，不新增动态内存、线字段或网络流量。产品 Port 还必须冻结任务优先级、最大阻塞、Adapter/Bridge 预算并实测 Link `send()` WCET。
 

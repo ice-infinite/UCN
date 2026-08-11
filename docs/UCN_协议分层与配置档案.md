@@ -20,7 +20,7 @@ UCN-Host      只有 Linux、地面站、ROS2 等外部主机使用
 
 上层只能依赖下层，不能反向依赖：关闭 `Extended` 或完全不部署 `Host` 时，`Core` 的认证、发现、路由、转发和失联恢复仍完整可用。
 
-当前仓库已实现 v5 W0～W3 Codec、所有 Build Profile 四档接收、Node 固定 TX/最大 RX 档、1 B RX Ceiling HELLO、压缩 RREQ、Profile 绑定安全、显式自动最小档，以及从 v4 继承的邻居保活/回收、Route Epoch/grace、受限 Candidate 选路、静态 Endpoint、Q0/Q1、透明密文中继、受认证 Path ID 逐跳表、按需诊断和 Adapter 模拟。公开编译参数集中在 `ucn_config.h`，产品头可覆盖且原文件默认保留。默认固定 W3；`Extended`、真实 Linux Host、生产密码库和真实介质驱动仍未实现。
+当前仓库已实现 v5 W0～W3 Codec、所有 Build Profile 四档接收、Node 固定 TX/最大 RX 档、per-Link 本地 RX 上限、1 B RX Ceiling HELLO、Profile-aware 控制载荷、32 bit 累计 Cost、Profile 绑定安全、显式自动最小档，以及从 v4 继承的邻居保活/回收、Route Epoch/grace、受限 Candidate 选路、静态 Endpoint、Q0/Q1、透明密文中继、受认证 Path ID 逐跳表、按需诊断和 Adapter 模拟。公开编译参数集中在 `ucn_config.h`，产品头可覆盖且原文件默认保留。默认固定 W3；`Extended`、真实 Linux Host、生产密码库、Authorized Class 执行层和真实介质驱动仍未实现。
 
 ## 2. 三个档案的边界
 
@@ -40,7 +40,7 @@ Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个�
 | `LITE` | Nano + HELLO/准入、Neighbor/Heartbeat、多 Bearer、AODV-Lite/RERR、最小 Security Provider。 | 普通 MCU Mesh 节点与中继。 | 是 |
 | `FULL` | Lite + Candidate、显式 Path、Policy/Balance、Path Trace、Node Snapshot、Policy Diagnostic。 | 主控、复杂中继、诊断或多路径节点。 | 是 |
 
-`UCN_FEATURE_SERVICE` 独立控制节点内 Service Router/Bridge。Nano 使用独立 `ucn_node_nano.c`；Lite/Full 使用动态 Node；非 Full 不编译 Path/Policy 源文件，高级 API 由固定 Stub 返回 `UCN_ERR_CONFIG`。因此这是对象字段和源文件级裁剪，不是仅关闭运行时分支。最小帧上限分别为 Nano 33 B、Lite 50 B、Full 64 B；默认 Service 开启时最低为 64 B。详见 [S04 Feature Profile 与资源报告](UCN_S04_Feature_Profile与资源报告.md)。
+`UCN_FEATURE_SERVICE` 独立控制节点内 Service Router/Bridge。Nano 使用独立 `ucn_node_nano.c`；Lite/Full 使用动态 Node；非 Full 不编译 Path/Policy 源文件，高级 API 由固定 Stub 返回 `UCN_ERR_CONFIG`。因此这是对象字段和源文件级裁剪，不是仅关闭运行时分支。当前最小帧上限分别为 Nano 33 B、Lite 46 B、Full 64 B；默认 Service 开启时最低为 64 B。详见 [S04 Feature Profile 与资源报告](UCN_S04_Feature_Profile与资源报告.md)。
 
 ## 3. UCN-Core：MCU 自组网最小闭环
 
@@ -67,7 +67,7 @@ Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个�
 | 路由 | `ROUTE_REQ`、`ROUTE_REPLY`、`ROUTE_ERROR` | 已处理。 |
 | 健康 | `HEARTBEAT` | 已处理：一跳 8 B 请求/ACK 和邻居状态机；`LINK_STATE` 尚未定义为线协议消息。 |
 | 路径验证 | `PATH_PROBE`、`PATH_PROBE_ACK`、`PATH_ACTIVATE`、`PATH_ACTIVATE_ACK` | v5 继续使用现有控制语义；Activate/ACK 载荷为 Candidate ID + Route Epoch，业务按 Epoch 查 Current/Previous。 |
-| Path 控制 | `PATH_INSTALL`、`PATH_REVOKE` | 已处理：固定 `{Path ID, Destination, Next Hop, Lease}` / `{Path ID, Destination}`，依次需要 Provider、显式控制面授权和按 `(Source, Session)` 的固定管理预算；同源换 Bearer 不会重置预算。 |
+| Path 控制 | `PATH_INSTALL`、`PATH_REVOKE` | 已处理：字段按 Wire Profile 宽度编码，Payload 分别为 7/10/13/16 B 与 2/4/6/8 B；依次需要 Provider、显式控制面授权和按 `(Source, Session)` 的固定管理预算，同源换 Bearer 不会重置预算。 |
 | 按需诊断 | `PATH_TRACE_REQ`、`PATH_TRACE_REPLY` | 已处理：`DIAGNOSTIC=0x04`、逐跳 Node ID、固定 Pending/Reverse 表和回调结果；只查当前 Cache，不触发 RREQ，也不锁定业务路径。 |
 | 按需诊断 | `NODE_SNAPSHOT_REQ`、`NODE_SNAPSHOT_REPLY` | 已处理：受限泛洪、短期 Reverse、随机短延迟 Reply、源端固定结果表与默认拒绝 ACL；不常驻保存全网节点或拓扑。 |
 | 按需诊断 | `POLICY_DIAGNOSTIC_REQ`、`POLICY_DIAGNOSTIC_REPLY` | 已处理：受授权单 Node 查询、三页 Summary 或一个固定 Policy/Path/Flow/quality 槽位、8 B 请求/32 B 回复、独立 Token 与 Pending/Reply 固定表；普通业务帧零额外字段。 |
@@ -75,7 +75,7 @@ Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个�
 
 Core 只需要单播、受限广播和有限多跳。组播、服务调用、文件传输和任意长度分片不是 Core 的前置条件。
 
-`ROUTE_REQ`/`ROUTE_REPLY` 的控制载荷携带累计 `route_cost` 与 hop 数；非 Candidate `ROUTE_REPLY` 还带 2 B Route Epoch。Link 未上报质量时使用保留 Unknown 哨兵 `UINT16_MAX`，Known Cost 累加最多饱和到 `UINT16_MAX-1`；因此 WiFi、BLE、LoRa、CAN、UART 的质量指标必须先由各自 Adapter 归一化，不能把 RSSI 等无线字段写入共同线协议。
+`ROUTE_REQ`/`ROUTE_REPLY` 的控制载荷携带 32 bit 语义的累计 `route_cost` 与 hop 数；Cost 在线上按 W0/W1/W2/W3 使用 1/2/3/4 B，Route Epoch 使用 1/2/2/2 B。Link 未上报质量时先以 16 bit 单跳 Unknown 输入，累计 Unknown 为 `0xFFFFFFFF`；因此 WiFi、BLE、LoRa、CAN、UART 的质量指标必须先由各自 Adapter 归一化，不能把 RSSI 等无线字段写入共同线协议。
 
 ### 3.3 Core 的资源纪律
 

@@ -35,6 +35,9 @@
 #ifndef UCN_CONFIG_NO_DEFAULTS
 
 /* Build and frame capacity. */
+#ifndef UCN_PROTOCOL_VERSION
+#define UCN_PROTOCOL_VERSION ((uint8_t)5U)
+#endif
 #ifndef UCN_PROFILE
 #define UCN_PROFILE UCN_PROFILE_FULL
 #endif

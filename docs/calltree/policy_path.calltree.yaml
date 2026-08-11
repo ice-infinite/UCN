@@ -58,6 +58,7 @@ nodes:
         reason: 写入源端 owner/session/path/destination 项。
     notes:
       - 仅源端安装还不够；中继与终端仍须逐跳收到授权 PATH_INSTALL。
+      - 本地写表前按 Node TX Wire Profile 验证 Path ID、Destination 与 Next Hop 可表达性。
 
   - id: policy_path.ucn_node_send_path_install
     symbol: ucn_node_send_path_install
@@ -73,6 +74,7 @@ nodes:
         reason: 用当前 Route 将控制帧送到指定控制目标。
     notes:
       - 目标侧必须配置 path_control_authorizer；未配置时默认拒绝。
+      - Auto 模式按 Path ID、Destination、Next Hop、Session、控制目标、MTU 与 Peer Ceiling 选择最小档；Payload 为 7/10/13/16 B。
 
   - id: policy_path.handle_path_install_static
     symbol: handle_path_install
@@ -92,6 +94,8 @@ nodes:
       - target: policy_path.path_control_helpers_static
         type: direct
         reason: 写入固定 Path 转发表。
+    notes:
+      - Wire Profile 决定 Path/Node/Session 字段宽度；精确长度和可表达性在 authorizer/token/写表之前校验。
 
   - id: policy_path.handle_path_revoke_static
     symbol: handle_path_revoke
@@ -108,6 +112,8 @@ nodes:
       - target: policy_path.path_control_budget_helpers_static
         type: direct
         reason: 授权成功后按认证 Source/Session 消耗 REVOKE Token。
+    notes:
+      - PATH_REVOKE Payload 按 W0/W1/W2/W3 为 2/4/6/8 B，旧窄档固定宽度格式拒绝。
 
   - id: policy_path.send_endpoint_pinned_static
     symbol: send_endpoint_pinned

@@ -75,6 +75,10 @@ struct ucn_link {
     const ucn_link_ops_t *ops;
     void *context;
     uint8_t link_id;
+    /* Local ingress ceiling for this physical/logical Link.  UNSPECIFIED
+     * inherits the owning Node maximum.  uint8_t deliberately occupies the
+     * existing alignment gap on common 32/64-bit ABIs. */
+    uint8_t local_receive_wire_profile;
     size_t mtu;
     ucn_node_id_t peer_node_id;
     /* Peer maximum RX profile advertised by an admitted v5 HELLO, or set

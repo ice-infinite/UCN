@@ -256,5 +256,15 @@ if(UCN_BUILD_TESTS)
             --wire-profile w3
             --quiet
         )
+        add_test(NAME ucn_scale_end_to_end_smoke COMMAND ucn_scale_sim
+            --nodes 8
+            --topology line
+            --traffic end-to-end
+            --ticks 20
+            --warmup-ticks 100
+            --drain-ticks 200
+            --wire-profile w3
+            --quiet
+        )
     endif()
 endif()

@@ -224,7 +224,7 @@ Service 是正交 Feature，可按产品是否需要节点内 Task 统一通信�
 - CI 构建 Nano/Lite/Full 与关键组合，报告 `sizeof(ucn_node_t)`、静态 RAM、Flash 和最小 MTU。
 - 默认 Full API 行为保持兼容；关闭功能时返回明确的编译或配置错误。
 
-当前执行结果：S04 已按上述边界完成代码和 Host 软件验证。Nano 使用独立静态 Node，Lite 在预处理/构建层移除 Candidate、Path、Policy 和 Diagnostic，Service 可独立关闭；三档功能矩阵、最小帧 33/50/64 B、Full 回归及 GCC 严格构建均已通过。S08 又将 `ucn_node.h` 收口为 API/不完整类型，以 `ucn_node_storage.h` 让唯一 owner 显式取得静态布局，并明确 Seen Cache 不等价于生产 Replay Window。详细证据见 [S04 Feature Profile 与资源报告](UCN_S04_Feature_Profile与资源报告.md) 和 [S08 公共 API 与静态存储边界](UCN_S08_公共API与静态存储边界.md)。Host 结果不能替代 ESP32/STM32 ELF、栈/Heap 或真实介质测试，后者继续归 S06/S07。
+当前执行结果：S04 已按上述边界完成代码和 Host 软件验证。Nano 使用独立静态 Node，Lite 在预处理/构建层移除 Candidate、Path、Policy 和 Diagnostic，Service 可独立关闭；三档功能矩阵、当前最小帧 33/46/64 B、Full 回归及 GCC 严格构建均已通过。S08 又将 `ucn_node.h` 收口为 API/不完整类型，以 `ucn_node_storage.h` 让唯一 owner 显式取得静态布局，并明确 Seen Cache 不等价于生产 Replay Window。详细证据见 [S04 Feature Profile 与资源报告](UCN_S04_Feature_Profile与资源报告.md) 和 [S08 公共 API 与静态存储边界](UCN_S08_公共API与静态存储边界.md)。Host 结果不能替代 ESP32/STM32 ELF、栈/Heap 或真实介质测试，后者继续归 S06/S07。
 
 ## 11. ST2-09：动态网络压力场景
 

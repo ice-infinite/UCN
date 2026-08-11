@@ -4,6 +4,8 @@
 > 日期：2026-08-07  
 > 适用范围：`UCN-Core` 的动态多跳路由；保持 MCU-first、固定内存、跨介质 `route_cost` 与 Linux 非必需边界。
 
+> v5 更新：当前累计 Route/Candidate Cost 已升级为 32 bit，RREQ/RREP 按 Wire Profile 编码，详见 [V5-14 实现报告](UCN_V5_14_长距离Cost与RREQ_RREP实现报告.md)。下文 32 B 基础头、16 bit 累计 Cost 和固定 RREP 长度仅是 v4 历史成本估算。
+
 ## 1. 为什么需要这份建议
 
 当前 Core 已能按需发现路径，并在一次发现过程中选择较低累计 `route_cost` 的路径。但动态 Route Cache 默认有效期为 30 秒，且普通业务帧不会续租它；多跳路径在缓存有效期间也不会因质量变化自动重选。

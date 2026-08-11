@@ -22,6 +22,7 @@ nodes:
         reason: 通过当前 Route 发送带固定记录容量的 Trace Request。
     notes:
       - 每跳追加 Node ID，记录数同时受帧 MTU 与 Hop Limit 限制；有独立 Token/Pending/Reverse 表。
+      - 固定域 8 B，Node 记录按 Wire Profile 地址宽度编码；Auto 请求选择最小安全档。
 
   - id: diagnostic.handle_path_trace_request_static
     symbol: handle_path_trace_request
@@ -40,6 +41,7 @@ nodes:
         reason: 中继继续转发 Trace Request。
     notes:
       - 授权通过后仍按直连 ingress 对端和 Trace 类型消费独立入站预算；耗尽时不分配 Reverse 状态。
+      - 本 Node ID 若不能由请求 Profile 表达则返回 TRUNCATED，不截断地址。
 
   - id: diagnostic.ucn_node_request_node_snapshot
     symbol: ucn_node_request_node_snapshot
@@ -55,6 +57,7 @@ nodes:
         reason: 向当前直连 Link 发 Snapshot Request。
     notes:
       - 源只保存固定数量结果；不会在所有 Node 建永久全网拓扑表。
+      - Request 固定 8 B；Reply 继承请求 Profile，Node ID 按档位编码，总长为 9/10/11/12 B。
 
   - id: diagnostic.handle_node_snapshot_request_static
     symbol: handle_node_snapshot_request
@@ -151,7 +154,7 @@ nodes:
     type: module
     file: src/ucn_node.c
     layer: diagnostic
-    role: 编码、转发和反向回送 Path Trace 帧，并管理固定 Reverse/Pending 槽。
+    role: 按请求 Wire Profile 编码、转发和反向回送 Path Trace 帧，并管理固定 Reverse/Pending 槽。
     called_by:
       - diagnostic.ucn_node_request_path_trace
       - diagnostic.handle_path_trace_request_static
@@ -165,7 +168,7 @@ nodes:
     type: module
     file: src/ucn_node.c
     layer: diagnostic
-    role: Snapshot 的 Reply 固定队列、抖动延迟发送和受限泛洪辅助组。
+    role: Snapshot 的 Reply 固定队列、请求 Profile 继承、抖动延迟发送和受限泛洪辅助组。
     called_by:
       - diagnostic.handle_node_snapshot_request_static
       - diagnostic.send_due_diagnostics_static

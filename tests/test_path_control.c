@@ -26,6 +26,9 @@ typedef struct path_link_context {
     bool last_has_path_id;
     bool last_protected;
     ucn_path_id_t last_path_id;
+    ucn_wire_profile_t last_wire_profile;
+    uint16_t last_payload_length;
+    uint8_t last_message_type;
 } path_link_context_t;
 
 typedef struct path_receive_state {
@@ -184,6 +187,9 @@ static ucn_result_t path_link_send(ucn_link_t *link,
         return UCN_ERR_LINK_DOWN;
     }
     if (ucn_frame_decode(frame, length, &decoded) == UCN_OK) {
+        context->last_wire_profile = decoded.wire_profile;
+        context->last_payload_length = decoded.payload_length;
+        context->last_message_type = decoded.message_type;
         context->last_has_path_id = decoded.has_path_id;
         context->last_protected =
             (decoded.flags & UCN_FRAME_FLAG_E2E_PROTECTED) != 0U;
@@ -380,6 +386,245 @@ static int test_path_frame_extension(void)
     return 0;
 }
 
+static int test_path_wire_scope(void)
+{
+    ucn_config_t config;
+    ucn_node_t node;
+    path_security_state_t security;
+    ucn_security_policy_t policy;
+
+    (void)memset(&node, 0, sizeof(node));
+    (void)memset(&security, 0, sizeof(security));
+    config.network_id = UINT32_C(42);
+    config.node_id = UINT32_C(1);
+    config.default_hop_limit = 4U;
+    security.next_sequence = 1U;
+    security.session_id = UINT32_C(0x99);
+    TEST_ASSERT(ucn_node_init(&node, &config) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profiles(&node, UCN_WIRE_PROFILE_W0_LOCAL,
+                                            UCN_WIRE_PROFILE_W3_BACKBONE) ==
+                UCN_OK);
+    TEST_ASSERT(ucn_node_set_security(&node, &PATH_SECURITY_OPS, &security) ==
+                UCN_OK);
+    policy.tx_mode = UCN_SECURITY_TX_E2E_PROTECTED;
+    policy.rx_mode = UCN_SECURITY_RX_BOTH;
+    policy.forward_mode = UCN_SECURITY_FORWARD_PLAIN_AND_OPAQUE_E2E;
+    TEST_ASSERT(ucn_node_set_security_policy(&node, &policy) == UCN_OK);
+
+    TEST_ASSERT(ucn_node_install_local_path(&node, UINT32_C(256), UINT32_C(1),
+                                             0U, UINT32_C(1000)) ==
+                UCN_ERR_TOO_LARGE);
+    TEST_ASSERT(ucn_node_install_local_path(&node, UINT32_C(1), UINT32_C(255),
+                                             0U, UINT32_C(1000)) ==
+                UCN_ERR_TOO_LARGE);
+    TEST_ASSERT(ucn_node_install_local_path(&node, UINT32_C(1), UINT32_C(2),
+                                             UINT32_C(255), UINT32_C(1000)) ==
+                UCN_ERR_TOO_LARGE);
+    TEST_ASSERT(ucn_node_find_path_forward(&node, UINT32_C(1),
+                                            security.session_id,
+                                            UINT32_C(256), UINT32_C(1)) == NULL);
+    return 0;
+}
+
+static int test_remote_path_wire_scope(void)
+{
+    uint8_t payload[16U] = { 0U };
+    uint8_t encoded[UCN_MAX_FRAME_BYTES];
+    size_t encoded_length = 0U;
+    ucn_config_t config;
+    ucn_node_t a, b;
+    ucn_link_t ab, ba;
+    path_link_context_t cab, cba;
+    path_security_state_t sa = { 2U, UINT32_C(0x99), 0U, 0U };
+    path_security_state_t sb = { 1U, UINT32_C(0x99), 0U, 0U };
+    path_authorize_state_t auth_b = { true, 0U };
+    ucn_security_policy_t policy;
+    ucn_frame_t frame;
+
+    config.network_id = UINT32_C(42);
+    config.node_id = UINT32_C(1);
+    config.default_hop_limit = 4U;
+    (void)memset(&a, 0, sizeof(a));
+    (void)memset(&b, 0, sizeof(b));
+    TEST_ASSERT(ucn_node_init(&a, &config) == UCN_OK);
+    config.node_id = UINT32_C(2);
+    TEST_ASSERT(ucn_node_init(&b, &config) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profiles(&a, UCN_WIRE_PROFILE_W0_LOCAL,
+                                             UCN_WIRE_PROFILE_W3_BACKBONE) ==
+                UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profiles(&b, UCN_WIRE_PROFILE_W0_LOCAL,
+                                             UCN_WIRE_PROFILE_W3_BACKBONE) ==
+                UCN_OK);
+    TEST_ASSERT(ucn_node_set_security(&a, &PATH_SECURITY_OPS, &sa) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_security(&b, &PATH_SECURITY_OPS, &sb) == UCN_OK);
+    policy.tx_mode = UCN_SECURITY_TX_PLAIN;
+    policy.rx_mode = UCN_SECURITY_RX_BOTH;
+    policy.forward_mode = UCN_SECURITY_FORWARD_PLAIN_AND_OPAQUE_E2E;
+    TEST_ASSERT(ucn_node_set_security_policy(&a, &policy) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_security_policy(&b, &policy) == UCN_OK);
+    TEST_ASSERT(path_connect_pair(&a, UINT32_C(1), &b, UINT32_C(2), 21U,
+                                  &ab, &ba, &cab, &cba) == 0);
+    TEST_ASSERT(ucn_node_set_path_control_authorizer(&b, path_authorize,
+                                                      &auth_b) == UCN_OK);
+
+    /* V5-15 rejects the old fixed 16-byte W0 payload before the product
+     * authorization hook.  A W0 Path ID 256 is no longer representable in the
+     * profile-sized payload at all, so it cannot alias a valid Path entry. */
+    payload[2] = 1U; /* path_id = 256 */
+    payload[7] = 2U; /* destination = 2 */
+    payload[14] = 3U;
+    payload[15] = 0xE8U; /* lease = 1000 ms */
+    (void)memset(&frame, 0, sizeof(frame));
+    frame.message_type = UCN_MSG_PATH_INSTALL;
+    frame.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
+    frame.wire_profile = UCN_WIRE_PROFILE_W0_LOCAL;
+    frame.hop_limit = 4U;
+    frame.network_id = UINT32_C(42);
+    frame.source = UINT32_C(1);
+    frame.destination = UINT32_C(2);
+    frame.sequence = UINT32_C(1);
+    frame.session_id = UINT32_C(0x99);
+    frame.payload = payload;
+    frame.payload_length = (uint16_t)sizeof(payload);
+    TEST_ASSERT(ucn_frame_encode(&frame, encoded, sizeof(encoded),
+                                 &encoded_length) == UCN_OK);
+    TEST_ASSERT(ucn_node_receive(&b, &ba, encoded, encoded_length) ==
+                UCN_ERR_MALFORMED);
+    TEST_ASSERT(auth_b.calls == 0U);
+    TEST_ASSERT(ucn_node_find_path_forward(&b, UINT32_C(1), sb.session_id,
+                                            UINT32_C(256), UINT32_C(2)) == NULL);
+
+    /* The real W0 codec is 1 B Path ID + 1 B Destination + 1 B Next Hop +
+     * 4 B Lease.  Install and revoke prove both narrow control layouts. */
+    TEST_ASSERT(ucn_node_send_path_install(&a, UINT32_C(2), UINT32_C(7),
+                                            UINT32_C(2), 0U,
+                                            UINT32_C(1000)) == UCN_OK);
+    TEST_ASSERT(auth_b.calls == 1U);
+    TEST_ASSERT(ucn_node_find_path_forward(&b, UINT32_C(1), sb.session_id,
+                                            UINT32_C(7), UINT32_C(2)) != NULL);
+    TEST_ASSERT(ucn_node_send_path_revoke(&a, UINT32_C(2), UINT32_C(7),
+                                           UINT32_C(2)) == UCN_OK);
+    TEST_ASSERT(auth_b.calls == 2U);
+    TEST_ASSERT(ucn_node_find_path_forward(&b, UINT32_C(1), sb.session_id,
+                                            UINT32_C(7), UINT32_C(2)) == NULL);
+    return 0;
+}
+
+static int test_path_control_profile_payloads(void)
+{
+    static const ucn_wire_profile_t profiles[] = {
+        UCN_WIRE_PROFILE_W0_LOCAL,
+        UCN_WIRE_PROFILE_W1_EDGE,
+        UCN_WIRE_PROFILE_W2_MESH,
+        UCN_WIRE_PROFILE_W3_BACKBONE
+    };
+    static const uint16_t install_lengths[] = { 7U, 10U, 13U, 16U };
+    static const uint16_t revoke_lengths[] = { 2U, 4U, 6U, 8U };
+    size_t index;
+
+    for (index = 0U; index < sizeof(profiles) / sizeof(profiles[0]); ++index) {
+        ucn_config_t config;
+        ucn_node_t a, b;
+        ucn_link_t ab, ba;
+        path_link_context_t cab, cba;
+        path_security_state_t sa = { 1U, UINT32_C(0x99), 0U, 0U };
+        path_security_state_t sb = { 1U, UINT32_C(0x99), 0U, 0U };
+        path_authorize_state_t auth_b = { true, 0U };
+        ucn_security_policy_t policy;
+        uint8_t malformed_payload[17U] = { 0U };
+        uint8_t encoded[UCN_MAX_FRAME_BYTES];
+        size_t encoded_length = 0U;
+        ucn_frame_t malformed;
+
+        (void)memset(&a, 0, sizeof(a));
+        (void)memset(&b, 0, sizeof(b));
+        config.network_id = UINT32_C(42);
+        config.node_id = UINT32_C(1);
+        config.default_hop_limit = 4U;
+        TEST_ASSERT(ucn_node_init(&a, &config) == UCN_OK);
+        config.node_id = UINT32_C(2);
+        TEST_ASSERT(ucn_node_init(&b, &config) == UCN_OK);
+        TEST_ASSERT(ucn_node_set_wire_profiles(
+                        &a, profiles[index], UCN_WIRE_PROFILE_W3_BACKBONE) ==
+                    UCN_OK);
+        TEST_ASSERT(ucn_node_set_wire_profiles(
+                        &b, profiles[index], UCN_WIRE_PROFILE_W3_BACKBONE) ==
+                    UCN_OK);
+        TEST_ASSERT(ucn_node_set_security(&a, &PATH_SECURITY_OPS, &sa) == UCN_OK);
+        TEST_ASSERT(ucn_node_set_security(&b, &PATH_SECURITY_OPS, &sb) == UCN_OK);
+        policy.tx_mode = UCN_SECURITY_TX_PLAIN;
+        policy.rx_mode = UCN_SECURITY_RX_BOTH;
+        policy.forward_mode = UCN_SECURITY_FORWARD_PLAIN_AND_OPAQUE_E2E;
+        TEST_ASSERT(ucn_node_set_security_policy(&a, &policy) == UCN_OK);
+        TEST_ASSERT(ucn_node_set_security_policy(&b, &policy) == UCN_OK);
+        path_prepare_pair(&a, UINT32_C(1), &b, UINT32_C(2),
+                          (uint8_t)(40U + index * 2U),
+                          &ab, &ba, &cab, &cba);
+        ab.mtu = ucn_frame_header_size_for_profile(profiles[index], 0U) +
+                 install_lengths[index];
+        TEST_ASSERT(ucn_node_set_link_local_wire_profile_limit(
+                        &a, &ab, profiles[index]) == UCN_OK);
+        TEST_ASSERT(ucn_node_set_link_local_wire_profile_limit(
+                        &b, &ba, profiles[index]) == UCN_OK);
+        TEST_ASSERT(ucn_node_register_link(&a, &ab) == UCN_OK);
+        TEST_ASSERT(ucn_node_register_link(&b, &ba) == UCN_OK);
+        TEST_ASSERT(ucn_node_set_path_control_authorizer(
+                        &b, path_authorize, &auth_b) == UCN_OK);
+        TEST_ASSERT(ucn_node_send_path_install(
+                        &a, UINT32_C(2), UINT32_C(7), UINT32_C(2), 0U,
+                        UINT32_C(1000)) == UCN_OK);
+        TEST_ASSERT(cab.last_message_type == UCN_MSG_PATH_INSTALL &&
+                    cab.last_wire_profile == profiles[index] &&
+                    cab.last_payload_length == install_lengths[index]);
+        ab.mtu = ucn_frame_header_size_for_profile(profiles[index], 0U) +
+                 revoke_lengths[index];
+        TEST_ASSERT(ucn_node_send_path_revoke(
+                        &a, UINT32_C(2), UINT32_C(7), UINT32_C(2)) == UCN_OK);
+        TEST_ASSERT(cab.last_message_type == UCN_MSG_PATH_REVOKE &&
+                    cab.last_wire_profile == profiles[index] &&
+                    cab.last_payload_length == revoke_lengths[index]);
+        TEST_ASSERT(auth_b.calls == 2U);
+
+        if (profiles[index] == UCN_WIRE_PROFILE_W3_BACKBONE) {
+            TEST_ASSERT(ucn_node_set_wire_profile_auto(&a, true) == UCN_OK);
+            TEST_ASSERT(ucn_node_set_link_wire_profile_limit(
+                            &a, &ab, UCN_WIRE_PROFILE_W0_LOCAL) == UCN_OK);
+            ab.mtu = UCN_MAX_FRAME_BYTES;
+            TEST_ASSERT(ucn_node_send_path_install(
+                            &a, UINT32_C(2), UINT32_C(8), UINT32_C(2), 0U,
+                            UINT32_C(1000)) == UCN_OK);
+            TEST_ASSERT(cab.last_wire_profile == UCN_WIRE_PROFILE_W0_LOCAL &&
+                        cab.last_payload_length == install_lengths[0]);
+            TEST_ASSERT(ucn_node_send_path_revoke(
+                            &a, UINT32_C(2), UINT32_C(8), UINT32_C(2)) ==
+                        UCN_OK);
+            TEST_ASSERT(cab.last_wire_profile == UCN_WIRE_PROFILE_W0_LOCAL &&
+                        cab.last_payload_length == revoke_lengths[0] &&
+                        auth_b.calls == 4U);
+        }
+
+        (void)memset(&malformed, 0, sizeof(malformed));
+        malformed.message_type = UCN_MSG_PATH_INSTALL;
+        malformed.wire_profile = profiles[index];
+        malformed.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
+        malformed.hop_limit = 4U;
+        malformed.network_id = UINT32_C(42);
+        malformed.source = UINT32_C(1);
+        malformed.destination = UINT32_C(2);
+        malformed.sequence = (uint32_t)(100U + index);
+        malformed.session_id = UINT32_C(0x99);
+        malformed.payload = malformed_payload;
+        malformed.payload_length = (uint16_t)(install_lengths[index] + 1U);
+        TEST_ASSERT(ucn_frame_encode(&malformed, encoded, sizeof(encoded),
+                                     &encoded_length) == UCN_OK);
+        TEST_ASSERT(ucn_node_receive(&b, &ba, encoded, encoded_length) ==
+                    UCN_ERR_MALFORMED);
+        TEST_ASSERT(auth_b.calls ==
+                    (profiles[index] == UCN_WIRE_PROFILE_W3_BACKBONE ? 4U : 2U));
+    }
+    return 0;
+}
+
 static int test_path_bearer_binding(void)
 {
     const ucn_path_id_t path_p1 = UINT32_C(0x2201);
@@ -566,6 +811,9 @@ int test_path_control(void)
     size_t index;
 
     TEST_ASSERT(test_path_frame_extension() == 0);
+    TEST_ASSERT(test_path_wire_scope() == 0);
+    TEST_ASSERT(test_remote_path_wire_scope() == 0);
+    TEST_ASSERT(test_path_control_profile_payloads() == 0);
     TEST_ASSERT(test_path_bearer_binding() == 0);
     (void)memset(&received, 0, sizeof(received));
     TEST_ASSERT(path_init_node(&a, UINT32_C(1), &sa) == 0);

@@ -117,6 +117,7 @@ typedef struct ucn_node_snapshot_reverse {
 
 typedef struct ucn_node_snapshot_reply_pending {
     bool occupied;
+    ucn_wire_profile_t wire_profile;
     ucn_node_id_t origin;
     uint32_t query_id;
     ucn_link_t *egress_link;
@@ -152,7 +153,7 @@ typedef struct ucn_route_entry {
     uint32_t expires_at_ms;
     uint32_t last_used_at_ms;
     uint32_t last_refresh_started_ms;
-    uint16_t route_cost;
+    ucn_route_cost_t route_cost;
     uint8_t hop_count;
     uint16_t route_epoch;
     bool previous_valid;
@@ -182,7 +183,7 @@ typedef struct ucn_candidate_route {
     ucn_link_t *egress_link;
     uint32_t expires_at_ms;
     uint32_t next_probe_at_ms;
-    uint16_t route_cost;
+    ucn_route_cost_t route_cost;
     uint8_t hop_count;
     uint8_t probes_sent;
     uint8_t probes_acked;
@@ -213,7 +214,7 @@ typedef struct ucn_rreq_cache_entry {
     ucn_node_id_t origin;
     ucn_session_id_t session_id;
     uint32_t request_id;
-    uint16_t best_route_request_cost;
+    ucn_route_cost_t best_route_request_cost;
     uint32_t last_observed_ms;
 } ucn_rreq_cache_entry_t;
 #endif

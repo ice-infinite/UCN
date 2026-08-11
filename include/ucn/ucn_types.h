@@ -11,7 +11,11 @@
 extern "C" {
 #endif
 
+#ifndef UCN_PROTOCOL_VERSION
 #define UCN_PROTOCOL_VERSION ((uint8_t)5U)
+#endif
+typedef char ucn_protocol_version_must_fit_six_wire_bits[
+    UCN_PROTOCOL_VERSION <= 0x3FU ? 1 : -1];
 #define UCN_FRAME_MAGIC_0 ((uint8_t)0x55U)
 #define UCN_FRAME_MAGIC_1 ((uint8_t)0x43U)
 #define UCN_FRAME_W0_HEADER_SIZE ((size_t)17U)
@@ -65,6 +69,10 @@ typedef uint32_t ucn_node_id_t;
 typedef uint32_t ucn_network_id_t;
 typedef uint32_t ucn_sequence_t;
 typedef uint32_t ucn_session_id_t;
+typedef uint32_t ucn_route_cost_t;
+
+#define UCN_ROUTE_COST_UNKNOWN UINT32_MAX
+#define UCN_ROUTE_COST_MAX (UINT32_MAX - UINT32_C(1))
 
 /* API values intentionally differ from the 2-bit wire code so a zero-filled
  * v4-style frame remains an explicit "unspecified" request.  The frame codec

@@ -119,6 +119,7 @@ nodes:
         reason: 向当前可用直连 Neighbor 泛洪 RREQ。
     notes:
       - 同目的地并发请求合并；控制面有令牌桶和固定表上限。
+      - RREQ 按 Network/Source/Target/Session/Hop 与累计 Cost 选择最小可表达 Profile；转发不升降档。
 
   - id: route.ucn_node_discover_route
     symbol: ucn_node_discover_route
@@ -147,7 +148,7 @@ nodes:
         reason: 记录到 RREQ 源的反向动态 Route。
       - target: node_runtime.send_control_to_node_static
         type: direct
-        reason: 目标 Node 按反向 Route 返回 RREP。
+        reason: 目标 Node 按反向 Route、继承 RREQ Wire Profile 返回去重后的 RREP。
       - target: route.route_request_helpers_static
         type: direct
         reason: 非目标 Node 向健康邻居继续受限泛洪。
@@ -164,6 +165,7 @@ nodes:
     notes:
       - 同 Cost/更差请求返回 Replay且不申请 RREQ RX Token；New/Better 只有取得 Token后才提交。
       - 该表与普通业务的 Source/Session Sequence 位图窗口完全分离。
+      - Best Cost 为 32 bit 累计值；线上按 W0/W1/W2/W3 使用 1/2/3/4 B，全 1 为 Unknown。
 
   - id: route.handle_route_reply_static
     symbol: handle_route_reply
@@ -205,6 +207,8 @@ nodes:
       - target: node_runtime.send_control_to_node_static
         type: direct
         reason: 若未到源，沿已有反向路径回传 RERR。
+    notes:
+      - 普通 RERR 的失效 Node、Path RERR 的 Session/Path ID 都按触发帧 Profile 编码；Owner Node 使用 Header Destination。
 
   - id: route.queue_pending_q1_static
     symbol: queue_pending_q1
@@ -274,7 +278,7 @@ nodes:
     type: module
     file: src/ucn_node.c
     layer: routing
-    role: 维护 Active、Previous 和 Candidate Route 的固定表及 Route Epoch。
+    role: 维护 Active、Previous 和 Candidate Route 的固定表、32 bit 累计 Cost 及 Route Epoch。
     called_by:
       - route.handle_route_request_static
       - route.handle_route_reply_static

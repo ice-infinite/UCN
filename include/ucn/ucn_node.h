@@ -298,7 +298,12 @@ typedef char ucn_unknown_route_cost_must_use_reserved_sentinel[
  * topology: only the origin keeps a bounded result array, while relays keep
  * short-lived reverse entries for replies. */
 #define UCN_NODE_SNAPSHOT_REQUEST_PAYLOAD_BYTES ((size_t)8U)
-#define UCN_NODE_SNAPSHOT_REPLY_PAYLOAD_BYTES ((size_t)12U)
+/* Reply is 4 B Query ID + Profile-sized Node ID + 4 B status trailer.
+ * This compatibility name denotes the maximum W3 payload, not every wire
+ * profile's exact length. */
+#define UCN_NODE_SNAPSHOT_REPLY_MAX_PAYLOAD_BYTES ((size_t)12U)
+#define UCN_NODE_SNAPSHOT_REPLY_PAYLOAD_BYTES \
+    UCN_NODE_SNAPSHOT_REPLY_MAX_PAYLOAD_BYTES
 
 #ifndef UCN_NODE_SNAPSHOT_MAX_RESULTS
 #define UCN_NODE_SNAPSHOT_MAX_RESULTS ((size_t)8U)
@@ -338,8 +343,12 @@ typedef char ucn_unknown_route_cost_must_use_reserved_sentinel[
 #define UCN_POLICY_DIAGNOSTIC_REQUEST_PAYLOAD_BYTES ((size_t)8U)
 #define UCN_POLICY_DIAGNOSTIC_REPLY_PAYLOAD_BYTES ((size_t)32U)
 #define UCN_POLICY_DIAGNOSTIC_RECORD_BYTES ((size_t)24U)
+/* The largest mandatory Lite dynamic-mesh control payload is the W3 RREQ:
+ * Target(4) + Request ID(4) + Cost(4) + Hop(1) + Flags(1) = 14 B. */
+#define UCN_DYNAMIC_MESH_MAX_CONTROL_PAYLOAD_BYTES ((size_t)14U)
 #define UCN_DYNAMIC_MESH_MIN_FRAME_BYTES \
-    (UCN_FRAME_HEADER_SIZE + (size_t)18U)
+    (UCN_FRAME_ROUTE_HEADER_SIZE + \
+     UCN_DYNAMIC_MESH_MAX_CONTROL_PAYLOAD_BYTES)
 
 #ifndef UCN_POLICY_DIAGNOSTIC_PENDING_DEPTH
 #define UCN_POLICY_DIAGNOSTIC_PENDING_DEPTH ((size_t)2U)
@@ -364,7 +373,8 @@ typedef char ucn_unknown_route_cost_must_use_reserved_sentinel[
 #if UCN_FEATURE_DYNAMIC_MESH
 typedef char ucn_dynamic_mesh_control_must_fit_frame[
     UCN_MAX_FRAME_BYTES >= UCN_DYNAMIC_MESH_MIN_FRAME_BYTES &&
-            UCN_MAX_PAYLOAD_BYTES >= (size_t)18U ? 1 : -1];
+            UCN_MAX_PAYLOAD_BYTES >=
+                UCN_DYNAMIC_MESH_MAX_CONTROL_PAYLOAD_BYTES ? 1 : -1];
 typedef char ucn_rreq_cache_must_not_be_empty[
     UCN_RREQ_CACHE_SIZE > 0U ? 1 : -1];
 typedef char ucn_rreq_cache_timeout_must_be_valid[
@@ -894,6 +904,17 @@ ucn_result_t ucn_node_set_link_wire_profile_limit(
     ucn_link_t *link,
     ucn_wire_profile_t maximum_profile);
 ucn_wire_profile_t ucn_node_get_link_wire_profile_limit(
+    const ucn_node_t *node,
+    const ucn_link_t *link);
+/* Configure the local ingress ceiling independently for each Link.  This may
+ * be called before registration so a narrow-MTU Link can join a wider Node.
+ * UNSPECIFIED inherits the Node maximum; the effective ceiling is always the
+ * smaller of the Node and Link limits. */
+ucn_result_t ucn_node_set_link_local_wire_profile_limit(
+    ucn_node_t *node,
+    ucn_link_t *link,
+    ucn_wire_profile_t maximum_profile);
+ucn_wire_profile_t ucn_node_get_link_local_wire_profile_limit(
     const ucn_node_t *node,
     const ucn_link_t *link);
 /* Plain deployments should set a non-zero boot/session value before network

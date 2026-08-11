@@ -99,9 +99,9 @@ min(Profile Length 上限,
 | Sequence | 4 B | 4 B | 4 B | 4 B | 不压缩，继续用于乱序、去重和 Replay 边界。 |
 | CRC | 2 B | 2 B | 2 B | 2 B | 不压缩。 |
 
-Route Cost 暂不直接冻结为 W0=8 bit。v4 Cost 是统一正数可加量且真实介质尚未完成标定，8 bit 可能连一个高代价 Link 都无法表示。v5 第一阶段保持现有 16 bit Cost；W2/W3 的 24/32 bit Cost 要在长路径、Cost 单位和饱和策略测试后再启用。
+V5-14 已完成 Route Cost 专项：Adapter 的单跳输入继续为 16 bit，Route/Candidate/RREQ/RREP 的累计值升级为 32 bit；线上 W0/W1/W2/W3 分别使用 1/2/3/4 B。各档全 1 值是 Unknown，最高 Known 为全 1 减 1；不可表达或真实加法溢出时失败关闭。200 Edge/累计 200,000 的 Host 长链和 80,000 对 100,000 双路径已经验证，真实介质标定仍归 S06/S07。
 
-Request ID 第一阶段也保持现有 32 bit 控制载荷；缩成 1/2/3/4 B 前必须先定义回绕、活动请求冲突和 RREQ Cache 生命周期。
+Request ID 保持固定 32 bit，不随 Profile 缩窄；这避免引入回绕、活动请求冲突和额外迁移状态。
 
 ## 7. 地址与 Session 的第一阶段边界
 
@@ -129,7 +129,7 @@ v4 RREQ Payload 重复 Origin。v5 控制载荷压缩阶段删除该字段，Ori
 Target + Request ID + Route Cost + Hop Count + RREQ Flags
 ```
 
-但 RREQ 的 ID/Cost 宽度只有在回绕、Cost 单位和控制预算完成专项测试后才能按 Profile 缩短。
+当前 RREQ 为 `Target(A)+RequestID(4)+Cost(C)+Hop(1)+Flags(1)`，四档 Payload 为 8/10/12/14 B。RREP 删除重复 Origin/Target，使用 Header Source/Destination，Payload 为 `RequestID(4)+Cost(C)+Hop(1)+Flags(1)+Epoch(E)`，四档为 8/10/11/12 B。RREQ/RREP 的详细边界见 [V5-14 实现报告](UCN_V5_14_长距离Cost与RREQ_RREP实现报告.md)。
 
 ## 9. Hop、预算与权限
 
@@ -197,7 +197,9 @@ V5-04 已用 W0 A→B→C 专项测试冻结上述边界：A/C 使用测试 E2E 
 
 中继不得升级/降级一个已受 E2E 保护的帧。只有安全终止 Gateway 或未来 Outer Envelope Gateway 可以重新编码。
 
-V5-05 已实现可选 Route-aware 自动选级，默认仍关闭。固定 TX Profile 是本机控制帧的域编码上限；V5-10 将 Peer RX Ceiling 从 TX 档中分离，HELLO 以 1 B Payload 明确发布 `max_receive_wire_profile`。未知路由仍用固定档 RREQ，自动业务帧按地址/Session/Path/Route Epoch、实际 Route Hop、MTU、Peer RX Ceiling 和可选 Tag 选择最小档；中继只转发已经明确的原档位，不升降已受保护帧。固定模式、控制面域探测和产品策略覆盖保持不变。
+V5-05 已实现可选 Route-aware 自动选级，默认仍关闭；V5-10 将 Peer RX Ceiling 从 TX 档中分离；V5-12～V5-15 又补齐了控制面。HELLO/Heartbeat、RREQ/RREP、RERR、PATH_INSTALL/REVOKE、Path Trace 与 Node Snapshot 现在都会按完整字段、Hop、MTU、per-Link 本地 RX 上限和 Peer RX Ceiling 选择或保持合法 Profile。未知路由的 RREQ 会选择能表达完整搜索域的最小档并在转发中保持不变，RREP/诊断回复继承请求档。已编码中继帧仍不升降档，固定模式和产品策略覆盖保持不变。
+
+Wire Profile、RX Ceiling 与管理权限相互正交。V5-16 已冻结 Authorized Class C0～C3、身份/Session Generation、ACL、Token 和 Fanout 方案；在 S02 生产身份与撤销基础完成前，不把该设计写成可被伪造的权限实现。
 
 ## 12. v4/v5 迁移
 

@@ -14,6 +14,7 @@ typedef struct ucn_wire_profile_descriptor {
     uint8_t payload_length_bytes;
     uint8_t route_epoch_bytes;
     uint8_t path_id_bytes;
+    uint8_t route_cost_bytes;
     uint8_t max_hops;
     uint32_t max_wire_value;
     uint32_t max_node_id;

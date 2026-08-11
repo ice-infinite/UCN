@@ -64,7 +64,7 @@ CRC 位于实际 Header 最后 2 B，覆盖 CRC 之前的 Header、Payload 和�
 | Windows Lite Release / Service OFF | CTest 2/2 |
 | Windows Nano Release / Service OFF | CTest 1/1 |
 | WSL GCC 13.3 ASan+UBSan Full/OFF | CTest 2/2 |
-| Feature Profile 最小帧门禁 | Nano/Lite/Full 33/50/64 B 构建通过；32/49/63 B 编译拒绝 |
+| Feature Profile 最小帧门禁 | 本阶段历史值为 33/50/64 B；V5-14 后当前值为 33/46/64 B，32/45/63 B 编译拒绝 |
 | 256 Node、M4、80‰ Duplicate | 102,400/102,400，重复业务 0，Route Loop 0，Harness 背压 0 |
 
 `test_wire_profile.c` 固定四个完整 Golden Vector，并覆盖四档描述符、Base/Route/Path 长度、最大 Hop、广播映射、字段/Route Epoch/Path ID 溢出、坏 Flag、坏 CRC、AAD Profile 差异和 v4 显式拒绝。全量旧 Node/路由/安全/Service 测试同时回归。

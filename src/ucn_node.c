@@ -7,17 +7,17 @@
 
 #include "ucn_duplicate_internal.h"
 
-#define UCN_ROUTE_REQ_FIXED_PAYLOAD_BYTES ((size_t)8U)
-#define UCN_ROUTE_REQ_MAX_PAYLOAD_BYTES ((size_t)12U)
-#define UCN_ROUTE_REPLY_PAYLOAD_BYTES ((size_t)18U)
-#define UCN_ROUTE_ERROR_PAYLOAD_BYTES ((size_t)4U)
-#define UCN_PATH_ROUTE_ERROR_PAYLOAD_BYTES ((size_t)16U)
+#define UCN_ROUTE_REQUEST_ID_BYTES ((size_t)4U)
+#define UCN_ROUTE_CONTROL_TRAILER_BYTES ((size_t)2U)
+#define UCN_ROUTE_REQ_MAX_PAYLOAD_BYTES ((size_t)14U)
+#define UCN_ROUTE_REPLY_MAX_PAYLOAD_BYTES ((size_t)12U)
+#define UCN_ROUTE_ERROR_MAX_PAYLOAD_BYTES ((size_t)12U)
 #define UCN_HELLO_PAYLOAD_BYTES ((size_t)1U)
 #define UCN_HEARTBEAT_PAYLOAD_BYTES ((size_t)8U)
 #define UCN_PATH_PROBE_PAYLOAD_BYTES ((size_t)12U)
 #define UCN_PATH_ACTIVATE_PAYLOAD_BYTES ((size_t)6U)
-#define UCN_PATH_INSTALL_PAYLOAD_BYTES ((size_t)16U)
-#define UCN_PATH_REVOKE_PAYLOAD_BYTES ((size_t)8U)
+#define UCN_PATH_INSTALL_MAX_PAYLOAD_BYTES ((size_t)16U)
+#define UCN_PATH_REVOKE_MAX_PAYLOAD_BYTES ((size_t)8U)
 #define UCN_PATH_TRACE_TRACE_ID_OFFSET ((size_t)0U)
 #define UCN_PATH_TRACE_RECORD_COUNT_OFFSET ((size_t)4U)
 #define UCN_PATH_TRACE_RECORD_LIMIT_OFFSET ((size_t)5U)
@@ -29,9 +29,7 @@
      UCN_PATH_TRACE_MAX_NODES * sizeof(ucn_node_id_t))
 #define UCN_NODE_SNAPSHOT_QUERY_ID_OFFSET ((size_t)0U)
 #define UCN_NODE_SNAPSHOT_REQUEST_FLAGS_OFFSET ((size_t)4U)
-#define UCN_NODE_SNAPSHOT_REPLY_NODE_ID_OFFSET ((size_t)4U)
-#define UCN_NODE_SNAPSHOT_REPLY_NEIGHBOR_COUNT_OFFSET ((size_t)8U)
-#define UCN_NODE_SNAPSHOT_REPLY_FLAGS_OFFSET ((size_t)9U)
+#define UCN_NODE_SNAPSHOT_REPLY_MAX_PAYLOAD_BYTES ((size_t)12U)
 #define UCN_POLICY_DIAGNOSTIC_REQUEST_ID_OFFSET ((size_t)0U)
 #define UCN_POLICY_DIAGNOSTIC_SECTION_OFFSET ((size_t)4U)
 #define UCN_POLICY_DIAGNOSTIC_INDEX_OFFSET ((size_t)5U)
@@ -74,7 +72,8 @@ static ucn_result_t send_path_route_error(ucn_node_t *node,
                                           ucn_node_id_t origin,
                                           ucn_node_id_t unreachable,
                                           ucn_session_id_t owner_session_id,
-                                          ucn_path_id_t path_id);
+                                          ucn_path_id_t path_id,
+                                          ucn_wire_profile_t wire_profile);
 #endif
 
 static uint32_t read_u32_be(const uint8_t *data)
@@ -91,6 +90,7 @@ static void write_u32_be(uint8_t *data, uint32_t value)
     data[3] = (uint8_t)value;
 }
 
+#if UCN_FEATURE_CANDIDATE_ROUTING || UCN_FEATURE_DIAGNOSTICS
 static uint16_t read_u16_be(const uint8_t *data)
 {
     return (uint16_t)(((uint16_t)data[0] << 8U) | (uint16_t)data[1]);
@@ -101,6 +101,7 @@ static void write_u16_be(uint8_t *data, uint16_t value)
     data[0] = (uint8_t)(value >> 8U);
     data[1] = (uint8_t)value;
 }
+#endif
 
 static uint32_t read_uint_be(const uint8_t *data, uint8_t width)
 {
@@ -130,7 +131,9 @@ static size_t route_request_payload_size(ucn_wire_profile_t profile)
         ucn_wire_profile_get_descriptor(profile);
 
     return descriptor == NULL ? 0U :
-           (size_t)descriptor->address_bytes + UCN_ROUTE_REQ_FIXED_PAYLOAD_BYTES;
+           (size_t)descriptor->address_bytes + UCN_ROUTE_REQUEST_ID_BYTES +
+               (size_t)descriptor->route_cost_bytes +
+               UCN_ROUTE_CONTROL_TRAILER_BYTES;
 }
 
 static size_t route_request_id_offset(const ucn_frame_t *frame)
@@ -143,17 +146,21 @@ static size_t route_request_id_offset(const ucn_frame_t *frame)
 
 static size_t route_request_cost_offset(const ucn_frame_t *frame)
 {
-    return route_request_id_offset(frame) + 4U;
+    return route_request_id_offset(frame) + UCN_ROUTE_REQUEST_ID_BYTES;
 }
 
 static size_t route_request_hop_offset(const ucn_frame_t *frame)
 {
-    return route_request_id_offset(frame) + 6U;
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(frame->wire_profile);
+
+    return descriptor == NULL ? 0U :
+           route_request_cost_offset(frame) + descriptor->route_cost_bytes;
 }
 
 static size_t route_request_flags_offset(const ucn_frame_t *frame)
 {
-    return route_request_id_offset(frame) + 7U;
+    return route_request_hop_offset(frame) + 1U;
 }
 
 static ucn_node_id_t route_request_target(const ucn_frame_t *frame)
@@ -165,22 +172,265 @@ static ucn_node_id_t route_request_target(const ucn_frame_t *frame)
            read_uint_be(frame->payload, descriptor->address_bytes);
 }
 
-static uint16_t add_route_cost(uint16_t left, uint16_t right)
+static size_t route_reply_payload_size(ucn_wire_profile_t profile)
 {
-    if (left == UCN_LINK_ROUTE_COST_UNKNOWN ||
-        right == UCN_LINK_ROUTE_COST_UNKNOWN) {
-        return UCN_LINK_ROUTE_COST_UNKNOWN;
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(profile);
+
+    return descriptor == NULL ? 0U :
+           UCN_ROUTE_REQUEST_ID_BYTES + descriptor->route_cost_bytes +
+               UCN_ROUTE_CONTROL_TRAILER_BYTES +
+               descriptor->route_epoch_bytes;
+}
+
+static size_t route_reply_cost_offset(void)
+{
+    return UCN_ROUTE_REQUEST_ID_BYTES;
+}
+
+static size_t route_reply_hop_offset(const ucn_frame_t *frame)
+{
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(frame->wire_profile);
+
+    return descriptor == NULL ? 0U :
+           route_reply_cost_offset() + descriptor->route_cost_bytes;
+}
+
+static size_t route_reply_flags_offset(const ucn_frame_t *frame)
+{
+    return route_reply_hop_offset(frame) + 1U;
+}
+
+static size_t route_reply_epoch_offset(const ucn_frame_t *frame)
+{
+    return route_reply_flags_offset(frame) + 1U;
+}
+
+static size_t route_error_payload_size(ucn_wire_profile_t profile,
+                                       bool path_scoped)
+{
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(profile);
+
+    if (descriptor == NULL) {
+        return 0U;
     }
-    return left > (uint16_t)(UCN_LINK_ROUTE_COST_MAX - right) ?
-               UCN_LINK_ROUTE_COST_MAX : (uint16_t)(left + right);
+    return path_scoped ?
+               (size_t)descriptor->address_bytes +
+                   (size_t)descriptor->address_bytes +
+                   (size_t)descriptor->path_id_bytes :
+               (size_t)descriptor->address_bytes;
 }
 
-static bool route_cost_is_known(uint16_t route_cost)
+#if UCN_FEATURE_PATH
+static size_t path_install_payload_size(ucn_wire_profile_t profile)
 {
-    return route_cost != 0U && route_cost != UCN_LINK_ROUTE_COST_UNKNOWN;
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(profile);
+
+    return descriptor == NULL ? 0U :
+           (size_t)descriptor->path_id_bytes +
+               (size_t)descriptor->address_bytes * 2U + 4U;
 }
 
-static bool route_cost_is_better(uint16_t candidate_cost, uint16_t active_cost)
+static size_t path_install_destination_offset(
+    const ucn_wire_profile_descriptor_t *descriptor)
+{
+    return descriptor == NULL ? 0U : descriptor->path_id_bytes;
+}
+
+static size_t path_install_next_hop_offset(
+    const ucn_wire_profile_descriptor_t *descriptor)
+{
+    return descriptor == NULL ? 0U :
+           (size_t)descriptor->path_id_bytes + descriptor->address_bytes;
+}
+
+static size_t path_install_lease_offset(
+    const ucn_wire_profile_descriptor_t *descriptor)
+{
+    return descriptor == NULL ? 0U :
+           (size_t)descriptor->path_id_bytes +
+               (size_t)descriptor->address_bytes * 2U;
+}
+
+static size_t path_revoke_payload_size(ucn_wire_profile_t profile)
+{
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(profile);
+
+    return descriptor == NULL ? 0U :
+           (size_t)descriptor->path_id_bytes + descriptor->address_bytes;
+}
+#endif
+
+#if UCN_FEATURE_DIAGNOSTICS
+static size_t path_trace_payload_size(ucn_wire_profile_t profile,
+                                      uint8_t record_count)
+{
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(profile);
+
+    return descriptor == NULL ? 0U :
+           UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES +
+               (size_t)record_count * descriptor->address_bytes;
+}
+
+static size_t node_snapshot_reply_payload_size(ucn_wire_profile_t profile)
+{
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(profile);
+
+    return descriptor == NULL ? 0U :
+           4U + (size_t)descriptor->address_bytes + 4U;
+}
+
+static size_t node_snapshot_reply_neighbor_count_offset(
+    const ucn_wire_profile_descriptor_t *descriptor)
+{
+    return descriptor == NULL ? 0U : 4U + descriptor->address_bytes;
+}
+
+static size_t node_snapshot_reply_flags_offset(
+    const ucn_wire_profile_descriptor_t *descriptor)
+{
+    return node_snapshot_reply_neighbor_count_offset(descriptor) + 1U;
+}
+#endif
+
+static ucn_result_t select_route_request_profile(
+    const ucn_node_t *node,
+    ucn_node_id_t destination,
+    ucn_wire_profile_t *selected_profile)
+{
+    ucn_wire_profile_t profile;
+
+    if (node == NULL || selected_profile == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (!node->automatic_wire_profile) {
+        *selected_profile = node->tx_wire_profile;
+        return destination <= ucn_wire_profile_get_descriptor(
+                                  node->tx_wire_profile)->max_node_id ?
+               UCN_OK : UCN_ERR_TOO_LARGE;
+    }
+
+    /* Route discovery has no single peer ceiling: it is flooded over every
+     * eligible Link.  Choose the smallest profile that represents the whole
+     * configured search domain; each egress Link then applies MTU and learned
+     * peer-RX checks independently without widening the RREQ in transit. */
+    for (profile = UCN_WIRE_PROFILE_W0_LOCAL;
+         profile <= node->tx_wire_profile; ++profile) {
+        const ucn_wire_profile_descriptor_t *descriptor =
+            ucn_wire_profile_get_descriptor(profile);
+
+        if (descriptor != NULL &&
+            node->config.network_id <= descriptor->max_wire_value &&
+            node->config.node_id <= descriptor->max_node_id &&
+            destination <= descriptor->max_node_id &&
+            node->config.default_hop_limit <= descriptor->max_hops &&
+            node->session_id <= descriptor->max_wire_value) {
+            *selected_profile = profile;
+            return UCN_OK;
+        }
+    }
+    return UCN_ERR_TOO_LARGE;
+}
+
+static uint32_t maximum_value_for_wire_bytes(uint8_t width)
+{
+    return width >= 4U ? UINT32_MAX :
+           (UINT32_C(1) << ((uint32_t)width * 8U)) - UINT32_C(1);
+}
+
+static ucn_result_t write_route_cost_for_profile(
+    uint8_t *output,
+    ucn_wire_profile_t profile,
+    ucn_route_cost_t route_cost)
+{
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(profile);
+    uint32_t wire_maximum;
+
+    if (output == NULL || descriptor == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    wire_maximum = maximum_value_for_wire_bytes(descriptor->route_cost_bytes);
+    if (route_cost == UCN_ROUTE_COST_UNKNOWN) {
+        write_uint_be(output, descriptor->route_cost_bytes, wire_maximum);
+        return UCN_OK;
+    }
+    if (route_cost >= wire_maximum) {
+        return UCN_ERR_TOO_LARGE;
+    }
+    write_uint_be(output, descriptor->route_cost_bytes, route_cost);
+    return UCN_OK;
+}
+
+static ucn_route_cost_t read_route_cost_for_profile(
+    const uint8_t *input,
+    ucn_wire_profile_t profile)
+{
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(profile);
+    uint32_t wire_value;
+    uint32_t wire_maximum;
+
+    if (input == NULL || descriptor == NULL) {
+        return UCN_ROUTE_COST_UNKNOWN;
+    }
+    wire_value = read_uint_be(input, descriptor->route_cost_bytes);
+    wire_maximum = maximum_value_for_wire_bytes(descriptor->route_cost_bytes);
+    return wire_value == wire_maximum ? UCN_ROUTE_COST_UNKNOWN : wire_value;
+}
+
+#if UCN_FEATURE_PATH
+static ucn_result_t validate_path_wire_scope(ucn_wire_profile_t profile,
+                                             ucn_path_id_t path_id,
+                                             ucn_node_id_t destination,
+                                             ucn_node_id_t next_hop)
+{
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(profile);
+
+    if (descriptor == NULL) {
+        return UCN_ERR_CONFIG;
+    }
+    if (path_id > maximum_value_for_wire_bytes(descriptor->path_id_bytes) ||
+        destination > descriptor->max_node_id ||
+        (next_hop != 0U && next_hop > descriptor->max_node_id)) {
+        return UCN_ERR_TOO_LARGE;
+    }
+    return UCN_OK;
+}
+#endif
+
+static ucn_result_t accumulate_route_cost(ucn_route_cost_t left,
+                                          ucn_route_cost_t right,
+                                          ucn_route_cost_t *output)
+{
+    if (output == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (left == UCN_ROUTE_COST_UNKNOWN || right == UCN_ROUTE_COST_UNKNOWN) {
+        *output = UCN_ROUTE_COST_UNKNOWN;
+        return UCN_OK;
+    }
+    if (left > UCN_ROUTE_COST_MAX - right) {
+        return UCN_ERR_TOO_LARGE;
+    }
+    *output = left + right;
+    return UCN_OK;
+}
+
+static bool route_cost_is_known(ucn_route_cost_t route_cost)
+{
+    return route_cost != 0U && route_cost != UCN_ROUTE_COST_UNKNOWN;
+}
+
+static bool route_cost_is_better(ucn_route_cost_t candidate_cost,
+                                 ucn_route_cost_t active_cost)
 {
     if (!route_cost_is_known(candidate_cost)) {
         return false;
@@ -201,17 +451,18 @@ static uint16_t route_epoch_from_request_id(ucn_wire_profile_t profile,
     return route_epoch == 0U ? 1U : route_epoch;
 }
 
-static uint16_t link_route_cost(const ucn_link_t *link)
+static ucn_route_cost_t link_route_cost(const ucn_link_t *link)
 {
     ucn_link_metrics_t metrics;
 
     (void)memset(&metrics, 0, sizeof(metrics));
     if (link != NULL && link->ops != NULL && link->ops->get_metrics != NULL &&
         link->ops->get_metrics(link, &metrics) == UCN_OK &&
-        metrics.route_cost_valid && route_cost_is_known(metrics.route_cost)) {
-        return metrics.route_cost;
+        metrics.route_cost_valid && metrics.route_cost != 0U &&
+        metrics.route_cost != UCN_LINK_ROUTE_COST_UNKNOWN) {
+        return (ucn_route_cost_t)metrics.route_cost;
     }
-    return UCN_UNKNOWN_LINK_ROUTE_COST;
+    return UCN_ROUTE_COST_UNKNOWN;
 }
 
 static bool route_is_expired(const ucn_node_t *node, const ucn_route_entry_t *route)
@@ -228,12 +479,12 @@ static bool candidate_is_expired(const ucn_node_t *node,
 }
 #endif
 
-static bool cost_is_sufficiently_better(uint16_t active_cost,
-                                        uint16_t candidate_cost,
+static bool cost_is_sufficiently_better(ucn_route_cost_t active_cost,
+                                        ucn_route_cost_t candidate_cost,
                                         uint8_t improvement_percent)
 {
-    uint32_t candidate_scaled;
-    uint32_t active_scaled;
+    uint64_t candidate_scaled;
+    uint64_t active_scaled;
 
     if (!route_cost_is_known(candidate_cost)) {
         return false;
@@ -244,15 +495,15 @@ static bool cost_is_sufficiently_better(uint16_t active_cost,
     if (candidate_cost >= active_cost) {
         return false;
     }
-    candidate_scaled = (uint32_t)candidate_cost * 100U;
-    active_scaled = (uint32_t)active_cost *
-                    (uint32_t)(100U - improvement_percent);
+    candidate_scaled = (uint64_t)candidate_cost * UINT64_C(100);
+    active_scaled = (uint64_t)active_cost *
+                     (uint32_t)(100U - improvement_percent);
     return candidate_scaled <= active_scaled;
 }
 
 #if UCN_FEATURE_CANDIDATE_ROUTING
-static bool candidate_is_sufficiently_better(uint16_t active_cost,
-                                             uint16_t candidate_cost)
+static bool candidate_is_sufficiently_better(ucn_route_cost_t active_cost,
+                                             ucn_route_cost_t candidate_cost)
 {
     return cost_is_sufficiently_better(active_cost, candidate_cost,
                                        UCN_ROUTE_SWITCH_IMPROVEMENT_PERCENT);
@@ -264,12 +515,12 @@ static ucn_link_t *find_direct_link(ucn_node_t *node,
 {
     size_t index;
     ucn_link_t *best_direct = NULL;
-    uint16_t best_direct_cost = UINT16_MAX;
+    ucn_route_cost_t best_direct_cost = UCN_ROUTE_COST_UNKNOWN;
 
     for (index = 0U; index < node->link_count; ++index) {
         ucn_link_t *link = node->links[index];
         ucn_link_t *selected;
-        uint16_t route_cost;
+        ucn_route_cost_t route_cost;
 
         if (link->peer_node_id != destination) {
             continue;
@@ -466,7 +717,7 @@ static ucn_neighbor_bearer_t *select_neighbor_bearer(ucn_neighbor_entry_t *entry
 {
     size_t index;
     ucn_neighbor_bearer_t *best = NULL;
-    uint16_t best_cost = UINT16_MAX;
+    ucn_route_cost_t best_cost = UCN_ROUTE_COST_UNKNOWN;
 
     if (entry == NULL) {
         return NULL;
@@ -543,8 +794,8 @@ static ucn_neighbor_bearer_t *find_better_neighbor_bearer(
 {
     size_t index;
     ucn_neighbor_bearer_t *best = NULL;
-    uint16_t primary_cost;
-    uint16_t best_cost = UINT16_MAX;
+    ucn_route_cost_t primary_cost;
+    ucn_route_cost_t best_cost = UCN_ROUTE_COST_UNKNOWN;
 
     if (entry == NULL || primary == NULL || !link_is_usable(primary->link)) {
         return NULL;
@@ -552,7 +803,7 @@ static ucn_neighbor_bearer_t *find_better_neighbor_bearer(
     primary_cost = link_route_cost(primary->link);
     for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
         ucn_neighbor_bearer_t *bearer = &entry->bearers[index];
-        uint16_t bearer_cost;
+        ucn_route_cost_t bearer_cost;
 
         if (bearer == primary ||
             bearer->state != UCN_NEIGHBOR_BEARER_ADMITTED ||
@@ -834,7 +1085,7 @@ typedef enum ucn_rreq_cache_classification {
 static ucn_rreq_cache_classification_t classify_route_request(
     ucn_node_t *node,
     const ucn_frame_t *frame,
-    uint16_t route_cost,
+    ucn_route_cost_t route_cost,
     size_t *slot_index)
 {
     const uint32_t request_id =
@@ -869,7 +1120,7 @@ static ucn_rreq_cache_classification_t classify_route_request(
 
 static void commit_route_request(ucn_node_t *node,
                                  const ucn_frame_t *frame,
-                                 uint16_t route_cost,
+                                 ucn_route_cost_t route_cost,
                                  size_t slot_index)
 {
     ucn_rreq_cache_entry_t *slot = &node->rreq_cache[slot_index];
@@ -1231,7 +1482,7 @@ static void expire_dynamic_state(ucn_node_t *node, uint32_t now_ms)
 static ucn_result_t learn_route(ucn_node_t *node,
                                 ucn_node_id_t destination,
                                 ucn_link_t *egress_link,
-                                uint16_t route_cost,
+                                ucn_route_cost_t route_cost,
                                 uint8_t hop_count,
                                 uint16_t route_epoch)
 {
@@ -1324,7 +1575,7 @@ static ucn_result_t learn_candidate_route(ucn_node_t *node,
                                           ucn_node_id_t destination,
                                           uint32_t candidate_id,
                                           ucn_link_t *egress_link,
-                                          uint16_t route_cost,
+                                          ucn_route_cost_t route_cost,
                                           uint8_t hop_count,
                                           bool originated_here)
 {
@@ -1847,6 +2098,29 @@ static bool link_is_usable(const ucn_link_t *link)
     return get_link_status(link, &status) == UCN_OK && status.is_up;
 }
 
+static ucn_result_t resolve_link_local_receive_profile(
+    const ucn_node_t *node,
+    const ucn_link_t *link,
+    ucn_wire_profile_t *profile)
+{
+    ucn_wire_profile_t configured;
+
+    if (node == NULL || link == NULL || profile == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    configured = (ucn_wire_profile_t)link->local_receive_wire_profile;
+    if (configured == UCN_WIRE_PROFILE_UNSPECIFIED) {
+        *profile = node->max_receive_wire_profile;
+        return UCN_OK;
+    }
+    if (ucn_wire_profile_get_descriptor(configured) == NULL ||
+        configured > node->max_receive_wire_profile) {
+        return UCN_ERR_CONFIG;
+    }
+    *profile = configured;
+    return UCN_OK;
+}
+
 static size_t effective_link_mtu(const ucn_link_t *link,
                                  const ucn_link_status_t *status)
 {
@@ -2052,19 +2326,21 @@ static ucn_result_t validate_inbound_business_security(
     return UCN_OK;
 }
 
-static ucn_result_t send_control_on_link(ucn_node_t *node,
-                                         ucn_link_t *link,
-                                         ucn_node_id_t destination,
-                                         uint8_t message_type,
-                                         const uint8_t *payload,
-                                         uint16_t payload_length)
+static ucn_result_t send_control_on_link_profile(
+    ucn_node_t *node,
+    ucn_link_t *link,
+    ucn_node_id_t destination,
+    uint8_t message_type,
+    const uint8_t *payload,
+    uint16_t payload_length,
+    ucn_wire_profile_t wire_profile)
 {
     ucn_frame_t frame;
     ucn_result_t result;
 
     (void)memset(&frame, 0, sizeof(frame));
     frame.message_type = message_type;
-    frame.wire_profile = node->tx_wire_profile;
+    frame.wire_profile = wire_profile;
     frame.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
     frame.hop_limit = (message_type == UCN_MSG_HELLO ||
                        message_type == UCN_MSG_HEARTBEAT) ? 1U :
@@ -2087,12 +2363,113 @@ static ucn_result_t send_control_on_link(ucn_node_t *node,
     return result;
 }
 
-#if UCN_FEATURE_PATH
-static ucn_result_t send_control_to_node(ucn_node_t *node,
-                                         ucn_node_id_t control_target,
+#if UCN_FEATURE_CANDIDATE_ROUTING
+static ucn_result_t send_control_on_link(ucn_node_t *node,
+                                         ucn_link_t *link,
+                                         ucn_node_id_t destination,
                                          uint8_t message_type,
                                          const uint8_t *payload,
                                          uint16_t payload_length)
+{
+    return send_control_on_link_profile(node, link, destination, message_type,
+                                        payload, payload_length,
+                                        node->tx_wire_profile);
+}
+#endif
+
+/* Only use this wrapper for control payloads whose semantics do not contain
+ * additional profile-sized identifiers.  Profile-dependent payload codecs are
+ * migrated explicitly in V5-14/V5-15 instead of being silently narrowed. */
+static ucn_result_t send_adaptive_control_on_link(
+    ucn_node_t *node,
+    ucn_link_t *link,
+    ucn_node_id_t destination,
+    uint8_t message_type,
+    const uint8_t *payload,
+    uint16_t payload_length)
+{
+    const ucn_wire_profile_t profile = node->automatic_wire_profile ?
+        UCN_WIRE_PROFILE_UNSPECIFIED : node->tx_wire_profile;
+
+    return send_control_on_link_profile(node, link, destination, message_type,
+                                        payload, payload_length, profile);
+}
+
+#if UCN_FEATURE_PATH
+static ucn_result_t select_path_control_profile(
+    const ucn_node_t *node,
+    const ucn_link_t *link,
+    ucn_node_id_t control_target,
+    uint8_t message_type,
+    ucn_path_id_t path_id,
+    ucn_node_id_t destination,
+    ucn_node_id_t next_hop,
+    ucn_wire_profile_t *selected_profile)
+{
+    ucn_link_status_t status;
+    ucn_wire_profile_t first_profile;
+    ucn_wire_profile_t profile;
+    ucn_result_t result;
+
+    if (node == NULL || link == NULL || selected_profile == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = get_link_status(link, &status);
+    if (result != UCN_OK) {
+        return result;
+    }
+    first_profile = node->automatic_wire_profile ?
+        UCN_WIRE_PROFILE_W0_LOCAL : node->tx_wire_profile;
+    for (profile = first_profile; profile <= node->tx_wire_profile; ++profile) {
+        const ucn_wire_profile_descriptor_t *descriptor =
+            ucn_wire_profile_get_descriptor(profile);
+        uint8_t placeholder[UCN_PATH_INSTALL_MAX_PAYLOAD_BYTES] = { 0U };
+        ucn_frame_t frame;
+        size_t payload_length;
+        size_t encoded_size;
+        size_t path_maximum;
+
+        if (descriptor == NULL ||
+            (link->peer_wire_profile != UCN_WIRE_PROFILE_UNSPECIFIED &&
+             profile > link->peer_wire_profile)) {
+            continue;
+        }
+        path_maximum = maximum_value_for_wire_bytes(descriptor->path_id_bytes);
+        if (path_id > path_maximum || destination > descriptor->max_node_id ||
+            next_hop > descriptor->max_node_id) {
+            continue;
+        }
+        payload_length = message_type == UCN_MSG_PATH_INSTALL ?
+            path_install_payload_size(profile) :
+            path_revoke_payload_size(profile);
+        (void)memset(&frame, 0, sizeof(frame));
+        frame.message_type = message_type;
+        frame.wire_profile = profile;
+        frame.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
+        frame.hop_limit = node->config.default_hop_limit;
+        frame.network_id = node->config.network_id;
+        frame.source = node->config.node_id;
+        frame.destination = control_target;
+        frame.sequence = 1U;
+        frame.session_id = node->session_id;
+        frame.payload = placeholder;
+        frame.payload_length = (uint16_t)payload_length;
+        encoded_size = ucn_frame_encoded_size(&frame);
+        if (encoded_size != 0U && encoded_size <= effective_link_mtu(link, &status)) {
+            *selected_profile = profile;
+            return UCN_OK;
+        }
+    }
+    return UCN_ERR_TOO_LARGE;
+}
+
+static ucn_result_t send_control_to_node_profile(
+    ucn_node_t *node,
+    ucn_node_id_t control_target,
+    uint8_t message_type,
+    const uint8_t *payload,
+    uint16_t payload_length,
+    ucn_wire_profile_t wire_profile)
 {
     ucn_link_t *link;
 
@@ -2104,8 +2481,9 @@ static ucn_result_t send_control_to_node(ucn_node_t *node,
     if (link == NULL) {
         return UCN_ERR_NOT_FOUND;
     }
-    return send_control_on_link(node, link, control_target, message_type,
-                                payload, payload_length);
+    return send_control_on_link_profile(node, link, control_target,
+                                        message_type, payload, payload_length,
+                                        wire_profile);
 }
 #endif
 
@@ -2157,6 +2535,59 @@ static ucn_result_t install_path_forward_entry(ucn_node_t *node,
 #endif
 
 #if UCN_FEATURE_DIAGNOSTICS
+static ucn_result_t select_path_trace_profile(
+    const ucn_node_t *node,
+    const ucn_link_t *link,
+    ucn_node_id_t destination,
+    uint8_t record_count,
+    ucn_wire_profile_t *selected_profile)
+{
+    ucn_link_status_t status;
+    ucn_wire_profile_t first_profile;
+    ucn_wire_profile_t profile;
+    ucn_result_t result;
+
+    if (node == NULL || link == NULL || selected_profile == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = get_link_status(link, &status);
+    if (result != UCN_OK) {
+        return result;
+    }
+    first_profile = node->automatic_wire_profile ?
+        UCN_WIRE_PROFILE_W0_LOCAL : node->tx_wire_profile;
+    for (profile = first_profile; profile <= node->tx_wire_profile; ++profile) {
+        uint8_t placeholder[UCN_PATH_TRACE_MAX_PAYLOAD_BYTES] = { 0U };
+        ucn_frame_t frame;
+        size_t encoded_size;
+
+        if (link->peer_wire_profile != UCN_WIRE_PROFILE_UNSPECIFIED &&
+            profile > link->peer_wire_profile) {
+            continue;
+        }
+        (void)memset(&frame, 0, sizeof(frame));
+        frame.message_type = UCN_MSG_PATH_TRACE_REQ;
+        frame.wire_profile = profile;
+        frame.traffic_class = UCN_TRAFFIC_Q1_REALTIME;
+        frame.flags = UCN_FRAME_FLAG_DIAGNOSTIC;
+        frame.hop_limit = node->config.default_hop_limit;
+        frame.network_id = node->config.network_id;
+        frame.source = node->config.node_id;
+        frame.destination = destination;
+        frame.sequence = 1U;
+        frame.session_id = node->session_id;
+        frame.payload = placeholder;
+        frame.payload_length = (uint16_t)path_trace_payload_size(
+            profile, record_count);
+        encoded_size = ucn_frame_encoded_size(&frame);
+        if (encoded_size != 0U && encoded_size <= effective_link_mtu(link, &status)) {
+            *selected_profile = profile;
+            return UCN_OK;
+        }
+    }
+    return UCN_ERR_TOO_LARGE;
+}
+
 static bool path_trace_status_is_wire_valid(uint8_t status)
 {
     return status <= (uint8_t)UCN_PATH_TRACE_STATUS_TRUNCATED;
@@ -2164,6 +2595,7 @@ static bool path_trace_status_is_wire_valid(uint8_t status)
 
 static bool path_trace_payload_is_valid(const ucn_frame_t *frame)
 {
+    const ucn_wire_profile_descriptor_t *descriptor;
     uint8_t record_count;
     uint8_t record_limit;
     size_t expected_length;
@@ -2171,16 +2603,18 @@ static bool path_trace_payload_is_valid(const ucn_frame_t *frame)
 
     if (frame == NULL || frame->payload == NULL ||
         frame->payload_length < UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES ||
-        frame->payload_length > UCN_PATH_TRACE_MAX_PAYLOAD_BYTES ||
         (frame->flags & UCN_FRAME_FLAG_DIAGNOSTIC) == 0U ||
         frame->has_route_extension ||
         read_u32_be(frame->payload + UCN_PATH_TRACE_TRACE_ID_OFFSET) == 0U) {
         return false;
     }
+    descriptor = ucn_wire_profile_get_descriptor(frame->wire_profile);
+    if (descriptor == NULL) {
+        return false;
+    }
     record_count = frame->payload[UCN_PATH_TRACE_RECORD_COUNT_OFFSET];
     record_limit = frame->payload[UCN_PATH_TRACE_RECORD_LIMIT_OFFSET];
-    expected_length = UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES +
-                      (size_t)record_count * sizeof(ucn_node_id_t);
+    expected_length = path_trace_payload_size(frame->wire_profile, record_count);
     if (record_count == 0U || record_limit == 0U ||
         record_count > record_limit ||
         record_count > UCN_PATH_TRACE_MAX_NODES ||
@@ -2191,9 +2625,10 @@ static bool path_trace_payload_is_valid(const ucn_frame_t *frame)
         return false;
     }
     for (index = 0U; index < record_count; ++index) {
-        ucn_node_id_t node_id = read_u32_be(frame->payload +
-                                             UCN_PATH_TRACE_NODE_IDS_OFFSET +
-                                             index * sizeof(ucn_node_id_t));
+        ucn_node_id_t node_id = read_uint_be(
+            frame->payload + UCN_PATH_TRACE_NODE_IDS_OFFSET +
+                index * descriptor->address_bytes,
+            descriptor->address_bytes);
 
         if (node_id == 0U || node_id == UCN_NODE_BROADCAST) {
             return false;
@@ -2207,11 +2642,15 @@ static bool append_path_trace_node(const ucn_frame_t *frame,
                                    uint8_t *output,
                                    uint16_t *output_length)
 {
+    const ucn_wire_profile_descriptor_t *descriptor =
+        frame == NULL ? NULL :
+        ucn_wire_profile_get_descriptor(frame->wire_profile);
     uint8_t record_count;
     uint8_t record_limit;
     size_t node_offset;
 
-    if (!path_trace_payload_is_valid(frame) || node_id == 0U ||
+    if (descriptor == NULL || !path_trace_payload_is_valid(frame) ||
+        node_id == 0U || node_id > descriptor->max_node_id ||
         node_id == UCN_NODE_BROADCAST || output == NULL || output_length == NULL) {
         return false;
     }
@@ -2223,10 +2662,11 @@ static bool append_path_trace_node(const ucn_frame_t *frame,
         return false;
     }
     node_offset = UCN_PATH_TRACE_NODE_IDS_OFFSET +
-                  (size_t)record_count * sizeof(ucn_node_id_t);
-    write_u32_be(output + node_offset, node_id);
+                  (size_t)record_count * descriptor->address_bytes;
+    write_uint_be(output + node_offset, descriptor->address_bytes, node_id);
     output[UCN_PATH_TRACE_RECORD_COUNT_OFFSET] = (uint8_t)(record_count + 1U);
-    *output_length = (uint16_t)(frame->payload_length + sizeof(ucn_node_id_t));
+    *output_length = (uint16_t)(frame->payload_length +
+                                descriptor->address_bytes);
     return true;
 }
 
@@ -2234,13 +2674,15 @@ static ucn_result_t send_path_trace_request_on_link(ucn_node_t *node,
                                                      ucn_link_t *link,
                                                      ucn_node_id_t destination,
                                                      const uint8_t *payload,
-                                                     uint16_t payload_length)
+                                                     uint16_t payload_length,
+                                                     ucn_wire_profile_t wire_profile)
 {
     ucn_frame_t frame;
     ucn_result_t result;
 
     (void)memset(&frame, 0, sizeof(frame));
     frame.message_type = UCN_MSG_PATH_TRACE_REQ;
+    frame.wire_profile = wire_profile;
     frame.traffic_class = UCN_TRAFFIC_Q1_REALTIME;
     frame.flags = UCN_FRAME_FLAG_DIAGNOSTIC;
     frame.hop_limit = node->config.default_hop_limit;
@@ -2262,13 +2704,15 @@ static ucn_result_t send_path_trace_reply_on_link(ucn_node_t *node,
                                                    ucn_link_t *link,
                                                    ucn_node_id_t destination,
                                                    const uint8_t *payload,
-                                                   uint16_t payload_length)
+                                                   uint16_t payload_length,
+                                                   ucn_wire_profile_t wire_profile)
 {
     ucn_frame_t frame;
     ucn_result_t result;
 
     (void)memset(&frame, 0, sizeof(frame));
     frame.message_type = UCN_MSG_PATH_TRACE_REPLY;
+    frame.wire_profile = wire_profile;
     frame.traffic_class = UCN_TRAFFIC_Q1_REALTIME;
     frame.flags = UCN_FRAME_FLAG_DIAGNOSTIC;
     frame.hop_limit = node->config.default_hop_limit;
@@ -2408,13 +2852,15 @@ static void expire_path_trace_state(ucn_node_t *node, uint32_t now_ms)
 static ucn_result_t complete_path_trace(ucn_node_t *node,
                                         const ucn_frame_t *frame)
 {
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(frame->wire_profile);
     ucn_path_trace_pending_t *pending;
     ucn_path_trace_result_t result;
     uint32_t trace_id;
     uint8_t record_count;
     size_t index;
 
-    if (!path_trace_payload_is_valid(frame)) {
+    if (descriptor == NULL || !path_trace_payload_is_valid(frame)) {
         node->stats.path_trace_rejected++;
         return UCN_ERR_MALFORMED;
     }
@@ -2427,8 +2873,10 @@ static ucn_result_t complete_path_trace(ucn_node_t *node,
     if (frame->payload[UCN_PATH_TRACE_STATUS_OFFSET] ==
             (uint8_t)UCN_PATH_TRACE_STATUS_OK &&
         (frame->source != pending->destination ||
-         read_u32_be(frame->payload + UCN_PATH_TRACE_NODE_IDS_OFFSET +
-                     ((size_t)record_count - 1U) * sizeof(ucn_node_id_t)) !=
+         read_uint_be(frame->payload + UCN_PATH_TRACE_NODE_IDS_OFFSET +
+                      ((size_t)record_count - 1U) *
+                          descriptor->address_bytes,
+                      descriptor->address_bytes) !=
              pending->destination)) {
         node->stats.path_trace_rejected++;
         return UCN_ERR_MALFORMED;
@@ -2440,9 +2888,10 @@ static ucn_result_t complete_path_trace(ucn_node_t *node,
     result.trace_id = trace_id;
     result.node_count = record_count;
     for (index = 0U; index < record_count; ++index) {
-        result.node_ids[index] = read_u32_be(frame->payload +
-                                              UCN_PATH_TRACE_NODE_IDS_OFFSET +
-                                              index * sizeof(ucn_node_id_t));
+        result.node_ids[index] = read_uint_be(
+            frame->payload + UCN_PATH_TRACE_NODE_IDS_OFFSET +
+                index * descriptor->address_bytes,
+            descriptor->address_bytes);
     }
     {
         ucn_path_trace_handler_t handler = pending->handler;
@@ -2461,18 +2910,21 @@ static ucn_result_t handle_path_trace_request(ucn_node_t *node,
                                               ucn_link_t *ingress_link,
                                               const ucn_frame_t *frame)
 {
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(frame->wire_profile);
     uint8_t payload[UCN_PATH_TRACE_MAX_PAYLOAD_BYTES];
     uint16_t payload_length;
     uint32_t trace_id;
     ucn_link_t *egress_link;
     ucn_result_t result;
 
-    if (!path_trace_payload_is_valid(frame) ||
+    if (descriptor == NULL || !path_trace_payload_is_valid(frame) ||
         frame->payload[UCN_PATH_TRACE_STATUS_OFFSET] !=
             (uint8_t)UCN_PATH_TRACE_STATUS_OK ||
         frame->source == 0U || frame->source == UCN_NODE_BROADCAST ||
         frame->destination == 0U || frame->destination == UCN_NODE_BROADCAST ||
-        read_u32_be(frame->payload + UCN_PATH_TRACE_NODE_IDS_OFFSET) != frame->source) {
+        read_uint_be(frame->payload + UCN_PATH_TRACE_NODE_IDS_OFFSET,
+                     descriptor->address_bytes) != frame->source) {
         node->stats.path_trace_rejected++;
         return UCN_ERR_MALFORMED;
     }
@@ -2494,33 +2946,38 @@ static ucn_result_t handle_path_trace_request(ucn_node_t *node,
             (uint8_t)UCN_PATH_TRACE_STATUS_TRUNCATED;
         node->stats.path_trace_rejected++;
         return send_path_trace_reply_on_link(node, ingress_link, frame->source,
-                                             payload, frame->payload_length);
+                                             payload, frame->payload_length,
+                                             frame->wire_profile);
     }
 
     if (frame->destination == node->config.node_id) {
         payload[UCN_PATH_TRACE_STATUS_OFFSET] = (uint8_t)UCN_PATH_TRACE_STATUS_OK;
         return send_path_trace_reply_on_link(node, ingress_link, frame->source,
-                                             payload, payload_length);
+                                             payload, payload_length,
+                                             frame->wire_profile);
     }
     if (frame->hop_limit <= 1U) {
         payload[UCN_PATH_TRACE_STATUS_OFFSET] =
             (uint8_t)UCN_PATH_TRACE_STATUS_TTL_EXCEEDED;
         return send_path_trace_reply_on_link(node, ingress_link, frame->source,
-                                             payload, payload_length);
+                                             payload, payload_length,
+                                             frame->wire_profile);
     }
     egress_link = find_link(node, frame->destination);
     if (egress_link == NULL || egress_link == ingress_link) {
         payload[UCN_PATH_TRACE_STATUS_OFFSET] =
             (uint8_t)UCN_PATH_TRACE_STATUS_NO_ROUTE;
         return send_path_trace_reply_on_link(node, ingress_link, frame->source,
-                                             payload, payload_length);
+                                             payload, payload_length,
+                                             frame->wire_profile);
     }
     if (allocate_path_trace_reverse(node, frame->source, trace_id, ingress_link) == NULL) {
         payload[UCN_PATH_TRACE_STATUS_OFFSET] =
             (uint8_t)UCN_PATH_TRACE_STATUS_NO_ROUTE;
         node->stats.path_trace_rejected++;
         return send_path_trace_reply_on_link(node, ingress_link, frame->source,
-                                             payload, payload_length);
+                                             payload, payload_length,
+                                             frame->wire_profile);
     }
 
     {
@@ -2593,21 +3050,34 @@ static bool node_snapshot_request_payload_is_valid(const ucn_frame_t *frame)
 
 static bool node_snapshot_reply_payload_is_valid(const ucn_frame_t *frame)
 {
+    const ucn_wire_profile_descriptor_t *descriptor;
     ucn_node_id_t reported_node_id;
+    size_t neighbor_offset;
+    size_t flags_offset;
 
     if (frame == NULL || frame->payload == NULL ||
-        frame->payload_length != UCN_NODE_SNAPSHOT_REPLY_PAYLOAD_BYTES ||
         (frame->flags & UCN_FRAME_FLAG_DIAGNOSTIC) == 0U ||
         frame->has_route_extension ||
-        read_u32_be(frame->payload + UCN_NODE_SNAPSHOT_QUERY_ID_OFFSET) == 0U ||
-        frame->payload[10U] != 0U || frame->payload[11U] != 0U) {
+        read_u32_be(frame->payload + UCN_NODE_SNAPSHOT_QUERY_ID_OFFSET) == 0U) {
         return false;
     }
-    reported_node_id = read_u32_be(frame->payload +
-                                   UCN_NODE_SNAPSHOT_REPLY_NODE_ID_OFFSET);
+    descriptor = ucn_wire_profile_get_descriptor(frame->wire_profile);
+    if (descriptor == NULL || frame->payload_length !=
+                                  node_snapshot_reply_payload_size(
+                                      frame->wire_profile)) {
+        return false;
+    }
+    neighbor_offset = node_snapshot_reply_neighbor_count_offset(descriptor);
+    flags_offset = node_snapshot_reply_flags_offset(descriptor);
+    if (frame->payload[flags_offset + 1U] != 0U ||
+        frame->payload[flags_offset + 2U] != 0U) {
+        return false;
+    }
+    reported_node_id = read_uint_be(frame->payload + 4U,
+                                    descriptor->address_bytes);
     return reported_node_id != 0U && reported_node_id != UCN_NODE_BROADCAST &&
            reported_node_id == frame->source &&
-           frame->payload[UCN_NODE_SNAPSHOT_REPLY_NEIGHBOR_COUNT_OFFSET] <=
+           frame->payload[neighbor_offset] <=
                UCN_MAX_NEIGHBORS;
 }
 
@@ -2615,20 +3085,28 @@ static ucn_result_t send_node_snapshot_reply_on_link(
     ucn_node_t *node,
     ucn_link_t *link,
     ucn_node_id_t destination,
-    uint32_t query_id)
+    uint32_t query_id,
+    ucn_wire_profile_t wire_profile)
 {
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(wire_profile);
     ucn_frame_t frame;
-    uint8_t payload[UCN_NODE_SNAPSHOT_REPLY_PAYLOAD_BYTES];
+    uint8_t payload[UCN_NODE_SNAPSHOT_REPLY_MAX_PAYLOAD_BYTES];
+    size_t payload_length = node_snapshot_reply_payload_size(wire_profile);
     ucn_result_t result;
 
+    if (descriptor == NULL || payload_length > sizeof(payload)) {
+        return UCN_ERR_CONFIG;
+    }
     (void)memset(&frame, 0, sizeof(frame));
     (void)memset(payload, 0, sizeof(payload));
     write_u32_be(payload + UCN_NODE_SNAPSHOT_QUERY_ID_OFFSET, query_id);
-    write_u32_be(payload + UCN_NODE_SNAPSHOT_REPLY_NODE_ID_OFFSET,
-                 node->config.node_id);
-    payload[UCN_NODE_SNAPSHOT_REPLY_NEIGHBOR_COUNT_OFFSET] =
+    write_uint_be(payload + 4U, descriptor->address_bytes,
+                  node->config.node_id);
+    payload[node_snapshot_reply_neighbor_count_offset(descriptor)] =
         (uint8_t)node->link_count;
     frame.message_type = UCN_MSG_NODE_SNAPSHOT_REPLY;
+    frame.wire_profile = wire_profile;
     frame.traffic_class = UCN_TRAFFIC_Q1_REALTIME;
     frame.flags = UCN_FRAME_FLAG_DIAGNOSTIC;
     frame.hop_limit = node->config.default_hop_limit;
@@ -2637,7 +3115,7 @@ static ucn_result_t send_node_snapshot_reply_on_link(
     frame.destination = destination;
     frame.session_id = node->session_id;
     frame.payload = payload;
-    frame.payload_length = (uint16_t)sizeof(payload);
+    frame.payload_length = (uint16_t)payload_length;
     result = allocate_sequence(node, &frame.sequence);
     if (result != UCN_OK) {
         return result;
@@ -2735,7 +3213,8 @@ static ucn_node_snapshot_reverse_t *allocate_node_snapshot_reverse(
 static bool queue_node_snapshot_reply(ucn_node_t *node,
                                       ucn_node_id_t origin,
                                       uint32_t query_id,
-                                      ucn_link_t *egress_link)
+                                      ucn_link_t *egress_link,
+                                      ucn_wire_profile_t wire_profile)
 {
     size_t index;
     ucn_node_snapshot_reply_pending_t *free_slot = NULL;
@@ -2758,6 +3237,7 @@ static bool queue_node_snapshot_reply(ucn_node_t *node,
     free_slot->origin = origin;
     free_slot->query_id = query_id;
     free_slot->egress_link = egress_link;
+    free_slot->wire_profile = wire_profile;
     {
         uint32_t delay_ms = (query_id ^ node->config.node_id) %
                             (UCN_NODE_SNAPSHOT_REPLY_JITTER_MS + UINT32_C(1));
@@ -2864,7 +3344,9 @@ static ucn_result_t send_due_node_snapshot_reply(ucn_node_t *node,
         }
         pending->occupied = false;
         result = send_node_snapshot_reply_on_link(node, pending->egress_link,
-                                                  pending->origin, pending->query_id);
+                                                  pending->origin,
+                                                  pending->query_id,
+                                                  pending->wire_profile);
         return result;
     }
     return UCN_ERR_NOT_FOUND;
@@ -3480,6 +3962,8 @@ static ucn_result_t handle_policy_diagnostic_reply(
 static ucn_result_t complete_node_snapshot_reply(ucn_node_t *node,
                                                   const ucn_frame_t *frame)
 {
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(frame->wire_profile);
     uint32_t query_id;
     ucn_node_snapshot_pending_t *pending;
     size_t index;
@@ -3500,9 +3984,9 @@ static ucn_result_t complete_node_snapshot_reply(ucn_node_t *node,
     }
     pending->entries[pending->node_count].node_id = frame->source;
     pending->entries[pending->node_count].direct_link_count =
-        frame->payload[UCN_NODE_SNAPSHOT_REPLY_NEIGHBOR_COUNT_OFFSET];
+        frame->payload[node_snapshot_reply_neighbor_count_offset(descriptor)];
     pending->entries[pending->node_count].flags =
-        frame->payload[UCN_NODE_SNAPSHOT_REPLY_FLAGS_OFFSET];
+        frame->payload[node_snapshot_reply_flags_offset(descriptor)];
     ++pending->node_count;
     node->stats.node_snapshot_replies_received++;
     return UCN_OK;
@@ -3532,7 +4016,8 @@ static ucn_result_t handle_node_snapshot_request(ucn_node_t *node,
         node->stats.node_snapshot_rejected++;
         return UCN_ERR_NO_SPACE;
     }
-    if (!queue_node_snapshot_reply(node, frame->source, query_id, ingress_link)) {
+    if (!queue_node_snapshot_reply(node, frame->source, query_id, ingress_link,
+                                   frame->wire_profile)) {
         node->stats.node_snapshot_rejected++;
     }
     node->stats.node_snapshot_requests_received++;
@@ -3625,9 +4110,9 @@ static ucn_result_t send_due_heartbeat(ucn_node_t *node, uint32_t now_ms)
             (void)memset(payload, 0, sizeof(payload));
             payload[0] = UCN_HEARTBEAT_REQUEST;
             write_u32_be(payload + 4U, node->next_heartbeat_id++);
-            result = send_control_on_link(node, bearer->link, entry->peer_node_id,
-                                          UCN_MSG_HEARTBEAT, payload,
-                                          (uint16_t)sizeof(payload));
+            result = send_adaptive_control_on_link(
+                node, bearer->link, entry->peer_node_id, UCN_MSG_HEARTBEAT,
+                payload, (uint16_t)sizeof(payload));
             if (result == UCN_OK) {
                 bearer->heartbeat_sent = true;
                 bearer->last_heartbeat_sent_ms = now_ms;
@@ -3710,10 +4195,9 @@ static ucn_result_t send_due_bearer_quality_probe(ucn_node_t *node,
         candidate->quality_probe_sent_at_ms = now_ms;
         candidate->quality_probe_pending = true;
         candidate->quality_probes_sent++;
-        result = send_control_on_link(node, candidate->link,
-                                      entry->peer_node_id,
-                                      UCN_MSG_HEARTBEAT, payload,
-                                      (uint16_t)sizeof(payload));
+        result = send_adaptive_control_on_link(
+            node, candidate->link, entry->peer_node_id, UCN_MSG_HEARTBEAT,
+            payload, (uint16_t)sizeof(payload));
         if (result == UCN_OK) {
             node->stats.bearer_quality_probes_sent++;
             record_max_service_delay(&node->stats.max_probe_service_delay_ms,
@@ -3770,9 +4254,9 @@ static ucn_result_t handle_heartbeat(ucn_node_t *node,
 
     (void)memcpy(response, frame->payload, sizeof(response));
     response[0] = UCN_HEARTBEAT_ACK;
-    result = send_control_on_link(node, ingress_link, frame->source,
-                                  UCN_MSG_HEARTBEAT, response,
-                                  (uint16_t)sizeof(response));
+    result = send_adaptive_control_on_link(
+        node, ingress_link, frame->source, UCN_MSG_HEARTBEAT, response,
+        (uint16_t)sizeof(response));
     if (result == UCN_OK) {
         node->stats.heartbeat_acks_sent++;
     }
@@ -4032,7 +4516,7 @@ static ucn_result_t forward_route_request(ucn_node_t *node,
                                           const ucn_frame_t *frame)
 {
     ucn_frame_t forwarded = *frame;
-    uint16_t route_cost;
+    ucn_route_cost_t route_cost;
     uint8_t hop_count;
     size_t index;
     size_t sent_count = 0U;
@@ -4045,7 +4529,8 @@ static ucn_result_t forward_route_request(ucn_node_t *node,
                                      frame->wire_profile)) {
         return UCN_ERR_MALFORMED;
     }
-    route_cost = read_u16_be(frame->payload + route_request_cost_offset(frame));
+    route_cost = read_route_cost_for_profile(
+        frame->payload + route_request_cost_offset(frame), frame->wire_profile);
     hop_count = frame->payload[route_request_hop_offset(frame)];
     if (hop_count == UINT8_MAX) {
         return UCN_ERR_TTL;
@@ -4054,6 +4539,7 @@ static ucn_result_t forward_route_request(ucn_node_t *node,
 
     for (index = 0U; index < node->link_count; ++index) {
         uint8_t payload[UCN_ROUTE_REQ_MAX_PAYLOAD_BYTES];
+        ucn_route_cost_t next_cost;
         ucn_result_t result;
 
         if (node->links[index] == ingress_link) {
@@ -4067,8 +4553,20 @@ static ucn_result_t forward_route_request(ucn_node_t *node,
         }
 #endif
         (void)memcpy(payload, frame->payload, frame->payload_length);
-        write_u16_be(payload + route_request_cost_offset(frame),
-                     add_route_cost(route_cost, link_route_cost(node->links[index])));
+        result = accumulate_route_cost(route_cost,
+                                       link_route_cost(node->links[index]),
+                                       &next_cost);
+        if (result != UCN_OK) {
+            last_error = result;
+            continue;
+        }
+        result = write_route_cost_for_profile(
+            payload + route_request_cost_offset(frame), frame->wire_profile,
+            next_cost);
+        if (result != UCN_OK) {
+            last_error = result;
+            continue;
+        }
         payload[route_request_hop_offset(frame)] = (uint8_t)(hop_count + 1U);
         forwarded.payload = payload;
         result = send_frame_on_link(node, node->links[index], &forwarded);
@@ -4085,18 +4583,25 @@ static ucn_result_t forward_route_request(ucn_node_t *node,
 static ucn_result_t send_route_error(ucn_node_t *node,
                                      ucn_link_t *upstream_link,
                                      ucn_node_id_t origin,
-                                     ucn_node_id_t unreachable)
+                                     ucn_node_id_t unreachable,
+                                     ucn_wire_profile_t wire_profile)
 {
-    uint8_t payload[UCN_ROUTE_ERROR_PAYLOAD_BYTES];
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(wire_profile);
+    uint8_t payload[UCN_ROUTE_ERROR_MAX_PAYLOAD_BYTES];
+    size_t payload_length = route_error_payload_size(wire_profile, false);
     ucn_result_t result;
 
-    if (upstream_link == NULL || origin == 0U || origin == UCN_NODE_BROADCAST) {
+    if (descriptor == NULL || payload_length > sizeof(payload) ||
+        upstream_link == NULL || origin == 0U ||
+        origin == UCN_NODE_BROADCAST) {
         return UCN_ERR_ARGUMENT;
     }
 
-    write_u32_be(payload, unreachable);
-    result = send_control_on_link(node, upstream_link, origin, UCN_MSG_ROUTE_ERROR,
-                                  payload, (uint16_t)sizeof(payload));
+    write_uint_be(payload, descriptor->address_bytes, unreachable);
+    result = send_control_on_link_profile(
+        node, upstream_link, origin, UCN_MSG_ROUTE_ERROR, payload,
+        (uint16_t)payload_length, wire_profile);
     if (result == UCN_OK) {
         node->stats.route_errors_sent++;
     }
@@ -4109,23 +4614,33 @@ static ucn_result_t send_path_route_error(ucn_node_t *node,
                                           ucn_node_id_t origin,
                                           ucn_node_id_t unreachable,
                                           ucn_session_id_t owner_session_id,
-                                          ucn_path_id_t path_id)
+                                          ucn_path_id_t path_id,
+                                          ucn_wire_profile_t wire_profile)
 {
-    uint8_t payload[UCN_PATH_ROUTE_ERROR_PAYLOAD_BYTES];
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(wire_profile);
+    uint8_t payload[UCN_ROUTE_ERROR_MAX_PAYLOAD_BYTES];
+    size_t payload_length = route_error_payload_size(wire_profile, true);
+    size_t offset;
     ucn_result_t result;
 
-    if (upstream_link == NULL || origin == 0U || origin == UCN_NODE_BROADCAST ||
+    if (descriptor == NULL || payload_length > sizeof(payload) ||
+        upstream_link == NULL || origin == 0U || origin == UCN_NODE_BROADCAST ||
         unreachable == 0U || unreachable == UCN_NODE_BROADCAST ||
         owner_session_id == 0U || path_id == 0U) {
         return UCN_ERR_ARGUMENT;
     }
 
-    write_u32_be(payload, unreachable);
-    write_u32_be(payload + 4U, origin);
-    write_u32_be(payload + 8U, owner_session_id);
-    write_u32_be(payload + 12U, path_id);
-    result = send_control_on_link(node, upstream_link, origin, UCN_MSG_ROUTE_ERROR,
-                                  payload, (uint16_t)sizeof(payload));
+    offset = 0U;
+    write_uint_be(payload + offset, descriptor->address_bytes, unreachable);
+    offset += descriptor->address_bytes;
+    write_uint_be(payload + offset, descriptor->address_bytes,
+                  owner_session_id);
+    offset += descriptor->address_bytes;
+    write_uint_be(payload + offset, descriptor->path_id_bytes, path_id);
+    result = send_control_on_link_profile(
+        node, upstream_link, origin, UCN_MSG_ROUTE_ERROR, payload,
+        (uint16_t)payload_length, wire_profile);
     if (result == UCN_OK) {
         node->stats.route_errors_sent++;
         node->stats.path_route_errors_sent++;
@@ -4199,7 +4714,7 @@ static ucn_result_t handle_route_request(ucn_node_t *node,
     ucn_node_id_t origin;
     ucn_node_id_t target;
     uint32_t request_id;
-    uint16_t route_cost;
+    ucn_route_cost_t route_cost;
     uint8_t hop_count;
     bool is_candidate;
     ucn_result_t result;
@@ -4211,7 +4726,8 @@ static ucn_result_t handle_route_request(ucn_node_t *node,
     origin = frame->source;
     target = route_request_target(frame);
     request_id = read_u32_be(frame->payload + route_request_id_offset(frame));
-    route_cost = read_u16_be(frame->payload + route_request_cost_offset(frame));
+    route_cost = read_route_cost_for_profile(
+        frame->payload + route_request_cost_offset(frame), frame->wire_profile);
     hop_count = frame->payload[route_request_hop_offset(frame)];
     is_candidate =
         (frame->payload[route_request_flags_offset(frame)] &
@@ -4234,7 +4750,10 @@ static ucn_result_t handle_route_request(ucn_node_t *node,
     }
 
     if (target == node->config.node_id) {
-        uint8_t reply[UCN_ROUTE_REPLY_PAYLOAD_BYTES];
+        const ucn_wire_profile_descriptor_t *descriptor =
+            ucn_wire_profile_get_descriptor(frame->wire_profile);
+        uint8_t reply[UCN_ROUTE_REPLY_MAX_PAYLOAD_BYTES];
+        size_t reply_length = route_reply_payload_size(frame->wire_profile);
         ucn_route_entry_t *reverse_route = find_active_route(node, origin);
 
         if (!is_candidate && (reverse_route == NULL ||
@@ -4242,21 +4761,29 @@ static ucn_result_t handle_route_request(ucn_node_t *node,
             return UCN_ERR_NOT_FOUND;
         }
 
-        write_u32_be(reply, origin);
-        write_u32_be(reply + 4U, target);
-        write_u32_be(reply + 8U, request_id);
+        if (descriptor == NULL || reply_length > sizeof(reply)) {
+            return UCN_ERR_CONFIG;
+        }
+        write_u32_be(reply, request_id);
         /* A ROUTE_REPLY advertises distance from the current reply sender to
          * the target, not the completed RREQ's origin-to-target distance.
          * Starting at zero lets every return hop add its own outbound Link
          * Cost/Hop.  Stored route metrics then strictly decrease toward the
          * target, which is the bounded AODV-Lite loop-freedom invariant. */
-        write_u16_be(reply + 12U, 0U);
-        reply[14] = 0U;
-        reply[15] = is_candidate ? UCN_ROUTE_REQ_FLAG_CANDIDATE : 0U;
-        write_u16_be(reply + 16U,
-                     is_candidate ? 0U : reverse_route->route_epoch);
-        result = send_control_on_link(node, ingress_link, origin, UCN_MSG_ROUTE_REPLY,
-                                      reply, (uint16_t)sizeof(reply));
+        result = write_route_cost_for_profile(
+            reply + route_reply_cost_offset(), frame->wire_profile, 0U);
+        if (result != UCN_OK) {
+            return result;
+        }
+        reply[route_reply_hop_offset(frame)] = 0U;
+        reply[route_reply_flags_offset(frame)] =
+            is_candidate ? UCN_ROUTE_REQ_FLAG_CANDIDATE : 0U;
+        write_uint_be(reply + route_reply_epoch_offset(frame),
+                      descriptor->route_epoch_bytes,
+                      is_candidate ? 0U : reverse_route->route_epoch);
+        result = send_control_on_link_profile(
+            node, ingress_link, origin, UCN_MSG_ROUTE_REPLY, reply,
+            (uint16_t)reply_length, frame->wire_profile);
         if (result == UCN_OK) {
             node->stats.route_replies_sent++;
         }
@@ -4273,8 +4800,9 @@ static ucn_result_t handle_route_reply(ucn_node_t *node,
 {
     ucn_node_id_t origin;
     ucn_node_id_t target;
+    const ucn_wire_profile_descriptor_t *descriptor;
     uint32_t request_id;
-    uint16_t route_cost;
+    ucn_route_cost_t route_cost;
     uint16_t route_epoch;
     uint8_t hop_count;
     bool is_candidate;
@@ -4282,26 +4810,37 @@ static ucn_result_t handle_route_reply(ucn_node_t *node,
     ucn_result_t result;
 
     *consumed = false;
-    if (frame->payload_length != UCN_ROUTE_REPLY_PAYLOAD_BYTES) {
+    descriptor = ucn_wire_profile_get_descriptor(frame->wire_profile);
+    if (descriptor == NULL ||
+        frame->payload_length != route_reply_payload_size(frame->wire_profile)) {
         return UCN_ERR_MALFORMED;
     }
-    origin = read_u32_be(frame->payload);
-    target = read_u32_be(frame->payload + 4U);
-    request_id = read_u32_be(frame->payload + 8U);
-    route_cost = read_u16_be(frame->payload + 12U);
-    hop_count = frame->payload[14];
-    is_candidate = (frame->payload[15] & UCN_ROUTE_REQ_FLAG_CANDIDATE) != 0U;
-    route_epoch = read_u16_be(frame->payload + 16U);
-    if (origin == 0U || target != frame->source || target == UCN_NODE_BROADCAST ||
-        request_id == 0U ||
-        (frame->payload[15] & (uint8_t)~UCN_ROUTE_REQ_FLAG_CANDIDATE) != 0U ||
+    origin = frame->destination;
+    target = frame->source;
+    request_id = read_u32_be(frame->payload);
+    route_cost = read_route_cost_for_profile(
+        frame->payload + route_reply_cost_offset(), frame->wire_profile);
+    hop_count = frame->payload[route_reply_hop_offset(frame)];
+    is_candidate =
+        (frame->payload[route_reply_flags_offset(frame)] &
+         UCN_ROUTE_REQ_FLAG_CANDIDATE) != 0U;
+    route_epoch = (uint16_t)read_uint_be(
+        frame->payload + route_reply_epoch_offset(frame),
+        descriptor->route_epoch_bytes);
+    if (origin == 0U || origin == UCN_NODE_BROADCAST || request_id == 0U ||
+        (frame->payload[route_reply_flags_offset(frame)] &
+         (uint8_t)~UCN_ROUTE_REQ_FLAG_CANDIDATE) != 0U ||
         (!is_candidate && route_epoch == 0U)) {
         return UCN_ERR_MALFORMED;
     }
     if (hop_count == UINT8_MAX) {
         return UCN_ERR_TTL;
     }
-    route_cost = add_route_cost(route_cost, link_route_cost(ingress_link));
+    result = accumulate_route_cost(route_cost, link_route_cost(ingress_link),
+                                   &route_cost);
+    if (result != UCN_OK) {
+        return result;
+    }
     hop_count++;
 #if !UCN_FEATURE_CANDIDATE_ROUTING
     if (is_candidate) {
@@ -4376,27 +4915,36 @@ static ucn_result_t handle_route_error(ucn_node_t *node,
                                        const ucn_frame_t *frame,
                                        bool *consumed)
 {
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(frame->wire_profile);
+    size_t normal_length = route_error_payload_size(frame->wire_profile, false);
+    size_t path_length = route_error_payload_size(frame->wire_profile, true);
     ucn_node_id_t unreachable;
     bool path_scoped = false;
 
     *consumed = false;
-    if (frame->payload_length != UCN_ROUTE_ERROR_PAYLOAD_BYTES &&
-        frame->payload_length != UCN_PATH_ROUTE_ERROR_PAYLOAD_BYTES) {
+    if (descriptor == NULL ||
+        (frame->payload_length != normal_length &&
+         frame->payload_length != path_length)) {
         return UCN_ERR_MALFORMED;
     }
-    unreachable = read_u32_be(frame->payload);
+    unreachable = read_uint_be(frame->payload, descriptor->address_bytes);
     if (unreachable == 0U || unreachable == UCN_NODE_BROADCAST) {
         return UCN_ERR_MALFORMED;
     }
-    path_scoped = frame->payload_length == UCN_PATH_ROUTE_ERROR_PAYLOAD_BYTES;
+    path_scoped = frame->payload_length == path_length;
     if (path_scoped) {
 #if UCN_FEATURE_PATH
-        const ucn_node_id_t owner = read_u32_be(frame->payload + 4U);
-        const ucn_session_id_t owner_session_id = read_u32_be(frame->payload + 8U);
-        const ucn_path_id_t path_id = read_u32_be(frame->payload + 12U);
+        const size_t session_offset = descriptor->address_bytes;
+        const size_t path_offset = session_offset + descriptor->address_bytes;
+        const ucn_node_id_t owner = frame->destination;
+        const ucn_session_id_t owner_session_id = read_uint_be(
+            frame->payload + session_offset, descriptor->address_bytes);
+        const ucn_path_id_t path_id = read_uint_be(
+            frame->payload + path_offset, descriptor->path_id_bytes);
 
         if (owner == 0U || owner == UCN_NODE_BROADCAST ||
-            owner != frame->destination || owner_session_id == 0U || path_id == 0U) {
+            owner_session_id == 0U || path_id == 0U) {
             return UCN_ERR_MALFORMED;
         }
         revoke_path_and_mark_local_policy(node, owner, owner_session_id,
@@ -4564,26 +5112,39 @@ static ucn_result_t handle_path_install(ucn_node_t *node,
                                         ucn_link_t *ingress_link,
                                         const ucn_frame_t *frame)
 {
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(frame->wire_profile);
     ucn_path_id_t path_id;
     ucn_node_id_t destination;
     ucn_node_id_t next_hop;
     uint32_t lease_ms;
     ucn_result_t result;
 
-    if (frame->payload_length != UCN_PATH_INSTALL_PAYLOAD_BYTES ||
+    if (descriptor == NULL ||
+        frame->payload_length != path_install_payload_size(frame->wire_profile) ||
         frame->destination != node->config.node_id || frame->source == 0U ||
         frame->source == UCN_NODE_BROADCAST || frame->session_id == 0U) {
         return UCN_ERR_MALFORMED;
     }
-    path_id = read_u32_be(frame->payload);
-    destination = read_u32_be(frame->payload + 4U);
-    next_hop = read_u32_be(frame->payload + 8U);
-    lease_ms = read_u32_be(frame->payload + 12U);
+    path_id = read_uint_be(frame->payload, descriptor->path_id_bytes);
+    destination = read_uint_be(
+        frame->payload + path_install_destination_offset(descriptor),
+        descriptor->address_bytes);
+    next_hop = read_uint_be(
+        frame->payload + path_install_next_hop_offset(descriptor),
+        descriptor->address_bytes);
+    lease_ms = read_u32_be(
+        frame->payload + path_install_lease_offset(descriptor));
     if (path_id == 0U || destination == 0U || destination == UCN_NODE_BROADCAST ||
         next_hop == UCN_NODE_BROADCAST ||
         !ucn_duration_is_valid(lease_ms) ||
         (next_hop == 0U && destination != node->config.node_id)) {
         return UCN_ERR_MALFORMED;
+    }
+    result = validate_path_wire_scope(frame->wire_profile, path_id,
+                                      destination, next_hop);
+    if (result != UCN_OK) {
+        return result;
     }
     result = authorize_path_control(node, ingress_link, frame,
                                     UCN_PATH_CONTROL_INSTALL, path_id,
@@ -4620,17 +5181,21 @@ static ucn_result_t handle_path_revoke(ucn_node_t *node,
                                        ucn_link_t *ingress_link,
                                        const ucn_frame_t *frame)
 {
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(frame->wire_profile);
     ucn_path_id_t path_id;
     ucn_node_id_t destination;
     ucn_result_t result;
 
-    if (frame->payload_length != UCN_PATH_REVOKE_PAYLOAD_BYTES ||
+    if (descriptor == NULL ||
+        frame->payload_length != path_revoke_payload_size(frame->wire_profile) ||
         frame->destination != node->config.node_id || frame->source == 0U ||
         frame->source == UCN_NODE_BROADCAST || frame->session_id == 0U) {
         return UCN_ERR_MALFORMED;
     }
-    path_id = read_u32_be(frame->payload);
-    destination = read_u32_be(frame->payload + 4U);
+    path_id = read_uint_be(frame->payload, descriptor->path_id_bytes);
+    destination = read_uint_be(frame->payload + descriptor->path_id_bytes,
+                               descriptor->address_bytes);
     if (path_id == 0U || destination == 0U || destination == UCN_NODE_BROADCAST) {
         return UCN_ERR_MALFORMED;
     }
@@ -4826,6 +5391,40 @@ ucn_wire_profile_t ucn_node_get_link_wire_profile_limit(
 {
     return node == NULL || link == NULL || !link_is_registered(node, link) ?
                UCN_WIRE_PROFILE_UNSPECIFIED : link->peer_wire_profile;
+}
+
+ucn_result_t ucn_node_set_link_local_wire_profile_limit(
+    ucn_node_t *node,
+    ucn_link_t *link,
+    ucn_wire_profile_t maximum_profile)
+{
+    ucn_wire_profile_t effective_profile = maximum_profile;
+
+    if (node == NULL || link == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (maximum_profile == UCN_WIRE_PROFILE_UNSPECIFIED) {
+        effective_profile = node->max_receive_wire_profile;
+    } else if (ucn_wire_profile_get_descriptor(maximum_profile) == NULL ||
+               maximum_profile > node->max_receive_wire_profile) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (link->mtu != 0U &&
+        link->mtu < ucn_frame_header_size_for_profile(effective_profile, 0U)) {
+        return UCN_ERR_TOO_LARGE;
+    }
+    link->local_receive_wire_profile = (uint8_t)maximum_profile;
+    return UCN_OK;
+}
+
+ucn_wire_profile_t ucn_node_get_link_local_wire_profile_limit(
+    const ucn_node_t *node,
+    const ucn_link_t *link)
+{
+    if (node == NULL || link == NULL) {
+        return UCN_WIRE_PROFILE_UNSPECIFIED;
+    }
+    return (ucn_wire_profile_t)link->local_receive_wire_profile;
 }
 
 ucn_result_t ucn_node_set_plain_session_id(ucn_node_t *node,
@@ -5164,6 +5763,7 @@ ucn_result_t ucn_node_probe_neighbor(ucn_node_t *node,
                                      uint32_t now_ms)
 {
     uint8_t payload;
+    ucn_wire_profile_t local_receive_profile;
     ucn_result_t result;
 
     result = ucn_node_observe_neighbor(node, link, now_ms);
@@ -5172,9 +5772,15 @@ ucn_result_t ucn_node_probe_neighbor(ucn_node_t *node,
     }
 
     node->now_ms = now_ms;
-    payload = node->max_receive_wire_profile;
-    return send_control_on_link(node, link, link->peer_node_id, UCN_MSG_HELLO,
-                                &payload, (uint16_t)UCN_HELLO_PAYLOAD_BYTES);
+    result = resolve_link_local_receive_profile(node, link,
+                                                &local_receive_profile);
+    if (result != UCN_OK) {
+        return result;
+    }
+    payload = (uint8_t)local_receive_profile;
+    return send_adaptive_control_on_link(
+        node, link, link->peer_node_id, UCN_MSG_HELLO, &payload,
+        (uint16_t)UCN_HELLO_PAYLOAD_BYTES);
 }
 
 ucn_result_t ucn_node_broadcast_hello(ucn_node_t *node,
@@ -5182,6 +5788,8 @@ ucn_result_t ucn_node_broadcast_hello(ucn_node_t *node,
                                       uint32_t now_ms)
 {
     uint8_t payload;
+    ucn_wire_profile_t local_receive_profile;
+    ucn_result_t result;
 
     if (node == NULL || link == NULL || link->ops == NULL ||
         link->ops->send == NULL || link->ops->get_status == NULL) {
@@ -5189,9 +5797,15 @@ ucn_result_t ucn_node_broadcast_hello(ucn_node_t *node,
     }
 
     node->now_ms = now_ms;
-    payload = node->max_receive_wire_profile;
-    return send_control_on_link(node, link, UCN_NODE_BROADCAST, UCN_MSG_HELLO,
-                                &payload, (uint16_t)UCN_HELLO_PAYLOAD_BYTES);
+    result = resolve_link_local_receive_profile(node, link,
+                                                &local_receive_profile);
+    if (result != UCN_OK) {
+        return result;
+    }
+    payload = (uint8_t)local_receive_profile;
+    return send_adaptive_control_on_link(
+        node, link, UCN_NODE_BROADCAST, UCN_MSG_HELLO, &payload,
+        (uint16_t)UCN_HELLO_PAYLOAD_BYTES);
 }
 
 ucn_result_t ucn_node_admit_neighbor(ucn_node_t *node,
@@ -5249,12 +5863,20 @@ size_t ucn_node_neighbor_count(const ucn_node_t *node,
 ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
 {
     size_t index;
+    ucn_wire_profile_t local_receive_profile;
     ucn_result_t result;
 
     if (node == NULL || link == NULL || link->ops == NULL ||
-        link->ops->send == NULL || link->ops->get_status == NULL ||
-        link->mtu < ucn_frame_header_size_for_profile(
-                        node->max_receive_wire_profile, 0U)) {
+        link->ops->send == NULL || link->ops->get_status == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = resolve_link_local_receive_profile(node, link,
+                                                &local_receive_profile);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (link->mtu < ucn_frame_header_size_for_profile(local_receive_profile,
+                                                       0U)) {
         return UCN_ERR_ARGUMENT;
     }
 
@@ -5329,6 +5951,7 @@ static ucn_result_t begin_route_discovery(ucn_node_t *node,
     ucn_route_discovery_t *slot = NULL;
     uint8_t payload[UCN_ROUTE_REQ_MAX_PAYLOAD_BYTES];
     ucn_frame_t frame;
+    ucn_wire_profile_t request_profile;
     size_t index;
     ucn_result_t result;
 
@@ -5336,9 +5959,9 @@ static ucn_result_t begin_route_discovery(ucn_node_t *node,
         destination == node->config.node_id) {
         return UCN_ERR_ARGUMENT;
     }
-    if (destination > ucn_wire_profile_get_descriptor(
-                          node->tx_wire_profile)->max_node_id) {
-        return UCN_ERR_TOO_LARGE;
+    result = select_route_request_profile(node, destination, &request_profile);
+    if (result != UCN_OK) {
+        return result;
     }
 
     expire_dynamic_state(node, now_ms);
@@ -5408,7 +6031,7 @@ static ucn_result_t begin_route_discovery(ucn_node_t *node,
 
     (void)memset(&frame, 0, sizeof(frame));
     frame.message_type = UCN_MSG_ROUTE_REQ;
-    frame.wire_profile = node->tx_wire_profile;
+    frame.wire_profile = request_profile;
     frame.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
     frame.hop_limit = node->config.default_hop_limit;
     frame.network_id = node->config.network_id;
@@ -5419,7 +6042,12 @@ static ucn_result_t begin_route_discovery(ucn_node_t *node,
                   ucn_wire_profile_get_descriptor(frame.wire_profile)->address_bytes,
                   destination);
     write_u32_be(payload + route_request_id_offset(&frame), slot->request_id);
-    write_u16_be(payload + route_request_cost_offset(&frame), 0U);
+    result = write_route_cost_for_profile(
+        payload + route_request_cost_offset(&frame), frame.wire_profile, 0U);
+    if (result != UCN_OK) {
+        slot->active = false;
+        return result;
+    }
     payload[route_request_hop_offset(&frame)] = 0U;
     payload[route_request_flags_offset(&frame)] =
         is_candidate ? UCN_ROUTE_REQ_FLAG_CANDIDATE : 0U;
@@ -5542,8 +6170,15 @@ ucn_result_t ucn_node_install_local_path(ucn_node_t *node,
                                          ucn_node_id_t next_hop,
                                          uint32_t lease_ms)
 {
+    ucn_result_t result;
+
     if (node == NULL) {
         return UCN_ERR_ARGUMENT;
+    }
+    result = validate_path_wire_scope(node->tx_wire_profile, path_id,
+                                      destination, next_hop);
+    if (result != UCN_OK) {
+        return result;
     }
     if (node->security_ops == NULL || node->session_id == 0U) {
         return UCN_ERR_SECURITY;
@@ -5556,8 +6191,15 @@ ucn_result_t ucn_node_revoke_local_path(ucn_node_t *node,
                                         ucn_path_id_t path_id,
                                         ucn_node_id_t destination)
 {
+    ucn_result_t result;
+
     if (node == NULL) {
         return UCN_ERR_ARGUMENT;
+    }
+    result = validate_path_wire_scope(node->tx_wire_profile, path_id,
+                                      destination, 0U);
+    if (result != UCN_OK) {
+        return result;
     }
     if (node->security_ops == NULL || node->session_id == 0U) {
         return UCN_ERR_SECURITY;
@@ -5573,7 +6215,11 @@ ucn_result_t ucn_node_send_path_install(ucn_node_t *node,
                                         ucn_node_id_t next_hop,
                                         uint32_t lease_ms)
 {
-    uint8_t payload[UCN_PATH_INSTALL_PAYLOAD_BYTES];
+    ucn_wire_profile_t wire_profile;
+    const ucn_wire_profile_descriptor_t *descriptor;
+    ucn_link_t *link;
+    uint8_t payload[UCN_PATH_INSTALL_MAX_PAYLOAD_BYTES];
+    size_t payload_length;
     ucn_result_t result;
 
     if (node == NULL || control_target == 0U ||
@@ -5586,12 +6232,35 @@ ucn_result_t ucn_node_send_path_install(ucn_node_t *node,
     if (node->security_ops == NULL || node->session_id == 0U) {
         return UCN_ERR_SECURITY;
     }
-    write_u32_be(payload, path_id);
-    write_u32_be(payload + 4U, destination);
-    write_u32_be(payload + 8U, next_hop);
-    write_u32_be(payload + 12U, lease_ms);
-    result = send_control_to_node(node, control_target, UCN_MSG_PATH_INSTALL,
-                                  payload, (uint16_t)sizeof(payload));
+    result = validate_path_wire_scope(node->tx_wire_profile, path_id,
+                                      destination, next_hop);
+    if (result != UCN_OK) {
+        return result;
+    }
+    link = find_link(node, control_target);
+    if (link == NULL) {
+        return UCN_ERR_NOT_FOUND;
+    }
+    result = select_path_control_profile(
+        node, link, control_target, UCN_MSG_PATH_INSTALL, path_id,
+        destination, next_hop, &wire_profile);
+    if (result != UCN_OK) {
+        return result;
+    }
+    descriptor = ucn_wire_profile_get_descriptor(wire_profile);
+    payload_length = path_install_payload_size(wire_profile);
+    if (descriptor == NULL || payload_length > sizeof(payload)) {
+        return UCN_ERR_CONFIG;
+    }
+    write_uint_be(payload, descriptor->path_id_bytes, path_id);
+    write_uint_be(payload + path_install_destination_offset(descriptor),
+                  descriptor->address_bytes, destination);
+    write_uint_be(payload + path_install_next_hop_offset(descriptor),
+                  descriptor->address_bytes, next_hop);
+    write_u32_be(payload + path_install_lease_offset(descriptor), lease_ms);
+    result = send_control_to_node_profile(
+        node, control_target, UCN_MSG_PATH_INSTALL, payload,
+        (uint16_t)payload_length, wire_profile);
     if (result == UCN_OK) {
         node->stats.path_installs_sent++;
     }
@@ -5603,7 +6272,11 @@ ucn_result_t ucn_node_send_path_revoke(ucn_node_t *node,
                                        ucn_path_id_t path_id,
                                        ucn_node_id_t destination)
 {
-    uint8_t payload[UCN_PATH_REVOKE_PAYLOAD_BYTES];
+    ucn_wire_profile_t wire_profile;
+    const ucn_wire_profile_descriptor_t *descriptor;
+    ucn_link_t *link;
+    uint8_t payload[UCN_PATH_REVOKE_MAX_PAYLOAD_BYTES];
+    size_t payload_length;
     ucn_result_t result;
 
     if (node == NULL || control_target == 0U ||
@@ -5614,10 +6287,32 @@ ucn_result_t ucn_node_send_path_revoke(ucn_node_t *node,
     if (node->security_ops == NULL || node->session_id == 0U) {
         return UCN_ERR_SECURITY;
     }
-    write_u32_be(payload, path_id);
-    write_u32_be(payload + 4U, destination);
-    result = send_control_to_node(node, control_target, UCN_MSG_PATH_REVOKE,
-                                  payload, (uint16_t)sizeof(payload));
+    result = validate_path_wire_scope(node->tx_wire_profile, path_id,
+                                      destination, 0U);
+    if (result != UCN_OK) {
+        return result;
+    }
+    link = find_link(node, control_target);
+    if (link == NULL) {
+        return UCN_ERR_NOT_FOUND;
+    }
+    result = select_path_control_profile(
+        node, link, control_target, UCN_MSG_PATH_REVOKE, path_id,
+        destination, 0U, &wire_profile);
+    if (result != UCN_OK) {
+        return result;
+    }
+    descriptor = ucn_wire_profile_get_descriptor(wire_profile);
+    payload_length = path_revoke_payload_size(wire_profile);
+    if (descriptor == NULL || payload_length > sizeof(payload)) {
+        return UCN_ERR_CONFIG;
+    }
+    write_uint_be(payload, descriptor->path_id_bytes, path_id);
+    write_uint_be(payload + descriptor->path_id_bytes,
+                  descriptor->address_bytes, destination);
+    result = send_control_to_node_profile(
+        node, control_target, UCN_MSG_PATH_REVOKE, payload,
+        (uint16_t)payload_length, wire_profile);
     if (result == UCN_OK) {
         node->stats.path_revokes_sent++;
     }
@@ -5985,7 +6680,8 @@ static uint32_t auto_balance_path_score(const ucn_node_t *node,
     quality = ucn_node_get_link_quality(node, path->egress_link);
     active_flows = auto_balance_active_flow_count(node, local_path_id);
     if (quality == NULL || !quality->route_cost_valid ||
-        !route_cost_is_known(quality->route_cost)) {
+        quality->route_cost == 0U ||
+        quality->route_cost == UCN_LINK_ROUTE_COST_UNKNOWN) {
         return active_flows >= (size_t)(UINT32_MAX - unknown_score_base) ?
                    UINT32_MAX : unknown_score_base + (uint32_t)active_flows;
     }
@@ -6370,6 +7066,8 @@ ucn_result_t ucn_node_request_path_trace(ucn_node_t *node,
                                          ucn_path_trace_handler_t handler,
                                          void *context)
 {
+    ucn_wire_profile_t wire_profile;
+    const ucn_wire_profile_descriptor_t *descriptor;
     ucn_path_trace_pending_t *pending;
     ucn_link_t *link;
     uint8_t payload[UCN_PATH_TRACE_MAX_PAYLOAD_BYTES];
@@ -6396,6 +7094,15 @@ ucn_result_t ucn_node_request_path_trace(ucn_node_t *node,
     if (link == NULL) {
         return UCN_ERR_NOT_FOUND;
     }
+    result = select_path_trace_profile(node, link, destination, 1U,
+                                       &wire_profile);
+    if (result != UCN_OK) {
+        return result;
+    }
+    descriptor = ucn_wire_profile_get_descriptor(wire_profile);
+    if (descriptor == NULL) {
+        return UCN_ERR_CONFIG;
+    }
     if (!take_path_trace_token(node)) {
         return UCN_ERR_NO_SPACE;
     }
@@ -6419,10 +7126,12 @@ ucn_result_t ucn_node_request_path_trace(ucn_node_t *node,
     payload[UCN_PATH_TRACE_RECORD_COUNT_OFFSET] = 1U;
     payload[UCN_PATH_TRACE_RECORD_LIMIT_OFFSET] = record_limit;
     payload[UCN_PATH_TRACE_STATUS_OFFSET] = (uint8_t)UCN_PATH_TRACE_STATUS_OK;
-    write_u32_be(payload + UCN_PATH_TRACE_NODE_IDS_OFFSET, node->config.node_id);
+    write_uint_be(payload + UCN_PATH_TRACE_NODE_IDS_OFFSET,
+                  descriptor->address_bytes, node->config.node_id);
     result = send_path_trace_request_on_link(node, link, destination, payload,
-                                             (uint16_t)(UCN_PATH_TRACE_FIXED_PAYLOAD_BYTES +
-                                                        sizeof(ucn_node_id_t)));
+                                             (uint16_t)path_trace_payload_size(
+                                                 wire_profile, 1U),
+                                             wire_profile);
     if (result != UCN_OK) {
         if (pending->occupied && pending->trace_id == trace_id) {
             pending->occupied = false;
@@ -6799,6 +7508,7 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
 {
     ucn_frame_t frame;
     bool control_consumed = false;
+    ucn_wire_profile_t local_receive_profile;
     ucn_result_t result;
     uint8_t plaintext[UCN_MAX_PAYLOAD_BYTES];
 
@@ -6814,7 +7524,12 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
         return result;
     }
 
-    if (frame.wire_profile > node->max_receive_wire_profile) {
+    result = resolve_link_local_receive_profile(node, ingress_link,
+                                                &local_receive_profile);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (frame.wire_profile > local_receive_profile) {
         return UCN_ERR_UNSUPPORTED;
     }
 
@@ -6891,7 +7606,7 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
     if (frame.message_type == UCN_MSG_ROUTE_REQ) {
         ucn_rreq_cache_classification_t classification;
         size_t rreq_slot = 0U;
-        uint16_t route_cost;
+        ucn_route_cost_t route_cost;
 
         if (frame.destination != UCN_NODE_BROADCAST) {
             return UCN_ERR_MALFORMED;
@@ -6904,8 +7619,9 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
         if (result != UCN_OK) {
             return result;
         }
-        route_cost = read_u16_be(
-            frame.payload + route_request_cost_offset(&frame));
+        route_cost = read_route_cost_for_profile(
+            frame.payload + route_request_cost_offset(&frame),
+            frame.wire_profile);
         classification = classify_route_request(node, &frame, route_cost,
                                                 &rreq_slot);
         if (classification == UCN_RREQ_CACHE_REPLAY) {
@@ -7017,7 +7733,7 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
             node->stats.path_rejected++;
             (void)send_path_route_error(node, ingress_link, frame.source,
                                         frame.destination, frame.session_id,
-                                        frame.path_id);
+                                        frame.path_id, frame.wire_profile);
             return UCN_ERR_NOT_FOUND;
         }
     }
@@ -7037,7 +7753,7 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
 #if UCN_FEATURE_PATH
         const ucn_path_forward_entry_t *path = NULL;
 #endif
-        uint8_t route_reply_payload[UCN_ROUTE_REPLY_PAYLOAD_BYTES];
+        uint8_t route_reply_payload[UCN_ROUTE_REPLY_MAX_PAYLOAD_BYTES];
 
         if (frame.hop_limit <= 1U) {
             return UCN_ERR_TTL;
@@ -7045,10 +7761,12 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
 
 #if UCN_FEATURE_CANDIDATE_ROUTING
         if (frame.message_type == UCN_MSG_ROUTE_REPLY &&
-            frame.payload_length == UCN_ROUTE_REPLY_PAYLOAD_BYTES &&
-            (frame.payload[15] & UCN_ROUTE_REQ_FLAG_CANDIDATE) != 0U) {
+            frame.payload_length == route_reply_payload_size(
+                                        frame.wire_profile) &&
+            (frame.payload[route_reply_flags_offset(&frame)] &
+             UCN_ROUTE_REQ_FLAG_CANDIDATE) != 0U) {
             egress_link = find_candidate_link(node, frame.destination,
-                                              read_u32_be(frame.payload + 8U));
+                                              read_u32_be(frame.payload));
         } else if (frame.message_type == UCN_MSG_PATH_PROBE ||
                    frame.message_type == UCN_MSG_PATH_PROBE_ACK) {
             if (frame.payload_length != UCN_PATH_PROBE_PAYLOAD_BYTES ||
@@ -7098,14 +7816,15 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
                 }
                 (void)send_path_route_error(node, ingress_link, frame.source,
                                             frame.destination, frame.session_id,
-                                            frame.path_id);
+                                            frame.path_id, frame.wire_profile);
             } else if (frame.message_type != UCN_MSG_ROUTE_ERROR) {
-                (void)send_route_error(node, ingress_link, frame.source, frame.destination);
+                (void)send_route_error(node, ingress_link, frame.source,
+                                       frame.destination, frame.wire_profile);
             }
 #else
             if (frame.message_type != UCN_MSG_ROUTE_ERROR) {
                 (void)send_route_error(node, ingress_link, frame.source,
-                                       frame.destination);
+                                       frame.destination, frame.wire_profile);
             }
 #endif
             return UCN_ERR_NOT_FOUND;
@@ -7115,19 +7834,33 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
          * the ingress Link.  Forward the same accumulated Cost/Hop so the
          * upstream node can extend it by exactly one more Link. */
         if (frame.message_type == UCN_MSG_ROUTE_REPLY &&
-            frame.payload_length == UCN_ROUTE_REPLY_PAYLOAD_BYTES) {
-            uint8_t reply_hop_count = frame.payload[14];
+            frame.payload_length == route_reply_payload_size(
+                                        frame.wire_profile)) {
+            ucn_route_cost_t forwarded_cost;
+            uint8_t reply_hop_count =
+                frame.payload[route_reply_hop_offset(&frame)];
 
             if (reply_hop_count == UINT8_MAX) {
                 return UCN_ERR_TTL;
             }
             (void)memcpy(route_reply_payload, frame.payload,
-                         sizeof(route_reply_payload));
-            write_u16_be(
-                route_reply_payload + 12U,
-                add_route_cost(read_u16_be(frame.payload + 12U),
-                               link_route_cost(ingress_link)));
-            route_reply_payload[14] = (uint8_t)(reply_hop_count + 1U);
+                         frame.payload_length);
+            result = accumulate_route_cost(
+                read_route_cost_for_profile(
+                    frame.payload + route_reply_cost_offset(),
+                    frame.wire_profile),
+                link_route_cost(ingress_link), &forwarded_cost);
+            if (result != UCN_OK) {
+                return result;
+            }
+            result = write_route_cost_for_profile(
+                route_reply_payload + route_reply_cost_offset(),
+                frame.wire_profile, forwarded_cost);
+            if (result != UCN_OK) {
+                return result;
+            }
+            route_reply_payload[route_reply_hop_offset(&frame)] =
+                (uint8_t)(reply_hop_count + 1U);
             frame.payload = route_reply_payload;
         }
 
@@ -7159,14 +7892,15 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
                                                    frame.destination);
                 (void)send_path_route_error(node, ingress_link, frame.source,
                                             frame.destination, frame.session_id,
-                                            frame.path_id);
+                                            frame.path_id, frame.wire_profile);
             } else if (frame.message_type != UCN_MSG_ROUTE_ERROR) {
-                (void)send_route_error(node, ingress_link, frame.source, frame.destination);
+                (void)send_route_error(node, ingress_link, frame.source,
+                                       frame.destination, frame.wire_profile);
             }
 #else
             if (frame.message_type != UCN_MSG_ROUTE_ERROR) {
                 (void)send_route_error(node, ingress_link, frame.source,
-                                       frame.destination);
+                                       frame.destination, frame.wire_profile);
             }
 #endif
         }

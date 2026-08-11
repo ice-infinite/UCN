@@ -50,11 +50,11 @@ CMake 会把 `UCN_PROFILE` 和 `UCN_FEATURE_SERVICE` 作为 `ucn_core` 的 `PUBL
 | 配置 | 编译期最小 `UCN_MAX_FRAME_BYTES` | 原因 |
 | --- | ---: | --- |
 | Nano + Service OFF | 33 B | 当前静态 Payload 缓冲仍按保守 32 B Build 边界至少保留 1 B；Wire W0 Header 本身为 17 B。 |
-| Lite + Service OFF | 50 B | 保守 W3 控制面和 18 B AODV-Lite `ROUTE_REPLY`。 |
+| Lite + Service OFF | 46 B | 当前最大必需 W3 动态路由控制载荷是 14 B `ROUTE_REQ`，并保留 32 B W3 Route Header 的通用 Payload 缓冲契约；旧 18 B RREP 门禁已由 V5-14 移除。 |
 | Full + Service OFF | 64 B | 保守 W3 控制面和 32 B Policy Diagnostic Reply。 |
 | 任意 Profile + Service ON | 64 B | 默认 `UCN_SERVICE_MAX_PAYLOAD_BYTES=32`。 |
 
-GCC 严格构建已验证 33/50/64 B 的 `ucn_core` 分别可编译；32/49/63 B 分别按预期在编译期拒绝。这里是 **Core 正向/负向编译门禁**，不是 33 B 配置下运行包含大帧向量的整套 CTest；也不代表 CAN 等小 MTU 介质无需 Carrier 分段。
+GCC 严格构建已验证 33/46/64 B 的 `ucn_core` 分别可编译；32/45/63 B 分别按预期在编译期拒绝。这里是 **Core 正向/负向编译门禁**，不是最小配置下运行包含大帧向量的整套 CTest；也不代表 CAN 等小 MTU 介质无需 Carrier 分段。
 
 ## 6. Host 资源对比
 
@@ -62,11 +62,11 @@ GCC 严格构建已验证 33/50/64 B 的 `ucn_core` 分别可编译；32/49/63 B
 
 | Profile | `sizeof(ucn_node_t)` | 相对 Full | 静态库 `.text` 合计 | 相对 Full |
 | --- | ---: | ---: | ---: | ---: |
-| Nano | 2,648 B | -71.8% | 19,116 B | -83.7% |
-| Lite | 5,888 B | -37.4% | 57,688 B | -50.8% |
-| Full | 9,400 B | 基线 | 117,164 B | 基线 |
+| Nano | 2,648 B | -72.0% | 19,384 B | -83.3% |
+| Lite | 5,888 B | -37.8% | 58,580 B | -49.7% |
+| Full | 9,464 B | 基线 | 116,360 B | 基线 |
 
-该表已在 V5-07 以 GCC 14.2 Release/Service OFF 重新测量。Node 仍为 `2648/5888/9400 B`，`ucn_link_t` 三档均为 40 B；相对 V5-01，Wire 域/自动选档未继续扩大 Node，但 Codec、固定域门禁、控制压缩和自动选择函数增加了 Archive `.text`。历史变化见[S22 稳定化修复报告](UCN_S22_重复抑制与稳定化修复报告.md)和[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)。
+该表已在 V5-15 后以 GCC 14.2 Release/Service OFF 重新测量。Node 为 `2648/5888/9464 B`，`ucn_link_t` 三档均为 40 B；Full 增加 64 B 来自累计 Cost/诊断待发状态的固定字段，仍无动态内存。Archive `.text` 只用于比较 Host 裁剪。历史变化见[S22 稳定化修复报告](UCN_S22_重复抑制与稳定化修复报告.md)和[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)。
 
 这些数字不是 MCU ELF 的最终 Flash/RAM：目标 ABI、编译器、LTO、表深度、`UCN_MAX_FRAME_BYTES` 和产品静态实例数都会改变结果。目标板必须另外报告 ELF 段、静态对象、运行时栈高水位和 Heap；不能把 Host `.a` 直接写成 ESP32/STM32 Flash。
 

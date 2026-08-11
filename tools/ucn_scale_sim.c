@@ -34,7 +34,8 @@
 
 typedef enum scale_topology {
     SCALE_TOPOLOGY_TREE = 0,
-    SCALE_TOPOLOGY_RING4 = 1
+    SCALE_TOPOLOGY_RING4 = 1,
+    SCALE_TOPOLOGY_LINE = 2
 } scale_topology_t;
 
 typedef enum scale_traffic {
@@ -43,7 +44,8 @@ typedef enum scale_traffic {
     SCALE_TRAFFIC_PAIRS = 2,
     SCALE_TRAFFIC_INCAST = 3,
     SCALE_TRAFFIC_ALL_TO_ALL = 4,
-    SCALE_TRAFFIC_MIXED = 5
+    SCALE_TRAFFIC_MIXED = 5,
+    SCALE_TRAFFIC_END_TO_END = 6
 } scale_traffic_t;
 
 typedef enum scale_wire_mode {
@@ -253,7 +255,16 @@ static void scale_write_u32_be(uint8_t *output, uint32_t value)
 
 static const char *scale_topology_name(scale_topology_t topology)
 {
-    return topology == SCALE_TOPOLOGY_TREE ? "tree" : "ring4";
+    switch (topology) {
+    case SCALE_TOPOLOGY_TREE:
+        return "tree";
+    case SCALE_TOPOLOGY_RING4:
+        return "ring4";
+    case SCALE_TOPOLOGY_LINE:
+        return "line";
+    default:
+        return "unknown";
+    }
 }
 
 static const char *scale_traffic_name(scale_traffic_t traffic)
@@ -271,6 +282,8 @@ static const char *scale_traffic_name(scale_traffic_t traffic)
         return "all-to-all";
     case SCALE_TRAFFIC_MIXED:
         return "mixed";
+    case SCALE_TRAFFIC_END_TO_END:
+        return "end-to-end";
     default:
         return "unknown";
     }
@@ -710,6 +723,14 @@ static bool scale_build_topology(scale_network_t *network)
         }
         return true;
     }
+    if (network->options.topology == SCALE_TOPOLOGY_LINE) {
+        for (index = 1U; index < network->options.node_count; ++index) {
+            if (!scale_add_edge(network, index - 1U, index, UINT16_C(1000))) {
+                return false;
+            }
+        }
+        return true;
+    }
     for (index = 0U; index < network->options.node_count; ++index) {
         size_t next = (index + 1U) % network->options.node_count;
 
@@ -811,6 +832,9 @@ static void scale_choose_destinations(scale_network_t *network)
             }
         } else if (network->options.traffic == SCALE_TRAFFIC_INCAST) {
             destination = source == 0U ? 1U : 0U;
+        } else if (network->options.traffic == SCALE_TRAFFIC_END_TO_END) {
+            destination = source == 0U ?
+                              network->options.node_count - 1U : 0U;
         }
         network->fixed_destinations[source] = scale_constrain_destination(
             network, source, destination, (uint32_t)source);
@@ -1104,7 +1128,9 @@ static bool scale_generate_tick(scale_network_t *network, uint32_t tick)
     size_t source_count = network->options.node_count;
     size_t source_start = 0U;
 
-    if (!network->measuring && network->options.warmup_batch > 0U) {
+    if (network->options.traffic == SCALE_TRAFFIC_END_TO_END) {
+        source_count = 1U;
+    } else if (!network->measuring && network->options.warmup_batch > 0U) {
         source_count = network->options.warmup_batch;
         if (source_count > network->options.node_count) {
             source_count = network->options.node_count;
@@ -1909,6 +1935,7 @@ static bool scale_write_reports(const scale_network_t *network, bool passed)
 
 static bool scale_run(scale_network_t *network)
 {
+    scale_totals_t totals;
     uint32_t tick;
 
     for (tick = 0U; tick < network->options.warmup_ticks; ++tick) {
@@ -1946,6 +1973,18 @@ static bool scale_run(scale_network_t *network)
     if (!scale_routes_have_no_loop(network)) {
         return false;
     }
+    totals = scale_collect_totals(network);
+    if (network->options.traffic == SCALE_TRAFFIC_END_TO_END) {
+        if (totals.generated == 0U || totals.accepted == 0U ||
+            totals.delivered == 0U) {
+            return false;
+        }
+        if (network->options.loss_per_mille == 0U &&
+            network->options.flap_every_ticks == 0U &&
+            totals.accepted != totals.delivered) {
+            return false;
+        }
+    }
     return !network->fatal_error && !network->duplicate_business_delivery &&
            network->simulator_backpressure == 0U;
 }
@@ -1962,8 +2001,8 @@ static void scale_usage(const char *program)
         "  --step-ms N               virtual tick duration (default 10)\n"
         "  --messages-per-node N     Q1 messages per node/tick (default 1)\n"
         "  --payload-bytes N         12..UCN_MAX_PAYLOAD_BYTES\n"
-        "  --topology tree|ring4     default tree\n"
-        "  --traffic local|two-hop|pairs|incast|all-to-all|mixed\n"
+        "  --topology tree|ring4|line  default tree\n"
+        "  --traffic local|two-hop|pairs|incast|all-to-all|mixed|end-to-end\n"
         "  --wire-mode fixed|auto    declared fixed class or route-aware minimum\n"
         "  --wire-profile w0|w1|w2|w3|mixed  per-node TX class (default w3)\n"
         "  --loss-per-mille N        0..1000\n"
@@ -2032,6 +2071,8 @@ static bool scale_parse_options(int argc, char **argv, scale_options_t *options)
                 options->topology = SCALE_TOPOLOGY_TREE;
             } else if (strcmp(value, "ring4") == 0) {
                 options->topology = SCALE_TOPOLOGY_RING4;
+            } else if (strcmp(value, "line") == 0) {
+                options->topology = SCALE_TOPOLOGY_LINE;
             } else {
                 return false;
             }
@@ -2050,6 +2091,8 @@ static bool scale_parse_options(int argc, char **argv, scale_options_t *options)
                 options->traffic = SCALE_TRAFFIC_ALL_TO_ALL;
             } else if (strcmp(value, "mixed") == 0) {
                 options->traffic = SCALE_TRAFFIC_MIXED;
+            } else if (strcmp(value, "end-to-end") == 0) {
+                options->traffic = SCALE_TRAFFIC_END_TO_END;
             } else {
                 return false;
             }

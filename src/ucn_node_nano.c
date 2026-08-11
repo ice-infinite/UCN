@@ -25,6 +25,29 @@ static bool nano_link_is_registered(const ucn_node_t *node,
     return false;
 }
 
+static ucn_result_t nano_resolve_link_local_receive_profile(
+    const ucn_node_t *node,
+    const ucn_link_t *link,
+    ucn_wire_profile_t *profile)
+{
+    ucn_wire_profile_t configured;
+
+    if (node == NULL || link == NULL || profile == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    configured = (ucn_wire_profile_t)link->local_receive_wire_profile;
+    if (configured == UCN_WIRE_PROFILE_UNSPECIFIED) {
+        *profile = node->max_receive_wire_profile;
+        return UCN_OK;
+    }
+    if (ucn_wire_profile_get_descriptor(configured) == NULL ||
+        configured > node->max_receive_wire_profile) {
+        return UCN_ERR_CONFIG;
+    }
+    *profile = configured;
+    return UCN_OK;
+}
+
 static ucn_result_t nano_link_status(const ucn_link_t *link,
                                      ucn_link_status_t *status)
 {
@@ -290,6 +313,40 @@ ucn_wire_profile_t ucn_node_get_link_wire_profile_limit(
                UCN_WIRE_PROFILE_UNSPECIFIED : link->peer_wire_profile;
 }
 
+ucn_result_t ucn_node_set_link_local_wire_profile_limit(
+    ucn_node_t *node,
+    ucn_link_t *link,
+    ucn_wire_profile_t maximum_profile)
+{
+    ucn_wire_profile_t effective_profile = maximum_profile;
+
+    if (node == NULL || link == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (maximum_profile == UCN_WIRE_PROFILE_UNSPECIFIED) {
+        effective_profile = node->max_receive_wire_profile;
+    } else if (ucn_wire_profile_get_descriptor(maximum_profile) == NULL ||
+               maximum_profile > node->max_receive_wire_profile) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (link->mtu != 0U &&
+        link->mtu < ucn_frame_header_size_for_profile(effective_profile, 0U)) {
+        return UCN_ERR_TOO_LARGE;
+    }
+    link->local_receive_wire_profile = (uint8_t)maximum_profile;
+    return UCN_OK;
+}
+
+ucn_wire_profile_t ucn_node_get_link_local_wire_profile_limit(
+    const ucn_node_t *node,
+    const ucn_link_t *link)
+{
+    if (node == NULL || link == NULL) {
+        return UCN_WIRE_PROFILE_UNSPECIFIED;
+    }
+    return (ucn_wire_profile_t)link->local_receive_wire_profile;
+}
+
 ucn_result_t ucn_node_set_plain_session_id(ucn_node_t *node,
                                            ucn_session_id_t session_id)
 {
@@ -406,12 +463,20 @@ size_t ucn_node_neighbor_count(const ucn_node_t *node,
 ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
 {
     size_t index;
+    ucn_wire_profile_t local_receive_profile;
     ucn_result_t result;
 
     if (node == NULL || link == NULL || link->ops == NULL ||
-        link->ops->send == NULL || link->ops->get_status == NULL ||
-        link->mtu < ucn_frame_header_size_for_profile(
-                        node->max_receive_wire_profile, 0U)) {
+        link->ops->send == NULL || link->ops->get_status == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = nano_resolve_link_local_receive_profile(node, link,
+                                                     &local_receive_profile);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (link->mtu < ucn_frame_header_size_for_profile(local_receive_profile,
+                                                       0U)) {
         return UCN_ERR_ARGUMENT;
     }
     for (index = 0U; index < node->link_count; ++index) {
@@ -750,6 +815,7 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
 {
     ucn_frame_t frame;
     ucn_link_t *egress_link;
+    ucn_wire_profile_t local_receive_profile;
     ucn_result_t result;
     bool delivered = false;
 
@@ -761,7 +827,12 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
     if (result != UCN_OK) {
         return result;
     }
-    if (frame.wire_profile > node->max_receive_wire_profile) {
+    result = nano_resolve_link_local_receive_profile(node, ingress_link,
+                                                     &local_receive_profile);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (frame.wire_profile > local_receive_profile) {
         return UCN_ERR_UNSUPPORTED;
     }
     if (frame.network_id != node->config.network_id) {

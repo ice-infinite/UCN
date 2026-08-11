@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "test_support.h"
+#include "ucn/ucn_frame.h"
 #include "ucn/ucn_node.h"
 
 typedef struct metrics_link_context {
@@ -10,6 +11,8 @@ typedef struct metrics_link_context {
     bool metrics_valid;
     uint16_t route_cost;
     uint32_t send_count;
+    uint8_t last_frame[UCN_MAX_FRAME_BYTES];
+    size_t last_frame_length;
 } metrics_link_context_t;
 
 typedef struct metrics_receive_state {
@@ -24,6 +27,10 @@ static ucn_result_t metrics_link_send(ucn_link_t *link,
     metrics_link_context_t *context = (metrics_link_context_t *)link->context;
 
     context->send_count++;
+    if (length <= sizeof(context->last_frame)) {
+        (void)memcpy(context->last_frame, frame, length);
+        context->last_frame_length = length;
+    }
     if (context->peer == NULL) {
         return UCN_OK;
     }
@@ -85,6 +92,164 @@ static void metrics_setup_link(ucn_link_t *link,
     link->peer_node_id = peer_node_id;
 }
 
+static uint32_t metrics_wire_maximum(uint8_t width)
+{
+    return width >= 4U ? UINT32_MAX :
+           (UINT32_C(1) << ((uint32_t)width * 8U)) - UINT32_C(1);
+}
+
+static void metrics_write_uint_be(uint8_t *output, uint8_t width,
+                                  uint32_t value)
+{
+    uint8_t index;
+
+    for (index = 0U; index < width; ++index) {
+        output[index] = (uint8_t)(value >>
+            ((uint32_t)(width - index - 1U) * 8U));
+    }
+}
+
+static uint32_t metrics_read_uint_be(const uint8_t *input, uint8_t width)
+{
+    uint32_t value = 0U;
+    uint8_t index;
+
+    for (index = 0U; index < width; ++index) {
+        value = (value << 8U) | input[index];
+    }
+    return value;
+}
+
+static ucn_result_t metrics_inject_route_request(
+    ucn_node_t *relay,
+    ucn_link_t *ingress,
+    ucn_wire_profile_t profile,
+    uint32_t request_id,
+    uint32_t route_cost)
+{
+    const ucn_wire_profile_descriptor_t *descriptor =
+        ucn_wire_profile_get_descriptor(profile);
+    uint8_t payload[14] = { 0U };
+    uint8_t encoded[UCN_MAX_FRAME_BYTES];
+    size_t encoded_length = 0U;
+    size_t cost_offset;
+    size_t payload_length;
+    ucn_frame_t frame;
+    ucn_result_t result;
+
+    if (descriptor == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    cost_offset = (size_t)descriptor->address_bytes + 4U;
+    payload_length = cost_offset + descriptor->route_cost_bytes + 2U;
+    metrics_write_uint_be(payload, descriptor->address_bytes, UINT32_C(3));
+    metrics_write_uint_be(payload + descriptor->address_bytes, 4U, request_id);
+    metrics_write_uint_be(payload + cost_offset, descriptor->route_cost_bytes,
+                          route_cost);
+    payload[cost_offset + descriptor->route_cost_bytes] = 0U;
+    payload[cost_offset + descriptor->route_cost_bytes + 1U] = 0U;
+
+    (void)memset(&frame, 0, sizeof(frame));
+    frame.message_type = UCN_MSG_ROUTE_REQ;
+    frame.wire_profile = profile;
+    frame.traffic_class = UCN_TRAFFIC_Q0_CRITICAL;
+    frame.hop_limit = 4U;
+    frame.network_id = UINT32_C(0x2A);
+    frame.source = UINT32_C(1);
+    frame.destination = UCN_NODE_BROADCAST;
+    frame.sequence = request_id;
+    frame.payload = payload;
+    frame.payload_length = (uint16_t)payload_length;
+    result = ucn_frame_encode(&frame, encoded, sizeof(encoded), &encoded_length);
+    return result == UCN_OK ?
+               ucn_node_receive(relay, ingress, encoded, encoded_length) :
+               result;
+}
+
+static int test_route_cost_profile_boundaries(void)
+{
+    const ucn_wire_profile_t profiles[] = {
+        UCN_WIRE_PROFILE_W0_LOCAL,
+        UCN_WIRE_PROFILE_W1_EDGE,
+        UCN_WIRE_PROFILE_W2_MESH,
+        UCN_WIRE_PROFILE_W3_BACKBONE
+    };
+    size_t profile_index;
+
+    for (profile_index = 0U;
+         profile_index < sizeof(profiles) / sizeof(profiles[0]);
+         ++profile_index) {
+        const ucn_wire_profile_t profile = profiles[profile_index];
+        const ucn_wire_profile_descriptor_t *descriptor =
+            ucn_wire_profile_get_descriptor(profile);
+        const uint32_t wire_maximum =
+            metrics_wire_maximum(descriptor->route_cost_bytes);
+        const size_t cost_offset = (size_t)descriptor->address_bytes + 4U;
+        const size_t expected_payload_length =
+            cost_offset + descriptor->route_cost_bytes + 2U;
+        ucn_node_t relay;
+        ucn_link_t ingress, egress;
+        metrics_link_context_t ingress_context, egress_context;
+        ucn_config_t config;
+        ucn_frame_t forwarded;
+        uint32_t sends_before_overflow;
+
+        (void)memset(&relay, 0, sizeof(relay));
+        (void)memset(&ingress, 0, sizeof(ingress));
+        (void)memset(&egress, 0, sizeof(egress));
+        (void)memset(&ingress_context, 0, sizeof(ingress_context));
+        (void)memset(&egress_context, 0, sizeof(egress_context));
+        config.network_id = UINT32_C(42);
+        config.node_id = UINT32_C(2);
+        config.default_hop_limit = 4U;
+        TEST_ASSERT(ucn_node_init(&relay, &config) == UCN_OK);
+        TEST_ASSERT(ucn_node_set_wire_profiles(
+                        &relay, profile, UCN_WIRE_PROFILE_W3_BACKBONE) == UCN_OK);
+        ingress_context.is_up = true;
+        ingress_context.metrics_valid = true;
+        ingress_context.route_cost = 1U;
+        egress_context.is_up = true;
+        egress_context.metrics_valid = true;
+        egress_context.route_cost = 1U;
+        metrics_setup_link(&ingress, &ingress_context, 20U, UINT32_C(1));
+        metrics_setup_link(&egress, &egress_context, 21U, UINT32_C(3));
+        ingress.peer_wire_profile = profile;
+        egress.peer_wire_profile = profile;
+        TEST_ASSERT(ucn_node_register_link(&relay, &ingress) == UCN_OK);
+        TEST_ASSERT(ucn_node_register_link(&relay, &egress) == UCN_OK);
+
+        TEST_ASSERT(metrics_inject_route_request(
+                        &relay, &ingress, profile, UINT32_C(1),
+                        wire_maximum - UINT32_C(2)) == UCN_OK);
+        TEST_ASSERT(ucn_frame_decode(egress_context.last_frame,
+                                     egress_context.last_frame_length,
+                                     &forwarded) == UCN_OK);
+        TEST_ASSERT(forwarded.wire_profile == profile);
+        TEST_ASSERT(forwarded.payload_length == expected_payload_length);
+        TEST_ASSERT(metrics_read_uint_be(
+                        forwarded.payload + cost_offset,
+                        descriptor->route_cost_bytes) ==
+                    wire_maximum - UINT32_C(1));
+
+        TEST_ASSERT(metrics_inject_route_request(
+                        &relay, &ingress, profile, UINT32_C(2),
+                        wire_maximum) == UCN_OK);
+        TEST_ASSERT(ucn_frame_decode(egress_context.last_frame,
+                                     egress_context.last_frame_length,
+                                     &forwarded) == UCN_OK);
+        TEST_ASSERT(metrics_read_uint_be(
+                        forwarded.payload + cost_offset,
+                        descriptor->route_cost_bytes) == wire_maximum);
+
+        sends_before_overflow = egress_context.send_count;
+        TEST_ASSERT(metrics_inject_route_request(
+                        &relay, &ingress, profile, UINT32_C(3),
+                        wire_maximum - UINT32_C(1)) == UCN_ERR_TOO_LARGE);
+        TEST_ASSERT(egress_context.send_count == sends_before_overflow);
+    }
+    return 0;
+}
+
 int test_link_metrics(void)
 {
     uint8_t payload = 0x5AU;
@@ -98,6 +263,8 @@ int test_link_metrics(void)
     const ucn_route_entry_t *a_to_c = NULL;
     const ucn_route_entry_t *d_to_c = NULL;
     size_t route_index;
+
+    TEST_ASSERT(test_route_cost_profile_boundaries() == 0);
 
     (void)memset(&direct_node, 0, sizeof(direct_node));
     (void)memset(&default_link, 0, sizeof(default_link));
@@ -145,14 +312,16 @@ int test_link_metrics(void)
     TEST_ASSERT(metrics_init_node(&b, UINT32_C(2)) == 0);
     TEST_ASSERT(metrics_init_node(&c, UINT32_C(3)) == 0);
     TEST_ASSERT(metrics_init_node(&d, UINT32_C(4)) == 0);
-    cab.is_up = true; cab.metrics_valid = false;
-    cba.is_up = true; cba.metrics_valid = false;
-    cad.is_up = true; cad.metrics_valid = true; cad.route_cost = 2000U;
-    cda.is_up = true; cda.metrics_valid = true; cda.route_cost = 2000U;
-    cbc.is_up = true; cbc.metrics_valid = true; cbc.route_cost = 1U;
-    ccb.is_up = true; ccb.metrics_valid = true; ccb.route_cost = 1U;
-    cdc.is_up = true; cdc.metrics_valid = true; cdc.route_cost = 2000U;
-    ccd.is_up = true; ccd.metrics_valid = true; ccd.route_cost = 2000U;
+    /* Both alternatives deliberately exceed the old 16-bit aggregate ceiling:
+     * A-B-C costs 100000 while A-D-C costs 80000. */
+    cab.is_up = true; cab.metrics_valid = true; cab.route_cost = 50000U;
+    cba.is_up = true; cba.metrics_valid = true; cba.route_cost = 50000U;
+    cad.is_up = true; cad.metrics_valid = true; cad.route_cost = 40000U;
+    cda.is_up = true; cda.metrics_valid = true; cda.route_cost = 40000U;
+    cbc.is_up = true; cbc.metrics_valid = true; cbc.route_cost = 50000U;
+    ccb.is_up = true; ccb.metrics_valid = true; ccb.route_cost = 50000U;
+    cdc.is_up = true; cdc.metrics_valid = true; cdc.route_cost = 40000U;
+    ccd.is_up = true; ccd.metrics_valid = true; ccd.route_cost = 40000U;
     metrics_setup_link(&ab, &cab, 10U, UINT32_C(2));
     metrics_setup_link(&ba, &cba, 11U, UINT32_C(1));
     metrics_setup_link(&ad, &cad, 12U, UINT32_C(4));
@@ -190,9 +359,11 @@ int test_link_metrics(void)
      * advertised by its downstream neighbor.  This keeps a same-Epoch route
      * strictly decreasing toward the target instead of copying one total
      * origin-to-target value into every relay. */
-    TEST_ASSERT(a_to_c != NULL && a_to_c->route_cost == UINT16_C(4000) &&
+    TEST_ASSERT(a_to_c != NULL &&
+                a_to_c->route_cost == UINT32_C(80000) &&
                 a_to_c->hop_count == 2U);
-    TEST_ASSERT(d_to_c != NULL && d_to_c->route_cost == UINT16_C(2000) &&
+    TEST_ASSERT(d_to_c != NULL &&
+                d_to_c->route_cost == UINT32_C(40000) &&
                 d_to_c->hop_count == 1U);
     cab.send_count = 0U; cad.send_count = 0U;
     TEST_ASSERT(ucn_node_send(&a, UINT32_C(3), UCN_MSG_DATA_Q1,

@@ -30,7 +30,7 @@ ucn_node_set_wire_profiles(&node,
 - `test_node_wire_profile.c` 新增低档 Node 专项：Node 固定 `W0 TX/W3 RX`，同一个静态命令 Endpoint 依次接收 W0、W1、W2、W3 帧，并核对实际 Profile、Payload 和分发次数。
 - 原有 `W0 TX/W0 RX` 节点拒绝 W1 帧的负向测试保留，证明产品主动收窄接收上限仍然失败关闭。
 
-Windows Debug 与 Release 的 Core/Scale 回归均通过：Nano `1/1`，Lite/Full `3/3`；V5-09 独立配置契约为 `3/3`，WSL Full 在显式启用配置契约后 ASan+UBSan `6/6`。33/50/64 B 最小 MTU 继续按既有门禁只证明 Core 编译通过；完整测试套件包含超过最小 MTU 的 W3 大载荷向量，不能在最小 MTU 配置下全跑。
+Windows Debug 与 Release 的 Core/Scale 回归均通过：Nano `1/1`，Lite/Full `3/3`；V5-09 独立配置契约为 `3/3`，WSL Full 在显式启用配置契约后 ASan+UBSan `6/6`。当前 33/46/64 B 最小 MTU 门禁只证明 Core 编译通过；完整测试套件包含超过最小 MTU 的 W3 大载荷向量，不能在最小 MTU 配置下全跑。
 
 ## “能解码”不等于“具备全部功能”
 

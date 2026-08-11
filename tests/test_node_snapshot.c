@@ -11,6 +11,8 @@ typedef struct snapshot_link_context {
     uint32_t send_count;
     uint8_t last_message_type;
     uint8_t last_flags;
+    ucn_wire_profile_t last_wire_profile;
+    uint16_t last_payload_length;
 } snapshot_link_context_t;
 
 typedef struct snapshot_callback_state {
@@ -29,6 +31,8 @@ static ucn_result_t snapshot_link_send(ucn_link_t *link,
     if (ucn_frame_decode(frame, length, &decoded) == UCN_OK) {
         context->last_message_type = decoded.message_type;
         context->last_flags = decoded.flags;
+        context->last_wire_profile = decoded.wire_profile;
+        context->last_payload_length = decoded.payload_length;
     }
     if (!context->deliver) {
         return UCN_OK;
@@ -99,6 +103,129 @@ static const ucn_node_snapshot_entry_t *snapshot_find_entry(
         }
     }
     return NULL;
+}
+
+static int snapshot_test_profile_payloads(void)
+{
+    static const ucn_wire_profile_t profiles[] = {
+        UCN_WIRE_PROFILE_W0_LOCAL,
+        UCN_WIRE_PROFILE_W1_EDGE,
+        UCN_WIRE_PROFILE_W2_MESH,
+        UCN_WIRE_PROFILE_W3_BACKBONE
+    };
+    static const uint16_t reply_lengths[] = { 9U, 10U, 11U, 12U };
+    const ucn_node_id_t origin = UINT32_C(1);
+    size_t index;
+
+    for (index = 0U; index < sizeof(profiles) / sizeof(profiles[0]); ++index) {
+        ucn_config_t config;
+        ucn_node_t a, b;
+        ucn_link_t ab, ba;
+        snapshot_link_context_t cab, cba;
+        snapshot_callback_state_t callback;
+        const ucn_wire_profile_descriptor_t *descriptor =
+            ucn_wire_profile_get_descriptor(profiles[index]);
+        uint8_t malformed_payload[13U] = { 0U };
+        uint8_t encoded[UCN_MAX_FRAME_BYTES];
+        size_t encoded_length = 0U;
+        ucn_frame_t malformed;
+
+        (void)memset(&a, 0, sizeof(a));
+        (void)memset(&b, 0, sizeof(b));
+        (void)memset(&ab, 0, sizeof(ab));
+        (void)memset(&ba, 0, sizeof(ba));
+        (void)memset(&cab, 0, sizeof(cab));
+        (void)memset(&cba, 0, sizeof(cba));
+        (void)memset(&callback, 0, sizeof(callback));
+        config.network_id = UINT32_C(42);
+        config.node_id = origin;
+        config.default_hop_limit = 4U;
+        TEST_ASSERT(ucn_node_init(&a, &config) == UCN_OK);
+        config.node_id = UINT32_C(2);
+        TEST_ASSERT(ucn_node_init(&b, &config) == UCN_OK);
+        TEST_ASSERT(ucn_node_set_wire_profiles(
+                        &a, profiles[index], UCN_WIRE_PROFILE_W3_BACKBONE) ==
+                    UCN_OK);
+        TEST_ASSERT(ucn_node_set_wire_profiles(
+                        &b, profiles[index], UCN_WIRE_PROFILE_W3_BACKBONE) ==
+                    UCN_OK);
+        snapshot_setup_link(&ab, &cab, (uint8_t)(30U + index * 2U),
+                            UINT32_C(2));
+        snapshot_setup_link(&ba, &cba, (uint8_t)(31U + index * 2U), origin);
+        cab.peer = &b;
+        cab.peer_ingress = &ba;
+        cba.peer = &a;
+        cba.peer_ingress = &ab;
+        ab.mtu = ucn_frame_header_size_for_profile(
+                     profiles[index], UCN_FRAME_FLAG_DIAGNOSTIC) + 8U;
+        ba.mtu = ucn_frame_header_size_for_profile(
+                     profiles[index], UCN_FRAME_FLAG_DIAGNOSTIC) +
+                 reply_lengths[index];
+        TEST_ASSERT(ucn_node_set_link_local_wire_profile_limit(
+                        &a, &ab, profiles[index]) == UCN_OK);
+        TEST_ASSERT(ucn_node_set_link_local_wire_profile_limit(
+                        &b, &ba, profiles[index]) == UCN_OK);
+        TEST_ASSERT(ucn_node_register_link(&a, &ab) == UCN_OK);
+        TEST_ASSERT(ucn_node_register_link(&b, &ba) == UCN_OK);
+        TEST_ASSERT(ucn_node_set_node_snapshot_authorizer(
+                        &b, snapshot_allow_origin, (void *)&origin) == UCN_OK);
+        TEST_ASSERT(ucn_node_request_node_snapshot(
+                        &a, 0U, snapshot_callback, &callback) == UCN_OK);
+        TEST_ASSERT(cab.last_message_type == UCN_MSG_NODE_SNAPSHOT_REQ &&
+                    cab.last_wire_profile == profiles[index] &&
+                    cab.last_payload_length == 8U);
+        (void)ucn_node_step(&b, UCN_NODE_SNAPSHOT_REPLY_JITTER_MS);
+        (void)ucn_node_step(&a, UCN_NODE_SNAPSHOT_TIMEOUT_MS);
+        TEST_ASSERT(cba.last_message_type == UCN_MSG_NODE_SNAPSHOT_REPLY &&
+                    cba.last_wire_profile == profiles[index] &&
+                    cba.last_payload_length == reply_lengths[index]);
+        TEST_ASSERT(callback.count == 1U &&
+                    callback.result.node_count == 2U);
+
+        if (profiles[index] == UCN_WIRE_PROFILE_W3_BACKBONE) {
+            (void)ucn_node_step(&a, UCN_NODE_SNAPSHOT_TOKEN_REFILL_MS);
+            (void)ucn_node_step(&b, UCN_NODE_SNAPSHOT_TOKEN_REFILL_MS);
+            TEST_ASSERT(ucn_node_set_wire_profile_auto(&a, true) == UCN_OK);
+            TEST_ASSERT(ucn_node_set_link_wire_profile_limit(
+                            &a, &ab, UCN_WIRE_PROFILE_W0_LOCAL) == UCN_OK);
+            (void)memset(&callback, 0, sizeof(callback));
+            TEST_ASSERT(ucn_node_request_node_snapshot(
+                            &a, 0U, snapshot_callback, &callback) == UCN_OK);
+            (void)ucn_node_step(
+                &b, UCN_NODE_SNAPSHOT_TOKEN_REFILL_MS +
+                        UCN_NODE_SNAPSHOT_REPLY_JITTER_MS);
+            (void)ucn_node_step(
+                &a, UCN_NODE_SNAPSHOT_TOKEN_REFILL_MS +
+                        UCN_NODE_SNAPSHOT_TIMEOUT_MS);
+            TEST_ASSERT(callback.count == 1U &&
+                        cab.last_wire_profile == UCN_WIRE_PROFILE_W0_LOCAL &&
+                        cab.last_payload_length == 8U &&
+                        cba.last_wire_profile == UCN_WIRE_PROFILE_W0_LOCAL &&
+                        cba.last_payload_length == reply_lengths[0]);
+        }
+
+        ab.mtu = UCN_MAX_FRAME_BYTES;
+        malformed_payload[3U] = 1U;
+        malformed_payload[4U + descriptor->address_bytes - 1U] = 2U;
+        malformed_payload[4U + descriptor->address_bytes] = 1U;
+        (void)memset(&malformed, 0, sizeof(malformed));
+        malformed.message_type = UCN_MSG_NODE_SNAPSHOT_REPLY;
+        malformed.wire_profile = profiles[index];
+        malformed.traffic_class = UCN_TRAFFIC_Q1_REALTIME;
+        malformed.flags = UCN_FRAME_FLAG_DIAGNOSTIC;
+        malformed.hop_limit = 4U;
+        malformed.network_id = UINT32_C(42);
+        malformed.source = UINT32_C(2);
+        malformed.destination = UINT32_C(1);
+        malformed.sequence = (uint32_t)(100U + index);
+        malformed.payload = malformed_payload;
+        malformed.payload_length = (uint16_t)(reply_lengths[index] + 1U);
+        TEST_ASSERT(ucn_frame_encode(&malformed, encoded, sizeof(encoded),
+                                     &encoded_length) == UCN_OK);
+        TEST_ASSERT(ucn_node_receive(&a, &ab, encoded, encoded_length) ==
+                    UCN_ERR_MALFORMED);
+    }
+    return 0;
 }
 
 static void snapshot_run_replies(ucn_node_t *a,
@@ -232,6 +359,7 @@ int test_node_snapshot(void)
 {
     int result = 0;
 
+    result |= snapshot_test_profile_payloads();
     result |= snapshot_test_collect_and_truncate();
     result |= snapshot_test_default_deny();
     return result;

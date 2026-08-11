@@ -5,6 +5,8 @@
 #define CONFIG_ASSERT(name, condition) \
     typedef char name[(condition) ? 1 : -1]
 
+CONFIG_ASSERT(config_protocol_version, UCN_PROTOCOL_VERSION == 5U);
+
 #ifdef UCN_TEST_EXPECT_USER_OVERRIDES
 CONFIG_ASSERT(config_override_frame, UCN_MAX_FRAME_BYTES == 128U);
 CONFIG_ASSERT(config_override_payload, UCN_MAX_PAYLOAD_BYTES == 64U);
