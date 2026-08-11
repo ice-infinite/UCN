@@ -459,6 +459,35 @@ ucn_result_t ucn_frame_encode(const ucn_frame_t *frame,
     return UCN_OK;
 }
 
+ucn_result_t ucn_frame_peek_wire_profile(const uint8_t *input,
+                                         size_t input_length,
+                                         ucn_wire_profile_t *profile)
+{
+    ucn_wire_profile_t decoded_profile;
+
+    if (input == NULL || profile == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (input_length <= UCN_OFFSET_VERSION_PROFILE) {
+        return UCN_ERR_MALFORMED;
+    }
+    if (input[UCN_OFFSET_MAGIC_0] != UCN_FRAME_MAGIC_0 ||
+        input[UCN_OFFSET_MAGIC_1] != UCN_FRAME_MAGIC_1) {
+        return UCN_ERR_MALFORMED;
+    }
+    if ((input[UCN_OFFSET_VERSION_PROFILE] & UCN_VERSION_MASK) !=
+        UCN_PROTOCOL_VERSION) {
+        return UCN_ERR_VERSION;
+    }
+    decoded_profile = profile_from_wire_code(
+        (uint8_t)(input[UCN_OFFSET_VERSION_PROFILE] >> UCN_WIRE_PROFILE_SHIFT));
+    if (ucn_wire_profile_get_descriptor(decoded_profile) == NULL) {
+        return UCN_ERR_MALFORMED;
+    }
+    *profile = decoded_profile;
+    return UCN_OK;
+}
+
 ucn_result_t ucn_frame_decode(const uint8_t *input,
                               size_t input_length,
                               ucn_frame_t *frame)
@@ -479,20 +508,17 @@ ucn_result_t ucn_frame_decode(const uint8_t *input,
     if (input == NULL || frame == NULL) {
         return UCN_ERR_ARGUMENT;
     }
+    {
+        const ucn_result_t peek_result =
+            ucn_frame_peek_wire_profile(input, input_length, &profile);
+
+        if (peek_result != UCN_OK) {
+            return peek_result;
+        }
+    }
     if (input_length < UCN_FRAME_W0_HEADER_SIZE) {
         return UCN_ERR_MALFORMED;
     }
-    if (input[UCN_OFFSET_MAGIC_0] != UCN_FRAME_MAGIC_0 ||
-        input[UCN_OFFSET_MAGIC_1] != UCN_FRAME_MAGIC_1) {
-        return UCN_ERR_MALFORMED;
-    }
-    if ((input[UCN_OFFSET_VERSION_PROFILE] & UCN_VERSION_MASK) !=
-        UCN_PROTOCOL_VERSION) {
-        return UCN_ERR_VERSION;
-    }
-
-    profile = profile_from_wire_code(
-        (uint8_t)(input[UCN_OFFSET_VERSION_PROFILE] >> UCN_WIRE_PROFILE_SHIFT));
     descriptor = ucn_wire_profile_get_descriptor(profile);
     flags = input[UCN_OFFSET_TRAFFIC_FLAGS] & UCN_WIRE_FLAGS_MASK;
     traffic_class = (uint8_t)(input[UCN_OFFSET_TRAFFIC_FLAGS] >> 6U);

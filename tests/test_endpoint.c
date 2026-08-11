@@ -75,6 +75,8 @@ int test_endpoint(void)
     endpoint_link_context_t cab, cba;
     endpoint_receive_state_t imu_received, baro_received, generic_received;
     ucn_send_request_t request;
+    ucn_route_constraints_t constraints;
+    ucn_route_constraints_t readback;
 
     (void)memset(&a, 0, sizeof(a));
     (void)memset(&b, 0, sizeof(b));
@@ -86,6 +88,7 @@ int test_endpoint(void)
     (void)memset(&baro_received, 0, sizeof(baro_received));
     (void)memset(&generic_received, 0, sizeof(generic_received));
     (void)memset(&request, 0, sizeof(request));
+    (void)memset(&constraints, 0, sizeof(constraints));
     TEST_ASSERT(endpoint_init_node(&a, UINT32_C(1)) == 0);
     TEST_ASSERT(endpoint_init_node(&b, UINT32_C(2)) == 0);
     ab.ops = &ENDPOINT_LINK_OPS; ab.context = &cab; ab.link_id = 1U;
@@ -140,5 +143,33 @@ int test_endpoint(void)
     TEST_ASSERT(ucn_node_step(&a, 11U) == UCN_OK);
     TEST_ASSERT(imu_received.count == 2U && imu_received.last_payload == imu_latest);
     TEST_ASSERT(baro_received.count == 1U && baro_received.last_payload == baro_value);
+
+#if UCN_FEATURE_DYNAMIC_MESH
+    constraints.max_hops = 1U;
+    constraints.max_route_cost = 100U;
+    TEST_ASSERT(ucn_node_set_default_route_constraints(&a, &constraints) == UCN_OK);
+    TEST_ASSERT(ucn_node_get_default_route_constraints(&a, &readback) == UCN_OK);
+    TEST_ASSERT(readback.max_hops == 1U && readback.max_route_cost == 100U);
+    /* This legacy test Link exposes no Cost or RTT.  A finite Cost ceiling and
+     * an RTT-required gate therefore fail closed for Q0 rather than guessing. */
+    TEST_ASSERT(ucn_node_send_endpoint(&a, UINT32_C(2), IMU_ENDPOINT,
+                                       UCN_TRAFFIC_Q0_CRITICAL,
+                                       &imu_first, 1U) == UCN_ERR_NOT_FOUND);
+    constraints.max_route_cost = UCN_ROUTE_COST_MAX;
+    constraints.require_verified_rtt = true;
+    TEST_ASSERT(ucn_node_set_default_route_constraints(&a, &constraints) == UCN_OK);
+    TEST_ASSERT(ucn_node_send_endpoint(&a, UINT32_C(2), IMU_ENDPOINT,
+                                       UCN_TRAFFIC_Q0_CRITICAL,
+                                       &imu_first, 1U) == UCN_ERR_NOT_FOUND);
+    constraints.require_verified_rtt = false;
+    TEST_ASSERT(ucn_node_set_default_route_constraints(&a, &constraints) == UCN_OK);
+    TEST_ASSERT(ucn_node_send_endpoint(&a, UINT32_C(2), IMU_ENDPOINT,
+                                       UCN_TRAFFIC_Q0_CRITICAL,
+                                       &imu_first, 1U) == UCN_OK);
+    TEST_ASSERT(imu_received.count == 3U);
+#else
+    (void)constraints;
+    (void)readback;
+#endif
     return 0;
 }

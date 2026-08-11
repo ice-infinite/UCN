@@ -26,6 +26,9 @@ typedef struct ucn_path_forward_config {
     ucn_path_id_t path_id;
     ucn_node_id_t destination;
     ucn_node_id_t next_hop;
+    /* Number of Link hops from this Node to destination.  A terminal entry
+     * must be zero; every forwarding entry must be non-zero. */
+    uint8_t remaining_hops;
     ucn_link_t *egress_link;
     uint32_t expires_at_ms;
 } ucn_path_forward_config_t;
@@ -37,6 +40,7 @@ typedef struct ucn_path_forward_entry {
     ucn_path_id_t path_id;
     ucn_node_id_t destination;
     ucn_node_id_t next_hop;
+    uint8_t remaining_hops;
     ucn_link_t *egress_link;
     bool terminal;
     uint32_t expires_at_ms;

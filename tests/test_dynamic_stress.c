@@ -1180,6 +1180,7 @@ static int dynamic_test_fixed_resource_bounds(void)
     path_config.owner_session_id = UINT32_C(1);
     path_config.destination = UINT32_C(9);
     path_config.next_hop = UINT32_C(2);
+    path_config.remaining_hops = 1U;
     path_config.egress_link = &route_link;
     for (index = 0U; index < UCN_MAX_PATH_FORWARD_ENTRIES; ++index) {
         path_config.path_id = (ucn_path_id_t)(index + 1U);

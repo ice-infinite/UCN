@@ -13,7 +13,7 @@
  * mutate them outside the Core/Port owner and always compile every translation
  * unit with the same UCN_PROFILE and UCN_FEATURE_SERVICE definitions.
  */
-#define UCN_NODE_STORAGE_LAYOUT_VERSION UINT32_C(2)
+#define UCN_NODE_STORAGE_LAYOUT_VERSION UINT32_C(3)
 
 typedef struct ucn_endpoint_handler_entry {
     bool occupied;
@@ -155,6 +155,8 @@ typedef struct ucn_route_entry {
     uint32_t last_refresh_started_ms;
     ucn_route_cost_t route_cost;
     uint8_t hop_count;
+    bool verified_rtt_valid;
+    uint16_t verified_rtt_ms;
     uint16_t route_epoch;
     bool previous_valid;
     ucn_link_t *previous_egress_link;
@@ -167,10 +169,14 @@ typedef struct ucn_route_discovery {
     bool active;
     ucn_node_id_t destination;
     uint32_t request_id;
+    uint32_t overall_started_at_ms;
     uint32_t started_at_ms;
     uint32_t deadline_ms;
+    uint8_t current_hop_limit;
+    uint8_t maximum_hop_limit;
 #if UCN_FEATURE_CANDIDATE_ROUTING
     bool is_candidate;
+    bool require_verified_rtt;
 #endif
 } ucn_route_discovery_t;
 
@@ -187,6 +193,8 @@ typedef struct ucn_candidate_route {
     uint8_t hop_count;
     uint8_t probes_sent;
     uint8_t probes_acked;
+    bool verified_rtt_valid;
+    uint16_t verified_rtt_ms;
     uint16_t route_epoch;
 } ucn_candidate_route_t;
 
@@ -232,6 +240,7 @@ struct ucn_node {
     ucn_tx_item_t q1[UCN_TX_Q1_DEPTH];
 #if UCN_FEATURE_DYNAMIC_MESH
     ucn_pending_q1_item_t pending_q1[UCN_PENDING_Q1_DEPTH];
+    ucn_route_constraints_t default_route_constraints;
 #endif
 #if UCN_FEATURE_DIAGNOSTICS
     ucn_path_trace_pending_t path_trace_pending[UCN_PATH_TRACE_PENDING_DEPTH];

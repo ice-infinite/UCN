@@ -16,6 +16,7 @@ nodes:
       - frame.ucn_frame_max_payload_for_profile
       - frame.ucn_frame_encoded_size
       - frame.ucn_frame_encode
+      - frame.ucn_frame_peek_wire_profile
       - frame.ucn_frame_decode
       - frame.ucn_frame_write_e2e_aad
       - frame.ucn_frame_select_min_wire_profile
@@ -131,6 +132,22 @@ nodes:
     notes:
       - CRC 仅检错，不提供身份认证或防篡改能力。
 
+  - id: frame.ucn_frame_peek_wire_profile
+    symbol: ucn_frame_peek_wire_profile
+    type: function
+    file: src/ucn_frame.c
+    layer: core
+    role: 只读取固定 3 B Prefix，校验 Magic、Version 与官方 Profile Code，供 Ingress 在完整 Decode/CRC 前执行本地 RX Ceiling 门禁。
+    called_by:
+      - frame.ucn_frame_decode
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: frame.ucn_wire_profile_get_descriptor
+        type: direct
+        reason: 只接受官方 W0～W3 Profile。
+    notes:
+      - Peek 不校验长度以外的帧语义、CRC 或认证，也不替代完整 Decode。
+
   - id: frame.ucn_frame_decode
     symbol: ucn_frame_decode
     type: function
@@ -140,6 +157,9 @@ nodes:
     called_by:
       - node_runtime.ucn_node_receive
     calls:
+      - target: frame.ucn_frame_peek_wire_profile
+        type: direct
+        reason: 复用统一 Prefix 解析和错误语义。
       - target: frame.ucn_wire_profile_get_descriptor
         type: direct
         reason: 由线上 2 bit Code 选择官方 Descriptor。

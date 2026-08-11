@@ -103,16 +103,19 @@ nodes:
     type: function
     file: src/ucn_node.c
     layer: core
-    role: 所有接收帧的唯一 Core 入口：解码、网络/安全/去重检查、控制面处理、转发或目标 Endpoint 分发。
+    role: 所有接收帧的唯一 Core 入口：先按 3 B Prefix 与 per-Link RX Ceiling 早拒绝，再完整解码、网络/安全/去重检查、控制面处理、转发或目标 Endpoint 分发。
     called_by:
       - adapter.ucn_adapter_rx_pump
     calls:
       - target: security.ucn_node_security_ready
         type: direct
         reason: Required 配置未完成时不解码、不处理或转发入站帧。
+      - target: frame.ucn_frame_peek_wire_profile
+        type: direct
+        reason: 在完整 Decode/CRC 前解析固定 Prefix，并按 Node/Link 本地 RX Ceiling 拒绝超档帧。
       - target: frame.ucn_frame_decode
         type: direct
-        reason: 先验证线格式、版本、长度和 CRC。
+        reason: 通过早期 Profile 门禁后验证完整线格式、长度、字段和 CRC。
       - target: security.validate_inbound_business_security
         type: direct
         reason: 执行 Provider 授权、端点安全策略、必要时解密。
@@ -255,6 +258,9 @@ nodes:
       - target: policy_path.ucn_path_expire
         type: direct
         reason: 回收过期逐跳 Path 表项。
+      - target: route.route_discovery_ring_helpers_static
+        type: direct
+        reason: 到期时扩大一个 Discovery Ring，或在总预算/最大 Hop 到达后结束发现。
       - target: route.ucn_node_send
         type: direct
         reason: 优先发送 Q0，再发送 Q1 固定 TX 项。

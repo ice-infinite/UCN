@@ -265,6 +265,47 @@ static int test_adaptive_wire_control_chain(void)
     return 0;
 }
 
+static int test_expanding_ring_budget(void)
+{
+    ucn_config_t config = { UINT32_C(42), UINT32_C(10), 16U };
+    bool link_up = true;
+    bool drop_frames = true;
+    ucn_node_t node;
+    ucn_link_t link;
+    aodv_link_context_t context;
+
+    (void)memset(&node, 0, sizeof(node));
+    (void)memset(&link, 0, sizeof(link));
+    (void)memset(&context, 0, sizeof(context));
+    TEST_ASSERT(ucn_node_init(&node, &config) == UCN_OK);
+    TEST_ASSERT(ucn_node_set_wire_profiles(
+                    &node, UCN_WIRE_PROFILE_W3_BACKBONE,
+                    UCN_WIRE_PROFILE_W3_BACKBONE) == UCN_OK);
+    link.ops = &AODV_LINK_OPS;
+    link.context = &context;
+    link.link_id = 31U;
+    link.mtu = UCN_MAX_FRAME_BYTES;
+    link.peer_node_id = UINT32_C(11);
+    context.is_up = &link_up;
+    context.drop_frames = &drop_frames;
+    TEST_ASSERT(ucn_node_register_link(&node, &link) == UCN_OK);
+
+    TEST_ASSERT(ucn_node_discover_route(&node, UINT32_C(99), 1U) == UCN_OK);
+    TEST_ASSERT(node.discoveries[0].current_hop_limit == 2U &&
+                ucn_node_get_stats(&node)->route_requests_sent == 1U);
+    TEST_ASSERT(ucn_node_step(&node, 252U) == UCN_OK);
+    TEST_ASSERT(node.discoveries[0].current_hop_limit == 4U);
+    TEST_ASSERT(ucn_node_step(&node, 503U) == UCN_OK);
+    TEST_ASSERT(node.discoveries[0].current_hop_limit == 8U);
+    TEST_ASSERT(ucn_node_step(&node, 754U) == UCN_OK);
+    TEST_ASSERT(node.discoveries[0].current_hop_limit == 16U &&
+                ucn_node_get_stats(&node)->route_requests_sent == 4U &&
+                ucn_node_get_stats(&node)->route_request_ring_expansions == 3U);
+    TEST_ASSERT(ucn_node_step(&node, 1002U) == UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(!ucn_node_route_pending(&node, UINT32_C(99)));
+    return 0;
+}
+
 int test_aodv_lite(void)
 {
     uint8_t first_payload = 0x31U;
@@ -303,6 +344,7 @@ int test_aodv_lite(void)
     TEST_ASSERT(aodv_init_node(&c, UINT32_C(3)) == 0);
     TEST_ASSERT(test_route_error_profile_payloads() == 0);
     TEST_ASSERT(test_adaptive_wire_control_chain() == 0);
+    TEST_ASSERT(test_expanding_ring_budget() == 0);
 
     ab.ops = &AODV_LINK_OPS; ab.context = &cab; ab.link_id = 1U;
     ab.mtu = UCN_MAX_FRAME_BYTES; ab.peer_node_id = UINT32_C(2);
@@ -391,13 +433,18 @@ int test_aodv_lite(void)
     TEST_ASSERT(ucn_node_discover_route(&a, UINT32_C(3), 20U) == UCN_OK);
     TEST_ASSERT(ucn_node_get_stats(&a)->route_requests_sent == 1U);
     TEST_ASSERT(ucn_node_route_pending(&a, UINT32_C(3)));
+    TEST_ASSERT(ucn_node_step(&a, 261U) == UCN_OK);
+    TEST_ASSERT(a.discoveries[0].current_hop_limit == 4U &&
+                ucn_node_get_stats(&a)->route_requests_sent == 2U &&
+                ucn_node_get_stats(&a)->route_request_ring_expansions == 1U);
+    TEST_ASSERT(ucn_node_step(&a, 512U) == UCN_ERR_NOT_FOUND);
     TEST_ASSERT(ucn_node_step(&a, 1011U) == UCN_ERR_NOT_FOUND);
     TEST_ASSERT(!ucn_node_route_pending(&a, UINT32_C(3)));
 
     ab_drop = false;
     TEST_ASSERT(ucn_node_discover_route(&a, UINT32_C(3), 1100U) == UCN_OK);
     TEST_ASSERT(!ucn_node_route_pending(&a, UINT32_C(3)));
-    TEST_ASSERT(ucn_node_get_stats(&a)->route_requests_sent == 2U);
+    TEST_ASSERT(ucn_node_get_stats(&a)->route_requests_sent == 3U);
     TEST_ASSERT(ucn_node_get_stats(&c)->route_replies_sent == 1U);
     TEST_ASSERT(ucn_node_send(&a, UINT32_C(3), UCN_MSG_DATA_Q1,
                               UCN_TRAFFIC_Q1_REALTIME, &first_payload, 1U) == UCN_OK);

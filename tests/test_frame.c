@@ -10,6 +10,7 @@ int test_frame(void)
     ucn_frame_t decoded;
     uint8_t encoded[UCN_MAX_FRAME_BYTES];
     size_t encoded_length = 0U;
+    ucn_wire_profile_t peeked_profile = UCN_WIRE_PROFILE_UNSPECIFIED;
 
     (void)memset(&source, 0, sizeof(source));
     source.message_type = UCN_MSG_DATA_Q1;
@@ -25,6 +26,14 @@ int test_frame(void)
 
     TEST_ASSERT(ucn_frame_encoded_size(&source) == UCN_FRAME_HEADER_SIZE + sizeof(payload));
     TEST_ASSERT(ucn_frame_encode(&source, encoded, sizeof(encoded), &encoded_length) == UCN_OK);
+    TEST_ASSERT(ucn_frame_peek_wire_profile(encoded, encoded_length,
+                                             &peeked_profile) == UCN_OK);
+    TEST_ASSERT(peeked_profile == UCN_WIRE_PROFILE_W3_BACKBONE);
+    TEST_ASSERT(ucn_frame_peek_wire_profile(encoded, 2U, &peeked_profile) ==
+                UCN_ERR_MALFORMED);
+    TEST_ASSERT(ucn_frame_peek_wire_profile(NULL, encoded_length,
+                                             &peeked_profile) ==
+                UCN_ERR_ARGUMENT);
     TEST_ASSERT(encoded_length == UCN_FRAME_HEADER_SIZE + sizeof(payload));
     TEST_ASSERT(ucn_frame_decode(encoded, encoded_length, &decoded) == UCN_OK);
     TEST_ASSERT(decoded.message_type == source.message_type);

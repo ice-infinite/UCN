@@ -1,6 +1,6 @@
 # UCN 整体架构设计：MCU 自组网优先
 
-> 状态：**UCN v5 V5-01～V5-10 软件闭环（2026-08-11）**；W0～W3 Codec、Node 固定域、全 Build Profile 四档接收、控制帧压缩、安全绑定、路由感知自动选档、全局公共配置、单档/混档极限模拟和 Host 软件门禁已完成。v4 已独立冻结；生产密码库、目标板资源和多介质多跳实机仍待验证。
+> 状态：**UCN v5 V5-01～V5-20 软件范围闭环（V5-16 为设计、V5-21 阻塞，2026-08-11）**；W0～W3、全 Build Profile 四档接收、Profile-aware 控制面、32 bit Cost、业务路由约束、Pinned Path Remaining Hops、有界 Expanding Ring、Ingress 早拒绝和 Host 软件门禁已完成。v4 已独立冻结；生产密码库、Authorized Class 执行层、目标板资源和多介质多跳实机仍待验证。
 > 日期：2026-08-11
 > 目标：以 MCU 为主体完成安全自组网；Linux 仅作为兼容接入端；协议小而可裁剪；资源占用由目标硬件配置决定。
 
@@ -10,7 +10,7 @@ UCN 是一个可移植的 C 通信协议栈。它的最小运行形态不是 Lin
 
 Linux、ROS2、PX4/MAVLink、地面站与 AI 系统可以通过 `UCN-Host` 接入同一网络，但它们不拥有路由中心、入网中心或控制中心的地位，更不替代 Linux 自己已有的网络体系。
 
-当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 与 per-Link 接收上限、1 B RX Ceiling HELLO、Profile-aware RREQ/RREP/RERR/Path/诊断控制载荷、32 bit 累计 Cost、Profile 绑定 AAD、透明密文中继、显式开启的路由感知最小档选择、Route Epoch/grace、受限 AODV-Lite、Candidate Probe/Activate、Endpoint Q1 首包自动寻路、固定邻居表、通用 Link Cost、Path ID 逐跳表、固定/主备与 Q1 流亲和策略，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、Authorized Class 执行层、真实无线多板和小 MTU Carrier 仍是后续任务，不能由软件测试替代。
+当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 与 per-Link 接收上限、1 B RX Ceiling HELLO、3 B Ingress Profile Peek、Profile-aware RREQ/RREP/RERR/Path/诊断控制载荷、32 bit 累计 Cost、Node/Policy Hop-Cost-已验证 RTT 门禁、Profile 绑定 AAD、透明密文中继、显式开启的路由感知最小档选择、Route Epoch/grace、2→4→8→16 受限 AODV-Lite、Candidate Probe/Activate 与端到端 RTT EWMA、Endpoint Q1 首包自动寻路、固定邻居表、通用 Link Cost、带 Remaining Hops 的 Path ID 逐跳表、固定/主备与 Q1 流亲和策略，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、Authorized Class 执行层、真实无线多板和小 MTU Carrier 仍是后续任务，不能由软件测试替代。
 
 这份架构只围绕四项约束设计：
 
@@ -73,10 +73,10 @@ flowchart TB
 
 | 模块 | 当前已实现 | 明确尚未实现 |
 | --- | --- | --- |
-| Packet | v5 W0～W3 基础头 17/21/26/30 B；Nano/Lite/Full 都解析四档。固定域和最大接收档可配置，推荐最低够用 TX/W3 RX；自动模式按字段、路由 Hop、Path、MTU、对端上限及 Tag 选择最小可用档。长度/CRC/Network/Hop/Flag/字段范围失败关闭并拒绝 v4。 | 跨 Link 分片仍未实现。 |
+| Packet | v5 W0～W3 基础头 17/21/26/30 B；Nano/Lite/Full 都解析四档。固定域和最大接收档可配置，推荐最低够用 TX/W3 RX；自动模式按字段、路由 Hop、Path、MTU、对端上限及 Tag 选择最小可用档。Ingress 先用 3 B Prefix 按 per-Link RX Ceiling 早拒绝，再执行完整长度/CRC/Network/Hop/Flag/字段校验。 | 跨 Link 分片仍未实现。 |
 | Identity & Join | 最小 `HELLO`、Candidate/Admitted/Suspect/Removed/Rejected/Expired 邻居表、`Manual`/`Open`/`Provider` 准入。 | `JOIN_REQ`/挑战/接受状态机、出厂身份格式。 |
 | Session & Replay | 可注入 Provider 的会话 ID、发送序号持久化、TX/RX 授权、固定 `seal/open`、30 B 不可变 AAD（Path 帧含 Path ID）、明文/受保护策略和入站去重缓存。 | 生产 AEAD、密钥轮换、完整重放窗口与产品 ACL 表。 |
-| Route / Forwarding | 固定 Active/Candidate 表、受限 AODV-Lite、RREQ/RREP/RERR、`PATH_PROBE/ACK`、携带 Candidate ID + Epoch 的 `PATH_ACTIVATE/ACK`、TTL、断链清表、保守 Link Cost；业务按 `(destination, route_epoch)` 区分 Current/Previous，默认 1 s grace。 | 自动业务重发、全网拓扑。 |
+| Route / Forwarding | 固定 Active/Candidate 表、2→4→8→16 有界 AODV-Lite、RREQ/RREP/RERR、`PATH_PROBE/ACK` 的端到端 RTT EWMA、携带 Candidate ID + Epoch 的 `PATH_ACTIVATE/ACK`、TTL、断链清表、32 bit Route Cost；Node/Policy 可按 Hop/Cost/已验证 RTT 门禁业务路线，按 `(destination, route_epoch)` 区分 Current/Previous，默认 1 s grace。 | 自动业务重发、全网拓扑。 |
 | Core QoS | Q0/Q1 固定队列、deadline、`best_effort`、`latest_value`；Endpoint Q1 首包固定 4 槽/1 s 等待并合并同 `(destination, Endpoint)`。 | Q2/Q3、可靠确认、分片。 |
 | Node 内任务通信 | Core 外已有固定 Router、本机 Inbox、Remote TX、Bridge、FreeRTOS 静态事件通知；高风险远端 Q0 可在入队前强制产品 Validator，并使用固定 Replay 表。 | 产品执行器、真实 Task 时延/失联安全与板级验收；详见[节点内任务通信建议](UCN_节点内任务通信建议.md)。 |
 | Health | 8 B 一跳 `HEARTBEAT` 请求/ACK、业务帧刷新存活、`ADMITTED → SUSPECT → REMOVED`、路由/Link 槽回收。 | `LINK_STATE` 线协议消息、对应用的统一失联事件、介质专用 Profile 实机标定。 |
@@ -117,7 +117,7 @@ Adapter 发现物理端点，建立 Candidate Link（Node ID 未知）
 写入可信 Neighbor Table
   ↓
 已有路由：直接下一跳发送
-未知路由：限速 ROUTE_REQ → ROUTE_REPLY → Route Cache
+未知路由：限速 ROUTE_REQ Ring 2→4→8→16 → ROUTE_REPLY → Route Cache
   ↓
 链路失效：ROUTE_ERROR → 清理缓存 → 允许的业务重新寻路
   ↓
@@ -168,10 +168,12 @@ UCN 没有全网总发送队列，也没有要求一条路径传完后另一条�
 
 - 每节点只维护固定数量的邻居、路由、重复请求和等待请求。
 - `ROUTE_REQ` 带请求 ID、Hop Limit、累计 `route_cost` 与过期时间；重复请求默认抑制，但累计代价更低的副本可以替换较高代价副本。
+- 自动发现默认按 2→4→8→16 扩圈，单 Ring 250 ms、总预算 1000 ms；每轮新 Request ID 并重新选择最小可表达 Profile，Pending 业务不会反复重启活动 Ring。
 - `ROUTE_REPLY` 只建立“目标 → 下一跳”的缓存，不构建完整全网拓扑图；同一目标优先保留较低 `route_cost` 的动态路径。
 - `ROUTE_ERROR` 只影响相关缓存路径，不触发无限全网泛洪。
 - Q0 不得等待路由发现；Q0 只能使用直连、预建路径或本地安全动作。
 - `ucn_node_send_endpoint()` 的 Q1 在未知路径时自动发起一次受限 RREQ，并把最新值放入固定等待槽；旧 `ucn_node_send()` 保持显式寻路兼容。
+- “Route 存在”不等于该业务可用：Node 默认和单 Policy 可以限制 Hop、累计 Cost、最大已验证 RTT/是否强制 RTT。有限 Cost 遇 Unknown、必需 RTT 未验证时失败关闭。
 
 等待槽仅服务 Endpoint Q1，默认 `UCN_PENDING_Q1_DEPTH=4`、`UCN_PENDING_Q1_TIMEOUT_MS=1000`，同目的同 Endpoint 覆盖旧值；Q0 永不进入等待槽。这保持了 RAM、时延和 RREQ 数量的上限。
 
@@ -179,7 +181,7 @@ UCN 没有全网总发送队列，也没有要求一条路径传完后另一条�
 
 当前 Active/Candidate 解决的是“同一目标 Node 的自动换路”，不是“不同业务固定走不同路径”或“多路径同时分担”。T22.1 已在 `ucn_node_t` 中加入固定 Policy、当地 Path、Q1 Flow 和 Link 质量快照表；默认上限为 8/8/8/4，均可按 RAM Profile 编译期调整。Policy 按 `(destination, Endpoint[, traffic_class])` 精确或 traffic-class 通配匹配；未配置业务仍保持原有 `AUTO_BEST`。它已提供 `ucn_node_set_route_policy()`、`ucn_node_set_policy_path()`、`ucn_node_bind_q1_flow()` 和质量/统计查询 API。
 
-T22.2 已引入真正的线上 Path ID，但它与 T22.1 的本地 `local_path_id` 仍不是同一个概念。v5 Path 业务帧按 Profile 使用 19/25/31/36 B Header；固定模式使用 Node 发送档，自动模式选择能表达 Path ID、地址、Hop、Tag 且满足 MTU/对端上限的最小档。表项以 `(源 Node、源 Session、Path ID、目标)` 识别，并在每一跳保存固定的“下一跳/egress 或终端”关系。默认每节点最多 8 项，租约到期自动回收；中继保留源端已选 Wire Profile，只按表转发，端到端密文只由目标解密。
+T22.2 已引入真正的线上 Path ID，但它与 T22.1 的本地 `local_path_id` 仍不是同一个概念。v5 Path 业务帧按 Profile 使用 19/25/31/36 B Header；固定模式使用 Node 发送档，自动模式选择能表达 Path ID、地址、真实 Remaining Hops、Tag 且满足 MTU/对端上限的最小档。表项以 `(源 Node、源 Session、Path ID、目标)` 识别，并在每一跳保存固定的“下一跳/egress 或终端 + remaining_hops”关系。PATH_INSTALL 四档 Payload 为 8/11/14/17 B；中继 Scope 逐跳递减，终端为 0，旧长度或错误 Scope 失败关闭。默认每节点最多 8 项，租约到期自动回收；中继保留源端已选 Wire Profile，只按表转发，端到端密文只由目标解密。
 
 T22.3 将 Policy 的 Primary/Backup 本地句柄绑定到已经验证的线上 Path ID，并接入 `ucn_node_send_endpoint()`。`PINNED_STRICT` 只发送 Primary，任何失败都直接返回；`PINNED_FAILOVER` 仅在 Link Down 或 Path 不存在时标记该本地 Path Down 并尝试 Backup，Cost、队列抖动、背压和 Security 错误均不会触发切换。Primary/Backup 都不可用时，只有配置显式允许的 Q1 才会进入既有 RREQ/等待槽；这代表该次业务已经允许退回普通 Route，Q0 永不自动寻路。
 

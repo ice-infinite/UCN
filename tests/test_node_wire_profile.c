@@ -354,6 +354,16 @@ static int verify_per_link_local_receive_ceiling(void)
     TEST_ASSERT(receive_context.count == 2U &&
                 receive_context.last_profile == UCN_WIRE_PROFILE_W3_BACKBONE);
 
+    /* The local ceiling is decided from the fixed prefix before the decoder
+     * spends time validating the unsupported frame CRC.  A capable link still
+     * reaches the normal CRC gate for the same corrupted frame. */
+    encoded[encoded_length - 1U] ^= 0x5AU;
+    TEST_ASSERT(ucn_node_receive(&node, &narrow_link, encoded, encoded_length) ==
+                UCN_ERR_UNSUPPORTED);
+    TEST_ASSERT(ucn_node_receive(&node, &wide_link, encoded, encoded_length) ==
+                UCN_ERR_CRC);
+    encoded[encoded_length - 1U] ^= 0x5AU;
+
     TEST_ASSERT(ucn_node_set_link_local_wire_profile_limit(
                     &node, &narrow_link, UCN_WIRE_PROFILE_W3_BACKBONE) ==
                 UCN_ERR_TOO_LARGE);

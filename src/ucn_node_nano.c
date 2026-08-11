@@ -816,6 +816,7 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
     ucn_frame_t frame;
     ucn_link_t *egress_link;
     ucn_wire_profile_t local_receive_profile;
+    ucn_wire_profile_t incoming_profile;
     ucn_result_t result;
     bool delivered = false;
 
@@ -823,17 +824,21 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
         !nano_link_is_registered(node, ingress_link)) {
         return UCN_ERR_ARGUMENT;
     }
-    result = ucn_frame_decode(data, length, &frame);
-    if (result != UCN_OK) {
-        return result;
-    }
     result = nano_resolve_link_local_receive_profile(node, ingress_link,
                                                      &local_receive_profile);
     if (result != UCN_OK) {
         return result;
     }
-    if (frame.wire_profile > local_receive_profile) {
+    result = ucn_frame_peek_wire_profile(data, length, &incoming_profile);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (incoming_profile > local_receive_profile) {
         return UCN_ERR_UNSUPPORTED;
+    }
+    result = ucn_frame_decode(data, length, &frame);
+    if (result != UCN_OK) {
+        return result;
     }
     if (frame.network_id != node->config.network_id) {
         return UCN_ERR_NETWORK;

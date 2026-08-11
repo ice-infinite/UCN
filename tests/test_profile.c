@@ -211,7 +211,7 @@ static int test_profile_contract(void)
     (void)memset(&path_state, 0, sizeof(path_state));
     (void)memset(&policy_state, 0, sizeof(policy_state));
     TEST_ASSERT(ucn_node_set_route_policy(&node, &policy) == UCN_ERR_CONFIG);
-    TEST_ASSERT(ucn_node_install_local_path(&node, 1U, 11U, 11U, 1000U) ==
+    TEST_ASSERT(ucn_node_install_local_path(&node, 1U, 11U, 11U, 1U, 1000U) ==
                 UCN_ERR_CONFIG);
     TEST_ASSERT(ucn_node_request_path_trace(&node, 11U, 1U, NULL, NULL) ==
                 UCN_ERR_CONFIG);

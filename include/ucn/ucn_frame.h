@@ -47,6 +47,12 @@ ucn_result_t ucn_frame_encode(const ucn_frame_t *frame,
                               uint8_t *output,
                               size_t output_capacity,
                               size_t *output_length);
+/* Inspect only the fixed three-byte prefix (Magic + Version/Profile).  This is
+ * intentionally available to ingress adapters and the Node Core so an
+ * unsupported Wire Class can be rejected before full decoding and CRC work. */
+ucn_result_t ucn_frame_peek_wire_profile(const uint8_t *input,
+                                         size_t input_length,
+                                         ucn_wire_profile_t *profile);
 ucn_result_t ucn_frame_decode(const uint8_t *input,
                               size_t input_length,
                               ucn_frame_t *frame);

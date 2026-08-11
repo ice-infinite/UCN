@@ -113,6 +113,8 @@ typedef struct ucn_route_policy_config {
      * its selected Path for this lease unless that Path is hard-down or
      * remains congested for the configured sample count. */
     uint32_t balance_flow_lease_ms;
+    /* Zero fields inherit the Node default Route gate. */
+    ucn_route_constraints_t constraints;
 } ucn_route_policy_config_t;
 
 typedef struct ucn_route_policy_entry {
@@ -133,6 +135,10 @@ typedef struct ucn_policy_path_config {
     ucn_node_id_t destination;
     ucn_link_t *egress_link;
     bool verified;
+    bool route_cost_valid;
+    ucn_route_cost_t route_cost;
+    bool verified_rtt_valid;
+    uint16_t verified_rtt_ms;
 } ucn_policy_path_config_t;
 
 typedef struct ucn_policy_path_entry {
@@ -142,6 +148,10 @@ typedef struct ucn_policy_path_entry {
     ucn_node_id_t destination;
     ucn_link_t *egress_link;
     ucn_policy_path_state_t state;
+    bool route_cost_valid;
+    ucn_route_cost_t route_cost;
+    bool verified_rtt_valid;
+    uint16_t verified_rtt_ms;
     uint8_t congestion_samples;
     uint32_t configured_at_ms;
 } ucn_policy_path_entry_t;

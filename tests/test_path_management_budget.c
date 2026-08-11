@@ -160,7 +160,7 @@ static ucn_result_t management_inject(
     uint32_t lease_ms)
 {
     ucn_frame_t frame;
-    uint8_t payload[16] = { 0U };
+    uint8_t payload[17] = { 0U };
     uint8_t encoded[UCN_MAX_FRAME_BYTES];
     size_t encoded_length = 0U;
     ucn_result_t result;
@@ -170,6 +170,7 @@ static ucn_result_t management_inject(
     if (message_type == UCN_MSG_PATH_INSTALL) {
         management_write_u32(payload + 8U, 0U);
         management_write_u32(payload + 12U, lease_ms);
+        payload[16] = 0U;
     }
 
     (void)memset(&frame, 0, sizeof(frame));
@@ -182,7 +183,7 @@ static ucn_result_t management_inject(
     frame.destination = node->config.node_id;
     frame.sequence = sequence;
     frame.payload = payload;
-    frame.payload_length = message_type == UCN_MSG_PATH_INSTALL ? 16U : 8U;
+    frame.payload_length = message_type == UCN_MSG_PATH_INSTALL ? 17U : 8U;
 
     result = ucn_frame_encode(&frame, encoded, sizeof(encoded), &encoded_length);
     if (result != UCN_OK) {

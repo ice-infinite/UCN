@@ -55,6 +55,8 @@ ucn_result_t ucn_path_install(ucn_path_state_t *state,
         config->owner == UCN_NODE_BROADCAST || config->owner_session_id == 0U ||
         config->path_id == 0U || config->destination == 0U ||
         config->destination == UCN_NODE_BROADCAST || config->expires_at_ms == 0U ||
+        (config->next_hop == 0U && config->remaining_hops != 0U) ||
+        (config->next_hop != 0U && config->remaining_hops == 0U) ||
         (config->next_hop == 0U && config->egress_link != NULL) ||
         (config->next_hop != 0U && config->egress_link == NULL)) {
         return UCN_ERR_ARGUMENT;
@@ -69,6 +71,7 @@ ucn_result_t ucn_path_install(ucn_path_state_t *state,
                 return UCN_ERR_ACCESS;
             }
             entry->next_hop = config->next_hop;
+            entry->remaining_hops = config->remaining_hops;
             entry->egress_link = config->egress_link;
             entry->terminal = config->next_hop == 0U;
             entry->expires_at_ms = config->expires_at_ms;
@@ -90,6 +93,7 @@ ucn_result_t ucn_path_install(ucn_path_state_t *state,
     free_entry->path_id = config->path_id;
     free_entry->destination = config->destination;
     free_entry->next_hop = config->next_hop;
+    free_entry->remaining_hops = config->remaining_hops;
     free_entry->egress_link = config->egress_link;
     free_entry->terminal = config->next_hop == 0U;
     free_entry->expires_at_ms = config->expires_at_ms;

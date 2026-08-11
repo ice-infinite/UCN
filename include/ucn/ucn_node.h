@@ -133,6 +133,12 @@ extern "C" {
 #define UCN_ROUTE_REQUEST_TIMEOUT_MS UINT32_C(1000)
 #endif
 
+/* Per-ring wait.  Four default rings (2/4/8/16) remain within the historical
+ * one-second total discovery budget. */
+#ifndef UCN_ROUTE_RING_TIMEOUT_MS
+#define UCN_ROUTE_RING_TIMEOUT_MS UINT32_C(250)
+#endif
+
 #ifndef UCN_ROUTE_REQUEST_MIN_INTERVAL_MS
 #define UCN_ROUTE_REQUEST_MIN_INTERVAL_MS UINT32_C(100)
 #endif
@@ -547,6 +553,8 @@ typedef char ucn_node_relative_durations_must_be_wrap_safe[
 #if UCN_FEATURE_DYNAMIC_MESH
     UCN_ROUTE_ENTRY_LIFETIME_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_ROUTE_REQUEST_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_ROUTE_RING_TIMEOUT_MS > 0U &&
+    UCN_ROUTE_RING_TIMEOUT_MS <= UCN_ROUTE_REQUEST_TIMEOUT_MS &&
     UCN_ROUTE_REQUEST_MIN_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_ROUTE_REFRESH_ADVANCE_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_ROUTE_REFRESH_MIN_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
@@ -796,6 +804,7 @@ typedef struct ucn_node_stats {
     uint32_t duplicate_source_window_full;
 #if UCN_FEATURE_DYNAMIC_MESH
     uint32_t route_requests_sent;
+    uint32_t route_request_ring_expansions;
     uint32_t route_replies_sent;
     uint32_t route_errors_sent;
     uint32_t heartbeat_requests_sent;
@@ -977,6 +986,15 @@ ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link);
 ucn_result_t ucn_node_add_route(ucn_node_t *node,
                                 ucn_node_id_t destination,
                                 ucn_link_t *egress_link);
+ucn_result_t ucn_node_set_default_route_constraints(
+    ucn_node_t *node,
+    const ucn_route_constraints_t *constraints);
+ucn_result_t ucn_node_get_default_route_constraints(
+    const ucn_node_t *node,
+    ucn_route_constraints_t *constraints);
+ucn_result_t ucn_node_get_route_quality(const ucn_node_t *node,
+                                        ucn_node_id_t destination,
+                                        ucn_route_quality_t *quality);
 ucn_result_t ucn_node_discover_route(ucn_node_t *node,
                                      ucn_node_id_t destination,
                                      uint32_t now_ms);
@@ -1032,6 +1050,7 @@ ucn_result_t ucn_node_install_local_path(ucn_node_t *node,
                                          ucn_path_id_t path_id,
                                          ucn_node_id_t destination,
                                          ucn_node_id_t next_hop,
+                                         uint8_t remaining_hops,
                                          uint32_t lease_ms);
 ucn_result_t ucn_node_revoke_local_path(ucn_node_t *node,
                                         ucn_path_id_t path_id,
@@ -1041,6 +1060,7 @@ ucn_result_t ucn_node_send_path_install(ucn_node_t *node,
                                         ucn_path_id_t path_id,
                                         ucn_node_id_t destination,
                                         ucn_node_id_t next_hop,
+                                        uint8_t remaining_hops,
                                         uint32_t lease_ms);
 ucn_result_t ucn_node_send_path_revoke(ucn_node_t *node,
                                        ucn_node_id_t control_target,

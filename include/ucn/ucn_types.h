@@ -74,6 +74,23 @@ typedef uint32_t ucn_route_cost_t;
 #define UCN_ROUTE_COST_UNKNOWN UINT32_MAX
 #define UCN_ROUTE_COST_MAX (UINT32_MAX - UINT32_C(1))
 
+/* Zero-valued fields inherit the Node defaults when embedded in a Route
+ * Policy.  The Node-level setter resolves zero Hop/Cost to bounded defaults. */
+typedef struct ucn_route_constraints {
+    uint8_t max_hops;
+    ucn_route_cost_t max_route_cost;
+    uint16_t max_verified_rtt_ms;
+    bool require_verified_rtt;
+} ucn_route_constraints_t;
+
+typedef struct ucn_route_quality {
+    bool available;
+    uint8_t hop_count;
+    ucn_route_cost_t route_cost;
+    bool verified_rtt_valid;
+    uint16_t verified_rtt_ms;
+} ucn_route_quality_t;
+
 /* API values intentionally differ from the 2-bit wire code so a zero-filled
  * v4-style frame remains an explicit "unspecified" request.  The frame codec
  * resolves unspecified standalone frames to W3; Node TX uses its configured

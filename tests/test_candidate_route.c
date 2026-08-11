@@ -132,6 +132,7 @@ int test_candidate_route(void)
     candidate_receive_state_t received;
     ucn_send_request_t q0_request;
     ucn_send_request_t q1_request;
+    ucn_route_quality_t route_quality;
     uint16_t initial_route_epoch;
     uint32_t now_ms;
 
@@ -253,6 +254,10 @@ int test_candidate_route(void)
     TEST_ASSERT(a.stats.path_probe_acks_received == UCN_PATH_PROBE_REQUIRED_ACKS);
     TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 29401U) == UCN_OK);
     TEST_ASSERT(a.stats.route_switches == 1U);
+    TEST_ASSERT(ucn_node_get_route_quality(&a, UINT32_C(3), &route_quality) ==
+                UCN_OK);
+    TEST_ASSERT(route_quality.available && route_quality.hop_count == 2U &&
+                route_quality.verified_rtt_valid);
 
     reset_send_counts(contexts, 8U);
     TEST_ASSERT(ucn_node_send(&a, UINT32_C(3), UCN_MSG_DATA_Q1,

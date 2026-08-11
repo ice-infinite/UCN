@@ -14,7 +14,7 @@ modules:
   - id: frame
     file: frame.calltree.yaml
     status: current
-    role: v5 W0～W3 编解码、自动最小档、CRC 和 E2E AAD
+    role: v5 W0～W3 Prefix Peek、编解码、自动最小档、CRC 和 E2E AAD
     entry: frame.ucn_frame_encode
     source_files: [src/ucn_frame.c]
 
@@ -41,14 +41,14 @@ modules:
   - id: route
     file: route.calltree.yaml
     status: current
-    role: Endpoint 发送、AODV-Lite、Route Cache、RREQ/RREP/RERR
+    role: Endpoint 发送、Hop/Cost/RTT 门禁、Expanding Ring、Route Cache 与 RREQ/RREP/RERR
     entry: route.ucn_node_send_endpoint
     source_files: [src/ucn_node.c]
 
   - id: policy_path
     file: policy_path.calltree.yaml
     status: current
-    role: 策略、受控 Path、Strict/Failover 和 Q1 流亲和均衡
+    role: 策略、Remaining-Hops 受控 Path、Strict/Failover 和 Q1 流亲和均衡
     entry: policy_path.ucn_node_set_route_policy
     source_files: [src/ucn_policy.c, src/ucn_path.c, src/ucn_node.c]
 

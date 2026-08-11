@@ -4,6 +4,33 @@
 #error "ucn_profile_stubs.c must not be compiled for the Full profile"
 #endif
 
+#if !UCN_FEATURE_DYNAMIC_MESH
+ucn_result_t ucn_node_set_default_route_constraints(
+    ucn_node_t *node,
+    const ucn_route_constraints_t *constraints)
+{
+    (void)constraints;
+    return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
+}
+
+ucn_result_t ucn_node_get_default_route_constraints(
+    const ucn_node_t *node,
+    ucn_route_constraints_t *constraints)
+{
+    (void)constraints;
+    return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
+}
+
+ucn_result_t ucn_node_get_route_quality(const ucn_node_t *node,
+                                        ucn_node_id_t destination,
+                                        ucn_route_quality_t *quality)
+{
+    (void)destination;
+    (void)quality;
+    return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
+}
+#endif
+
 bool ucn_path_is_expired(const ucn_path_forward_entry_t *entry,
                          uint32_t now_ms)
 {
@@ -223,11 +250,13 @@ ucn_result_t ucn_node_install_local_path(ucn_node_t *node,
                                          ucn_path_id_t path_id,
                                          ucn_node_id_t destination,
                                          ucn_node_id_t next_hop,
+                                         uint8_t remaining_hops,
                                          uint32_t lease_ms)
 {
     (void)path_id;
     (void)destination;
     (void)next_hop;
+    (void)remaining_hops;
     (void)lease_ms;
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
@@ -246,12 +275,14 @@ ucn_result_t ucn_node_send_path_install(ucn_node_t *node,
                                         ucn_path_id_t path_id,
                                         ucn_node_id_t destination,
                                         ucn_node_id_t next_hop,
+                                        uint8_t remaining_hops,
                                         uint32_t lease_ms)
 {
     (void)control_target;
     (void)path_id;
     (void)destination;
     (void)next_hop;
+    (void)remaining_hops;
     (void)lease_ms;
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }

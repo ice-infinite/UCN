@@ -364,6 +364,10 @@ ucn_result_t ucn_node_set_route_policy(ucn_node_t *node,
         config->primary_local_path_id == config->backup_local_path_id) {
         return UCN_ERR_ARGUMENT;
     }
+    if (config->constraints.max_hops > node->config.default_hop_limit ||
+        config->constraints.max_route_cost == UCN_ROUTE_COST_UNKNOWN) {
+        return UCN_ERR_ARGUMENT;
+    }
     if (config->mode == UCN_ROUTE_POLICY_PINNED_STRICT &&
         config->allow_discovery_on_hard_failure) {
         return UCN_ERR_ARGUMENT;
@@ -443,7 +447,10 @@ ucn_result_t ucn_node_set_policy_path(ucn_node_t *node,
 
     if (node == NULL || config == NULL || config->local_path_id == 0U ||
         !policy_node_id_is_valid(config->destination) || config->egress_link == NULL ||
-        !policy_link_is_registered(node, config->egress_link)) {
+        !policy_link_is_registered(node, config->egress_link) ||
+        (config->route_cost_valid &&
+         (config->route_cost == 0U ||
+          config->route_cost == UCN_ROUTE_COST_UNKNOWN))) {
         return UCN_ERR_ARGUMENT;
     }
 
@@ -479,6 +486,10 @@ ucn_result_t ucn_node_set_policy_path(ucn_node_t *node,
     entry->egress_link = config->egress_link;
     entry->state = config->verified ? UCN_POLICY_PATH_VERIFIED :
                                       UCN_POLICY_PATH_CANDIDATE;
+    entry->route_cost_valid = config->route_cost_valid;
+    entry->route_cost = config->route_cost;
+    entry->verified_rtt_valid = config->verified_rtt_valid;
+    entry->verified_rtt_ms = config->verified_rtt_ms;
     entry->congestion_samples = 0U;
     entry->configured_at_ms = node->now_ms;
     node->policy_state.stats.path_config_updates++;

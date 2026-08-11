@@ -39,7 +39,7 @@ nodes:
     type: function
     file: src/ucn_node.c
     layer: routing
-    role: 默认自动路径：已有直连/Route Cache 时直接发送；未知 Q1 路径时启动受限发现并缓存最新值。
+    role: 默认自动路径：先按 Node/Policy Hop、Cost 与可选已验证 RTT 门禁检查直连或 Route Cache；未知/不合格的 Q1 路径启动有界发现并缓存最新值。
     called_by:
       - route.ucn_node_send_endpoint
     calls:
@@ -52,6 +52,9 @@ nodes:
       - target: route.ucn_node_send
         type: direct
         reason: 已有可用 Link 时构造普通业务帧发送。
+      - target: route.route_constraint_helpers_static
+        type: direct
+        reason: 路线必须满足当前业务的 Hop、Cost 与已验证 RTT 约束。
     notes:
       - Q0 绝不等待 RREQ/Route；没有路径立即向本机返回失败。
 
@@ -108,18 +111,35 @@ nodes:
     type: function
     file: src/ucn_node.c
     layer: routing
-    role: 分配固定 Discovery 项、令牌并发出/转发受 Hop Limit 限制的 RREQ。
+    role: 分配固定 Discovery 项并启动首个 Ring；默认半径 2 Hop，受 Node/Policy 最大 Hop 和总发现预算约束。
     called_by:
       - route.send_endpoint_auto_best_static
       - route.ucn_node_discover_route
       - route.start_due_route_refresh_static
     calls:
-      - target: route.route_request_helpers_static
+      - target: route.route_discovery_ring_helpers_static
         type: direct
-        reason: 向当前可用直连 Neighbor 泛洪 RREQ。
+        reason: 为本轮分配 Request ID、选择最小可表达 Profile 并发送 RREQ。
     notes:
       - 同目的地并发请求合并；控制面有令牌桶和固定表上限。
-      - RREQ 按 Network/Source/Target/Session/Hop 与累计 Cost 选择最小可表达 Profile；转发不升降档。
+      - 自动发送不会反复重启活动 Discovery；显式管理发现仍受最小重启间隔限制。
+
+  - id: route.route_discovery_ring_helpers_static
+    symbol: send_route_discovery_ring/send_due_route_discovery_ring
+    type: function
+    file: src/ucn_node.c
+    layer: routing
+    role: 在固定 Discovery 状态中按 2→4→8→16 或更小产品上限扩圈；每 Ring 默认 250 ms，总预算默认 1000 ms。
+    called_by:
+      - route.begin_route_discovery_static
+      - node_runtime.ucn_node_step
+    calls:
+      - target: route.route_request_helpers_static
+        type: direct
+        reason: 每轮使用新 Request ID 并向当前健康直连 Neighbor 受限泛洪。
+    notes:
+      - 每个 Ring 按当前 Hop/字段/MTU/Peer Ceiling 重新选择最小可表达 Wire Profile；转发过程中不升降档。
+      - 达到最大 Hop 或总预算后回收 Discovery，迟到回复不能使已结束请求无限复活。
 
   - id: route.ucn_node_discover_route
     symbol: ucn_node_discover_route
@@ -232,9 +252,25 @@ nodes:
     called_by:
       - node_runtime.ucn_node_step
     calls:
-      - target: route.ucn_node_send
+      - target: route.ucn_node_send_endpoint
         type: direct
-        reason: 使用新建 Active Route 发出待发送数据。
+        reason: 重新执行原 Policy 与 Hop/Cost/RTT 门禁后发送，不绕过业务约束。
+
+  - id: route.route_constraint_helpers_static
+    symbol: resolve_route_constraints/route_quality_satisfies_constraints/ucn_node_get_route_quality
+    type: module
+    file: src/ucn_node.c
+    layer: routing
+    role: 合并 Node 默认与单 Policy 约束，并以直连或动态 Route 的 Hop、32 bit Cost 与可选已验证端到端 RTT判断业务可用性。
+    called_by:
+      - route.send_endpoint_auto_best_static
+      - policy_path.send_endpoint_pinned_static
+      - policy_path.send_endpoint_auto_balance_static
+      - external.management_diagnostics
+    calls: []
+    notes:
+      - 有限 Cost 上限遇 Unknown 失败关闭；require_verified_rtt 遇未验证 RTT 失败关闭。
+      - 直连只采用 Adapter 明确标记有效的 RTT；动态多跳 RTT 由 Candidate Probe/ACK EWMA 提供。
 
   - id: route.start_due_route_refresh_static
     symbol: start_due_route_refresh
@@ -278,11 +314,30 @@ nodes:
     type: module
     file: src/ucn_node.c
     layer: routing
-    role: 维护 Active、Previous 和 Candidate Route 的固定表、32 bit 累计 Cost 及 Route Epoch。
+    role: 维护 Active、Previous 和 Candidate Route 的固定表、32 bit 累计 Cost、已验证 RTT 及 Route Epoch。
     called_by:
       - route.handle_route_request_static
       - route.handle_route_reply_static
     calls: []
+
+  - id: route.candidate_probe_helpers_static
+    symbol: send_due_candidate_probe/handle_path_probe/handle_path_probe_ack
+    type: module
+    file: src/ucn_node.c
+    layer: routing
+    role: 用现有 12 B PATH_PROBE/ACK 回显发送时刻，累计 ACK 并计算有界端到端 RTT EWMA；验证完成后把质量复制到 Active Route。
+    called_by:
+      - node_runtime.ucn_node_step
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: node_runtime.send_control_to_node_static
+        type: direct
+        reason: 沿 Candidate 路线发送 Probe，并沿返回路线回送原 Payload。
+      - target: route.route_learning_helpers_static
+        type: direct
+        reason: 达到 Probe ACK 门禁后激活候选并保留 verified RTT。
+    notes:
+      - 不扩展 RREQ/RREP Wire Payload；超时、乱序或不匹配 ACK 不会伪造 RTT。
 
   - id: route.route_invalidation_helpers_static
     symbol: invalidate_route_to/invalidate_routes_by_link

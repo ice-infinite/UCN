@@ -56,6 +56,7 @@ Wire Profile 还会收窄单个部署域的可表示范围。W0/W1/W2/W3 地址�
 | W3 | 254 | 16 |
 
 - 每个产品在 `ucn_config_t.default_hop_limit` 中配置实际值，并且不得超过其固定发送档；自动业务仍会按已知 Route Hop 选择足够档位。
+- 默认自动发现不是一次覆盖 16 Hop，而是按 2→4→8→16 扩圈；单 Ring 250 ms、总预算 1000 ms。业务 Policy 还可把 `max_hops` 设得更小。
 - 最长业务路径可经过 16 条 Link。
 - 对应路径最多包含 17 个节点位置（源节点到目标节点）。
 - 中继收到非目标帧且 `hop_limit<=1` 时返回 `UCN_ERR_TTL`，不会继续扩散。
@@ -229,11 +230,11 @@ Windows x64、GCC 14.2、Release、Service OFF的当前静态证据：
 
 | Profile | `sizeof(ucn_node_t)` | Core静态库`.text` |
 | --- | ---: | ---: |
-| Nano | 2,648 B | 19,384 B |
-| Lite | 5,888 B | 58,580 B |
-| Full | 9,464 B | 116,360 B |
+| Nano | 2,648 B | 19,692 B |
+| Lite | 5,944 B | 65,720 B |
+| Full | 9,728 B | 123,876 B |
 
-这是 V5-15 后的 Host x64 GCC 14.2 Release/Service OFF 结果；`ucn_link_t=40 B`。它只证明固定对象与代码裁剪，不等于目标 MCU ELF/栈/功耗；历史基线见[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)。
+这是 V5-20 后的 Host x64 GCC 14.2 Release/Service OFF 结果；`ucn_link_t=40 B`，Storage Layout Version=3。它只证明固定对象与代码裁剪，不等于目标 MCU ELF/栈/功耗；历史基线见[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)。
 
 特性：
 

@@ -12,7 +12,7 @@ nodes:
     type: function
     file: src/ucn_policy.c
     layer: routing
-    role: 配置一个精确 (destination, Endpoint, traffic class) 的 AUTO_BEST、Strict、Failover 或 AUTO_BALANCE 策略。
+    role: 配置一个精确 (destination, Endpoint, traffic class) 的 AUTO_BEST、Strict、Failover 或 AUTO_BALANCE 策略，并可覆盖 Node 默认 Hop/Cost/RTT 约束。
     called_by:
       - external.product_policy_setup
       - external.authorized_management
@@ -25,7 +25,7 @@ nodes:
     type: function
     file: src/ucn_policy.c
     layer: routing
-    role: 将本地 Path 句柄关联到目标、已认证 wire_path_id、首跳 Link 与 VERIFIED 状态。
+    role: 将本地 Path 句柄关联到目标、已认证 wire_path_id、首跳 Link、VERIFIED 状态及可选端到端 Cost/RTT 质量。
     called_by:
       - external.product_policy_setup
     calls: []
@@ -37,7 +37,7 @@ nodes:
     type: function
     file: src/ucn_path.c
     layer: routing
-    role: 在固定逐跳转发表安装/更新 (owner, session, path_id, destination) 的下一跳和租约。
+    role: 在固定逐跳转发表安装/更新 (owner, session, path_id, destination) 的下一跳、剩余跳数和租约。
     called_by:
       - policy_path.install_path_forward_entry_static
     calls: []
@@ -59,6 +59,7 @@ nodes:
     notes:
       - 仅源端安装还不够；中继与终端仍须逐跳收到授权 PATH_INSTALL。
       - 本地写表前按 Node TX Wire Profile 验证 Path ID、Destination 与 Next Hop 可表达性。
+      - 源端必须给出非零 remaining_hops；业务帧 Hop Limit 直接使用该值而不是 Node 默认值。
 
   - id: policy_path.ucn_node_send_path_install
     symbol: ucn_node_send_path_install
@@ -74,7 +75,7 @@ nodes:
         reason: 用当前 Route 将控制帧送到指定控制目标。
     notes:
       - 目标侧必须配置 path_control_authorizer；未配置时默认拒绝。
-      - Auto 模式按 Path ID、Destination、Next Hop、Session、控制目标、MTU 与 Peer Ceiling 选择最小档；Payload 为 7/10/13/16 B。
+      - Auto 模式按 Path ID、Destination、Next Hop、Remaining Hops、Session、控制目标、MTU 与 Peer Ceiling 选择最小档；Payload 为 8/11/14/17 B。
 
   - id: policy_path.handle_path_install_static
     symbol: handle_path_install
@@ -96,6 +97,7 @@ nodes:
         reason: 写入固定 Path 转发表。
     notes:
       - Wire Profile 决定 Path/Node/Session 字段宽度；精确长度和可表达性在 authorizer/token/写表之前校验。
+      - 中继要求 next_hop 与 remaining_hops 都非零；终端只接受二者都为零。转发时帧 Hop Limit 必须与表中 Scope 一致并逐跳减一。
 
   - id: policy_path.handle_path_revoke_static
     symbol: handle_path_revoke
@@ -120,7 +122,7 @@ nodes:
     type: function
     file: src/ucn_node.c
     layer: routing
-    role: 执行 PINNED_STRICT 或 PINNED_FAILOVER：先走 Primary，只对硬失败尝试 Backup。
+    role: 执行 PINNED_STRICT 或 PINNED_FAILOVER：先过滤不满足 Hop/Cost/RTT 约束的 Path，再走 Primary，只对硬失败尝试 Backup。
     called_by:
       - route.ucn_node_send_endpoint
     calls:
@@ -141,7 +143,7 @@ nodes:
     type: function
     file: src/ucn_node.c
     layer: routing
-    role: 对 Q1 Flow 选择/复用 Primary 或 Backup 的已验证 Path，之后从选中 Path 发送。
+    role: 对 Q1 Flow 在满足 Hop/Cost/RTT 约束的 Primary/Backup 已验证 Path 中选择或复用绑定，之后从选中 Path 发送。
     called_by:
       - route.ucn_node_send_endpoint
     calls:

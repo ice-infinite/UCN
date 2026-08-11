@@ -62,11 +62,11 @@ GCC 严格构建已验证 33/46/64 B 的 `ucn_core` 分别可编译；32/45/63 B
 
 | Profile | `sizeof(ucn_node_t)` | 相对 Full | 静态库 `.text` 合计 | 相对 Full |
 | --- | ---: | ---: | ---: | ---: |
-| Nano | 2,648 B | -72.0% | 19,384 B | -83.3% |
-| Lite | 5,888 B | -37.8% | 58,580 B | -49.7% |
-| Full | 9,464 B | 基线 | 116,360 B | 基线 |
+| Nano | 2,648 B | -72.8% | 19,692 B | -84.1% |
+| Lite | 5,944 B | -38.9% | 65,720 B | -46.9% |
+| Full | 9,728 B | 基线 | 123,876 B | 基线 |
 
-该表已在 V5-15 后以 GCC 14.2 Release/Service OFF 重新测量。Node 为 `2648/5888/9464 B`，`ucn_link_t` 三档均为 40 B；Full 增加 64 B 来自累计 Cost/诊断待发状态的固定字段，仍无动态内存。Archive `.text` 只用于比较 Host 裁剪。历史变化见[S22 稳定化修复报告](UCN_S22_重复抑制与稳定化修复报告.md)和[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)。
+该表已在 V5-20 后以 GCC 14.2 Release/Service OFF 重新测量。Node 为 `2648/5944/9728 B`，`ucn_link_t` 三档均为 40 B；Lite/Full 的增加来自路由约束、Expanding Ring、已验证 RTT、Path Remaining Hops 等固定状态，仍无动态内存。Archive `.text` 只用于比较 Host 裁剪。历史变化见[S22 稳定化修复报告](UCN_S22_重复抑制与稳定化修复报告.md)和[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)。
 
 这些数字不是 MCU ELF 的最终 Flash/RAM：目标 ABI、编译器、LTO、表深度、`UCN_MAX_FRAME_BYTES` 和产品静态实例数都会改变结果。目标板必须另外报告 ELF 段、静态对象、运行时栈高水位和 Heap；不能把 Host `.a` 直接写成 ESP32/STM32 Flash。
 
@@ -76,7 +76,7 @@ GCC 严格构建已验证 33/46/64 B 的 `ucn_core` 分别可编译；32/45/63 B
 - Lite：直接运行 AODV/RERR、Neighbor/HELLO/Heartbeat、多 Bearer、安全 Provider、Control Budget、Stress；Candidate/Path/Policy/Diagnostic 返回 `UCN_ERR_CONFIG`。
 - API 完整性：头文件声明的 56 个 `ucn_node_*`/`ucn_path_*`/`ucn_policy_*` 符号在 Nano、Lite、Full 静态库中均存在；低档 Profile 不会在链接阶段才暴露缺失能力。
 - Full：现有完整单元、虚拟拓扑、动态压力和 Profile 测试全部通过。
-- v5：四档固定域、1 B RX Ceiling HELLO、压缩 RREQ、AAD Profile 绑定、W0 透明密文中继和固定/自动选档对照均通过。
+- v5：四档固定域、1 B RX Ceiling HELLO、3 B Ingress Peek、Profile-aware RREQ/Path、AAD Profile 绑定、W0 透明密文中继、路由约束与 2→4→8→16 Expanding Ring 均通过。
 - Service：Nano/OFF 证明源码可移除；Lite/ON 证明正交组合可初始化 Router；Full/OFF 与 Full/ON 均可构建测试。
 - 编译器：MSVC Debug 与 GCC 14.2 Release 均验证；GCC 启用 `-Wall -Wextra -Wpedantic -Werror`。
 - CI：工作流已加入 Nano/OFF、Lite/ON、Full/ON 矩阵；只有远端 Actions 实际运行成功后，才能写成远端 CI 已通过。

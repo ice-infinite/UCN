@@ -90,12 +90,12 @@ S08 继续沿用 S04 已实现的编译期门禁和实际 Payload helper：
 | 最小 MTU 33/46/64 B | 全部编译通过 |
 | 低一字节 32/45/63 B | 全部按预期编译拒绝 |
 | 三档公共 Node/Path/Policy 符号 | 每档 56 个，无缺失 |
-| Host `sizeof(ucn_node_t)` | V5-15 后 Nano/Lite/Full 为 2648/5888/9464 B；Storage Layout Version=2 |
+| Host `sizeof(ucn_node_t)` | V5-20 后 Nano/Lite/Full 为 2648/5944/9728 B；Storage Layout Version=3 |
 | ESP32-S3 Full/Service ON 正常 Node | 构建成功，RAM 48124 B，Flash 600819 B |
 | ESP32-S3 Full/Service OFF UART Bench | 构建成功，RAM 22152 B，Flash 185947 B |
 | ESP-WROOM-32 Full/Service ON | 构建成功，RAM 50184 B，Flash 626803 B |
 
-S08 当时的头文件拆分不改变 v4 线格式或运行时对象；后续 S22 因去重/RREQ 状态重构主动将 Storage Layout Version 升到 2，并形成上述当前 Host 对象大小。公开 API 仍以不完整 `ucn_node_t` 隔离内部布局。上述旧 ESP 数字是 S22 前完整测试固件的历史构建尺寸，不是当前纯 Core 增量，也不证明运行时栈、Heap 或通信行为。
+S08 当时的头文件拆分不改变 v4 线格式或运行时对象；后续 S22 因去重/RREQ 状态重构将 Storage Layout Version 升到 2，V5-18 又因 Path Remaining Hops 将其升到 3。公开 API 仍以不完整 `ucn_node_t` 隔离内部布局。上述旧 ESP 数字是历史完整测试固件尺寸，不是当前纯 Core 增量，也不证明运行时栈、Heap 或通信行为。
 
 ## 7. 未由本轮证明的内容
 

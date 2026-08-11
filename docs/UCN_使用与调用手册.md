@@ -506,6 +506,30 @@ Core Profile 默认最多重试 `UCN_Q0_BACKPRESSURE_MAX_RETRIES=3` 次、间隔
 
 Adapter 的 Cost 必须来自真实可解释指标。`route_cost` 越低越优；未知指标使用保守默认值。Wi-Fi 可映射 RSSI 平滑值、丢包与本 Adapter 队列压力；UART/CAN 可映射错误率、重试/Bus-Off 与队列压力。不要虚构 RTT。
 
+### 路由 Hop、Cost 与 RTT 门禁
+
+Wire Profile 的最大 Hop 只表示“字段能否编码”，不代表业务一定应该走那么远。Full/Lite 可设置 Node 默认约束，并在单条 Policy 中用非零字段覆盖：
+
+```c
+ucn_route_constraints_t defaults = {
+    .max_hops = 16U,
+    .max_route_cost = UINT32_C(120000),
+    .max_verified_rtt_ms = 80U,
+    .require_verified_rtt = false,
+};
+ucn_route_quality_t quality;
+
+(void)ucn_node_set_default_route_constraints(&g_node, &defaults);
+if (ucn_node_get_route_quality(&g_node, remote_node, &quality) == UCN_OK &&
+    quality.available) {
+    /* 只用于诊断/管理展示；业务发送仍由 Core 执行约束。 */
+}
+```
+
+`max_hops==0`、`max_route_cost==0` 和 `max_verified_rtt_ms==0` 在 Policy 中表示继承 Node 默认。有限 Cost 门禁遇到未知 Cost 时失败关闭；`require_verified_rtt=true` 时，没有已验证端到端 RTT 的路线不能直接承载该 Policy。直连 Link 只有在 Adapter 的 `get_metrics()` 明确给出有效 RTT 时才作为已验证单跳 RTT；动态多跳 Route 使用 Candidate Path Probe/ACK 得到的 RTT EWMA。Nano 保留统一 API，但因不编译动态路由/策略能力而返回 `UCN_ERR_CONFIG`。
+
+自动发现采用有界 Expanding Ring：默认按 2→4→8→16 Hop 扩展，单轮 250 ms、总预算 1000 ms。业务发送不会每帧寻路，也不会在 Pending 期间反复重启当前 Ring；已有可用缓存路线时直接发送。
+
 ## 9. 指定路径、主备与 Q1 负载均衡
 
 ### 9.1 默认自动路径
@@ -517,8 +541,8 @@ Adapter 的 Cost 必须来自真实可解释指标。`route_cost` 越低越优�
 `local_path_id` 只是源端固定表的本地句柄；不能只写一个 Policy 就声称路径已上线。正确的安装顺序是：
 
 1. 产品配置安全 Provider 与 `ucn_node_set_path_control_authorizer()`；默认拒绝是故意的；
-2. 源 Node 为 P1/P2 调用 `ucn_node_install_local_path()`；
-3. 源 Node 依次向每个中继和终端调用 `ucn_node_send_path_install()`，让它们形成逐跳转发表；中继不需要解密端到端业务；
+2. 源 Node 为 P1/P2 调用 `ucn_node_install_local_path()`，显式填写从源端开始的 `remaining_hops`；
+3. 源 Node 依次向每个中继和终端调用 `ucn_node_send_path_install()`，每一跳的 `remaining_hops` 递减，终端必须为 `next_hop=0, remaining_hops=0`；中继不需要解密端到端业务；
 4. 源 Node 用 `ucn_node_set_policy_path()` 把本地句柄、已认证 `wire_path_id`、目的 Node、首跳 Link 关联，并设 `verified=true`；
 5. 用 `ucn_node_set_route_policy()` 为一个精确的 `(destination, endpoint, traffic_class)` 绑定策略；
 6. 业务继续调用原来的 `ucn_node_send_endpoint()` / Service `send()`，无需把路径号传给每次业务调用。
@@ -534,6 +558,10 @@ ucn_policy_path_config_t p1 = {
     .destination = UINT32_C(0x0000000D),
     .egress_link = &g_link_to_b,
     .verified = true,
+    .route_cost_valid = true,
+    .route_cost = UINT32_C(2500),
+    .verified_rtt_valid = true,
+    .verified_rtt_ms = 12U,
 };
 ucn_route_policy_config_t policy = {
     .key = { UINT32_C(0x0000000D), 0x40U,
@@ -542,8 +570,19 @@ ucn_route_policy_config_t policy = {
     .primary_local_path_id = 1U,
     .backup_local_path_id = 2U,
     .allow_discovery_on_hard_failure = false,
+    .constraints = {
+        .max_hops = 4U,
+        .max_route_cost = UINT32_C(10000),
+        .max_verified_rtt_ms = 50U,
+        .require_verified_rtt = true,
+    },
 };
 
+(void)ucn_node_install_local_path(&g_node, 0x101U,
+                                  UINT32_C(0x0000000D),
+                                  UINT32_C(0x0000000B), 2U, 30000U);
+/* 给中继 B 安装 next=D, remaining=1；给终端 D 安装 next=0,
+ * remaining=0。每次远端安装都要通过 Security 与 Authorizer。 */
 (void)ucn_node_set_policy_path(&g_node, &p1);
 /* 同样安装 p2，然后再设置 policy。 */
 (void)ucn_node_set_route_policy(&g_node, &policy);

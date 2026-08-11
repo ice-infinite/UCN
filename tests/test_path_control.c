@@ -412,13 +412,14 @@ static int test_path_wire_scope(void)
     TEST_ASSERT(ucn_node_set_security_policy(&node, &policy) == UCN_OK);
 
     TEST_ASSERT(ucn_node_install_local_path(&node, UINT32_C(256), UINT32_C(1),
-                                             0U, UINT32_C(1000)) ==
+                                             0U, 0U, UINT32_C(1000)) ==
                 UCN_ERR_TOO_LARGE);
     TEST_ASSERT(ucn_node_install_local_path(&node, UINT32_C(1), UINT32_C(255),
-                                             0U, UINT32_C(1000)) ==
+                                             0U, 0U, UINT32_C(1000)) ==
                 UCN_ERR_TOO_LARGE);
     TEST_ASSERT(ucn_node_install_local_path(&node, UINT32_C(1), UINT32_C(2),
-                                             UINT32_C(255), UINT32_C(1000)) ==
+                                             UINT32_C(255), 1U,
+                                             UINT32_C(1000)) ==
                 UCN_ERR_TOO_LARGE);
     TEST_ASSERT(ucn_node_find_path_forward(&node, UINT32_C(1),
                                             security.session_id,
@@ -497,7 +498,7 @@ static int test_remote_path_wire_scope(void)
     /* The real W0 codec is 1 B Path ID + 1 B Destination + 1 B Next Hop +
      * 4 B Lease.  Install and revoke prove both narrow control layouts. */
     TEST_ASSERT(ucn_node_send_path_install(&a, UINT32_C(2), UINT32_C(7),
-                                            UINT32_C(2), 0U,
+                                            UINT32_C(2), 0U, 0U,
                                             UINT32_C(1000)) == UCN_OK);
     TEST_ASSERT(auth_b.calls == 1U);
     TEST_ASSERT(ucn_node_find_path_forward(&b, UINT32_C(1), sb.session_id,
@@ -518,7 +519,7 @@ static int test_path_control_profile_payloads(void)
         UCN_WIRE_PROFILE_W2_MESH,
         UCN_WIRE_PROFILE_W3_BACKBONE
     };
-    static const uint16_t install_lengths[] = { 7U, 10U, 13U, 16U };
+    static const uint16_t install_lengths[] = { 8U, 11U, 14U, 17U };
     static const uint16_t revoke_lengths[] = { 2U, 4U, 6U, 8U };
     size_t index;
 
@@ -531,7 +532,7 @@ static int test_path_control_profile_payloads(void)
         path_security_state_t sb = { 1U, UINT32_C(0x99), 0U, 0U };
         path_authorize_state_t auth_b = { true, 0U };
         ucn_security_policy_t policy;
-        uint8_t malformed_payload[17U] = { 0U };
+        uint8_t malformed_payload[18U] = { 0U };
         uint8_t encoded[UCN_MAX_FRAME_BYTES];
         size_t encoded_length = 0U;
         ucn_frame_t malformed;
@@ -571,7 +572,7 @@ static int test_path_control_profile_payloads(void)
         TEST_ASSERT(ucn_node_set_path_control_authorizer(
                         &b, path_authorize, &auth_b) == UCN_OK);
         TEST_ASSERT(ucn_node_send_path_install(
-                        &a, UINT32_C(2), UINT32_C(7), UINT32_C(2), 0U,
+                        &a, UINT32_C(2), UINT32_C(7), UINT32_C(2), 0U, 0U,
                         UINT32_C(1000)) == UCN_OK);
         TEST_ASSERT(cab.last_message_type == UCN_MSG_PATH_INSTALL &&
                     cab.last_wire_profile == profiles[index] &&
@@ -591,7 +592,7 @@ static int test_path_control_profile_payloads(void)
                             &a, &ab, UCN_WIRE_PROFILE_W0_LOCAL) == UCN_OK);
             ab.mtu = UCN_MAX_FRAME_BYTES;
             TEST_ASSERT(ucn_node_send_path_install(
-                            &a, UINT32_C(2), UINT32_C(8), UINT32_C(2), 0U,
+                            &a, UINT32_C(2), UINT32_C(8), UINT32_C(2), 0U, 0U,
                             UINT32_C(1000)) == UCN_OK);
             TEST_ASSERT(cab.last_wire_profile == UCN_WIRE_PROFILE_W0_LOCAL &&
                         cab.last_payload_length == install_lengths[0]);
@@ -677,12 +678,15 @@ static int test_path_bearer_binding(void)
     path_config.expires_at_ms = UINT32_C(10000);
     path_config.path_id = path_p1;
     path_config.next_hop = UINT32_C(2);
+    path_config.remaining_hops = 2U;
     path_config.egress_link = &ab_primary;
     TEST_ASSERT(ucn_path_install(&a.path_state, &path_config) == UCN_OK);
     path_config.next_hop = UINT32_C(4);
+    path_config.remaining_hops = 1U;
     path_config.egress_link = &bd_primary;
     TEST_ASSERT(ucn_path_install(&b.path_state, &path_config) == UCN_OK);
     path_config.next_hop = 0U;
+    path_config.remaining_hops = 0U;
     path_config.egress_link = NULL;
     TEST_ASSERT(ucn_path_install(&d.path_state, &path_config) == UCN_OK);
 
@@ -690,9 +694,11 @@ static int test_path_bearer_binding(void)
      * Neighbor failure only removes the Paths that actually use that hop. */
     path_config.path_id = path_p2;
     path_config.next_hop = UINT32_C(4);
+    path_config.remaining_hops = 1U;
     path_config.egress_link = &ad;
     TEST_ASSERT(ucn_path_install(&a.path_state, &path_config) == UCN_OK);
     path_config.next_hop = 0U;
+    path_config.remaining_hops = 0U;
     path_config.egress_link = NULL;
     TEST_ASSERT(ucn_path_install(&d.path_state, &path_config) == UCN_OK);
 
@@ -769,6 +775,7 @@ static int test_path_bearer_binding(void)
      * leaves the independent direct P2 untouched. */
     path_config.path_id = path_p3;
     path_config.next_hop = UINT32_C(2);
+    path_config.remaining_hops = 2U;
     path_config.egress_link = &ab_primary;
     TEST_ASSERT(ucn_path_install(&a.path_state, &path_config) == UCN_OK);
     policy_path.local_path_id = 3U;
@@ -852,6 +859,7 @@ int test_path_control(void)
      * denied until the product installs an explicit authorization callback. */
     TEST_ASSERT(ucn_node_send_path_install(&a, UINT32_C(2), path_p1,
                                             UINT32_C(4), UINT32_C(4),
+                                            1U,
                                             UINT32_C(10000)) == UCN_ERR_ACCESS);
     TEST_ASSERT(ucn_node_set_path_control_authorizer(&b, path_authorize,
                                                       &auth_b) == UCN_OK);
@@ -861,29 +869,43 @@ int test_path_control(void)
                                                       &auth_d) == UCN_OK);
 
     TEST_ASSERT(ucn_node_install_local_path(&a, path_p1, UINT32_C(4),
-                                             UINT32_C(2), UINT32_C(10000)) == UCN_OK);
+                                             UINT32_C(2), 2U,
+                                             UINT32_C(10000)) == UCN_OK);
     TEST_ASSERT(ucn_node_send_path_install(&a, UINT32_C(2), path_p1,
                                             UINT32_C(4), UINT32_C(4),
+                                            1U,
                                             UINT32_C(10000)) == UCN_OK);
     TEST_ASSERT(ucn_node_send_path_install(&a, UINT32_C(2), path_p1,
                                             UINT32_C(4), UINT32_C(4),
+                                            1U,
                                             UINT32_C(10000)) == UCN_OK);
     TEST_ASSERT(ucn_node_send_path_install(&a, UINT32_C(4), path_p1,
-                                            UINT32_C(4), 0U,
+                                            UINT32_C(4), 0U, 0U,
                                             UINT32_C(10000)) == UCN_OK);
     TEST_ASSERT(ucn_node_install_local_path(&a, path_p2, UINT32_C(4),
-                                             UINT32_C(3), UINT32_C(10000)) == UCN_OK);
+                                             UINT32_C(3), 2U,
+                                             UINT32_C(10000)) == UCN_OK);
     TEST_ASSERT(ucn_node_send_path_install(&a, UINT32_C(3), path_p2,
                                             UINT32_C(4), UINT32_C(4),
+                                            1U,
                                             UINT32_C(10000)) == UCN_OK);
     TEST_ASSERT(ucn_node_send_path_install(&a, UINT32_C(4), path_p2,
-                                            UINT32_C(4), 0U,
+                                            UINT32_C(4), 0U, 0U,
                                             UINT32_C(10000)) == UCN_OK);
     TEST_ASSERT(auth_b.calls >= 2U && auth_c.calls >= 1U && auth_d.calls >= 2U);
     TEST_ASSERT(ucn_node_find_path_forward(&b, UINT32_C(1), sa.session_id,
                                             path_p1, UINT32_C(4)) != NULL);
     TEST_ASSERT(ucn_node_find_path_forward(&c, UINT32_C(1), sa.session_id,
                                             path_p2, UINT32_C(4)) != NULL);
+    TEST_ASSERT(ucn_node_find_path_forward(&a, UINT32_C(1), sa.session_id,
+                                            path_p1, UINT32_C(4))->remaining_hops ==
+                2U);
+    TEST_ASSERT(ucn_node_find_path_forward(&b, UINT32_C(1), sa.session_id,
+                                            path_p1, UINT32_C(4))->remaining_hops ==
+                1U);
+    TEST_ASSERT(ucn_node_find_path_forward(&d, UINT32_C(1), sa.session_id,
+                                            path_p1, UINT32_C(4))->remaining_hops ==
+                0U);
 
     /* T22.3 binds local policy handles to authenticated source-side Path IDs.
      * Normal Endpoint sends must then use the selected wire Path, rather than
@@ -1090,7 +1112,7 @@ int test_path_control(void)
                 policy_stats->flow_bindings_expired == 3U);
 
     TEST_ASSERT(ucn_node_install_local_path(&a, path_p3, UINT32_C(4),
-                                             UINT32_C(2), 1U) == UCN_OK);
+                                             UINT32_C(2), 2U, 1U) == UCN_OK);
     TEST_ASSERT(ucn_node_step(&a, UCN_POLICY_BALANCE_FLOW_LEASE_MS +
                                     UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS * 4U + 3U) ==
                 UCN_ERR_NOT_FOUND);
