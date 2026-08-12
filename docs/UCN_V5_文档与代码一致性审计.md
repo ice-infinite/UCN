@@ -77,7 +77,7 @@
 | V5-14/V5-23 Cost 报告 | 当前 Wire 规范 | 已与 Descriptor、Codec、边界测试一致。 |
 | V5-15 控制载荷报告 | 当前 Wire 规范 | 已与控制载荷 helper/测试一致；补全部 Profile 当前资源。 |
 | V5-16 Authorized Class | 设计冻结 | 与源码一致：没有 C0～C3 执行层，继续阻塞 S02。 |
-| V5 审计遗留修复方案 | 历史方案 + V5-17～20 结果 | 标注历史资源，并把 V5-26、V5-30 阶段值与 V5-33 当前值分栏。 |
+| V5 审计遗留修复方案 | 历史方案 + V5-17～20 结果 | 标注历史资源，并把 V5-26、V5-30、V5-33 阶段值与 V5-44/V5-36 当前值分栏。 |
 | V5 最新审计修复建议 | 历史问题 + V5-22～26 结果 | 顶部明确任务已在 `f941ae9` 完成，并链接 V5-30/V5-33 后续报告。 |
 | v5 Adaptive Wire 总方案 | 当前总设计 | 修正任务状态、权限正交、Epoch 语义和 Expanding Ring。 |
 | V5-27 异构 Bearer/动态 MTU 报告 | 当前增量规范 | 记录动态 MTU、Path 能力、确定性 RERR、逻辑 Bearer Policy、资源和验证。 |
@@ -90,11 +90,11 @@ Windows x64 GCC 14.2、Release、Service OFF：
 
 | Build Profile | `sizeof(ucn_node_t)` | `sizeof(ucn_link_t)` | Archive `.text` |
 | --- | ---: | ---: | ---: |
-| Nano | 2,648 B | 40 B | 19,884 B |
-| Lite | 5,960 B | 40 B | 68,244 B |
-| Full | 9,752 B | 40 B | 127,792 B |
+| Nano | 2,648 B | 40 B | 27,662 B |
+| Lite | 6,024 B | 40 B | 73,735 B |
+| Full | 10,080 B | 40 B | 139,017 B |
 
-当前软件回归口径：Windows Full/Lite Debug/Release/Service OFF 均 `10/10`，Nano 均 `1/1`；WSL Full ASan+UBSan 与配置契约 `13/13`，GCC `-fanalyzer` 与配置契约 `13/13`。Storage Layout Version=5。这些是 Host 软件和 ABI 证据，不是目标 MCU Flash/RAM/栈/CPU/功耗或 Wi-Fi/UART/CAN/LoRa 性能。
+V5-44/V5-36 当前软件回归口径：Windows Full/Lite/Nano 为 `11/11、11/11、1/1`，Full Service OFF `11/11`，产品头 `15/15`；WSL Full ASan+UBSan 与 GCC `-fanalyzer` 均 `11/11`。Storage Layout Version=5。这些是 Host 软件和 ABI 证据，不是目标 MCU Flash/RAM/栈/CPU/功耗或 Wi-Fi/UART/CAN/LoRa 性能。
 
 ## 6. 明确保留的未完成边界
 
@@ -113,7 +113,7 @@ Windows x64 GCC 14.2、Release、Service OFF：
 - 项目链接：README 与 `docs/` 共 59 份 Markdown 的相对链接无缺失。
 - 调用树：10 个模块、128 个节点、189 个调用引用；重复 ID、内部缺失目标和真实源码坏路径均为 0。
 - 知识库：UCN 58 份笔记的 WikiLink 无缺失；当前状态、测试证据、路线图、任务表和操作记录已同步。
-- 软件回归：Windows Debug/Release/Service OFF 的 Full/Lite 均 `10/10`、Nano 均 `1/1`；Windows 配置契约 `4/4`；WSL Full ASan+UBSan 与配置契约 `13/13`。
+- 软件回归：V5-44/V5-36 当前 Windows Full/Lite/Nano 为 `11/11、11/11、1/1`，Full Service OFF `11/11`，产品头 `15/15`；WSL Full ASan+UBSan 与 GCC `-fanalyzer` 均 `11/11`。
 - 文本检查：`git diff --check` 和本文新增文件的尾随空白检查均通过。
 
 本轮只更新文档和知识库，没有修改协议源码、构建配置或测试代码，也没有上传、烧录或访问硬件/COM。

@@ -3,6 +3,19 @@
 #include "test_support.h"
 #include "ucn/ucn_frame.h"
 
+static size_t expected_max_payload(uint8_t flags)
+{
+    const size_t header_size = ucn_frame_header_size_for_profile(
+        UCN_WIRE_PROFILE_W3_BACKBONE, flags);
+    const size_t tag_size = (flags & UCN_FRAME_FLAG_E2E_PROTECTED) != 0U ?
+                                UCN_E2E_TAG_SIZE : 0U;
+    const size_t frame_limited = header_size + tag_size > UCN_MAX_FRAME_BYTES ?
+                                     0U : UCN_MAX_FRAME_BYTES - header_size - tag_size;
+
+    return frame_limited < UCN_MAX_PAYLOAD_BYTES ? frame_limited :
+                                                   UCN_MAX_PAYLOAD_BYTES;
+}
+
 int test_frame(void)
 {
     static const uint8_t payload[] = { 0x10U, 0x20U, 0x30U, 0x40U };
@@ -69,19 +82,22 @@ int test_frame(void)
     source.payload_length = 1U;
     TEST_ASSERT(ucn_frame_encode(&source, encoded, sizeof(encoded), &encoded_length) == UCN_ERR_ARGUMENT);
 
-    TEST_ASSERT(ucn_frame_max_payload(0U) == UCN_MAX_PAYLOAD_BYTES);
+    TEST_ASSERT(ucn_frame_max_payload(0U) == expected_max_payload(0U));
     TEST_ASSERT(ucn_frame_max_payload(UCN_FRAME_FLAG_ROUTE_EXTENSION) ==
-                UCN_MAX_PAYLOAD_BYTES);
+                expected_max_payload(UCN_FRAME_FLAG_ROUTE_EXTENSION));
     TEST_ASSERT(ucn_frame_max_payload(UCN_FRAME_FLAG_PATH_ID) == 0U);
     TEST_ASSERT(ucn_frame_max_payload(UCN_FRAME_FLAG_ROUTE_EXTENSION |
                                       UCN_FRAME_FLAG_PATH_ID) ==
-                UCN_MAX_FRAME_BYTES - UCN_FRAME_PATH_HEADER_SIZE);
+                expected_max_payload(UCN_FRAME_FLAG_ROUTE_EXTENSION |
+                                     UCN_FRAME_FLAG_PATH_ID));
     TEST_ASSERT(ucn_frame_max_payload(UCN_FRAME_FLAG_E2E_PROTECTED) ==
-                UCN_MAX_FRAME_BYTES - UCN_FRAME_HEADER_SIZE - UCN_E2E_TAG_SIZE);
+                expected_max_payload(UCN_FRAME_FLAG_E2E_PROTECTED));
     TEST_ASSERT(ucn_frame_max_payload(UCN_FRAME_FLAG_ROUTE_EXTENSION |
                                       UCN_FRAME_FLAG_PATH_ID |
                                       UCN_FRAME_FLAG_E2E_PROTECTED) ==
-                UCN_MAX_FRAME_BYTES - UCN_FRAME_PATH_HEADER_SIZE - UCN_E2E_TAG_SIZE);
+                expected_max_payload(UCN_FRAME_FLAG_ROUTE_EXTENSION |
+                                     UCN_FRAME_FLAG_PATH_ID |
+                                     UCN_FRAME_FLAG_E2E_PROTECTED));
     TEST_ASSERT(ucn_frame_max_payload(UINT8_C(0x80)) == 0U);
     return 0;
 }

@@ -469,6 +469,9 @@ ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
         link->ops->send == NULL || link->ops->get_status == NULL) {
         return UCN_ERR_ARGUMENT;
     }
+    if (!ucn_link_liveness_profile_is_valid(link->liveness_profile)) {
+        return UCN_ERR_CONFIG;
+    }
     result = nano_resolve_link_local_receive_profile(node, link,
                                                      &local_receive_profile);
     if (result != UCN_OK) {

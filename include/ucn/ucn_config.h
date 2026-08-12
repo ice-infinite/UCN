@@ -292,6 +292,19 @@
 #ifndef UCN_NEIGHBOR_REMOVE_TIMEOUT_MS
 #define UCN_NEIGHBOR_REMOVE_TIMEOUT_MS UINT32_C(4000)
 #endif
+/* Optional per-Link fast liveness class.  DEFAULT continues to use the three
+ * values above, so zero-initialized and existing product Links are unchanged.
+ * FAST is intended for low-latency wired Bearers such as board-to-board UART
+ * or RS-485. */
+#ifndef UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS
+#define UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS UINT32_C(250)
+#endif
+#ifndef UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS
+#define UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS UINT32_C(1250)
+#endif
+#ifndef UCN_LINK_LIVENESS_FAST_REMOVE_TIMEOUT_MS
+#define UCN_LINK_LIVENESS_FAST_REMOVE_TIMEOUT_MS UINT32_C(2000)
+#endif
 #ifndef UCN_BEARER_SWITCH_IMPROVEMENT_PERCENT
 #define UCN_BEARER_SWITCH_IMPROVEMENT_PERCENT \
     UCN_ROUTE_SWITCH_IMPROVEMENT_PERCENT
@@ -310,6 +323,9 @@
 #endif
 #ifndef UCN_BEARER_QUALITY_PROBE_INTERVAL_MS
 #define UCN_BEARER_QUALITY_PROBE_INTERVAL_MS UINT32_C(100)
+#endif
+#ifndef UCN_BEARER_QUALITY_SWITCH_HOLD_MS
+#define UCN_BEARER_QUALITY_SWITCH_HOLD_MS UINT32_C(3000)
 #endif
 
 /* Endpoint, explicit Path and policy tables. */

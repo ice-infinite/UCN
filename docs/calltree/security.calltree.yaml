@@ -2,15 +2,15 @@ module: security
 description: Security Provider 挂接、Node/Endpoint 策略、端到端加解密和透明中继边界。
 entry: security.ucn_node_set_security
 source_files:
-  - src/ucn_node.c
-  - src/ucn_frame.c
+  - src/node/ucn_node.c
+  - src/core/ucn_frame.c
   - include/ucn/ucn_security.h
 
 nodes:
   - id: security.ucn_node_set_security
     symbol: ucn_node_set_security
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: security
     role: 挂接产品实现的 ucn_security_ops_t 和上下文，加载序号/Session 基础状态。
     called_by:
@@ -28,7 +28,7 @@ nodes:
   - id: security.ucn_node_set_security_required
     symbol: ucn_node_set_security_required
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: security
     role: 在运行时启用或关闭失败关闭门禁；产品也可用 UCN_SECURITY_REQUIRED_BY_DEFAULT=1 从初始化起强制启用。
     called_by:
@@ -40,7 +40,7 @@ nodes:
   - id: security.ucn_node_security_ready
     symbol: ucn_node_security_ready
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: security
     role: 核对 Provider、Session、授权、seal/open 和 Node/Endpoint 禁止明文策略是否全部就绪。
     called_by:
@@ -55,7 +55,7 @@ nodes:
   - id: security.allocate_sequence_static
     symbol: allocate_sequence
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: security
     role: 分配并持久化发送 Sequence；接近阈值时要求 Provider 先原子轮换 Session。
     called_by:
@@ -73,7 +73,7 @@ nodes:
   - id: security.ucn_node_set_security_policy
     symbol: ucn_node_set_security_policy
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: security
     role: 设置 Node 默认 TX/RX/Forward 安全策略。
     called_by:
@@ -83,7 +83,7 @@ nodes:
   - id: security.ucn_node_set_endpoint_security_policy
     symbol: ucn_node_set_endpoint_security_policy
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: security
     role: 覆盖单个 Endpoint 的默认安全策略。
     called_by:
@@ -95,7 +95,7 @@ nodes:
   - id: security.protect_outbound_business
     symbol: protect_outbound_business
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: security
     role: 在业务帧发送前先确定保护 Flag，再让 Wire 选档把 16 B Tag/MTU 纳入计算，最后生成 AAD、调用 seal 并附加 Tag。
     called_by:
@@ -124,7 +124,7 @@ nodes:
   - id: security.validate_inbound_business_security
     symbol: validate_inbound_business_security
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: security
     role: 在业务/控制分派前执行 RX 授权、策略匹配、Tag 验证和目标端解密。
     called_by:

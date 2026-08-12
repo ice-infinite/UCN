@@ -2,14 +2,14 @@ module: node_runtime
 description: ucn_node_t 的初始化、收包总入口、业务转发与单线程调度器。
 entry: node_runtime.ucn_node_step
 source_files:
-  - src/ucn_node.c
-  - src/ucn_duplicate_internal.h
+  - src/node/ucn_node.c
+  - src/node/ucn_duplicate_internal.h
 
 nodes:
   - id: node_runtime.ucn_node_init
     symbol: ucn_node_init
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: core
     role: 清零 Node 固定状态表，保存配置，初始化默认安全/准入/令牌与会话状态。
     called_by:
@@ -28,7 +28,7 @@ nodes:
   - id: node_runtime.ucn_node_register_link
     symbol: ucn_node_register_link
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: core
     role: 将已打开的统一 Link 注册到 Node 固定 Link 表；静态 mtu=0 允许由 get_status().mtu 在运行时提供逻辑上限。
     called_by:
@@ -44,7 +44,7 @@ nodes:
   - id: node_runtime.ucn_node_set_endpoint_handler
     symbol: ucn_node_set_endpoint_handler
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: core
     role: 为一个静态 Endpoint 注册唯一接收回调和上下文。
     called_by:
@@ -60,7 +60,7 @@ nodes:
   - id: node_runtime.send_control_on_link_static
     symbol: send_control_on_link/send_control_on_link_profile/send_control_on_link_adaptive
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: core
     role: 以固定、显式或自适应 Wire Profile 组装控制帧，并在字段可表达、Peer RX Ceiling 与 MTU 都满足后从指定 Link 发送。
     called_by:
@@ -81,7 +81,7 @@ nodes:
   - id: node_runtime.send_control_to_node_static
     symbol: send_control_to_node
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: core
     role: 查找到指定 Node 的当前 Route 后发送单播控制帧。
     called_by:
@@ -101,7 +101,7 @@ nodes:
   - id: node_runtime.ucn_node_receive
     symbol: ucn_node_receive
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: core
     role: 所有接收帧的唯一 Core 入口：先按 3 B Prefix 与 per-Link RX Ceiling 早拒绝，再完整解码；Network 通过后执行运行期 Hop Scope，然后才进入安全/去重、控制面、转发或目标 Endpoint 分发。
     called_by:
@@ -162,7 +162,7 @@ nodes:
   - id: node_runtime.validate_inbound_hop_scope_static
     symbol: validate_inbound_hop_scope
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: core
     role: 统一执行 Frame 当前 Hop、RREQ 原始 Ring Scope、RREP 已走 Hop 和 PATH_INSTALL Remaining Hops 的运行期硬边界。
     called_by:
@@ -175,7 +175,7 @@ nodes:
   - id: node_runtime.forward_or_dispatch_static
     symbol: forward_or_dispatch_static
     type: module
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: core
     role: 收包末段的二选一：中继转发，或目的 Node 的通用 RX/Endpoint handler 分发。
     called_by:
@@ -196,7 +196,7 @@ nodes:
   - id: node_runtime.send_frame_on_link_static
     symbol: send_frame_on_link
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: core
     role: 读取 Link 状态，对未选档的源发业务帧准备固定/自动 Wire Profile，再编码并调用具体 Link 的 send；转发帧保留原 Profile。
     called_by:
@@ -220,7 +220,7 @@ nodes:
   - id: node_runtime.prepare_outbound_wire_profile_static
     symbol: prepare_outbound_wire_profile
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: core
     role: 合并 Node 固定 TX 档、自动开关、Link Peer Ceiling、实际 MTU 与当前帧 Route Hop/Path/Tag 要求。
     called_by:
@@ -236,7 +236,7 @@ nodes:
   - id: node_runtime.ucn_duplicate_accept_frame_static
     symbol: ucn_duplicate_accept_frame
     type: function
-    file: src/ucn_duplicate_internal.h
+    file: src/node/ucn_duplicate_internal.h
     layer: core
     role: 在固定 Source/Session 槽中滑动 32/64 bit Sequence 位图；窗口内乱序可补收，重复/过旧拒绝，活跃来源表满失败关闭。
     called_by:
@@ -249,7 +249,7 @@ nodes:
   - id: node_runtime.ucn_node_step
     symbol: ucn_node_step
     type: scheduler
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: core
     role: 唯一 Protocol Task 的有界维护与发送调度入口；同时观测相邻 Step 的实际时间间隔。
     called_by:
@@ -304,7 +304,7 @@ nodes:
   - id: node_runtime.send_due_essential_maintenance_static
     symbol: send_due_essential_maintenance
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: core
     role: 依次检查到期 Heartbeat、Bearer Quality Probe、Path Probe 与 Route Refresh；只有实际动作才消耗调度槽位。
     called_by:

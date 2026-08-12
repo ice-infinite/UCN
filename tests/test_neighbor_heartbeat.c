@@ -11,6 +11,8 @@ typedef struct heartbeat_link_context {
     bool deliver;
     bool backpressure_q0;
     uint32_t close_count;
+    uint32_t send_count;
+    uint32_t heartbeat_send_count;
 } heartbeat_link_context_t;
 
 static ucn_result_t heartbeat_link_send(ucn_link_t *link,
@@ -19,9 +21,13 @@ static ucn_result_t heartbeat_link_send(ucn_link_t *link,
 {
     heartbeat_link_context_t *context = (heartbeat_link_context_t *)link->context;
     ucn_frame_t decoded;
+    const ucn_result_t decode_result = ucn_frame_decode(frame, length, &decoded);
 
-    if (context->backpressure_q0 &&
-        ucn_frame_decode(frame, length, &decoded) == UCN_OK &&
+    context->send_count++;
+    if (decode_result == UCN_OK && decoded.message_type == UCN_MSG_HEARTBEAT) {
+        context->heartbeat_send_count++;
+    }
+    if (context->backpressure_q0 && decode_result == UCN_OK &&
         decoded.message_type == UCN_MSG_DATA_Q0) {
         return UCN_ERR_NO_SPACE;
     }
@@ -80,6 +86,133 @@ static void heartbeat_setup_link(ucn_link_t *link,
     link->peer_node_id = 0U;
     context->is_up = true;
     context->deliver = true;
+}
+
+static ucn_neighbor_bearer_t *heartbeat_find_bearer(ucn_node_t *node,
+                                                     const ucn_link_t *link)
+{
+    size_t neighbor_index;
+
+    for (neighbor_index = 0U; neighbor_index < UCN_MAX_NEIGHBORS;
+         ++neighbor_index) {
+        size_t bearer_index;
+        ucn_neighbor_entry_t *entry = &node->neighbors[neighbor_index];
+
+        for (bearer_index = 0U; bearer_index < UCN_MAX_BEARERS_PER_NEIGHBOR;
+             ++bearer_index) {
+            if (entry->bearers[bearer_index].link == link) {
+                return &entry->bearers[bearer_index];
+            }
+        }
+    }
+    return NULL;
+}
+
+static int heartbeat_run_mixed_liveness_profiles(void)
+{
+    ucn_node_t a, b;
+    ucn_link_t ab_fast, ab_default, ba_fast, ba_default;
+    heartbeat_link_context_t cab_fast, cab_default, cba_fast, cba_default;
+    ucn_neighbor_bearer_t *fast_bearer;
+    ucn_neighbor_bearer_t *default_bearer;
+
+    if (UCN_MAX_BEARERS_PER_NEIGHBOR < 2U) {
+        return 0;
+    }
+    (void)memset(&a, 0, sizeof(a));
+    (void)memset(&b, 0, sizeof(b));
+    (void)memset(&ab_fast, 0, sizeof(ab_fast));
+    (void)memset(&ab_default, 0, sizeof(ab_default));
+    (void)memset(&ba_fast, 0, sizeof(ba_fast));
+    (void)memset(&ba_default, 0, sizeof(ba_default));
+    (void)memset(&cab_fast, 0, sizeof(cab_fast));
+    (void)memset(&cab_default, 0, sizeof(cab_default));
+    (void)memset(&cba_fast, 0, sizeof(cba_fast));
+    (void)memset(&cba_default, 0, sizeof(cba_default));
+    TEST_ASSERT(heartbeat_init_node(&a, UINT32_C(51)) == 0);
+    TEST_ASSERT(heartbeat_init_node(&b, UINT32_C(52)) == 0);
+    heartbeat_setup_link(&ab_fast, &cab_fast, 51U);
+    heartbeat_setup_link(&ab_default, &cab_default, 52U);
+    heartbeat_setup_link(&ba_fast, &cba_fast, 53U);
+    heartbeat_setup_link(&ba_default, &cba_default, 54U);
+    ab_fast.liveness_profile = (uint8_t)UCN_LINK_LIVENESS_FAST;
+    ba_fast.liveness_profile = (uint8_t)UCN_LINK_LIVENESS_FAST;
+    cab_fast.peer = &b; cab_fast.peer_ingress = &ba_fast;
+    cab_default.peer = &b; cab_default.peer_ingress = &ba_default;
+    cba_fast.peer = &a; cba_fast.peer_ingress = &ab_fast;
+    cba_default.peer = &a; cba_default.peer_ingress = &ab_default;
+
+    TEST_ASSERT(ucn_node_broadcast_hello(&a, &ab_fast, 0U) == UCN_OK);
+    TEST_ASSERT(ucn_node_broadcast_hello(&a, &ab_default, 0U) == UCN_OK);
+    TEST_ASSERT(ucn_node_broadcast_hello(&b, &ba_fast, 0U) == UCN_OK);
+    TEST_ASSERT(ucn_node_broadcast_hello(&b, &ba_default, 0U) == UCN_OK);
+    TEST_ASSERT(a.neighbors[0].bearer_count == 2U);
+    fast_bearer = heartbeat_find_bearer(&a, &ab_fast);
+    default_bearer = heartbeat_find_bearer(&a, &ab_default);
+    TEST_ASSERT(fast_bearer != NULL && default_bearer != NULL);
+
+    b.now_ms = 0U;
+    TEST_ASSERT(ucn_node_step(&a, 0U) == UCN_OK);
+    b.now_ms = 1U;
+    TEST_ASSERT(ucn_node_step(&a, 1U) == UCN_OK);
+    (void)ucn_node_step(&a, UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS - 1U);
+    TEST_ASSERT(cab_fast.heartbeat_send_count == 1U &&
+                cab_default.heartbeat_send_count == 1U);
+    /* Scheduled liveness is independently bounded per admitted Bearer and
+     * must not be starved by the generic RREQ/Probe control-token bucket. */
+    a.control_tokens = 0U;
+    a.control_last_refill_ms = UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS;
+    b.now_ms = UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS;
+    TEST_ASSERT(ucn_node_step(&a,
+                              UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS) ==
+                UCN_OK);
+    TEST_ASSERT(cab_fast.heartbeat_send_count == 2U &&
+                cab_default.heartbeat_send_count == 1U);
+    TEST_ASSERT(a.control_tokens == 0U &&
+                a.stats.control_budget_dropped == 0U);
+
+    /* UART-like FAST Bearer becomes physically silent while the DEFAULT
+     * Backup continues to ACK. Local send still reports success. */
+    cab_fast.deliver = false;
+    cba_fast.deliver = false;
+    b.now_ms = UINT32_C(1000);
+    (void)ucn_node_step(&a, UINT32_C(1000));
+    b.now_ms = UINT32_C(1001);
+    (void)ucn_node_step(&a, UINT32_C(1001));
+    (void)ucn_node_step(
+        &a, UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS +
+                UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS - 1U);
+    TEST_ASSERT(fast_bearer->state == UCN_NEIGHBOR_BEARER_ADMITTED);
+    (void)ucn_node_step(
+        &a, UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS +
+                UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS);
+    TEST_ASSERT(fast_bearer->state == UCN_NEIGHBOR_BEARER_SUSPECT &&
+                default_bearer->state == UCN_NEIGHBOR_BEARER_ADMITTED);
+    TEST_ASSERT(a.neighbors[0].bearers[a.neighbors[0].primary_bearer_index].link ==
+                &ab_default);
+
+    b.now_ms = UINT32_C(2000);
+    (void)ucn_node_step(&a, UINT32_C(2000));
+    b.now_ms = UINT32_C(2001);
+    (void)ucn_node_step(&a, UINT32_C(2001));
+    (void)ucn_node_step(
+        &a, UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS +
+                UCN_LINK_LIVENESS_FAST_REMOVE_TIMEOUT_MS);
+    TEST_ASSERT(fast_bearer->state == UCN_NEIGHBOR_BEARER_DOWN);
+    TEST_ASSERT(ucn_node_neighbor_count(&a, UCN_NEIGHBOR_ADMITTED) == 1U);
+
+    /* A valid HELLO on the physical Bearer is the recovery/admission path.
+     * Quality/Cost hysteresis, not this liveness test, decides when it becomes
+     * Primary again. */
+    cab_fast.deliver = true;
+    cba_fast.deliver = true;
+    a.now_ms = UINT32_C(2300);
+    TEST_ASSERT(ucn_node_broadcast_hello(&b, &ba_fast, UINT32_C(2300)) == UCN_OK);
+    fast_bearer = heartbeat_find_bearer(&a, &ab_fast);
+    TEST_ASSERT(fast_bearer != NULL &&
+                fast_bearer->state == UCN_NEIGHBOR_BEARER_ADMITTED);
+    TEST_ASSERT(cab_fast.heartbeat_send_count > cab_default.heartbeat_send_count);
+    return 0;
 }
 
 static int heartbeat_run_sustained_backlog(bool include_q0, bool include_q1)
@@ -187,6 +320,62 @@ static int heartbeat_run_wraparound_lifecycle(void)
     (void)ucn_node_step(&a, base_ms + UCN_NEIGHBOR_REMOVE_TIMEOUT_MS);
     TEST_ASSERT(ucn_node_neighbor_count(&a, UCN_NEIGHBOR_REMOVED) == 1U);
     TEST_ASSERT(a.link_count == 0U && cab.close_count == 1U);
+    return 0;
+}
+
+static int heartbeat_run_fast_wraparound_lifecycle(void)
+{
+    const uint32_t base_ms = UINT32_MAX - UINT32_C(1000);
+    ucn_node_t a, b;
+    ucn_link_t ab, ba;
+    heartbeat_link_context_t cab, cba;
+
+    (void)memset(&a, 0, sizeof(a));
+    (void)memset(&b, 0, sizeof(b));
+    (void)memset(&ab, 0, sizeof(ab));
+    (void)memset(&ba, 0, sizeof(ba));
+    (void)memset(&cab, 0, sizeof(cab));
+    (void)memset(&cba, 0, sizeof(cba));
+    TEST_ASSERT(heartbeat_init_node(&a, UINT32_C(23)) == 0);
+    TEST_ASSERT(heartbeat_init_node(&b, UINT32_C(24)) == 0);
+    heartbeat_setup_link(&ab, &cab, 23U);
+    heartbeat_setup_link(&ba, &cba, 24U);
+    ab.liveness_profile = (uint8_t)UCN_LINK_LIVENESS_FAST;
+    ba.liveness_profile = (uint8_t)UCN_LINK_LIVENESS_FAST;
+    cab.peer = &b; cab.peer_ingress = &ba;
+    cba.peer = &a; cba.peer_ingress = &ab;
+    TEST_ASSERT(ucn_node_broadcast_hello(&a, &ab, base_ms) == UCN_OK);
+    TEST_ASSERT(ucn_node_broadcast_hello(&b, &ba, base_ms) == UCN_OK);
+
+    cab.deliver = false;
+    cba.deliver = false;
+    (void)ucn_node_step(
+        &a, base_ms + UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS - 1U);
+    TEST_ASSERT(ucn_node_neighbor_count(&a, UCN_NEIGHBOR_ADMITTED) == 1U);
+    (void)ucn_node_step(
+        &a, base_ms + UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS);
+    TEST_ASSERT(ucn_node_neighbor_count(&a, UCN_NEIGHBOR_SUSPECT) == 1U);
+    (void)ucn_node_step(
+        &a, base_ms + UCN_LINK_LIVENESS_FAST_REMOVE_TIMEOUT_MS);
+    TEST_ASSERT(ucn_node_neighbor_count(&a, UCN_NEIGHBOR_REMOVED) == 1U);
+    TEST_ASSERT(a.link_count == 0U && cab.close_count == 1U);
+    return 0;
+}
+
+static int heartbeat_run_invalid_liveness_profile(void)
+{
+    ucn_node_t node;
+    ucn_link_t link;
+    heartbeat_link_context_t context;
+
+    (void)memset(&node, 0, sizeof(node));
+    (void)memset(&link, 0, sizeof(link));
+    (void)memset(&context, 0, sizeof(context));
+    TEST_ASSERT(heartbeat_init_node(&node, UINT32_C(25)) == 0);
+    heartbeat_setup_link(&link, &context, 25U);
+    link.liveness_profile = (uint8_t)UCN_LINK_LIVENESS_PROFILE_COUNT;
+    TEST_ASSERT(ucn_node_register_link(&node, &link) == UCN_ERR_CONFIG);
+    TEST_ASSERT(node.link_count == 0U);
     return 0;
 }
 
@@ -452,5 +641,8 @@ int test_neighbor_heartbeat(void)
     TEST_ASSERT(heartbeat_run_sustained_q0_backpressure() == 0);
     TEST_ASSERT(heartbeat_run_multi_bearer_service_bound() == 0);
     TEST_ASSERT(heartbeat_run_wraparound_lifecycle() == 0);
+    TEST_ASSERT(heartbeat_run_fast_wraparound_lifecycle() == 0);
+    TEST_ASSERT(heartbeat_run_mixed_liveness_profiles() == 0);
+    TEST_ASSERT(heartbeat_run_invalid_liveness_profile() == 0);
     return 0;
 }

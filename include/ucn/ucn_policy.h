@@ -3,6 +3,7 @@
 
 #include "ucn/ucn_endpoint.h"
 #include "ucn/ucn_link.h"
+#include "ucn/ucn_link_cost.h"
 #include "ucn/ucn_path.h"
 #include "ucn/ucn_time.h"
 
@@ -182,6 +183,20 @@ typedef struct ucn_policy_link_quality_snapshot {
     uint16_t tx_failure_ewma_per_mille;
     bool queue_pressure_valid;
     uint16_t queue_pressure_ewma_per_mille;
+    bool rx_failure_rate_valid;
+    uint16_t rx_failure_ewma_per_mille;
+    bool medium_busy_valid;
+    uint16_t medium_busy_ewma_per_mille;
+    bool medium_quality_valid;
+    uint16_t medium_quality_ewma_per_mille;
+    bool metrics_timestamp_valid;
+    uint32_t metrics_timestamp_ms;
+    bool rtt_reference_valid;
+    uint16_t rtt_reference_ms;
+    int16_t administrative_bias;
+    uint32_t adapter_bad_metric_count;
+    uint32_t rejected_metric_count;
+    ucn_link_cost_result_t cost;
     uint32_t sampled_at_ms;
 } ucn_policy_link_quality_snapshot_t;
 
@@ -193,6 +208,8 @@ typedef struct ucn_policy_stats {
     uint32_t flow_bindings_expired;
     uint32_t quality_samples;
     uint32_t quality_metrics_unavailable;
+    uint32_t quality_bad_metrics;
+    uint32_t quality_metrics_stale;
     uint32_t quality_link_down;
     uint32_t pinned_strict_sends;
     uint32_t pinned_strict_failures;

@@ -49,6 +49,9 @@ int main(void)
     result |= test_host_boundary();
     result |= test_endpoint();
     result |= test_adapter();
+    result |= test_standard_adapter();
+    result |= test_link_cost();
+    result |= test_protocol_owner();
 #if UCN_FEATURE_SERVICE
     result |= test_service();
     result |= test_service_bridge();

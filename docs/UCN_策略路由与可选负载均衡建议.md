@@ -119,14 +119,14 @@ Policy 通过 `primary_local_path_id` 和可选 `backup_local_path_id` 指向本
 
 自动均衡必须默认关闭，且只从通过 Probe/ACK、没有处于 `SUSPECT` 的 Path 中选择。它不应把所有帧按轮询方式交替发送：逐帧条带化会带来乱序、抖动和中继排队放大。
 
-T22.4 已将这个边界写入 Core：`AUTO_BALANCE` 只接受精确 Q1 Policy，Primary 必填、Backup 可选且均须是已验证 Path；Flow 键为当前最小 `(destination, endpoint, Q1)`，零 `balance_flow_lease_ms` 使用默认 2 s。首次/租约到期以 Known 基础 Cost ×（当前 Flow 数 + 1）选择成员，Unknown 不优于 Known；RTT/失败率不进入裸评分。Cost 相同的两个 Flow 可分散，单一 Flow 不会逐帧轮换。默认连续 3 个 500 ms 队列压力快照达到 800‰，或 Path Down 时，才将受影响 Flow 重绑到另一成员。Q0、自动发现、帧复制和带宽聚合均未实现。
+T22.4 已将这个边界写入 Core，V5-44/V5-36 又完成 LC-1 接入：`AUTO_BALANCE` 只接受精确 Q1 Policy，Primary 必填、Backup 可选且均须是已验证 Path；Flow 键为当前最小 `(destination, endpoint, Q1)`，零 `balance_flow_lease_ms` 使用默认 2 s。首次/租约到期以 Full 本地 `effective_select_cost ×（当前 Flow 数 + 1）` 选择成员，Known 基础 Cost 仍优先于 Unknown。单一 Flow 不会逐帧轮换。默认连续 3 个 500 ms 队列压力快照达到 800‰，或 Path Down 时，才将未到期受影响 Flow 重绑。Q0、自动发现、帧复制和带宽聚合均未实现。
 
 初版建议如下：
 
 1. **按流绑定而不是按帧分散**：同一 `(source, destination, endpoint[, stream_id])` 在一个租约窗口内固定使用一条 Path；不同流才可分配到不同 Path。
 2. **Q0 初版不参与自动均衡**：Q0 只能使用显式 `PINNED_STRICT`/`PINNED_FAILOVER` 或已冻结的安全路径。
 3. **Q1 才可选择参加均衡**：日志、非关键遥测等先进入；每条流的业务序号仍由产品 Payload 提供。
-4. **当前只使用同量纲基础 Cost**：以 Known 基础 Cost ×（活动 Flow 数 + 1）选择，持续本地队列压力只触发拥塞重绑。RTT/失败率继续独立观测；只有未来形成跨介质标定和量纲明确的产品 Profile 后，才另行评审加权模型。Adapter 继续负责把介质专有指标归一为通用字段；Core 不读取 RSSI、Bus-Off 等字段。
+4. **使用 LC-1 归一后的同量纲整数分**：Full 以 `effective_select_cost ×（活动 Flow 数 + 1）` 选择；RTT/失败率/Queue/介质项先经固定表归一，绝不裸相加。持续 Queue 仍可独立触发未到期 Flow 重绑。Adapter 负责把介质专有指标归一为通用字段；Core 不读取 RSSI、Bus-Off 等私有字段。
 5. **只在边界重新绑定**：流启动、租约到期、Path Down 或明显持续拥塞时重选，不因单次指标波动迁移。
 6. **不做隐式复制或带宽聚合**：同一帧不复制到多条 Path；大包/分片仍属于 Extended/Carrier 的独立问题。
 

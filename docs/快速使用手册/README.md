@@ -1,6 +1,6 @@
 # UCN 快速使用手册
 
-> 适用：当前 `codex/v5-adaptive-wire` 的 UCN Core 5.0.0 / 线协议 v5 V5-33 软件工作树；`f941ae9` 是本轮缺陷修复前基线。默认固定 W3；固定域、显式自动最小档、Profile-aware 控制面、PATH_INSTALL 基础/扩展双格式、动态 MTU、异构 Bearer Path 能力、逻辑 Bearer Policy、Q1 绝对 Deadline、运行期 Hop Scope 与有界 Expanding Ring 已可用。本文档组以公开 C99 API 和现有 ESP32 FreeRTOS 参考实现为准；生产安全和真实多板/多介质仍未由本手册替代验证。
+> 适用：`codex/v5-adaptive-wire@ebd3d8f` 的 UCN Core 5.0.0 / 线协议 v5 V5-33。默认固定 W3；固定域、显式自动最小档、Profile-aware 控制面、PATH_INSTALL 基础/扩展双格式、动态 MTU、异构 Bearer Path 能力、逻辑 Bearer Policy、Q1 绝对 Deadline、运行期 Hop Scope 与有界 Expanding Ring 已可用。本文档组以当前公开 C99 API 和 CMake 源文件选择为准；生产安全、正式 RTOS Port 和真实 v5 多板/多介质仍未由本手册替代验证。
 
 ## 选择你的运行环境
 
@@ -8,20 +8,33 @@
 | --- | --- | --- | --- |
 | 裸机 / Super Loop | [01-裸机快速使用](01-裸机快速使用.md) | Core 直接可用；需实现板级 Link/Adapter。 | 一个主循环、低资源 MCU。 |
 | 通用 RTOS | [02-通用RTOS快速使用](02-通用RTOS快速使用.md) | 提供平台无关 Router/Bridge API；需自行做 OS 适配层。 | 自研 RTOS 或希望先统一任务模型。 |
-| FreeRTOS | [03-FreeRTOS快速使用](03-FreeRTOS快速使用.md) | ESP32 测试工程已有静态 Port 参考。 | ESP32 或其他 FreeRTOS MCU。 |
-| Zephyr | [04-Zephyr快速使用](04-Zephyr快速使用.md) | 尚无 Zephyr Port；按本文接入。 | Zephyr 应用、设备树驱动和线程模型。 |
-| NuttX | [05-NuttX快速使用](05-NuttX快速使用.md) | 尚无 NuttX Port；按本文接入。 | NuttX/PX4 风格的板级应用。 |
-| RT-Thread | [06-RT-Thread快速使用](06-RT-Thread快速使用.md) | 尚无 RT-Thread Port；按本文接入。 | RT-Thread BSP 与设备框架。 |
+| FreeRTOS | [03-FreeRTOS快速使用](03-FreeRTOS快速使用.md) | 已有独立 C99 Port 入口；ESP32 v5 Adapter/实机仍待 V5-38。 | ESP32 或其他 FreeRTOS MCU。 |
+| Zephyr | [04-Zephyr快速使用](04-Zephyr快速使用.md) | 已有独立 C99 Port 入口；Zephyr SDK glue 仍由产品提供。 | Zephyr 应用、设备树驱动和线程模型。 |
+| NuttX | [05-NuttX快速使用](05-NuttX快速使用.md) | 已有独立 C99 Port 入口；NuttX SDK glue 仍由产品提供。 | NuttX/PX4 风格的板级应用。 |
+| RT-Thread | [06-RT-Thread快速使用](06-RT-Thread快速使用.md) | 已有独立 C99 Port 入口；RT-Thread 不再借用其它 RTOS 模式。 | RT-Thread BSP 与设备框架。 |
 
-“已有参考”不等于已经替你的板子完成驱动、引脚、DMA、密钥或实机验收。UCN Core 不包含 Wi-Fi、CAN、UART、BLE、LoRa 的具体驱动；每个产品仍要实现自己的 Link/Adapter。
+“已有参考”不等于已经替你的板子完成驱动、引脚、DMA、密钥或实机验收。UCN Core 不包含 Wi-Fi、CAN、UART、BLE、LoRa 的具体驱动；每个产品仍要实现自己的 Link/Adapter。当前可以先用 `ucn_standard_adapter.h` 解析官方静态 Preset/Cost/MTU，再把结果绑定到产品 Adapter；该 Resolver 不初始化硬件、不注册 Link、也不做动态选路。
+
+## 先选择 Build Profile
+
+Build Profile 决定实际编译的状态机和对象布局；Wire Profile 只决定帧字段宽度，两者不能混为一谈。
+
+| Build Profile | 当前能力 | 不具备的高级能力 |
+| --- | --- | --- |
+| Nano | 静态 Link/Route、Endpoint、Q0/Q1、W0～W3 编解码。 | 动态 Mesh、Security、Candidate、Path、Policy、诊断。 |
+| Lite | Nano 基础能力、动态 Mesh、Security。 | Candidate、Path、Policy、诊断。 |
+| Full | 动态 Mesh、Security、Candidate、Path、Policy、诊断。 | 生产密码、真实 Carrier 与产品授权仍由外部实现。 |
+
+`UCN_FEATURE_SERVICE` 与三档正交：开启才编译 Service Router/Bridge。所有包含 UCN 公共头的编译单元必须看到完全相同的 `UCN_PROFILE`、`UCN_FEATURE_SERVICE` 和产品配置头，否则公开对象布局不一致。
 
 ## 所有平台必须保持的边界
 
 ```mermaid
 flowchart LR
-    D["驱动 ISR / 回调"] --> Q["有界驱动 RX 队列"]
-    Q --> P["唯一 Protocol Task / 主循环"]
-    P --> A["ucn_adapter_rx_pump"]
+    D["驱动 ISR / 回调"] --> O["选定平台的 ucn_<platform>_port_rx_enqueue"]
+    O --> Q["有界 Adapter RX 队列"]
+    Q --> P["唯一 Protocol Owner / 主循环"]
+    P --> A["选定平台的 ucn_<platform>_port_*_step"]
     A --> N["ucn_node_receive + ucn_node_step"]
     S["业务 Task / Service"] --> R["Service Router"]
     R --> B["Protocol Bridge"]
@@ -31,36 +44,49 @@ flowchart LR
 
 1. 一个 MCU 只有一个 `ucn_node_t`，并且只由一个 Protocol Task（或裸机主循环）调用 `ucn_node_receive()`、`ucn_node_step()`、`ucn_node_send_endpoint()`。
 2. ISR、DMA 回调、Wi-Fi/BLE 回调只能把完整 UCN 帧放进**有上限**的驱动队列；不能运行路由、解密、Endpoint handler 或业务回调。
-3. `ucn_link_t` 只处理一种实际传输介质。它报告 `is_up`、MTU 和通用质量 Cost；业务代码不传 MAC、UART 号、CAN ID 或中继地址。
+3. V5-48 要求只选择一个独立 Platform Port 头：裸机、FreeRTOS、Zephyr、NuttX、RT-Thread 都有自己的文件，内部共享公共 Owner 的“Task 入队或 ISR token 入队 → 有界 Pump → 可选 Bridge → Node Step”顺序；它不创建 RTOS SDK 对象或驱动。ISR 直入仅在产品提供成对 ISR token 临界区时允许，否则返回 `UCN_ERR_CONFIG`；BSP ring→Protocol Task 仍是优先方案。`ucn_link_t` 只处理一种实际传输介质。`ucn_node_register_link()` 负责调用可选 `open()`，产品不能先手动打开再注册。Link 报告 `is_up`、MTU 和通用质量 Cost；业务代码不传 MAC、UART 号、CAN ID 或中继地址。
 4. 多个本机业务任务使用 `ucn_service_router_t`：本机消息进入固定 Inbox，远端消息经 `ucn_service_protocol_bridge_t` 由 Protocol Task 发出。Router 中没有动态内存。
 5. Q0 命令入队成功不等于执行器已经执行。Q0 必须有本机失效安全；Q1 是 Latest Value，允许覆盖旧传感器值。
-6. 生产安全节点使用 Lite/Full，并定义 `UCN_SECURITY_REQUIRED_BY_DEFAULT=1` 或启动时调用 `ucn_node_set_security_required(..., true)`；只有 `ucn_node_security_ready()` 为真才进入协议循环。测试 Provider 不能替代生产 AEAD。
+6. 生产安全节点使用 Lite/Full，并定义 `UCN_SECURITY_REQUIRED_BY_DEFAULT=1` 或启动时调用 `ucn_node_set_security_required(..., true)`；只有 `ucn_node_security_ready()` 为真才进入协议循环。明文开发节点也应在联网前设置非零、重启不复用的 Boot Session。测试 Provider 不能替代生产 AEAD。
 7. Service Binding 是 Router 借用的只读表，必须使用全生命周期有效的存储，推荐 `static const`，不能传函数栈上的临时数组。
 
-## 共同的最小构建输入
+## 共同的构建输入
 
-将以下 C99 源文件加入目标（或以 CMake `add_subdirectory()` 引入本仓库并关闭 `UCN_BUILD_TESTS`）：
+优先使用仓库 CMake，让同一套规则选择 Profile 源文件并向使用者导出对象布局宏：
 
-```text
-src/ucn_core.c
-src/ucn_adapter.c
-src/ucn_endpoint.c
-src/ucn_frame.c
-src/ucn_node.c
-src/ucn_path.c
-src/ucn_policy.c
-src/ucn_service.c
-src/ucn_service_bridge.c
-include/ucn/
+```cmake
+set(UCN_DIR "${CMAKE_CURRENT_LIST_DIR}/path/to/UCN")
+set(UCN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(UCN_BUILD_SCALE_SIM OFF CACHE BOOL "" FORCE)
+set(UCN_BUILD_CONFIG_CONTRACT_TESTS OFF CACHE BOOL "" FORCE)
+set(UCN_PROFILE LITE CACHE STRING "" FORCE)       # NANO / LITE / FULL
+set(UCN_FEATURE_SERVICE ON CACHE BOOL "" FORCE)   # ON / OFF
+add_subdirectory(${UCN_DIR} ${CMAKE_BINARY_DIR}/ucn)
+target_link_libraries(your_target PRIVATE ucn_core ucn_port_freertos)
 ```
+
+产品构建系统若必须直接添加 C99 源文件，使用下面的组合，不能固定复制“九个文件”：
+
+| 组合 | 源文件 |
+| --- | --- |
+| 所有 Profile 公共 | `src/core/ucn_core.c`、`src/core/ucn_endpoint.c`、`src/core/ucn_frame.c`、`src/transport/ucn_adapter.c`、`src/transport/ucn_standard_adapter.c`、`src/transport/ucn_protocol_owner.c` |
+| 选择一个 Platform Port | 只加入与目标系统对应的 `src/ports/ucn_port_*.c`；CMake 目标为 `ucn_port_bare_metal`、`ucn_port_freertos`、`ucn_port_zephyr`、`ucn_port_nuttx`、`ucn_port_rtthread` 或 `ucn_port_host_fake`。 |
+| Nano | `src/node/ucn_node_nano.c`、`src/node/ucn_profile_stubs.c` |
+| Lite | `src/node/ucn_node.c`、`src/node/ucn_profile_stubs.c` |
+| Full | `src/node/ucn_node.c`、`src/routing/ucn_path.c`、`src/routing/ucn_policy.c` |
+| Service ON | 追加 `src/service/ucn_service.c`、`src/service/ucn_service_bridge.c` |
+
+直接构建时还要全局定义同一组 `UCN_PROFILE=1/2/3`、`UCN_FEATURE_SERVICE=0/1`，并把 `include/` 加入头文件路径。Nano/Lite 的 Stub 是公开 API 符号合同的一部分，不能省略。
 
 编译器使用 C99；没有 `malloc` 依赖。资源上限通过宏在构建时冻结，例如 `UCN_MAX_FRAME_BYTES`、`UCN_MAX_LINKS`、`UCN_MAX_NEIGHBORS`、`UCN_MAX_ROUTES`、`UCN_TX_Q0_DEPTH`、`UCN_TX_Q1_DEPTH`、`UCN_ADAPTER_RX_QUEUE_DEPTH` 和 `UCN_SERVICE_*`。先按最小节点测量 RAM/Flash/栈，再增加上限；不要在运行时无界扩容。
 
+动态 MTU 的统一合同是：`link.mtu != 0` 表示静态上限，`get_status().mtu != 0` 表示当前运行期上限，两者同时存在时取较小值；`link.mtu=0` 可完全依赖运行期值。两者都为 0 时该 Link 暂不可发送并返回 `UCN_ERR_LINK_DOWN`，运行期 MTU 恢复后无需重新注册。这里的 MTU 是 Carrier 完成分段/重组后可承载的完整 UCN 逻辑帧上限。
+
 ## 先完成这四项，再让业务入网
 
-1. 冻结 `network_id`、每块板稳定且不重复的 `node_id`、最低够用 TX/默认 W3 RX Wire Profile、Endpoint ABI、QoS 和最大 Payload；编译期容量统一通过 `ucn_config.h`/产品 `UCN_USER_CONFIG_HEADER` 管理。
-2. 实现至少一种 Link 的 `open/send/poll_rx/get_status/close/get_metrics`，并把它注册到 Node。
-3. 让完整帧遵守“驱动队列 → Protocol Task → `ucn_adapter_rx_pump()`”路径；验证队列满会丢弃并计数，不会卡死回调。
-4. 先以一个 Endpoint 的 Q1 数据做两节点收发，再接 Service Router、多 Bearer、Path、策略和安全 Provider。
+1. 冻结 `network_id`、每块板稳定且不重复的 `node_id`、非零 Boot Session、最低够用 TX/默认 W3 RX Wire Profile、Endpoint ABI、QoS 和最大 Payload；Network/Node/Session/Hop 都必须能被固定 TX Profile 表达。编译期容量统一通过 `ucn_config.h`/产品 `UCN_USER_CONFIG_HEADER` 管理。
+2. 可选：先用 `ucn_standard_link_config_resolve()` 取得 UART/CAN-FD/ESP-NOW/Wi-Fi/USB CDC 的静态 Cost/MTU/RTT 默认值；CAN-FD/ESP-NOW 必须显式请求不超过 64/250 B 的逻辑 MTU。再实现至少一种 Link 的 `open/send/poll_rx/get_status/close/get_metrics`，并把它注册到 Node。
+3. 让完整帧遵守“驱动回调 → 选定平台的 ucn_<platform>_port_rx_enqueue() → Adapter RX Queue → 选定平台的 ucn_<platform>_port_*_step()”路径；验证队列满会丢弃并计数，不会卡死回调。需要直接控制低层顺序时，才使用 `ucn_adapter_rx_pump()`/Bridge/`ucn_node_step()` 原始 API。
+4. 先以一个 Endpoint 的 Q1 数据做两节点收发，再接 Service Router、多 Bearer、Path、策略和安全 Provider。Full 的 Path 安装仍要求认证 Session 和产品授权；旧 `ucn_node_send_path_install()` 固定发送 v5 基础格式，只有确认目标支持扩展 Schema 后才调用 `ucn_node_send_path_install_capable()`。Lite/Nano 的 Path API 仅保留可链接 Stub，并返回 `UCN_ERR_CONFIG`。
 
 常用详细资料：[UCN 使用与调用手册](../UCN_使用与调用手册.md)、[Adapter 契约](../UCN_Adapter_契约.md)、[调用关系树](../calltree/README.md)。

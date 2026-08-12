@@ -83,7 +83,7 @@ CRC 位于实际 Header 最后 2 B，覆盖 CRC 之前的 Header、Payload 和�
 
 V5-01 当时 Node 对象与 v4 相同；三档静态库 `.text` 均比 v4 增加 4,096 B。该结果来自 Windows x64 GCC Release/Service OFF，只证明该阶段 Host 对象与代码增量。
 
-V5-33 后同一 Host 口径的当前 Nano/Lite/Full Node 为 `2648/5960/9752 B`，Archive `.text` 为 `19884/68244/127792 B`，Link 为 `40 B`，Storage Layout Version 为 5。历史表不能替代当前资源表，也不能替代 MCU ELF、RAM、栈、CPU 和功耗测量。
+V5-44/V5-36 后同一 Host 口径的当前 Nano/Lite/Full Node 为 `2648/6024/10080 B`，Archive `.text` 为 `27662/73735/139017 B`，Link 为 `40 B`，Storage Layout Version 为 5。历史表不能替代当前资源表，也不能替代 MCU ELF、RAM、栈、CPU 和功耗测量。
 
 ## 7. 后续状态
 

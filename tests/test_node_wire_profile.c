@@ -462,13 +462,14 @@ int test_node_wire_profile(void)
     TEST_ASSERT(verify_profile_send(UCN_WIRE_PROFILE_W0_LOCAL, 42U, 1U, 2U,
                                     4U, UCN_FRAME_W0_HEADER_SIZE) == 0);
     TEST_ASSERT(verify_profile_send(UCN_WIRE_PROFILE_W1_EDGE, 300U, 300U, 301U,
-                                    16U, UCN_FRAME_W1_HEADER_SIZE) == 0);
+                                    UCN_MAX_HOPS,
+                                    UCN_FRAME_W1_HEADER_SIZE) == 0);
     TEST_ASSERT(verify_profile_send(UCN_WIRE_PROFILE_W2_MESH, 70000U, 70000U,
-                                    70001U, 16U,
+                                    70001U, UCN_MAX_HOPS,
                                     UCN_FRAME_W2_HEADER_SIZE) == 0);
     TEST_ASSERT(verify_profile_send(UCN_WIRE_PROFILE_W3_BACKBONE,
                                     UINT32_C(0xAABBCCDD), UINT32_C(0x1000001),
-                                    UINT32_C(0x1000002), 16U,
+                                    UINT32_C(0x1000002), UCN_MAX_HOPS,
                                     UCN_FRAME_W3_HEADER_SIZE) == 0);
     TEST_ASSERT(verify_node_automatic_profile() == 0);
     TEST_ASSERT(verify_low_tx_node_accepts_all_profiles() == 0);
@@ -478,13 +479,13 @@ int test_node_wire_profile(void)
     TEST_ASSERT(verify_control_profile(UCN_WIRE_PROFILE_W0_LOCAL, 42U, 1U, 2U,
                                        4U) == 0);
     TEST_ASSERT(verify_control_profile(UCN_WIRE_PROFILE_W1_EDGE, 300U, 300U,
-                                       301U, 16U) == 0);
+                                       301U, UCN_MAX_HOPS) == 0);
     TEST_ASSERT(verify_control_profile(UCN_WIRE_PROFILE_W2_MESH, 70000U, 70000U,
-                                       70001U, 16U) == 0);
+                                       70001U, UCN_MAX_HOPS) == 0);
     TEST_ASSERT(verify_control_profile(UCN_WIRE_PROFILE_W3_BACKBONE,
                                        UINT32_C(0xAABBCCDD),
                                        UINT32_C(0x1000001),
-                                       UINT32_C(0x1000002), 16U) == 0);
+                                       UINT32_C(0x1000002), UCN_MAX_HOPS) == 0);
 #endif
 
     TEST_ASSERT(ucn_node_init(&node, &config) == UCN_OK);

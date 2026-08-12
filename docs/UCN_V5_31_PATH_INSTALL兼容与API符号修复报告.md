@@ -74,7 +74,7 @@ Full 提供真实 Path 实现；Lite/Nano 因 `UCN_FEATURE_PATH=0` 提供固定 
 | 调用树 | 10 模块、132 节点、194 调用引用，结构错误 0 |
 | `git diff --check` | 通过 |
 
-当前 Windows x64 GCC 14.2 Release/Service OFF 的 Node 大小仍为 Nano/Lite/Full=`2648/5960/9752 B`，Link 均为 `40 B`。这些是 Host ABI 裁剪证据，不代表目标 MCU 的最终 RAM/Flash。
+V5-31 当时 Windows x64 GCC 14.2 Release/Service OFF 的 Node 大小为 Nano/Lite/Full=`2648/5960/9752 B`，Link 均为 `40 B`；V5-44/V5-36 后当前 Host 值为 `2648/6024/10080 B`，Link 仍为 `40 B`。这些是 Host ABI 裁剪证据，不代表目标 MCU 的最终 RAM/Flash。
 
 ## 5. 使用与升级规则
 

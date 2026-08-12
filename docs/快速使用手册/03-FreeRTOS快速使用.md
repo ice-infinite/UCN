@@ -1,6 +1,8 @@
 # UCN FreeRTOS 快速使用
 
-> 适用：FreeRTOS MCU。当前已有的可编译参考是 ESP32 测试工程中的 `UcnServiceFreeRtosPort`，路径为 `E:\File\PlatformIO\ESP32_UCN\ESP32S3_N16R8_UCN_Test1`。它不是已经打包进 UCN Core 的通用 FreeRTOS 库；移植到其他芯片时应复用其静态对象、短临界区和通知模型，而不是直接依赖 ESP32 的 `portMUX_TYPE`。
+> 适用：FreeRTOS MCU。ESP32 测试工程中的 `UcnServiceFreeRtosPort`（`E:\File\PlatformIO\ESP32_UCN\ESP32S3_N16R8_UCN_Test1`）可作为静态对象、短临界区和通知模型的历史参考，但该工程当前仍用静态断言锁定线协议 v4，不能作为 v5 已编译/已烧录证据。它也不是打包进 UCN Core 的通用 FreeRTOS 库；移植到其他芯片时不能直接依赖 ESP32 的 `portMUX_TYPE`。
+
+构建 v5 时按[总览的 Build Profile 与源文件矩阵](README.md#先选择-build-profile)重新选择 Nano/Lite/Full 源文件，并在所有 C/C++ 编译单元保持相同的 `UCN_PROFILE` 与 `UCN_FEATURE_SERVICE`。当前 ESP32 工程的源文件选择脚本已经具备该矩阵，但应用层 `main.cpp`/UART Benchmark 仍需另行迁移掉 v4 锁定后，才能称为 v5 FreeRTOS 实机参考。
 
 ## 1. 参考实现提供了什么
 
@@ -25,6 +27,9 @@ static ucn_service_router_t g_router{};
 static ucn_service_protocol_bridge_t g_bridge{};
 static UcnServiceFreeRtosPort g_service_port;
 
+static constexpr ucn_service_id_t kServiceControl = 2U;
+static constexpr ucn_service_id_t kServiceActuator = 3U;
+
 static StaticTask_t g_service_task_tcb{};
 static StackType_t g_service_stack[UCN_PRODUCT_SERVICE_STACK_DEPTH]{};
 ```
@@ -33,23 +38,24 @@ FreeRTOS 的 Task、事件 Queue、Adapter RX 缓冲和 UCN 固定表都应在�
 
 ## 3. 启动顺序
 
-Node 启动顺序固定为 `ucn_node_init()` → `ucn_node_set_wire_profiles()` → 可选 `ucn_node_set_wire_profile_auto(true)` → Link/Security → Router/Bridge/Port → 创建任务。所有配置都在 Scheduler 启动前完成，不能让多个 Task 在运行中修改 Wire 域。
+Node 启动顺序固定为 `ucn_node_init()` → `ucn_node_set_wire_profiles()` → 可选 `ucn_node_set_wire_profile_auto(true)` → 明文 Boot Session 或生产 Security → Link → Router/Bridge/Port → 创建任务。所有配置都在 Scheduler 启动前完成，不能让多个 Task 在运行中修改 Wire 域。明文节点的非零 Session 必须在有效重复窗口内跨重启不复用。
 
 ```cpp
 static void create_ucn_service_task(void)
 {
     const ucn_service_router_config_t router_config = {
-        .local_node_id = g_node.config.node_id,
-        .bindings = g_bindings,
-        .binding_count = static_cast<uint8_t>(kBindingCount),
+        g_node.config.node_id,
+        g_bindings,
+        static_cast<uint8_t>(kBindingCount),
     };
     const UcnServiceFreeRtosConsumerConfig consumers[] = {
-        { UCN_SERVICE_ID_CONTROL },
-        { UCN_SERVICE_ID_ACTUATOR },
+        { kServiceControl },
+        { kServiceActuator },
     };
 
     if (ucn_service_router_init(&g_router, &router_config) != UCN_OK ||
         ucn_service_protocol_bridge_init(&g_bridge, &g_router, &g_node) != UCN_OK ||
+        product_register_remote_q0_validators(&g_bridge) != UCN_OK ||
         ucn_service_protocol_bridge_install_endpoint_handlers(&g_bridge) != UCN_OK ||
         g_service_port.begin(&g_router, &g_bridge, consumers, 2U) != UCN_OK) {
         product_enter_safe_mode();
@@ -59,14 +65,14 @@ static void create_ucn_service_task(void)
         UCN_PRODUCT_SERVICE_STACK_DEPTH, &g_service_port,
         tskIDLE_PRIORITY + 1U, g_service_stack, &g_service_task_tcb);
     if (task == nullptr ||
-        g_service_port.bind_consumer_task(UCN_SERVICE_ID_CONTROL, task) != UCN_OK ||
-        g_service_port.bind_consumer_task(UCN_SERVICE_ID_ACTUATOR, task) != UCN_OK) {
+        g_service_port.bind_consumer_task(kServiceControl, task) != UCN_OK ||
+        g_service_port.bind_consumer_task(kServiceActuator, task) != UCN_OK) {
         product_enter_safe_mode();
     }
 }
 ```
 
-先初始化 Node、Link 和 Adapter，再初始化 Router/Bridge/Port。Router 的 Node ID 与 Node 配置不一致、Endpoint handler 被其他模块占用、Binding 超过固定上限都会返回错误，不能忽略。
+先初始化 Node、Link 和 Adapter，再初始化 Router/Bridge/Port。`kServiceControl`/`kServiceActuator` 是产品自定义 ID，不是 UCN 公共常量。`product_register_remote_q0_validators()` 必须为每个 `require_remote_q0_validator=true` 的 Binding 调用 `ucn_service_protocol_bridge_set_validator()`；没有此类 Binding 时产品函数可直接返回 `UCN_OK`。Router 的 Node ID 与 Node 配置不一致、Validator 缺失、Endpoint handler 被其他模块占用、Binding 超过固定上限都会返回错误，不能忽略。
 
 ## 4. 唯一 Protocol Task
 
@@ -92,6 +98,8 @@ static void ucn_protocol_task(void *argument)
 
 Wi-Fi、UART、CAN 的 ISR/回调不能调用本循环中的函数。回调只填充自己的有限接收缓冲并通知 Protocol Task；由它解码/入 Adapter Queue 后 Pump。
 
+若产品明确选择“完整帧由 ISR 直接进入 Adapter Queue”，`ucn_port_ops_t` 必须同时提供任务临界区和 ISR token 临界区。FreeRTOS 的 token 应使用目标 Port 的 `taskENTER_CRITICAL_FROM_ISR()` 返回值，并由对应 `taskEXIT_CRITICAL_FROM_ISR(token)` 恢复；不能把 `taskENTER_CRITICAL()` 或普通 mutex 用于 ISR。缺失 ISR 对时 `ucn_adapter_rx_enqueue_from_isr()` 会返回 `UCN_ERR_CONFIG`。ESP-IDF 的具体宏和 `portMUX_TYPE` 仍随芯片/SDK 变化，必须在目标 BSP 验证；默认仍优先 ISR→DMA/ring→Protocol Task。
+
 ## 5. 业务 Task 收发
 
 ```cpp
@@ -102,9 +110,9 @@ static void control_task(void *argument)
         ucn_endpoint_t token;
         ucn_service_message_t message{};
 
-        (void)g_service_port.event_take(UCN_SERVICE_ID_CONTROL, &token,
+        (void)g_service_port.event_take(kServiceControl, &token,
                                         pdMS_TO_TICKS(20U));
-        while (g_service_port.inbox_take(UCN_SERVICE_ID_CONTROL, 0x40U,
+        while (g_service_port.inbox_take(kServiceControl, 0x40U,
                                          &message) == UCN_OK) {
             control_use_imu(message.payload, message.payload_length);
         }
@@ -114,7 +122,7 @@ static void control_task(void *argument)
 static ucn_result_t send_servo(ucn_node_id_t destination,
                                const uint8_t payload[16])
 {
-    return g_service_port.send(destination, UCN_SERVICE_ID_CONTROL, 0x61U,
+    return g_service_port.send(destination, kServiceControl, 0x61U,
                                UCN_TRAFFIC_Q0_CRITICAL, payload, 16U);
 }
 ```
@@ -129,6 +137,7 @@ static ucn_result_t send_servo(ucn_node_id_t destination,
 - 将 ESP32 `portMUX_TYPE` 替换为目标芯片可用于短临界区的机制；不能在 ISR 使用会阻塞的 mutex。
 - 保留“Router Inbox 是 Payload 唯一副本”与“Bridge 只由 Protocol Task 调用”。
 - Bridge 和 Node Step 使用同一个单调 `now_ms`；若启用 Q0 背压策略，必须根据产品控制周期设置有限 Retry/Interval/Timeout，不能照抄示例后跳过实测。
+- 按[统一动态 MTU 合同](README.md#共同的构建输入)实现 Link；静态和运行期 MTU 都为 0 时失败关闭，运行期 MTU 恢复后不重建 Node。
 - 监控 `UcnServiceFreeRtosPortStats`、Router、Bridge、Adapter 和 Node 统计；还要用目标平台工具测任务 High Water Mark、Heap 和 CPU 占用。
 
 先在两节点以 Q1 小包验证，再测本机/远端 Q0、事件队列满、物理断链与执行器本地超时安全。当前 ESP32 参考的具体实机结论不能自动外推到其他 FreeRTOS 板子。

@@ -96,7 +96,7 @@ Destination Node ID + Endpoint + Traffic Class + Payload ABI
 
 ## 5. T25.1 已实现的纯 C API 合约
 
-`include/ucn/ucn_service.h` 与 `src/ucn_service.c` 已实现平台无关的 `ucn_service` 模块。它不放入 `ucn_node.h`，不包含 FreeRTOS 头文件，也不操作 `ucn_node_t` 或任一 Link。实际 API 如下：
+`include/ucn/ucn_service.h` 与 `src/service/ucn_service.c` 已实现平台无关的 `ucn_service` 模块。它不放入 `ucn_node.h`，不包含 FreeRTOS 头文件，也不操作 `ucn_node_t` 或任一 Link。实际 API 如下：
 
 ```c
 ucn_result_t ucn_service_router_init(ucn_service_router_t *router,
@@ -124,7 +124,7 @@ ucn_result_t ucn_service_remote_tx_take(ucn_service_router_t *router,
 
 ### 5.1 T25.2 Protocol Task Bridge
 
-`include/ucn/ucn_service_bridge.h` 与 `src/ucn_service_bridge.c` 是唯一允许同时引用 Router 与 Node 的薄适配层；不包含 FreeRTOS，也不改变 `ucn_node_t`。Port 先初始化并安装 Endpoint handler，随后只在拥有 Node 的 Protocol Task 中调用：
+`include/ucn/ucn_service_bridge.h` 与 `src/service/ucn_service_bridge.c` 是唯一允许同时引用 Router 与 Node 的薄适配层；不包含 FreeRTOS，也不改变 `ucn_node_t`。Port 先初始化并安装 Endpoint handler，随后只在拥有 Node 的 Protocol Task 中调用：
 
 ```c
 ucn_service_protocol_bridge_init(&g_bridge, &g_service_router, &g_node);
@@ -358,7 +358,7 @@ Task 重启不能等价于 Node 离网：Node ID、邻居、路由和 Link 全�
 | 位置 | T25 动作 | 说明 |
 | --- | --- | --- |
 | `include/ucn/ucn_service.h` | 新增 | 纯 C Router、固定配置、统计和 API 声明；不得包含 FreeRTOS。 |
-| `src/ucn_service.c` | 新增 | Service 表校验、本机直投、远端 TX 固定队列、入站投递、统计。 |
+| `src/service/ucn_service.c` | 新增 | Service 表校验、本机直投、远端 TX 固定队列、入站投递、统计。 |
 | `tests/test_service.c` | 新增 | 纯 C Router 的所有单元/虚拟测试。 |
 | `tests/test_main.c`、`CMakeLists.txt` | 修改 | 注册新测试；保留现有四个构建 Profile。 |
 | 产品 Port，例如 ESP 工程的 `src/ucn_service_freertos.cpp` | 新增 | 静态 FreeRTOS Queue/任务通知映射；只依赖 `ucn_service.h`。 |
@@ -383,7 +383,7 @@ Task 重启不能等价于 Node 离网：Node ID、邻居、路由和 Link 全�
 
 ### T25.1：纯 C 固定 Service Router（已完成）
 
-已在 `include/ucn/ucn_service.h`、`src/ucn_service.c` 和 `tests/test_service.c` 中实现静态表初始化、配置拒绝、Q0 FIFO、Q1 Latest、本机直投、Remote TX Request 队列、远端入站投递和统计；不接 FreeRTOS，Router 也不直接调用 Core。
+已在 `include/ucn/ucn_service.h`、`src/service/ucn_service.c` 和 `tests/test_service.c` 中实现静态表初始化、配置拒绝、Q0 FIFO、Q1 Latest、本机直投、Remote TX Request 队列、远端入站投递和统计；不接 FreeRTOS，Router 也不直接调用 Core。
 
 **单元测试：**
 

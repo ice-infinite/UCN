@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "test_support.h"
+#include "ucn/ucn_frame.h"
 #include "ucn/ucn_node.h"
 
 typedef struct bearer_link_context {
@@ -9,8 +10,13 @@ typedef struct bearer_link_context {
     bool is_up;
     bool deliver;
     uint16_t route_cost;
+    ucn_link_metrics_t metrics;
     uint32_t send_count;
     uint32_t close_count;
+    bool fail_send_link_down_once;
+    bool propagate_peer_result;
+    bool last_has_route_extension;
+    uint16_t last_route_epoch;
 } bearer_link_context_t;
 
 typedef struct bearer_receive_state {
@@ -28,15 +34,29 @@ static ucn_result_t bearer_link_send(ucn_link_t *link,
                                      size_t length)
 {
     bearer_link_context_t *context = (bearer_link_context_t *)link->context;
+    ucn_frame_t decoded;
 
     context->send_count++;
+    if (ucn_frame_decode(frame, length, &decoded) == UCN_OK) {
+        context->last_has_route_extension = decoded.has_route_extension;
+        context->last_route_epoch = decoded.route_epoch;
+    }
+    if (context->fail_send_link_down_once) {
+        context->fail_send_link_down_once = false;
+        return UCN_ERR_LINK_DOWN;
+    }
     if (context->peer_node == NULL || context->peer_ingress == NULL) {
         return UCN_OK;
     }
     if (!context->deliver) {
         return UCN_OK;
     }
-    return ucn_node_receive(context->peer_node, context->peer_ingress, frame, length);
+    {
+        const ucn_result_t peer_result =
+            ucn_node_receive(context->peer_node, context->peer_ingress, frame, length);
+
+        return context->propagate_peer_result ? peer_result : UCN_OK;
+    }
 }
 
 static ucn_result_t bearer_link_status(const ucn_link_t *link,
@@ -65,6 +85,7 @@ static ucn_result_t bearer_link_metrics(const ucn_link_t *link,
     const bearer_link_context_t *context =
         (const bearer_link_context_t *)link->context;
 
+    *metrics = context->metrics;
     metrics->route_cost_valid = true;
     metrics->route_cost = context->route_cost;
     return UCN_OK;
@@ -109,6 +130,7 @@ static void bearer_setup_link(ucn_link_t *link,
     link->peer_node_id = 0U;
     context->is_up = true;
     context->deliver = true;
+    context->propagate_peer_result = true;
     context->route_cost = route_cost;
 }
 
@@ -341,8 +363,20 @@ int test_neighbor_quality(void)
 
     /* A substantially better candidate without ACKs must not disrupt the
      * old Primary.  Dropping only B->A keeps the candidate Link usable. */
+#if UCN_FEATURE_POLICY
+    /* The Backup is statically worse (110 > 100), but LC-1 adds the Primary's
+     * 160-point TX failure penalty.  Full therefore probes the Backup; Lite
+     * retains the old base-Cost-only behavior below. */
+    cab_backup.route_cost = 110U;
+    cba_backup.route_cost = 110U;
+    cab_primary.metrics.tx_failure_rate_valid = true;
+    cab_primary.metrics.tx_failure_per_mille = 200U;
+    cab_backup.metrics.tx_failure_rate_valid = true;
+    cab_backup.metrics.tx_failure_per_mille = 0U;
+#else
     cab_backup.route_cost = 70U;
     cba_backup.route_cost = 70U;
+#endif
     cba_backup.deliver = false;
     TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 2000U) == UCN_OK);
     TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 2500U) == UCN_OK);
@@ -378,6 +412,38 @@ int test_neighbor_quality(void)
                 a.stats.max_probe_service_delay_ms <=
                 UCN_MAINTENANCE_SERVICE_BOUND_MS);
     TEST_ASSERT(a.stats.bearer_quality_switches == 1U);
+#if UCN_FEATURE_POLICY
+    {
+        const uint32_t probes_after_switch =
+            a.stats.bearer_quality_probes_sent;
+
+        /* Reverse the dynamic conditions immediately.  The 3000 ms hold
+         * keeps the new Primary stable and schedules no new soft Probe. */
+        cab_primary.metrics.tx_failure_per_mille = 0U;
+        cab_backup.metrics.tx_failure_per_mille = 200U;
+        TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 6500U) == UCN_OK);
+        TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 7000U) == UCN_OK);
+        TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 7500U) == UCN_OK);
+        TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 8000U) == UCN_OK);
+        TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 8500U) == UCN_OK);
+        TEST_ASSERT(a.neighbors[0]
+                        .bearers[a.neighbors[0].primary_bearer_index]
+                        .link == &ab_backup);
+        TEST_ASSERT(a.stats.bearer_quality_probes_sent ==
+                    probes_after_switch);
+
+        /* A stale active snapshot is a hard exclusion.  It fails over at the
+         * next sample without waiting for another three-sample/Probe cycle. */
+        cab_primary.metrics.metrics_timestamp_valid = true;
+        cab_primary.metrics.metrics_timestamp_ms = 9000U;
+        cab_backup.metrics.metrics_timestamp_valid = true;
+        cab_backup.metrics.metrics_timestamp_ms = 0U;
+        TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 9000U) == UCN_OK);
+        TEST_ASSERT(a.neighbors[0]
+                        .bearers[a.neighbors[0].primary_bearer_index]
+                        .link == &ab_primary);
+    }
+#endif
     return 0;
 }
 
@@ -394,6 +460,7 @@ int test_neighbor_route_bearer(void)
     ucn_candidate_route_t *candidate;
     uint8_t first_payload = 0xC1U;
     uint8_t second_payload = 0xC2U;
+    uint32_t primary_send_count;
     uint32_t backup_send_count;
 
     if (UCN_MAX_BEARERS_PER_NEIGHBOR < 2U) {
@@ -446,35 +513,54 @@ int test_neighbor_route_bearer(void)
      * while the logical next hop remains Neighbor B. */
     TEST_ASSERT(ucn_node_discover_route(&a, UINT32_C(33), 100U) == UCN_OK);
     route = bearer_find_dynamic_route(&a, UINT32_C(33));
-    TEST_ASSERT(route != NULL && route->egress_link == &ab_primary);
+    TEST_ASSERT(route != NULL && route->egress_link == &ab_primary &&
+                route->route_cost == 20U);
     TEST_ASSERT(ucn_node_send(&a, UINT32_C(33), UCN_MSG_DATA_Q1,
                               UCN_TRAFFIC_Q1_REALTIME, &first_payload, 1U) == UCN_OK);
     TEST_ASSERT(received.count == 1U && received.last_payload == first_payload);
 
-    /* Make the refresh route sufficiently better so the Candidate itself is
-     * learned through the current Primary before that Bearer fails. */
-    cab_primary.route_cost = 1U;
-    cba_primary.route_cost = 1U;
+    /* Make the downstream segment sufficiently better so the Candidate itself
+     * is learned through the current Primary before that Bearer fails.  The
+     * local A-B base Cost remains immutable, matching the Link Cost contract. */
+    cbc.route_cost = 1U;
+    ccb.route_cost = 1U;
     TEST_ASSERT(ucn_node_refresh_route(&a, UINT32_C(33), 200U) == UCN_OK);
     candidate = bearer_find_candidate_route(&a, UINT32_C(33));
     TEST_ASSERT(candidate != NULL && candidate->originated_here &&
-                candidate->egress_link == &ab_primary);
+                candidate->egress_link == &ab_primary &&
+                candidate->route_cost == 11U);
 
-    /* One physical A<->B Bearer fails.  The Active Route and Candidate keep
-     * their logical next hop and must send through the admitted Backup. */
-    cab_primary.is_up = false;
+    /* The Driver reports a hard failure after status selection.  The same
+     * application call must mark that Bearer down, remap every logical Route
+     * reference and retry exactly once through the admitted Backup. */
+    primary_send_count = cab_primary.send_count;
+    backup_send_count = cab_backup.send_count;
+    cab_primary.fail_send_link_down_once = true;
     cba_primary.is_up = false;
-    TEST_ASSERT(ucn_node_step(&a, 201U) == UCN_OK);
+    TEST_ASSERT(ucn_node_send(&a, UINT32_C(33), UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, &second_payload, 1U) == UCN_OK);
     route = bearer_find_dynamic_route(&a, UINT32_C(33));
-    TEST_ASSERT(route != NULL && route->egress_link == &ab_primary);
+    TEST_ASSERT(route != NULL && route->egress_link == &ab_backup &&
+                route->route_cost == 40U);
+    candidate = bearer_find_candidate_route(&a, UINT32_C(33));
+    TEST_ASSERT(candidate != NULL && candidate->egress_link == &ab_backup &&
+                candidate->route_cost == 31U);
     TEST_ASSERT(a.neighbors[0].bearers[a.neighbors[0].primary_bearer_index].link ==
                 &ab_backup);
+    TEST_ASSERT(cab_primary.send_count == primary_send_count + 1U &&
+                cab_backup.send_count == backup_send_count + 1U);
+    TEST_ASSERT(cab_backup.last_has_route_extension &&
+                cab_backup.last_route_epoch == route->route_epoch);
+    TEST_ASSERT(received.count == 2U && received.last_payload == second_payload);
+
+    /* A route installed against the failed physical member is also normalized
+     * to the logical Neighbor's current Primary. */
     TEST_ASSERT(ucn_node_add_route(&a, UINT32_C(99), &ab_primary) == UCN_OK);
     static_route = bearer_find_static_route(&a, UINT32_C(99));
     TEST_ASSERT(static_route != NULL && static_route->egress_link == &ab_primary);
-    TEST_ASSERT(ucn_node_send(&a, UINT32_C(33), UCN_MSG_DATA_Q1,
-                              UCN_TRAFFIC_Q1_REALTIME, &second_payload, 1U) == UCN_OK);
-    TEST_ASSERT(received.count == 2U && received.last_payload == second_payload);
+    TEST_ASSERT(ucn_node_step(&a, 201U) == UCN_OK);
+    TEST_ASSERT(static_route->egress_link == &ab_backup &&
+                static_route->route_cost == 30U);
     backup_send_count = cab_backup.send_count;
     TEST_ASSERT(ucn_node_step(&a, 301U) == UCN_OK);
     TEST_ASSERT(a.stats.path_probes_sent == 1U &&
@@ -487,15 +573,17 @@ int test_neighbor_route_bearer(void)
     TEST_ASSERT(ucn_node_step(&a, 601U) == UCN_OK);
     TEST_ASSERT(a.stats.route_switches == 1U);
     route = bearer_find_dynamic_route(&a, UINT32_C(33));
-    TEST_ASSERT(route != NULL && route->egress_link == &ab_primary);
+    TEST_ASSERT(route != NULL && route->egress_link == &ab_backup &&
+                route->route_cost == 31U);
 
     /* A downstream B->C failure returns RERR to A over the current Backup.
      * That RERR clears both A's dynamic Route and untrusted Candidate. */
     cbc.is_up = false;
     ccb.is_up = false;
+    cab_backup.propagate_peer_result = false;
     TEST_ASSERT(ucn_node_send(&a, UINT32_C(33), UCN_MSG_DATA_Q1,
                               UCN_TRAFFIC_Q1_REALTIME, &second_payload, 1U) ==
-                UCN_ERR_LINK_DOWN);
+                UCN_OK);
     TEST_ASSERT(b.stats.route_errors_sent == 1U);
     TEST_ASSERT(bearer_find_dynamic_route(&a, UINT32_C(33)) == NULL);
     TEST_ASSERT(bearer_find_candidate_route(&a, UINT32_C(33)) == NULL);

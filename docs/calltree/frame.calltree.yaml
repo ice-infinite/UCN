@@ -2,13 +2,13 @@ module: frame
 description: v5 W0/W1/W2/W3 官方 Header、CRC-16 和端到端 AAD 编解码路径。
 entry: frame.ucn_frame_encode
 source_files:
-  - src/ucn_frame.c
+  - src/core/ucn_frame.c
 
 nodes:
   - id: frame.ucn_wire_profile_get_descriptor
     symbol: ucn_wire_profile_get_descriptor
     type: function
-    file: src/ucn_frame.c
+    file: src/core/ucn_frame.c
     layer: core
     role: 按 API Profile 返回唯一只读官方描述符；不接受用户自定义字段宽度。
     called_by:
@@ -26,7 +26,7 @@ nodes:
   - id: frame.ucn_frame_header_size_for_profile
     symbol: ucn_frame_header_size_for_profile
     type: function
-    file: src/ucn_frame.c
+    file: src/core/ucn_frame.c
     layer: core
     role: 由 W0～W3 Descriptor 与 Route/Path Flag 唯一推导 17～36 B Header。
     called_by:
@@ -43,7 +43,7 @@ nodes:
   - id: frame.ucn_frame_max_payload_for_profile
     symbol: ucn_frame_max_payload_for_profile
     type: function
-    file: src/ucn_frame.c
+    file: src/core/ucn_frame.c
     layer: core
     role: 同时按 Profile Length 宽度、实际 Header、Tag、UCN_MAX_FRAME_BYTES 和静态 Payload 上限裁剪。
     called_by:
@@ -61,7 +61,7 @@ nodes:
   - id: frame.ucn_frame_max_payload
     symbol: ucn_frame_max_payload
     type: function
-    file: src/ucn_frame.c
+    file: src/core/ucn_frame.c
     layer: core
     role: 为旧调用保留的 W3 Payload 上限查询。
     called_by:
@@ -74,7 +74,7 @@ nodes:
   - id: frame.ucn_frame_select_min_wire_profile
     symbol: ucn_frame_select_min_wire_profile
     type: function
-    file: src/ucn_frame.c
+    file: src/core/ucn_frame.c
     layer: core
     role: 在官方 W0～W3 中选择能完整表达当前字段且满足最大档与实际 MTU 的最小档；可选 Tag 已计入最终长度。
     called_by:
@@ -93,7 +93,7 @@ nodes:
   - id: frame.ucn_frame_encoded_size
     symbol: ucn_frame_encoded_size
     type: function
-    file: src/ucn_frame.c
+    file: src/core/ucn_frame.c
     layer: core
     role: 校验 Profile/字段/扩展/Tag 后，计算 Header、Payload 与可选 Tag 的最终长度。
     called_by:
@@ -110,7 +110,7 @@ nodes:
   - id: frame.ucn_frame_encode
     symbol: ucn_frame_encode
     type: function
-    file: src/ucn_frame.c
+    file: src/core/ucn_frame.c
     layer: core
     role: 将 ucn_frame_t 编为官方 W0～W3 字节序列，写 Header、Payload、可选 Tag 和 CRC。
     called_by:
@@ -135,7 +135,7 @@ nodes:
   - id: frame.ucn_frame_peek_wire_profile
     symbol: ucn_frame_peek_wire_profile
     type: function
-    file: src/ucn_frame.c
+    file: src/core/ucn_frame.c
     layer: core
     role: 只读取固定 3 B Prefix，校验 Magic、Version 与官方 Profile Code，供 Ingress 在完整 Decode/CRC 前执行本地 RX Ceiling 门禁。
     called_by:
@@ -151,7 +151,7 @@ nodes:
   - id: frame.ucn_frame_decode
     symbol: ucn_frame_decode
     type: function
-    file: src/ucn_frame.c
+    file: src/core/ucn_frame.c
     layer: core
     role: 先解析 Version+Profile 和 Traffic+Flags，再推导 Header，校验字段、长度、Hop、CRC并返回视图。
     called_by:
@@ -181,7 +181,7 @@ nodes:
   - id: frame.ucn_frame_write_e2e_aad
     symbol: ucn_frame_write_e2e_aad
     type: function
-    file: src/ucn_frame.c
+    file: src/core/ucn_frame.c
     layer: security
     role: 生成 30 B 规范 AAD；Profile+Version、地址、Sequence、Session、Length 和可选 Path ID 被绑定。
     called_by:
@@ -198,7 +198,7 @@ nodes:
   - id: frame.ucn_crc16_ccitt
     symbol: ucn_crc16_ccitt
     type: function
-    file: src/ucn_frame.c
+    file: src/core/ucn_frame.c
     layer: core
     role: CRC-16/CCITT 基础计算函数。
     called_by:
@@ -209,7 +209,7 @@ nodes:
   - id: frame.profile_validation_helpers_static
     symbol: resolve_profile/validate_frame_fields/read_uint_be/write_uint_be
     type: function
-    file: src/ucn_frame.c
+    file: src/core/ucn_frame.c
     layer: core
     role: 完成 Profile 默认解析、宽度读写、广播映射和所有字段范围的失败关闭校验。
     called_by:

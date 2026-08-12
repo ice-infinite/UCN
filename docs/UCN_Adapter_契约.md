@@ -25,7 +25,7 @@ Core 不读取 MAC、RSSI、CAN ID、串口号、蓝牙连接句柄或 Linux soc
 4. 生产 Adapter 的 `send()` 只允许做有界复制并写入固定 TX Queue，随后立即返回；不得等待 UART DMA、无线 ACK、LoRa 空口发送或 Socket 完整写完，也不得自行改写 UCN 源/目的 Node ID、TTL、序号或路由。仅测试用同步虚拟 Link 可以在调用栈内直接投递。
 5. TX Queue 满返回 `UCN_ERR_NO_SPACE`，Driver 已明确 Down 返回 `UCN_ERR_LINK_DOWN`；Core 对一次 `send()` 失败不在调用栈内自旋或重试。产品必须记录队列容量、队列满统计和 `send()` 最坏执行时间。RX 队列满也必须丢弃并计数，不能使用无上限 RAM。
 
-公共队列默认 `UCN_ADAPTER_RX_QUEUE_DEPTH=2`，占用约 `2 × UCN_MAX_FRAME_BYTES` 原始帧缓存（默认约 512 B），可在编译期设为 1。它可使用 `ucn_port_ops_t` 的临界区钩子保护并发访问；真正 ISR 中应优先使用 RTOS/驱动提供的 ISR 安全队列，再由任务转交给本接口。
+公共队列默认 `UCN_ADAPTER_RX_QUEUE_DEPTH=2`，占用约 `2 × UCN_MAX_FRAME_BYTES` 原始帧缓存（默认约 512 B），可在编译期设为 1。任务/Owner 生产者调用 `ucn_adapter_rx_enqueue()`，使用 `enter_critical/exit_critical`；ISR 直接提交完整帧时必须调用 `ucn_adapter_rx_enqueue_from_isr()`，并在同一个 `ucn_port_ops_t` 中提供成对的 `enter_critical_from_isr()` / `exit_critical_from_isr(token)`。ISR 入口绝不会回退成任务锁：缺少该对回调返回 `UCN_ERR_CONFIG`。FreeRTOS 产品应把 `taskENTER_CRITICAL_FROM_ISR()` 返回的 mask 作为 token 并用同一个 token 恢复。仍优先建议 ISR 写 BSP 自己的固定 ring，由 Protocol Task 解码/入队；这会减少 ISR 时间与锁顺序风险。
 
 当前 `ucn_adapter_rx_pump()` 只负责“已入队帧 → `ucn_node_receive()`”，不会自动调用 `ucn_link_ops_t::poll_rx`。轮询型真实 Adapter 必须在自己的任务中执行 `poll_rx` 并调用 `ucn_adapter_rx_enqueue()`，随后再 Pump；这能保证所有介质采用同一 Core 入口。
 
@@ -47,7 +47,8 @@ physical address → Candidate Link (peer_node_id = 0)
 | --- | --- |
 | `ucn_adapter_bind_peer()` | 将一个物理地址固定绑定到静态 Link；同地址试图改绑到另一个 Link 会报配置冲突。 |
 | `ucn_adapter_find_peer()` | 由收到的物理地址找 Candidate/已知 Link。 |
-| `ucn_adapter_rx_enqueue()` | 复制一帧到固定队列；满时返回 `UCN_ERR_NO_SPACE` 并计数。 |
+| `ucn_adapter_rx_enqueue()` | Task/Owner 上下文复制一帧到固定队列；满时返回 `UCN_ERR_NO_SPACE` 并计数。 |
+| `ucn_adapter_rx_enqueue_from_isr()` | ISR 上下文复制一帧；必须有 ISR token 临界区对，否则返回 `UCN_ERR_CONFIG`。不执行 Pump、路由或业务回调。 |
 | `ucn_adapter_rx_pump()` | 在协议任务中 FIFO 出队、调用 Core；格式/安全/准入失败也会出队并记 `rejected_by_core`，不会堵塞后续帧。 |
 | `ucn_adapter_hello_scheduler_init()` | 为一个 Adapter 初始化固定状态的 HELLO 调度器；Port 随机 Seed 与非零 Adapter Token 共同形成独立序列。 |
 | `ucn_adapter_hello_scheduler_step()` | 在 Protocol Task 中推进 Initial Jitter、有限 Fast Retry、指数 Backoff 和准入后 Slow/Stop；到期只返回一次 `hello_due`。 |
@@ -70,6 +71,17 @@ INITIAL_JITTER
 `SLOW` 在准入后先按 Fast Retry 间隔发一次互相确认 HELLO，随后才进入低频恢复广播；Heartbeat 负责已准入邻居的存活判断。动态广播介质通常应使用 `SLOW`，因为 `STOP` 可能让只完成单向 HELLO 的对端等不到回包；`STOP` 只适合静态预准入、外部保证双向发现或其他明确产品流程。静态 CAN/UART 点对点 Profile 可以把 `enabled=false`，但必须由产品配置完成 Link 注册、Peer Node ID 与准入，不能把“关闭 HELLO”误解成还能自动发现。
 
 所有间隔必须在 `1..INT32_MAX ms`，重试抖动最大 500‰，配置还会检查抖动后的最坏间隔。Scheduler 每次到期先安装下一个 Deadline 再返回，不自旋、不睡眠、不发送帧；调用方只在 `hello_due=true` 时调用该 Adapter 对应 Link 的 `ucn_node_broadcast_hello()`。一个 Scheduler 是固定小对象，没有队列、malloc 或随节点数增长的状态。
+
+### 每 Link 存活档位
+
+动态发现与已准入存活是两套职责：HELLO Scheduler 负责发现/恢复，Core Heartbeat 负责已准入 Bearer 的静默判断。Adapter 在注册 Link 前可设置 `link->liveness_profile`：
+
+| 档位 | Heartbeat | SUSPECT | DOWN/回收 | 典型用途 |
+| --- | ---: | ---: | ---: | --- |
+| `UCN_LINK_LIVENESS_DEFAULT` | 1000 ms | 3000 ms | 4000 ms | Wi-Fi、ESP-NOW、一般动态介质 |
+| `UCN_LINK_LIVENESS_FAST` | 250 ms | 1250 ms | 2000 ms | 板间 UART、RS-485 等低时延有线链路 |
+
+零初始化等于 DEFAULT；未知值在 Link 注册时返回 `UCN_ERR_CONFIG`。周期 Heartbeat 由固定 Link/Bearer 数和档位节拍独立约束，不消耗通用 RREQ/Probe/Activate Token；入站 Heartbeat Request 仍受每 Peer 固定预算。若 Adapter 有 DCD/CTS/GPIO、Bus-Off 等更直接的物理状态，应由 `get_status()` 更早报告 Down，而不是等待 Heartbeat。普通 TTL UART 的 TX 成功只表示本地 Driver 接受字节，不能当作对端收到。
 
 ## 4. 标准 Adapter 流程
 
@@ -123,7 +135,7 @@ UCN_MAX_FRAME_BYTES ≤ 该 Profile 中所有可用 Link 的有效 MTU
 
 ## 8. 已验证与未验证边界
 
-- 已验证：固定 RX 队列 FIFO/满队列计数、临界区钩子、物理地址到静态 Link 的冲突保护、未知 Link 数据拒绝、广播 HELLO 绑定 Node ID、开放策略自动准入、准入后的业务交付；软件契约测试确认 `send()` 的 `NO_SPACE/LINK_DOWN` 原样返回且 Core 不在同一调用中重试。
+- 已验证：固定 RX 队列 FIFO/满队列计数、Task/ISR 两组临界区钩子及 token 回送、缺 ISR 钩子失败关闭、物理地址到静态 Link 的冲突保护、未知 Link 数据拒绝、广播 HELLO 绑定 Node ID、开放策略自动准入、准入后的业务交付；软件契约测试确认 `send()` 的 `NO_SPACE/LINK_DOWN` 原样返回且 Core 不在同一调用中重试。
 - 未验证：ESP-IDF、ESP-NOW、FreeRTOS ISR、BLE、LoRa、UART、RS485、CAN/CAN-FD 生产 TX Queue 的真实 WCET、无线性能和实机资源占用。
 
 T14 才负责指定 ESP32/ESP-IDF 的实际 Adapter；T15 才接入生产身份 Provider、撤销/淘汰与压力验证。

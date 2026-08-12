@@ -8,6 +8,7 @@ typedef struct candidate_link_context {
     ucn_node_t *peer;
     ucn_link_t *peer_ingress;
     uint16_t route_cost;
+    ucn_link_metrics_t metrics;
     uint32_t send_count;
     bool deliver;
     bool last_business_has_route_extension;
@@ -57,6 +58,7 @@ static ucn_result_t candidate_link_metrics(const ucn_link_t *link,
     const candidate_link_context_t *context =
         (const candidate_link_context_t *)link->context;
 
+    *metrics = context->metrics;
     metrics->route_cost_valid = true;
     metrics->route_cost = context->route_cost;
     return UCN_OK;
@@ -208,10 +210,10 @@ int test_candidate_route(void)
                               UCN_TRAFFIC_Q1_REALTIME, &first_payload, 1U) == UCN_OK);
     TEST_ASSERT(contexts[0].send_count == 1U && contexts[2].send_count == 1U);
 
-    candidate_setup_link(&ad, &contexts[4], 5U, UINT32_C(4), 1U);
-    candidate_setup_link(&da, &contexts[5], 6U, UINT32_C(1), 1U);
-    candidate_setup_link(&dc, &contexts[6], 7U, UINT32_C(3), 1U);
-    candidate_setup_link(&cd, &contexts[7], 8U, UINT32_C(4), 1U);
+    candidate_setup_link(&ad, &contexts[4], 5U, UINT32_C(4), 9U);
+    candidate_setup_link(&da, &contexts[5], 6U, UINT32_C(1), 9U);
+    candidate_setup_link(&dc, &contexts[6], 7U, UINT32_C(3), 9U);
+    candidate_setup_link(&cd, &contexts[7], 8U, UINT32_C(4), 9U);
     contexts[4].peer = &d; contexts[4].peer_ingress = &da;
     contexts[5].peer = &a; contexts[5].peer_ingress = &ad;
     contexts[6].peer = &c; contexts[6].peer_ingress = &cd;
@@ -220,6 +222,19 @@ int test_candidate_route(void)
     TEST_ASSERT(ucn_node_register_link(&d, &da) == UCN_OK);
     TEST_ASSERT(ucn_node_register_link(&d, &dc) == UCN_OK);
     TEST_ASSERT(ucn_node_register_link(&c, &cd) == UCN_OK);
+    /* The alternate wire Route costs 18 versus the active Route's 20: only a
+     * 10% base improvement, below the normal 20% switch threshold.  A's local
+     * AB penalty makes it sufficiently better without rewriting the RREP or
+     * the stored candidate route_cost. */
+    contexts[0].metrics.tx_failure_rate_valid = true;
+    contexts[0].metrics.tx_failure_per_mille = 200U;
+    {
+        const ucn_result_t sample_result =
+            candidate_step_network(&a, &b, &c, &d, 500U);
+
+        TEST_ASSERT(sample_result == UCN_OK ||
+                    sample_result == UCN_ERR_NOT_FOUND);
+    }
 
     /* A used route enters its refresh window 6 s before the 30 s validation
      * deadline.  Keep Q1 busy through the window: on the fifth scheduling
@@ -240,6 +255,7 @@ int test_candidate_route(void)
     TEST_ASSERT(a.stats.route_refreshes_started >= 2U);
     TEST_ASSERT(a.stats.maintenance_preemptions >= 1U);
     TEST_ASSERT(a.stats.candidate_routes_learned >= 1U);
+    TEST_ASSERT(a.candidates[0].route_cost == 18U);
     TEST_ASSERT(candidate_step_network(&a, &b, &c, &d, 24100U) == UCN_OK);
     reset_send_counts(contexts, 8U);
     TEST_ASSERT(ucn_node_send(&a, UINT32_C(3), UCN_MSG_DATA_Q1,

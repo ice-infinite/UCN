@@ -206,7 +206,7 @@ V5-18 在 V5-19 前完成，是为了让指定 Path 和自动 Route 使用同一
 - V5-20 已实现公开 3 B Prefix Peek；Full/Lite/Nano 都在完整 Decode/CRC 前执行 per-Link 本地 RX Ceiling 门禁。损坏 W3 帧在 W0 Link 上先返回不支持，在 W3 Link 上继续返回 CRC 错误。
 - V5-21 未实现且仍阻塞于 S02。没有生产 Principal、逐跳控制认证、Session Generation、吊销与持久 Replay 时，不允许把 Wire Profile、Node ID 或 Bearer 当权限凭据。
 
-V5-17～V5-20 当时 Windows Debug/Release 的 Full/Lite 均为 CTest `10/10`，Nano 为 `1/1`，独立配置契约为 `4/4`，`git diff --check` 无空白错误。当时 GCC 14.2 Release/Service OFF 的 Nano/Lite/Full Node 为 `2648/5944/9728 B`，Link 均为 40 B，Archive `.text` 为 `19692/65720/123876 B`。V5-26 后阶段值为 Node `2648/5960/9744 B`、Archive `.text` `19724/67316/125448 B`、Link `40 B`、Storage Layout Version=4；V5-30 阶段值为 Node `2648/5960/9752 B`、Archive `.text` `19820/68180/129124 B`、Link `40 B`；V5-33 当前值为 Node `2648/5960/9752 B`、Archive `.text` `19884/68244/127792 B`、Link `40 B`、Storage Layout Version=5。各组都只是 Host ABI/裁剪证据。WSL Ubuntu 24.04 Full ASan+UBSan 与配置契约当前为 `13/13`，GCC `-fanalyzer` 与配置契约也是 `13/13`。未访问硬件/COM，真实介质 RTT、CPU、栈、功耗和多板切换继续归 S06/S07。
+V5-17～V5-20 当时 Windows Debug/Release 的 Full/Lite 均为 CTest `10/10`，Nano 为 `1/1`，独立配置契约为 `4/4`，`git diff --check` 无空白错误。当时 GCC 14.2 Release/Service OFF 的 Nano/Lite/Full Node 为 `2648/5944/9728 B`，Link 均为 40 B，Archive `.text` 为 `19692/65720/123876 B`。V5-26 后阶段值为 Node `2648/5960/9744 B`、Archive `.text` `19724/67316/125448 B`、Link `40 B`、Storage Layout Version=4；V5-30 阶段值为 Node `2648/5960/9752 B`、Archive `.text` `19820/68180/129124 B`；V5-33 阶段值为 Node `2648/5960/9752 B`、Archive `.text` `19884/68244/127792 B`。V5-44/V5-36 当前值为 Node `2648/6024/10080 B`、Archive `.text` `27662/73735/139017 B`、Link `40 B`、Storage Layout Version=5。各组都只是 Host ABI/裁剪证据。当前 Host 回归见 DOC-047；未访问硬件/COM，真实介质 RTT、CPU、栈、功耗和多板切换继续归 S06/S07。
 
 ## 12. 本轮边界
 

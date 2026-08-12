@@ -2,14 +2,29 @@ module: core
 description: 配置校验、静态 Endpoint 编号与控制/业务消息的最小基础边界。
 entry: core.ucn_validate_config
 source_files:
-  - src/ucn_core.c
-  - src/ucn_endpoint.c
+  - src/core/ucn_core.c
+  - src/core/ucn_endpoint.c
+  - src/core/ucn_link_cost.c
 
 nodes:
+  - id: core.ucn_link_cost_resolve
+    symbol: ucn_link_cost_resolve
+    type: function
+    file: src/core/ucn_link_cost.c
+    layer: core
+    role: 按 LC-1 的固定整数表、状态门、陈旧门与饱和规则，把一份本地质量快照解析为 effective_select_cost。
+    called_by:
+      - policy_path.ucn_policy_refresh_link_quality
+      - external.host_cost_test
+    calls: []
+    notes:
+      - 不读取 Node、RTOS 或驱动对象，不分配内存，也不修改线上 route_cost。
+      - Unknown 基础 Cost 与 65534 饱和值分离；状态门失败直接不可选。
+
   - id: core.ucn_validate_config
     symbol: ucn_validate_config
     type: function
-    file: src/ucn_core.c
+    file: src/core/ucn_core.c
     layer: core
     role: 校验 network_id、node_id 与默认 Hop Limit 是否能创建一个合法 Node。
     called_by:
@@ -24,7 +39,7 @@ nodes:
   - id: core.ucn_endpoint_is_static
     symbol: ucn_endpoint_is_static
     type: function
-    file: src/ucn_endpoint.c
+    file: src/core/ucn_endpoint.c
     layer: core
     role: 判断业务 Endpoint 是否在当前静态命名空间 0x40..0xBF。
     called_by:
@@ -38,7 +53,7 @@ nodes:
   - id: core.ucn_message_type_is_control
     symbol: ucn_message_type_is_control
     type: function
-    file: src/ucn_endpoint.c
+    file: src/core/ucn_endpoint.c
     layer: core
     role: 区分 HELLO、Route、Path、诊断等控制帧与业务帧。
     called_by:

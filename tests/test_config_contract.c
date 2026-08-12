@@ -63,6 +63,12 @@ CONFIG_ASSERT(config_default_policy_diagnostic,
 CONFIG_ASSERT(config_default_neighbors, UCN_MAX_NEIGHBORS == 8U);
 CONFIG_ASSERT(config_default_bearers, UCN_MAX_BEARERS_PER_NEIGHBOR == 2U);
 CONFIG_ASSERT(config_default_heartbeat, UCN_HEARTBEAT_INTERVAL_MS == 1000U);
+CONFIG_ASSERT(config_default_fast_heartbeat,
+              UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS == 250U);
+CONFIG_ASSERT(config_default_fast_suspect,
+              UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS == 1250U);
+CONFIG_ASSERT(config_default_fast_remove,
+              UCN_LINK_LIVENESS_FAST_REMOVE_TIMEOUT_MS == 2000U);
 CONFIG_ASSERT(config_default_endpoint_handlers, UCN_MAX_ENDPOINT_HANDLERS == 8U);
 CONFIG_ASSERT(config_default_endpoint_security,
               UCN_MAX_ENDPOINT_SECURITY_POLICIES == 8U);

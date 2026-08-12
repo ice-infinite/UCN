@@ -1,8 +1,8 @@
 # UCN 协议分层与配置档案
 
-> 状态：**UCN v5 V5-01～V5-20、V5-22～V5-33 软件闭环（2026-08-11）**；V5-16 为设计冻结，V5-21 阻塞于 S02。Nano/Lite/Full 与 W0～W3 正交，三种 Build Profile 均使用四档 Decoder；当前还包含 3 B Ingress Peek、运行期 Hop Scope、3/3/3/4 B Wire Cost、Candidate Profile 连续性、Q1 绝对 Deadline、有界 Expanding Ring、动态 MTU、异构 Bearer Path 能力与 PATH_INSTALL 双格式兼容。真实 Adapter、生产 AEAD/身份与目标板资源仍待接入。
-> 日期：2026-08-04  
-> 关联文档：[UCN 整体架构设计](UCN_整体架构设计.md)
+> 状态：**UCN v5 V5-01～V5-20、V5-22～V5-36、V5-44～V5-48 软件闭环（2026-08-12）**；V5-16 为设计冻结，V5-21 阻塞于 S02。Nano/Lite/Full 与 W0～W3 正交，三种 Build Profile 均使用四档 Decoder；当前还包含 3 B Ingress Peek、运行期 Hop Scope、3/3/3/4 B Wire Cost、Candidate Profile 连续性、Q1 绝对 Deadline、有界 Expanding Ring、动态 MTU、异构 Bearer Path 能力、PATH_INSTALL 双格式兼容和 Full LC-1 本地动态选路。真实 Adapter、生产 AEAD/身份与目标板资源仍待接入。
+> 日期：2026-08-12
+> 关联文档：[UCN 整体架构设计](UCN_整体架构设计.md) · [工程架构索引](架构/README.md)
 
 ## 1. 拆分目标
 
@@ -20,7 +20,7 @@ UCN-Host      只有 Linux、地面站、ROS2 等外部主机使用
 
 上层只能依赖下层，不能反向依赖：关闭 `Extended` 或完全不部署 `Host` 时，`Core` 的认证、发现、路由、转发和失联恢复仍完整可用。
 
-当前仓库已实现 v5 W0～W3 Codec、所有 Build Profile 四档接收、Node 固定 TX/最大 RX 档、per-Link 本地 RX 上限、1 B RX Ceiling HELLO、Profile-aware 控制载荷、32 bit 累计 Cost、3/3/3/4 B Wire Cost、3 B Ingress Peek、运行期 Hop Scope、Profile 绑定安全、显式自动最小档、Candidate Profile 连续性、2→4→8→16 有界发现和 Q1 绝对 Deadline，以及从 v4 继承并演进的邻居保活/回收、Route Epoch/grace、受限 Candidate 选路、静态 Endpoint、Q0/Q1、透明密文中继、受认证 Path ID 逐跳表、按需诊断和 Adapter 模拟。公开编译参数集中在 `ucn_config.h`，产品头可覆盖且原文件默认保留。默认固定 W3；`Extended Gateway`、真实 Linux Host 产品实现、生产密码库、Authorized Class 执行层和真实介质驱动仍未实现。
+当前仓库已实现 v5 W0～W3 Codec、所有 Build Profile 四档接收、Node 固定 TX/最大 RX 档、per-Link 本地 RX 上限、1 B RX Ceiling HELLO、Profile-aware 控制载荷、32 bit 累计 Cost、3/3/3/4 B Wire Cost、3 B Ingress Peek、运行期 Hop Scope、Profile 绑定安全、显式自动最小档、Candidate Profile 连续性、2→4→8→16 有界发现和 Q1 绝对 Deadline，以及从 v4 继承并演进的邻居保活/回收、Route Epoch/grace、受限 Candidate 选路、静态 Endpoint、Q0/Q1、透明密文中继、受认证 Path ID 逐跳表、按需诊断、Adapter 模拟和 Full LC-1 Bearer/Candidate/Q1 本地评分。公开编译参数集中在 `ucn_config.h`，产品头可覆盖且原文件默认保留。默认固定 W3；`Extended Gateway`、真实 Linux Host 产品实现、生产密码库、Authorized Class 执行层和真实介质驱动仍未实现。
 
 ## 2. 三个档案的边界
 
@@ -52,8 +52,8 @@ Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个�
 | Identity & Join | 已实现最小 HELLO、邻居状态机和三种准入策略。 | JOIN 挑战/接受、设备证书/身份格式。 |
 | Session & Replay | 已实现 Provider 回调、会话 ID、持久化发送序号、入站去重、`seal/open`、固定 AAD 和 Node/Endpoint 安全策略。 | 生产 AEAD、密钥轮换、完整重放窗口。 |
 | Trusted Neighbor | 已实现固定 Candidate/Admitted/Suspect/Removed/Rejected/Expired 表、Heartbeat 和已接纳节点撤销/Link 槽复用。 | 随机退避、入网令牌桶与实机在线时间标定。 |
-| AODV-Lite Route | 已实现 RREQ/RREP/RERR、Active/Candidate 固定表、刷新、Probe/Activate、Route Epoch/grace、老化、保守未知 Cost 和源端控制 Token。 | Cost 抖动窗口和实机质量标定。 |
-| Explicit Path | 已实现默认 8 项的逐跳 Path 表；v5 Path Header 为 W0～W3 的 19/25/31/36 B，固定/自动模式均可使用。受认证安装/撤销、透明 E2E 中继、Path RERR、`PINNED_*` 与 Q1 Flow 亲和 `AUTO_BALANCE` 保持。 | 真实多板验收。 |
+| AODV-Lite Route | 已实现 RREQ/RREP/RERR、Active/Candidate 固定表、刷新、Probe/Activate、Route Epoch/grace、老化、保守未知 Cost、源端控制 Token，以及 Full 本地 LC-1 出口贡献比较。 | 真实介质质量标定。 |
+| Explicit Path | 已实现默认 8 项的逐跳 Path 表；v5 Path Header 为 W0～W3 的 19/25/31/36 B，固定/自动模式均可使用。受认证安装/撤销、透明 E2E 中继、Path RERR、`PINNED_*` 与基于 LC-1 有效分的 Q1 Flow 亲和 `AUTO_BALANCE` 保持。 | 真实多板验收。 |
 | Forwarding / QoS | 已实现 TTL、下一跳、Q0/Q1、deadline、latest-value、静态 Endpoint 分发；Endpoint Q1 未知路由固定等待/自动 RREQ。 | Q2/Q3、可靠确认。 |
 | Node 内 Service / Task | Endpoint 目前分发到协议任务中的固定回调，不增加帧字节。 | T25：Port 层的静态 Endpoint→任务队列映射、统一任务发送 API、本机直投和任务收发统计；不把 FreeRTOS 写入 Core。 |
 | Health | 已实现候选/路由老化、Heartbeat、Link down 路径清理和动态 Link 回收。 | 统一 Link 状态消息、应用失联事件。 |

@@ -133,10 +133,20 @@ ucn_result_t ucn_adapter_bind_peer(ucn_adapter_peer_binding_t *bindings,
 ucn_result_t ucn_adapter_rx_queue_init(ucn_adapter_rx_queue_t *queue,
                                        const ucn_port_ops_t *port_ops,
                                        void *port_context);
+/* Task/owner-context producer.  If this Queue is shared with another task,
+ * port_ops supplies the paired task critical callbacks. */
 ucn_result_t ucn_adapter_rx_enqueue(ucn_adapter_rx_queue_t *queue,
                                     ucn_link_t *ingress_link,
                                     const uint8_t *data,
                                     size_t length);
+/* ISR producer.  This never falls back to task critical callbacks: Queue
+ * initialization must have supplied the paired ISR callbacks or this returns
+ * UCN_ERR_CONFIG.  The caller still must not pump Node, Bridge, or handlers
+ * from the ISR. */
+ucn_result_t ucn_adapter_rx_enqueue_from_isr(ucn_adapter_rx_queue_t *queue,
+                                             ucn_link_t *ingress_link,
+                                             const uint8_t *data,
+                                             size_t length);
 ucn_result_t ucn_adapter_rx_pump(ucn_adapter_rx_queue_t *queue,
                                  ucn_node_t *node,
                                  size_t max_frames,

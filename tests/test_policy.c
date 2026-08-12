@@ -110,6 +110,18 @@ int test_policy(void)
     link_context.metrics.tx_failure_per_mille = 40U;
     link_context.metrics.queue_pressure_valid = true;
     link_context.metrics.queue_pressure_per_mille = 100U;
+    link_context.metrics.rx_failure_rate_valid = true;
+    link_context.metrics.rx_failure_per_mille = 50U;
+    link_context.metrics.medium_busy_valid = true;
+    link_context.metrics.medium_busy_per_mille = 750U;
+    link_context.metrics.medium_quality_valid = true;
+    link_context.metrics.medium_quality_per_mille = 700U;
+    link_context.metrics.rtt_reference_valid = true;
+    link_context.metrics.rtt_reference_ms = 5U;
+    link_context.metrics.administrative_bias_valid = true;
+    link_context.metrics.administrative_bias = -10;
+    link_context.metrics.metrics_timestamp_valid = true;
+    link_context.metrics.metrics_timestamp_ms = 0U;
     policy_setup_link(&link, &link_context, 1U, UINT32_C(9));
     policy_setup_link(&unregistered_link, &unregistered_context, 2U, UINT32_C(9));
     TEST_ASSERT(ucn_node_register_link(&node, &link) == UCN_OK);
@@ -119,20 +131,33 @@ int test_policy(void)
     TEST_ASSERT(quality->route_cost == 80U && quality->rtt_ewma_ms == 20U);
     TEST_ASSERT(quality->tx_failure_ewma_per_mille == 40U &&
                 quality->queue_pressure_ewma_per_mille == 100U);
+    TEST_ASSERT(quality->rx_failure_ewma_per_mille == 50U &&
+                quality->medium_busy_ewma_per_mille == 750U &&
+                quality->medium_quality_ewma_per_mille == 700U);
+    TEST_ASSERT(quality->cost.selectable && quality->cost.base_cost_known &&
+                quality->cost.effective_select_cost == 158U);
 
     link_context.metrics.route_cost = 40U;
     link_context.metrics.rtt_ms = 60U;
     link_context.metrics.tx_failure_per_mille = 140U;
     link_context.metrics.queue_pressure_per_mille = 300U;
+    link_context.metrics.rx_failure_per_mille = 100U;
+    link_context.metrics.medium_busy_per_mille = 500U;
+    link_context.metrics.medium_quality_per_mille = 900U;
+    link_context.metrics.metrics_timestamp_ms =
+        UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS;
     TEST_ASSERT(policy_step(&node, UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS - 1U) == 0);
     quality = ucn_node_get_link_quality(&node, &link);
     TEST_ASSERT(quality != NULL && quality->route_cost == 80U);
     TEST_ASSERT(policy_step(&node, UCN_POLICY_QUALITY_SAMPLE_INTERVAL_MS) == 0);
     quality = ucn_node_get_link_quality(&node, &link);
-    TEST_ASSERT(quality != NULL && quality->route_cost == 70U);
+    TEST_ASSERT(quality != NULL && quality->route_cost == 40U);
     TEST_ASSERT(quality->rtt_ewma_ms == 30U);
     TEST_ASSERT(quality->tx_failure_ewma_per_mille == 65U);
     TEST_ASSERT(quality->queue_pressure_ewma_per_mille == 150U);
+    TEST_ASSERT(quality->rx_failure_ewma_per_mille == 62U);
+    TEST_ASSERT(quality->medium_busy_ewma_per_mille == 687U);
+    TEST_ASSERT(quality->medium_quality_ewma_per_mille == 750U);
 
     /* Link metrics use independent valid bits.  Out-of-range per-mille input
      * is rejected as unknown instead of being silently folded into Policy
@@ -152,6 +177,7 @@ int test_policy(void)
     TEST_ASSERT(quality != NULL && !quality->route_cost_valid &&
                 !quality->rtt_valid && !quality->tx_failure_rate_valid &&
                 !quality->queue_pressure_valid);
+    TEST_ASSERT(quality->rejected_metric_count == 2U);
 
     (void)memset(&policy, 0, sizeof(policy));
     policy.key.destination = UINT32_C(9);

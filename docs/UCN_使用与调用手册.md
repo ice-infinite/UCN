@@ -1,6 +1,6 @@
 # UCN 使用与调用手册
 
-> 适用版本：UCN v5 V5-33 当前工作树（分支 `codex/v5-adaptive-wire`，`f941ae9` 为修复前基线）。Nano/Lite/Full 都解析 W0～W3；默认固定 W3，产品可在注册 Link/安装 Security 前使用“最低够用 TX/W3 RX”，或显式开启路由感知自动选档。产品工程的 Adapter、密钥、板级引脚和业务 Endpoint 仍需自行实现。
+> 适用版本：`codex/v5-adaptive-wire` 当前工作树的 UCN Core 5.0.0 / 线协议 v5，已包含 V5-35 静态标准 Preset Resolver。Nano/Lite/Full 都解析 W0～W3；默认固定 W3，产品可在注册 Link/安装 Security 前使用“最低够用 TX/W3 RX”，或显式开启路由感知自动选档。产品工程的 Adapter、密钥、板级引脚和业务 Endpoint 仍需自行实现。
 > 目标：让业务代码只关心“发给哪个 Node 的哪个 Endpoint、什么 QoS”，而不关心数据当前经过 Wi-Fi、UART、CAN、BLE 或其他 Bearer。
 
 ## 1. 先理解 UCN 在系统中的位置
@@ -54,8 +54,10 @@ Linux、ROS 2、地面站可以通过一个 Link/Adapter 作为普通 Node 接�
 | `ucn_node.h` | 邻居、路由、Endpoint 发送/接收、控制面、调度 | **唯一 Protocol Task** | 被多个业务 Task 或 ISR 直接调用。 |
 | `ucn_neighbor.h` | Neighbor/Bearer 状态和准入授权回调类型 | 产品 Join Provider、诊断读取 | 绕过 HELLO/准入直接把陌生节点当作可信 Neighbor。 |
 | `ucn_link.h` | 把一种底层介质封装为 `open/send/poll_rx/status/metrics` | Adapter/驱动层 | 让业务层看到 MAC、串口号或 CAN ID。 |
-| `ucn_port.h` | 时间、随机数、持久计数器与临界区的 Port 操作表 | Adapter RX Queue 和产品 Port | 把平台 API 泄漏到 C99 Core。 |
-| `ucn_adapter.h` | 驱动回调到 Protocol Task 的固定 RX 队列 | Adapter 回调入队、Protocol Task Pump | 在中断/驱动回调内执行路由、解密或业务回调。 |
+| `ucn_port.h` | 时间、随机数、持久计数器、任务临界区和 ISR token 临界区的 Port 操作表 | Adapter RX Queue 和产品 Port | 把平台 API 泄漏到 C99 Core，或用任务锁替代 ISR token 锁。 |
+| `ucn_adapter.h` | 驱动回调到 Protocol Task 的固定 RX 队列 | 任务使用 `ucn_adapter_rx_enqueue()`；完整帧 ISR 仅用 `ucn_adapter_rx_enqueue_from_isr()` | 在中断/驱动回调内执行路由、解密或业务回调；缺 ISR token 锁仍强行入队。 |
+| `ucn_standard_adapter.h` | SDK 无关的 Bearer/Preset、静态产品 Link 配置和 Cost/MTU/RTT Resolver | Adapter 初始化前统一取得默认事实、校验产品覆盖 | 以为它会初始化 UART/CAN/Wi-Fi/USB、注册 `ucn_link_t` 或执行动态选路。 |
+| `ucn/ports/ucn_protocol_owner.h` + `ucn/ports/ucn_port_<platform>.h` | 公共唯一 Owner 与独立平台 RX 通知、等待、固定预算、统一时钟 | 只包含当前产品所选的裸机/FreeRTOS/Zephyr/NuttX/RT-Thread Port | 以为包含一个头就会创建真实 Task/Queue/Semaphore 或实现介质驱动。 |
 | `ucn_service.h` | Node 内任务通信：本机直投、远端请求、Q0/Q1 Inbox | Service/Port，短临界区保护 | 直接访问 Link 或 `ucn_node_t`。 |
 | `ucn_service_bridge.h` | Router 和 Node 的唯一桥接 | **唯一 Protocol Task** | 创建 RTOS Task、动态队列或重试伪 ACK。 |
 | `ucn_policy.h`、`ucn_path.h` | 指定路径、主备、Q1 流亲和均衡 | 产品的受控配置/管理层 + Protocol Task | 对 Q0 使用逐帧均衡，或未授权安装路径。 |
@@ -69,7 +71,7 @@ Linux、ROS 2、地面站可以通过一个 Link/Adapter 作为普通 Node 接�
 | --- | --- | --- |
 | 启动检查 | `ucn_version()`、`ucn_validate_config()`、`ucn_node_init()` | 只在启动/重建 Node 时。 |
 | 安全和准入配置 | `ucn_node_set_security()`、`ucn_node_set_security_policy()`、`ucn_node_set_endpoint_security_policy()`、`ucn_node_set_join_policy()` | 注册 Link 前完成；产品需要时安装 Snapshot/Policy/Path authorizer。 |
-| Link 生命周期 | Link `ops->open()`、`ucn_node_register_link()`、Adapter 的 peer 绑定/释放 | Adapter 创建/移除物理承载时；不由业务 Task 调用。 |
+| Link 生命周期 | `ucn_node_register_link()`（内部调用可选 `ops->open()`）、Adapter 的 peer 绑定/释放 | Adapter 创建/移除物理承载时；不由业务 Task 调用。 |
 | 自动入网 | `ucn_node_observe_neighbor()`、`ucn_node_probe_neighbor()`、`ucn_node_broadcast_hello()` | 只由发现 Adapter/Protocol Task 在受控节拍调用。 |
 | 静态/手动路由 | `ucn_node_add_route()`、`ucn_node_discover_route()`、`ucn_node_refresh_route()`、`ucn_node_route_pending()` | 产品启动静态路由，或管理/测试层；业务优先发送 Endpoint。 |
 | 收/发 Endpoint | `ucn_node_set_endpoint_handler()`、`ucn_node_send_endpoint()` | 单 Task 简化产品或 Bridge；多 Task 业务应改用 Service API。 |
@@ -77,7 +79,7 @@ Linux、ROS 2、地面站可以通过一个 Link/Adapter 作为普通 Node 接�
 | 手动 Path/策略 | `ucn_node_install_local_path()`、`ucn_node_send_path_install()`、`ucn_node_set_policy_path()`、`ucn_node_set_route_policy()` | 受授权管理配置；不能放在高频业务循环。 |
 | 只读策略/质量 | `ucn_node_find_route_policy()`、`ucn_node_find_policy_path()`、`ucn_node_find_q1_flow()`、`ucn_node_get_link_quality()`、`ucn_node_get_policy_stats()` | 管理/日志任务经安全同步快照读取。 |
 | 诊断控制面 | `ucn_node_request_path_trace()`、`ucn_node_request_node_snapshot()`、`ucn_node_request_policy_diagnostic()` | 低频、显式用户/管理触发。 |
-| Protocol Task 主循环 | `ucn_adapter_rx_pump()`、`ucn_service_protocol_bridge_step()`、`ucn_node_step()`、`ucn_node_receive()` | 后三者仅由 Node owner；通常 `receive()` 由 Adapter Pump 间接调用。 |
+| Protocol Task 主循环 | 选择一个独立 Port 的 `ucn_<platform>_port_rx_enqueue()`、`ucn_<platform>_port_*_step()`；底层为公共 Owner、`ucn_adapter_rx_pump()`、可选 Bridge、`ucn_node_step()` | Owner 在同一个 `now_ms` 下按预算执行；不包含其它 RTOS Port。 |
 | 任务通信 | `ucn_service_send()`、`ucn_service_inbox_take()`；ESP32 用 `UcnServiceFreeRtosPort::send()` / `inbox_take()` | 业务 Task 可调用；Port 负责短临界区，不把 Node 暴露给 Task。 |
 
 ## 4. QoS 与 Endpoint：先选对语义
@@ -116,8 +118,10 @@ static ucn_node_t g_node;
 
 static void protocol_init(void)
 {
+    /* 裸机产品可把掉电保留计数与随机启动盐组合成非零 Session。 */
+    const ucn_session_id_t boot_session = product_next_boot_session_id();
     const ucn_config_t config = {
-        .network_id = UINT32_C(0x55434E01),
+        .network_id = UINT32_C(0x00004E01), /* W1 可表达。 */
         .node_id = UINT32_C(0x0000000A),
         .default_hop_limit = 8U,
     };
@@ -127,17 +131,47 @@ static void protocol_init(void)
         ucn_node_set_wire_profiles(&g_node,
             UCN_WIRE_PROFILE_W1_EDGE,
             UCN_WIRE_PROFILE_W3_BACKBONE) != UCN_OK ||
-        ucn_node_set_wire_profile_auto(&g_node, true) != UCN_OK) {
+        ucn_node_set_wire_profile_auto(&g_node, true) != UCN_OK ||
+        ucn_node_set_plain_session_id(&g_node, boot_session) != UCN_OK) {
         product_enter_safe_mode();
     }
 }
 ```
+
+上例是未启用 Security 的明文启动会话：每次启动必须提供新的非零
+`boot_session`，不能把常量或 Node ID 当成 Session。生产环境若要求认证、
+防重放或加密，应安装产品 Security Provider，由认证会话替代明文会话；
+安全失败时不能自动降级为明文重发。
 
 固定域模式只省去自动决策，适合资源/地址范围完全冻结的产品；自动模式不是协商任意格式，而是从四个官方档位中选满足本帧与当前出口的最小档。控制帧继续使用固定发送档，HELLO 会学习 `link->peer_wire_profile`；静态链路也可在注册后用 `ucn_node_set_link_wire_profile_limit()` 配置可信上限。中继不重新选档，防止在途帧被静默改写。
 
 只有静态分配并独占 Node 的 Protocol Task 所在 `.c/.cpp` 文件需要包含
 `ucn_node_storage.h`。业务任务、Adapter 声明和只传递 `ucn_node_t *` 的模块应
 只包含 `ucn_node.h`；存储头中的字段是实现布局，不是应用 ABI，禁止直接读写。
+
+### 5.1.1 可选：先解析标准 Preset，再初始化产品 Adapter
+
+若产品采用官方初始 Cost，不要在多处手写 UART/Wi-Fi/CAN/USB 数字；在 BSP/HAL 初始化之前调用 Resolver：
+
+```c
+#include <string.h>
+#include "ucn/ucn_standard_adapter.h"
+
+ucn_standard_link_config_t link_config;
+ucn_standard_resolved_link_config_t link_defaults;
+
+(void)memset(&link_config, 0, sizeof(link_config));
+link_config.local_link_id = 0x70U;
+link_config.peer_node_id = UINT32_C(0x0000000B);
+link_config.preset = UCN_STANDARD_PRESET_UART_115200_8N1;
+link_config.required_logical_mtu = 128U;
+
+if (ucn_standard_link_config_resolve(&link_config, &link_defaults) != UCN_OK) {
+    product_enter_safe_state();
+}
+```
+
+随后由**产品自己的 Adapter**把 `link_defaults.logical_mtu`、`base_cost` 和其他事实绑定到 `ucn_link_t`、`get_status()`/`get_metrics()` 与 BSP/HAL。Resolver 不调用 `open()`、不持有 Node 或驱动对象，也没有 GPIO/串口号/CAN Filter 参数。`required_logical_mtu=0` 会使用当前 `UCN_MAX_FRAME_BYTES`，不能超过 Preset 上限；CAN-FD 应显式写 `<=64`，ESP-NOW 默认 Preset 应显式写 `<=250`。经典 CAN 必须同时启用已实现的 Carrier（`carrier_enabled=true`），否则失败关闭。
 
 `node_id` 不是入网后临时分配的地址；它是设备稳定身份。可让首次启动写入 Flash，或在每块板的产品配置中固定。更换同一板的物理链路不应改变 Node ID。
 
@@ -165,36 +199,40 @@ static ucn_link_t g_uart_link = {
 
 static void register_uart_link(void)
 {
-    (void)g_uart_link.ops->open(&g_uart_link);
-    (void)ucn_node_register_link(&g_node, &g_uart_link);
+    /* register_link() 内部会调用可选 open()，产品不要提前重复打开。 */
+    if (ucn_node_register_link(&g_node, &g_uart_link) != UCN_OK) {
+        product_enter_safe_mode();
+    }
 }
 ```
 
 若同一个对端同时有 UART 与 ESP-NOW，注册两条 Link 即可。它们属于同一个 `peer_node_id` 的两个 Bearer；Core 会保留一个逻辑 Neighbor，并按状态/Cost/质量管理主备。不要用“两个 Node ID”模拟同一设备的两个接口。
 
-### 5.3 RX 回调只入队，Protocol Task 再 Pump
+### 5.3 RX 回调只入队，选择一个独立 Platform Port 再 Pump
+
+V5-46 起，产品不能再包含集中式 Port 头。先按运行环境选择一个文件：裸机使用 `ucn/ports/ucn_port_bare_metal.h`，FreeRTOS 使用 `ucn/ports/ucn_port_freertos.h`，Zephyr/NuttX/RT-Thread 分别使用自己的独立头。CMake 产品只链接对应的 `ucn_port_<platform>` 目标；所有 Port 在内部调用同一个 SDK 无关公共 Owner。Owner 不创建平台对象，产品仍持有静态 Node、RX Queue、`ucn_port_ops_t` 和可选 Bridge。
+
+V5-48 将 `from_isr` 继续传入 Queue：产品若允许 ISR 直接提交完整帧，必须为 `ucn_port_ops_t` 同时提供任务临界区和可返回/恢复 mask 的 ISR token 临界区。ISR 回调缺这一对时会得到 `UCN_ERR_CONFIG`；推荐路径仍是 ISR 写 BSP ring、Protocol Task 普通入队。
 
 ```c
 /* 驱动回调或 ISR 后半部：不调用 Node，不运行应用回调。 */
 void uart_rx_callback(const uint8_t *data, size_t length)
 {
-    (void)ucn_adapter_rx_enqueue(&g_uart_rx_queue, &g_uart_link, data, length);
+    (void)ucn_freertos_port_rx_enqueue(&g_ucn_freertos_port,
+                                        &g_uart_link, data, length, true);
 }
 
-/* 唯一 Protocol Task / loopTask。now_ms 来自单调时钟。 */
-void protocol_task_iteration(uint32_t now_ms)
+/* 唯一 Protocol Task / loopTask。Owner 内部只采样一次 now_ms。 */
+void protocol_task_iteration(void)
 {
     size_t pumped = 0U;
-    uint8_t processed = 0U;
+    uint8_t bridged = 0U;
 
-    (void)ucn_adapter_rx_pump(&g_uart_rx_queue, &g_node, 4U, &pumped);
-    (void)ucn_service_protocol_bridge_step_at(&g_service_bridge,
-                                               now_ms,
-                                               2U,
-                                               &processed);
-    (void)ucn_node_step(&g_node, now_ms);
+    (void)ucn_freertos_port_task_step(&g_ucn_freertos_port, &pumped, &bridged);
 }
 ```
+
+启动时先用 `ucn_protocol_owner_config_t` 绑定 `node`、`rx_queue`、`port_ops`、`port_context`、每轮 RX 预算和可选 Bridge/Bridge 预算；再用选择的平台 Config 绑定其专属 Runtime Hook 并初始化 Port。裸机没有 wait API；RTOS Port 的等待 API 会裁剪到 `UCN_MAX_STEP_INTERVAL_MS`。`ucn_node_step()` 的空闲 `UCN_ERR_NOT_FOUND` 已在公共 Owner 内归一为 `UCN_OK`，原始值仍可从 Owner 统计读取。
 
 该循环不是“尽量快即可”，而是产品时限契约。默认 Full Profile：
 
@@ -202,6 +240,18 @@ void protocol_task_iteration(uint32_t now_ms)
 maintenance_bound = (4 + 1) × 10 ms × 8 Neighbor × 2 Bearer = 800 ms
 1 s Heartbeat + 800 ms < 3 s Suspect
 ```
+
+对低时延有线 Link 可在注册前选择 FAST 存活档：
+
+```c
+ucn_link_t uart_link = {0};
+
+/* 先填写 ops/context/link_id/mtu 等 Adapter 字段。 */
+uart_link.liveness_profile = (uint8_t)UCN_LINK_LIVENESS_FAST;
+result = ucn_node_register_link(&node, &uart_link);
+```
+
+FAST 使用 `250 ms Heartbeat / 1250 ms SUSPECT / 2000 ms DOWN`；零初始化 Link 保持默认 `1000/3000/4000 ms`。周期 Heartbeat 不消耗通用 RREQ/Probe/Activate Token，但仍受固定 Link/Bearer 数、维护调度上界和入站每 Peer 预算约束。FAST 只缩短静默判断，不提供端到端 ACK、重传或零丢帧保证。
 
 构建会拒绝侵入 Suspect 窗口的配置。产品还必须冻结 Protocol Task 优先级、最大 Sleep/Block、每个 Adapter Pump 数量、Bridge 数量和 Link `send()` 最坏执行时间。运行时通过 `ucn_node_get_stats()` 观察 `last_step_ms`、`max_step_gap_ms`、`step_interval_violations`、`max_heartbeat_service_delay_ms`、`max_probe_service_delay_ms`；第一次 Step 不算 Gap，计时支持 `uint32_t` 回绕。出现违规时 Node 继续调度并报警，产品不得用“停止协议任务”处理已经发生的超时。
 
@@ -268,27 +318,33 @@ Q1 首次发送若尚无满足 Hop/Cost/RTT 约束的路线，会在固定 Pendi
 - 目标是远端 Node：Router 复制到固定 Remote TX 队列，Bridge 在 Protocol Task 中调用 `ucn_node_send_endpoint()`；
 - 远端帧到达本机：Node 的 Endpoint handler 通过 Bridge 投递 Router，再由目标业务 Task 读取 Inbox。
 
-Router 本身不依赖 FreeRTOS。当前 ESP32 工程在其上提供 `UcnServiceFreeRtosPort`，用于静态 Queue、事件通知和业务 Task 绑定。
+Router 本身不依赖 FreeRTOS。仓库外 ESP32 工程提供的 `UcnServiceFreeRtosPort` 可参考静态 Queue、事件通知和业务 Task 绑定方式，但该应用仍锁定线协议 v4；迁移其初始化和源文件选择前，不能把它当成当前 v5 编译/实机证据。
 
 ### 7.2 定义固定 Binding
 
 ```c
+enum {
+    kServiceSensor = 1U,
+    kServiceControl = 2U,
+    kServiceActuator = 3U,
+};
+
 static const ucn_service_binding_t g_bindings[] = {
     { .endpoint = 0x40U,
-      .owner_service_id = UCN_SERVICE_ID_CONTROL,
+      .owner_service_id = kServiceControl,
       .max_payload_length = 24U,
       .allowed_traffic_mask = UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q1_REALTIME),
       .delivery_mode = UCN_SERVICE_DELIVERY_Q1_LATEST,
-      .allowed_local_source_mask = UCN_SERVICE_SOURCE_MASK(UCN_SERVICE_ID_SENSOR),
+      .allowed_local_source_mask = UCN_SERVICE_SOURCE_MASK(kServiceSensor),
       .accept_remote = true,
       .enabled_at_boot = true,
       .require_remote_q0_validator = false },
     { .endpoint = 0x60U,
-      .owner_service_id = UCN_SERVICE_ID_ACTUATOR,
+      .owner_service_id = kServiceActuator,
       .max_payload_length = 16U,
       .allowed_traffic_mask = UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q0_CRITICAL),
       .delivery_mode = UCN_SERVICE_DELIVERY_Q0_FIFO,
-      .allowed_local_source_mask = UCN_SERVICE_SOURCE_MASK(UCN_SERVICE_ID_CONTROL),
+      .allowed_local_source_mask = UCN_SERVICE_SOURCE_MASK(kServiceControl),
       .accept_remote = true,
       .enabled_at_boot = true,
       .require_remote_q0_validator = true },
@@ -337,7 +393,7 @@ static void service_init(void)
 
 Binding 是产品 ABI 的一部分。Router 借用该数组而不复制，因此数组必须在 Router 整个生命周期内保持有效且不可修改；应像示例一样使用 `static const`，不能把函数栈上的临时数组传入。字段含义：`owner_service_id` 是唯一消费者；`max_payload_length` 和 `allowed_traffic_mask` 是硬边界；`allowed_local_source_mask` 只限制本机 Task 发起；`accept_remote` 决定是否接受远端帧；`enabled_at_boot` 决定启动后是否就绪；`require_remote_q0_validator` 要求 Bridge 在安装 handler 前找到对应 Validator，否则整体失败关闭。该标记只能用于可接收远端的 Q0 Binding。`local_node_id=0` 和广播 ID 都会被初始化拒绝。
 
-Validator 在 Core 完成安全/解密后、Router 入队前运行，返回非 `UCN_OK` 的帧不会进入 Inbox。固定 Replay helper 对当前 `(Source, Session, Endpoint)` 只接受递增命令 ID；认证 Session 轮换后，由产品 Security 逻辑调用 `ucn_service_bridge_replay_rotate_session()`，不能看到不同 Session 就自动切换。Replay 表满返回 `UCN_ERR_NO_SPACE`，不得动态扩容。`now_ms` 来自 Node 最近一次 Step，因此产品必须同时满足 Protocol Task 最大 Step 间隔。
+Validator 在 Core 完成安全/解密后、Router 入队前运行，返回非 `UCN_OK` 的帧不会进入 Inbox。固定 Replay helper 对当前 `(Source, Session, Endpoint)` 只接受递增命令 ID；认证 Session 轮换后，由产品 Security 逻辑调用 `ucn_service_bridge_replay_rotate_session()`，不能看到不同 Session 就自动切换。Replay 表满返回 `UCN_ERR_NO_SPACE`，不得动态扩容。Bridge 应通过 `ucn_service_protocol_bridge_step_at()` 接收本轮显式 `now_ms`，并与随后 `ucn_node_step()` 使用同一时刻；产品仍必须满足 Protocol Task 最大 Step 间隔。
 
 Validator 不规定 Payload ABI：可使用 12 B Command Guard，也可以解析产品已有的 16 B 电机命令。它只拦截远端帧，本机 Fast Path 仍由执行 Task 二次检查模式、范围、有效期、互锁和本地 watchdog。若 Task 还未创建，使用 `ucn_service_set_ready()` 显式切换。
 
@@ -348,19 +404,19 @@ Validator 不规定 Payload ABI：可使用 12 B Command Guard，也可以解析
 ```c
 ucn_result_t rc = ucn_service_send(&g_router,
                                    destination_node_id,
-                                   UCN_SERVICE_ID_CONTROL,
+                                   kServiceControl,
                                    0x60U,
                                    UCN_TRAFFIC_Q0_CRITICAL,
                                    servo_payload,
                                    16U);
 ```
 
-ESP32 业务 Task 不应直接持有 Router/Node。使用测试工程的 `UcnServiceFreeRtosPort`：
+FreeRTOS 业务 Task 不应直接持有 Router/Node。迁移到 v5 后，可沿用历史 ESP32 `UcnServiceFreeRtosPort` 的调用形态：
 
 ```cpp
 /* 业务 Task：本机或远端的调用形式完全相同。 */
 const ucn_result_t rc = g_service_port.send(destination_node_id,
-                                            UCN_SERVICE_ID_CONTROL,
+                                            kServiceControl,
                                             0x60U,
                                             UCN_TRAFFIC_Q0_CRITICAL,
                                             servo_payload,
@@ -375,7 +431,7 @@ Task 停机/重启前调用 `ucn_service_set_ready(..., false)`：Router 会清�
 
 ```cpp
 ucn_service_message_t message;
-while (g_service_port.inbox_take(UCN_SERVICE_ID_CONTROL, 0x40U, &message) == UCN_OK) {
+while (g_service_port.inbox_take(kServiceControl, 0x40U, &message) == UCN_OK) {
     consume_imu(message.payload, message.payload_length);
 }
 ```
@@ -508,7 +564,7 @@ Core Profile 默认最多重试 `UCN_Q0_BACKPRESSURE_MAX_RETRIES=3` 次、间隔
 - 单一 Bearer Down 不移除 Neighbor、不清逻辑 Route/Path；全部 Bearer Down 才回收动态状态；
 - 真实板级的切换时延、丢失和乱序还需按测试地图验证，不能仅根据虚拟测试宣称“无缝”。
 
-Adapter 的 Cost 必须来自真实可解释指标。`route_cost` 越低越优；未知指标使用保守默认值。Wi-Fi 可映射 RSSI 平滑值、丢包与本 Adapter 队列压力；UART/CAN 可映射错误率、重试/Bus-Off 与队列压力。不要虚构 RTT。
+Adapter 的 Cost 必须来自真实可解释指标。产品可以用 `ucn_standard_link_config_resolve()` 的 `base_cost` 作为官方静态初值，再由 Adapter 报告为 `route_cost`；Resolver 不会自动写入 Core。`route_cost` 越低越优；未知指标使用保守默认值。Wi-Fi 可映射 RSSI 平滑值、丢包与本 Adapter 队列压力；UART/CAN 可映射错误率、重试/Bus-Off 与队列压力。不要虚构 RTT，也不要把 LC-1 的动态评分当作已经运行的功能。
 
 ### 路由 Hop、Cost 与 RTT 门禁
 
@@ -606,7 +662,7 @@ const ucn_path_capability_t p1_capability = {
 | `PINNED_FAILOVER` | 需要固定优先路径但允许硬故障后换 P2 | P1 正常时固定走 P1；只在硬 Down/Path 不存在时切 P2。 |
 | `AUTO_BALANCE` | 多条已验证路径上的独立 Q1 实时流 | 同一个 `(目的 Node, Endpoint, Q1)` 在租约内固定一条 Path；不同 Endpoint 流可分散到 P1/P2。 |
 
-`AUTO_BALANCE` 不是逐帧轮询、不是帧复制、不是带宽聚合，也不适用于 Q0。默认流租约 2 s；持续 3 个 500 ms 窗口队列压力超过 800‰或 Path 硬 Down 才重绑。这样 IMU 的同一流不会因为每帧跳线而制造乱序。
+`AUTO_BALANCE` 不是逐帧轮询、不是帧复制、不是带宽聚合，也不适用于 Q0。Full 在新建/到期 Flow 时按出口 Link 的 LC-1 `effective_select_cost ×（活动 Flow 数 + 1）` 评分；默认流租约 2 s，租约内只在持续 3 个 500 ms 窗口队列压力达到 800‰或 Path 硬 Down 时重绑。这样 IMU 的同一流不会因为每帧跳线而制造乱序。
 
 ## 10. 安全：按 Endpoint 配置，不把 Provider 当作已完成
 

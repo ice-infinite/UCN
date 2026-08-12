@@ -9,7 +9,9 @@
 
 ```text
 物理 RX 回调
+  → adapter.platform_port_rx_enqueue（选择一个平台的独立 Port）
   → adapter.ucn_adapter_rx_enqueue
+  → adapter.ucn_protocol_owner_step
   → adapter.ucn_adapter_rx_pump
   → node_runtime.ucn_node_receive
   → frame.ucn_frame_peek_wire_profile / per-Link RX Ceiling
@@ -33,6 +35,7 @@
   → Link ops->send
 
 唯一 Protocol Task 周期调度
+  → adapter.platform_port_step → adapter.ucn_protocol_owner_step（每轮仅采样一次 now_ms）
   → adapter.ucn_adapter_rx_pump（有限帧数）
   → service.ucn_service_protocol_bridge_step_at（有限请求数，共用本轮 now_ms）
   → node_runtime.ucn_node_step
@@ -55,6 +58,8 @@ V5-10 后，默认发送仍固定 W3。产品只有显式调用 `ucn_node_set_wi
 
 V5-17～V5-20、V5-22～V5-33 后，Wire 可表达与业务可用分开判断：Node/Policy 可限制 Hop、32 bit Cost 与已验证 RTT；线上 Cost 为 3/3/3/4 B；Pinned Path 使用逐跳安装的 `remaining_hops` 和共同 Profile/MTU 能力；PATH_INSTALL 旧 API 发送基础 8/11/14/17 B，capability API 发送扩展 11/14/17/20 B，接收端只接受这两组精确 Schema；未知 Q1 路线默认按 2→4→8→16 有界扩圈且 Pending 内部重试不刷新绝对 Deadline；Candidate 验证保持发现时的 Wire Profile；Ingress 在完整 Decode/CRC 前先用 3 B Prefix 执行 per-Link RX Ceiling，完整 Decode/Network 后再在 Security/状态前执行运行期 Hop Scope。动态 MTU 使用静态/状态最小值，Policy 与 AUTO_BALANCE 跟随逻辑 Neighbor 当前 Bearer；后续跳能力失败会撤销 Path 并回送 Path-RERR。V5-21 Authorized Class 仍阻塞于生产安全 S02，不在调用树中伪造执行分支。
 
+V5-46 将“唯一 Protocol Task”拆为公共 `ucn_protocol_owner_*` 与独立 Platform Port：驱动/ISR 先调用当前平台的 `ucn_<platform>_port_rx_enqueue()`，成功入队后才通过该平台自己的 Hook 通知 Owner；平台 Step 再进入公共 Owner，在同一 `now_ms` 下有界 Pump、可选 Bridge、最后 Node Step。V5-48 继续把 `from_isr` 传至 Adapter Queue：任务入口使用任务锁，ISR 入口使用可恢复 token 的 ISR 锁；缺少 token 对即失败关闭，绝不将 ISR 回退到任务锁。裸机、FreeRTOS、Zephyr、NuttX、RT-Thread 与 Host Fake 彼此没有枚举或头文件耦合，Core 不创建 RTOS SDK 对象；空闲 `ucn_node_step()` 的 `UCN_ERR_NOT_FOUND` 只保留在 Owner 统计，不会把周期循环误报失败。
+
 ## 2. 目录和阅读顺序
 
 ```text
@@ -64,7 +69,7 @@ docs/calltree/
 ├── _template.calltree.yaml           新节点模板
 ├── core.calltree.yaml                配置和 Endpoint 编号边界
 ├── frame.calltree.yaml               编解码、CRC、E2E AAD
-├── adapter.calltree.yaml             物理地址、固定 RX Queue、Pump
+├── adapter.calltree.yaml             物理地址、固定 RX Queue、标准 Owner、Pump
 ├── node_runtime.calltree.yaml        Node 初始化、收包总入口、step 调度
 ├── neighbor.calltree.yaml            HELLO、准入、Heartbeat、Bearer 主备
 ├── route.calltree.yaml               自动 Route、RREQ/RREP/RERR、业务发送

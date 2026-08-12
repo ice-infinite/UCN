@@ -12,7 +12,7 @@ Service Router/Bridge 与网络 Profile 正交，通过 `UCN_FEATURE_SERVICE=ON/
 | --- | --- | --- | --- |
 | Nano | Frame、Link、Adapter RX Queue、Endpoint、Q0/Q1、静态直连与静态 Route。 | HELLO Scheduler、Neighbor、Heartbeat、AODV、Security、Candidate、Path、Policy、Trace、Snapshot、Policy Diagnostic。 | 否 |
 | Lite | Nano + HELLO Scheduler、Join/Neighbor、Heartbeat、多 Bearer、AODV-Lite、RERR、最小 Security Provider 接口。 | Candidate 先测后切、显式 Path、Policy/Balance、三类诊断。 | 是 |
-| Full | Lite + Candidate、Path、Policy、Q1 Flow/AUTO_BALANCE、Path Trace、Node Snapshot、Policy Diagnostic。 | 生产身份、密钥和 AEAD 算法仍由产品提供。 | 是 |
+| Full | Lite + Candidate、Path、Policy、LC-1 动态质量快照、Q1 Flow/AUTO_BALANCE、Path Trace、Node Snapshot、Policy Diagnostic。 | 生产身份、密钥和 AEAD 算法仍由产品提供。 | 是 |
 
 Service 开启后，任意 Profile 都可增加节点内 Service Router/Bridge；它不改变网络 Profile 的路由能力。
 
@@ -37,11 +37,11 @@ CMake 会把 `UCN_PROFILE` 和 `UCN_FEATURE_SERVICE` 作为 `ucn_core` 的 `PUBL
 ## 4. 实际裁剪方式
 
 - `include/ucn/ucn_profile.h` 是唯一 Profile/Feature 依赖图。
-- Nano 使用独立的 `src/ucn_node_nano.c`，不编译 Full/Lite 的动态路由 Node 单体。
+- Nano 使用独立的 `src/node/ucn_node_nano.c`，不编译 Full/Lite 的动态路由 Node 单体。
 - Lite 编译动态 Mesh Node，但 Candidate、Path、Policy、Diagnostic 的处理函数和对象字段由预处理阶段移除。
-- 非 Full 不编译 `src/ucn_path.c`、`src/ucn_policy.c`，高级公开 Node/Path API 由 `src/ucn_profile_stubs.c` 明确返回“未配置”或不可用；内部 Policy 维护 Hook 保留固定空操作符号，避免公共头可见声明在链接阶段缺失。
+- 非 Full 不编译 `src/routing/ucn_path.c`、`src/routing/ucn_policy.c`，高级公开 Node/Path API 由 `src/node/ucn_profile_stubs.c` 明确返回“未配置”或不可用；内部 Policy 维护 Hook 保留固定空操作符号，避免公共头可见声明在链接阶段缺失。
 - Nano 不导出 HELLO Scheduler 类型/API，其实现也不会进入 Adapter 对象。
-- Service 关闭时不编译 `src/ucn_service.c` 和 `src/ucn_service_bridge.c`。
+- Service 关闭时不编译 `src/service/ucn_service.c` 和 `src/service/ucn_service_bridge.c`。
 
 因此裁剪不依赖链接器碰巧删除未引用函数，也没有用零长度业务表伪装功能关闭。
 
@@ -58,15 +58,15 @@ GCC 严格构建已验证 33/46/64 B 的 `ucn_core` 分别可编译；32/45/63 B
 
 ## 6. Host 资源对比
 
-以下结果来自 Windows x64、GCC 14.2、Release `-O3`、Service OFF。`node_bytes` 是 `sizeof(ucn_node_t)`；`archive .text` 是 `size -t libucn_core.a` 对全部对象的合计，用来证明源代码确实被裁剪。
+以下结果来自 WSL x86_64、GCC 13.3、Release `-O3`、Service OFF。`node_bytes` 是 `sizeof(ucn_node_t)`；`archive .text` 是 `size -t libucn_core.a` 对全部对象的合计，用来证明源代码确实被裁剪。
 
 | Profile | `sizeof(ucn_node_t)` | 相对 Full | 静态库 `.text` 合计 | 相对 Full |
 | --- | ---: | ---: | ---: | ---: |
-| Nano | 2,648 B | -72.8% | 19,884 B | -84.4% |
-| Lite | 5,960 B | -38.9% | 68,244 B | -46.6% |
-| Full | 9,752 B | 基线 | 127,792 B | 基线 |
+| Nano | 2,648 B | -73.7% | 27,662 B | -80.1% |
+| Lite | 6,024 B | -40.2% | 73,735 B | -47.0% |
+| Full | 10,080 B | 基线 | 139,017 B | 基线 |
 
-该表已在 V5-33 后以 GCC 14.2 Release/Service OFF 重新测量。Node 为 `2648/5960/9752 B`，`ucn_link_t` 三档均为 40 B；V5-28 的 Path 能力和诊断只增加 Full 固定状态，Storage Layout Version 升到 5，V5-32 只为非 Full 增加 capability API Stub。固定状态仍无动态内存。Archive `.text` 只用于比较 Host 裁剪。历史变化见[S22 稳定化修复报告](UCN_S22_重复抑制与稳定化修复报告.md)、[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)和[V5-31～V5-33 修复报告](UCN_V5_31_PATH_INSTALL兼容与API符号修复报告.md)。
+该表已在 V5-44/V5-36 后重新测量。相对 V5-33 的同类 Host Node 记录 `2648/5960/9752 B`，当前 Nano/Lite/Full 分别变化 `+0/+64/+328 B`；`ucn_link_t` 三档仍为 40 B。Lite/Nano 不含常驻动态质量快照；Full 增量来自扩展质量快照和 Bearer 保持期状态。纯 Resolver 对象 `.text` 为 1,625 B，虽然存在于三档静态库，但 Nano/Lite 产品不引用时可由最终链接器不拉入固件。固定状态仍无动态内存。Archive `.text` 只用于比较 Host 裁剪，不能替代 MCU ELF/Map。
 
 这些数字不是 MCU ELF 的最终 Flash/RAM：目标 ABI、编译器、LTO、表深度、`UCN_MAX_FRAME_BYTES` 和产品静态实例数都会改变结果。目标板必须另外报告 ELF 段、静态对象、运行时栈高水位和 Heap；不能把 Host `.a` 直接写成 ESP32/STM32 Flash。
 
@@ -75,10 +75,10 @@ GCC 严格构建已验证 33/46/64 B 的 `ucn_core` 分别可编译；32/45/63 B
 - Nano：直接运行 Frame/QoS/静态 Route/Endpoint/Adapter RX/Service/去重行为；动态寻路和 Security 返回 `UCN_ERR_CONFIG`。
 - Lite：直接运行 AODV/RERR、Neighbor/HELLO/Heartbeat、多 Bearer、安全 Provider、Control Budget、Stress；Candidate/Path/Policy/Diagnostic 返回 `UCN_ERR_CONFIG`。
 - API 完整性：头文件声明的 `ucn_node_*`/`ucn_path_*`/`ucn_policy_*` 公共符号在 Nano、Lite、Full 静态库中均存在；V5-32 后按当前筛选口径三档各 74 个，两个 capability API 也由测试二进制直接引用，低档 Profile 不会在链接阶段才暴露缺失能力。
-- Full：现有完整单元、虚拟拓扑、动态压力和 Profile 测试全部通过。
+- Full：现有完整单元、虚拟拓扑、动态压力和 Profile 测试全部通过；V5-44/V5-36 后 LC-1 C01～C10、Bearer 软切换、Candidate 本地动态分和 Q1 Flow 加权分均进入正式回归。
 - v5：四档固定域、1 B RX Ceiling HELLO、3 B Ingress Peek、Profile-aware RREQ/Path、3/3/3/4 B Cost、Candidate Profile 连续性、Q1 绝对 Deadline、运行期 Hop Scope、动态 MTU、异构 Bearer Path 能力、逻辑 Bearer Policy、AAD Profile 绑定、跨档透明密文中继、路由约束与 2→4→8→16 Expanding Ring 均通过。
 - Service：Nano/OFF 证明源码可移除；Lite/ON 证明正交组合可初始化 Router；Full/OFF 与 Full/ON 均可构建测试。
-- 编译器：MSVC Debug 与 GCC 14.2 Release 均验证；GCC 启用 `-Wall -Wextra -Wpedantic -Werror`。
+- 编译器：MSVC Debug 与 GCC 13.3 Release 均验证；GCC 启用 `-Wall -Wextra -Wpedantic -Werror`，另有 ASan+UBSan 与 `-fanalyzer` 回归。
 - CI：工作流已加入 Nano/OFF、Lite/ON、Full/ON 矩阵；只有远端 Actions 实际运行成功后，才能写成远端 CI 已通过。
 
 ## 8. 尚未完成的硬件门禁

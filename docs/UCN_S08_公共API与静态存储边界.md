@@ -90,7 +90,7 @@ S08 继续沿用 S04 已实现的编译期门禁和实际 Payload helper：
 | 最小 MTU 33/46/64 B | 全部编译通过 |
 | 低一字节 32/45/63 B | 全部按预期编译拒绝 |
 | 三档公共 Node/Path/Policy 符号 | V5-33 当前筛选口径每档 74 个，无缺失；两个 capability API 均直接链接验证 |
-| Host `sizeof(ucn_node_t)` | V5-33 后 Nano/Lite/Full 为 2648/5960/9752 B；Storage Layout Version=5 |
+| Host `sizeof(ucn_node_t)` | V5-44/V5-36 后 Nano/Lite/Full 为 2648/6024/10080 B；Storage Layout Version=5 |
 | ESP32-S3 Full/Service ON 正常 Node | 构建成功，RAM 48124 B，Flash 600819 B |
 | ESP32-S3 Full/Service OFF UART Bench | 构建成功，RAM 22152 B，Flash 185947 B |
 | ESP-WROOM-32 Full/Service ON | 构建成功，RAM 50184 B，Flash 626803 B |

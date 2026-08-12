@@ -46,8 +46,10 @@ const ucn_path_forward_entry_t *ucn_path_find(
     return NULL;
 }
 
-ucn_result_t ucn_path_install(ucn_path_state_t *state,
-                              const ucn_path_forward_config_t *config)
+ucn_result_t ucn_path_install_capable(
+    ucn_path_state_t *state,
+    const ucn_path_forward_config_t *config,
+    const ucn_path_capability_t *capability)
 {
     ucn_path_forward_entry_t *free_entry = NULL;
     size_t index;
@@ -60,9 +62,10 @@ ucn_result_t ucn_path_install(ucn_path_state_t *state,
         (config->next_hop != 0U && config->remaining_hops == 0U) ||
         (config->next_hop == 0U && config->egress_link != NULL) ||
         (config->next_hop != 0U && config->egress_link == NULL) ||
-        (config->minimum_mtu != 0U &&
+        (capability != NULL &&
+         (config->next_hop == 0U || capability->minimum_mtu == 0U ||
          ucn_wire_profile_get_descriptor(
-             (ucn_wire_profile_t)config->maximum_wire_profile) == NULL)) {
+             capability->maximum_wire_profile) == NULL))) {
         return UCN_ERR_ARGUMENT;
     }
 
@@ -76,10 +79,11 @@ ucn_result_t ucn_path_install(ucn_path_state_t *state,
             }
             entry->next_hop = config->next_hop;
             entry->remaining_hops = config->remaining_hops;
-            entry->maximum_wire_profile = config->minimum_mtu == 0U ?
+            entry->maximum_wire_profile = capability == NULL ?
                 (uint8_t)UCN_WIRE_PROFILE_UNSPECIFIED :
-                config->maximum_wire_profile;
-            entry->minimum_mtu = config->minimum_mtu;
+                (uint8_t)capability->maximum_wire_profile;
+            entry->minimum_mtu = capability == NULL ? 0U :
+                capability->minimum_mtu;
             entry->egress_link = config->egress_link;
             entry->terminal = config->next_hop == 0U;
             entry->expires_at_ms = config->expires_at_ms;
@@ -102,15 +106,22 @@ ucn_result_t ucn_path_install(ucn_path_state_t *state,
     free_entry->destination = config->destination;
     free_entry->next_hop = config->next_hop;
     free_entry->remaining_hops = config->remaining_hops;
-    free_entry->maximum_wire_profile = config->minimum_mtu == 0U ?
+    free_entry->maximum_wire_profile = capability == NULL ?
         (uint8_t)UCN_WIRE_PROFILE_UNSPECIFIED :
-        config->maximum_wire_profile;
-    free_entry->minimum_mtu = config->minimum_mtu;
+        (uint8_t)capability->maximum_wire_profile;
+    free_entry->minimum_mtu = capability == NULL ? 0U :
+        capability->minimum_mtu;
     free_entry->egress_link = config->egress_link;
     free_entry->terminal = config->next_hop == 0U;
     free_entry->expires_at_ms = config->expires_at_ms;
     state->stats.installs++;
     return UCN_OK;
+}
+
+ucn_result_t ucn_path_install(ucn_path_state_t *state,
+                              const ucn_path_forward_config_t *config)
+{
+    return ucn_path_install_capable(state, config, NULL);
 }
 
 ucn_result_t ucn_path_revoke(ucn_path_state_t *state,

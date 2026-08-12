@@ -33,9 +33,10 @@
 #define SCALE_PAYLOAD_META_BYTES ((uint16_t)12U)
 
 typedef enum scale_topology {
-    SCALE_TOPOLOGY_TREE = 0,
-    SCALE_TOPOLOGY_RING4 = 1,
-    SCALE_TOPOLOGY_LINE = 2
+    SCALE_TOPOLOGY_AUTO = 0,
+    SCALE_TOPOLOGY_TREE = 1,
+    SCALE_TOPOLOGY_RING4 = 2,
+    SCALE_TOPOLOGY_LINE = 3
 } scale_topology_t;
 
 typedef enum scale_traffic {
@@ -86,6 +87,7 @@ typedef struct scale_options {
     scale_wire_layout_t wire_layout;
     const char *report_prefix;
     bool quiet;
+    bool topology_capacity_contract;
 } scale_options_t;
 
 typedef struct scale_network scale_network_t;
@@ -256,6 +258,8 @@ static void scale_write_u32_be(uint8_t *output, uint32_t value)
 static const char *scale_topology_name(scale_topology_t topology)
 {
     switch (topology) {
+    case SCALE_TOPOLOGY_AUTO:
+        return "auto";
     case SCALE_TOPOLOGY_TREE:
         return "tree";
     case SCALE_TOPOLOGY_RING4:
@@ -265,6 +269,26 @@ static const char *scale_topology_name(scale_topology_t topology)
     default:
         return "unknown";
     }
+}
+
+static bool scale_topology_is_supported(scale_topology_t topology)
+{
+    if (topology == SCALE_TOPOLOGY_LINE) {
+        return UCN_MAX_LINKS >= (size_t)2U;
+    }
+    if (topology == SCALE_TOPOLOGY_TREE || topology == SCALE_TOPOLOGY_RING4) {
+        return UCN_MAX_LINKS >= (size_t)4U;
+    }
+    return false;
+}
+
+static bool scale_resolve_topology(scale_options_t *options)
+{
+    if (options->topology == SCALE_TOPOLOGY_AUTO) {
+        options->topology = UCN_MAX_LINKS >= (size_t)4U ?
+            SCALE_TOPOLOGY_TREE : SCALE_TOPOLOGY_LINE;
+    }
+    return scale_topology_is_supported(options->topology);
 }
 
 static const char *scale_traffic_name(scale_traffic_t traffic)
@@ -2001,7 +2025,8 @@ static void scale_usage(const char *program)
         "  --step-ms N               virtual tick duration (default 10)\n"
         "  --messages-per-node N     Q1 messages per node/tick (default 1)\n"
         "  --payload-bytes N         12..UCN_MAX_PAYLOAD_BYTES\n"
-        "  --topology tree|ring4|line  default tree\n"
+        "  --topology auto|tree|ring4|line  default auto (tree for >=4 Links; line for 2-3)\n"
+        "  --topology-capacity-contract  report selected topology as supported or skipped\n"
         "  --traffic local|two-hop|pairs|incast|all-to-all|mixed|end-to-end\n"
         "  --wire-mode fixed|auto    declared fixed class or route-aware minimum\n"
         "  --wire-profile w0|w1|w2|w3|mixed  per-node TX class (default w3)\n"
@@ -2045,7 +2070,7 @@ static bool scale_parse_options(int argc, char **argv, scale_options_t *options)
     options->flap_duration_ticks = UINT32_C(50);
     options->q0_every_ticks = UINT32_C(10);
     options->seed = UINT32_C(0x5CA1E123);
-    options->topology = SCALE_TOPOLOGY_TREE;
+    options->topology = SCALE_TOPOLOGY_AUTO;
     options->traffic = SCALE_TRAFFIC_TWO_HOP;
     options->wire_mode = SCALE_WIRE_FIXED;
     options->wire_layout = SCALE_WIRE_LAYOUT_W3;
@@ -2062,12 +2087,18 @@ static bool scale_parse_options(int argc, char **argv, scale_options_t *options)
             options->quiet = true;
             continue;
         }
+        if (strcmp(argument, "--topology-capacity-contract") == 0) {
+            options->topology_capacity_contract = true;
+            continue;
+        }
         if (index + 1 >= argc) {
             return false;
         }
         value = argv[++index];
         if (strcmp(argument, "--topology") == 0) {
-            if (strcmp(value, "tree") == 0) {
+            if (strcmp(value, "auto") == 0) {
+                options->topology = SCALE_TOPOLOGY_AUTO;
+            } else if (strcmp(value, "tree") == 0) {
                 options->topology = SCALE_TOPOLOGY_TREE;
             } else if (strcmp(value, "ring4") == 0) {
                 options->topology = SCALE_TOPOLOGY_RING4;
@@ -2217,6 +2248,25 @@ int main(int argc, char **argv)
     if (!scale_parse_options(argc, argv, &options)) {
         scale_usage(argv[0]);
         return 2;
+    }
+    if (!scale_resolve_topology(&options)) {
+        if (options.topology_capacity_contract) {
+            (void)printf(
+                "SCALE_TOPOLOGY_CAPACITY_SKIPPED topology=%s max_links=%zu\n",
+                scale_topology_name(options.topology), (size_t)UCN_MAX_LINKS);
+            return 0;
+        }
+        (void)fprintf(stderr,
+                      "SCALE_TOPOLOGY_UNSUPPORTED topology=%s max_links=%zu\n",
+                      scale_topology_name(options.topology),
+                      (size_t)UCN_MAX_LINKS);
+        return 3;
+    }
+    if (options.topology_capacity_contract) {
+        (void)printf(
+            "SCALE_TOPOLOGY_CAPACITY_SUPPORTED topology=%s max_links=%zu\n",
+            scale_topology_name(options.topology), (size_t)UCN_MAX_LINKS);
+        return 0;
     }
     if (!scale_network_init(&network, &options)) {
         (void)fprintf(stderr, "SCALE_INIT_FAILED nodes=%zu topology=%s\n",

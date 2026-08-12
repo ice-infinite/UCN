@@ -63,6 +63,18 @@ ucn_result_t ucn_path_install(ucn_path_state_t *state,
     return UCN_ERR_CONFIG;
 }
 
+ucn_result_t ucn_path_install_capable(
+    ucn_path_state_t *state,
+    const ucn_path_forward_config_t *config,
+    const ucn_path_capability_t *capability)
+{
+    (void)capability;
+    if (state == NULL || config == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    return UCN_ERR_CONFIG;
+}
+
 ucn_result_t ucn_path_revoke(ucn_path_state_t *state,
                              ucn_node_id_t owner,
                              ucn_session_id_t owner_session_id,

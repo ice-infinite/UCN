@@ -141,18 +141,37 @@ static void hello_enter_admitted(ucn_adapter_hello_scheduler_t *scheduler,
 }
 #endif
 
-static void queue_enter(ucn_adapter_rx_queue_t *queue)
+static void queue_enter_task(ucn_adapter_rx_queue_t *queue)
 {
     if (queue->port_ops != NULL) {
         queue->port_ops->enter_critical(queue->port_context);
     }
 }
 
-static void queue_exit(ucn_adapter_rx_queue_t *queue)
+static void queue_exit_task(ucn_adapter_rx_queue_t *queue)
 {
     if (queue->port_ops != NULL) {
         queue->port_ops->exit_critical(queue->port_context);
     }
+}
+
+static ucn_port_critical_token_t queue_enter_from_isr(
+    ucn_adapter_rx_queue_t *queue)
+{
+    return queue->port_ops->enter_critical_from_isr(queue->port_context);
+}
+
+static void queue_exit_from_isr(ucn_adapter_rx_queue_t *queue,
+                                ucn_port_critical_token_t token)
+{
+    queue->port_ops->exit_critical_from_isr(queue->port_context, token);
+}
+
+static bool queue_isr_critical_is_configured(const ucn_adapter_rx_queue_t *queue)
+{
+    return queue->port_ops != NULL &&
+           queue->port_ops->enter_critical_from_isr != NULL &&
+           queue->port_ops->exit_critical_from_isr != NULL;
 }
 
 bool ucn_adapter_address_is_valid(const ucn_adapter_address_t *address)
@@ -227,8 +246,10 @@ ucn_result_t ucn_adapter_rx_queue_init(ucn_adapter_rx_queue_t *queue,
                                        void *port_context)
 {
     if (queue == NULL ||
-        (port_ops != NULL && (port_ops->enter_critical == NULL ||
-                              port_ops->exit_critical == NULL))) {
+        (port_ops != NULL &&
+         (port_ops->enter_critical == NULL || port_ops->exit_critical == NULL ||
+          (port_ops->enter_critical_from_isr == NULL) !=
+              (port_ops->exit_critical_from_isr == NULL)))) {
         return UCN_ERR_ARGUMENT;
     }
 
@@ -252,10 +273,10 @@ ucn_result_t ucn_adapter_rx_enqueue(ucn_adapter_rx_queue_t *queue,
         return UCN_ERR_TOO_LARGE;
     }
 
-    queue_enter(queue);
+    queue_enter_task(queue);
     if (queue->count >= UCN_ADAPTER_RX_QUEUE_DEPTH) {
         queue->stats.dropped_full++;
-        queue_exit(queue);
+        queue_exit_task(queue);
         return UCN_ERR_NO_SPACE;
     }
 
@@ -268,7 +289,45 @@ ucn_result_t ucn_adapter_rx_enqueue(ucn_adapter_rx_queue_t *queue,
     queue->tail = (queue->tail + 1U) % UCN_ADAPTER_RX_QUEUE_DEPTH;
     queue->count++;
     queue->stats.enqueued++;
-    queue_exit(queue);
+    queue_exit_task(queue);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_adapter_rx_enqueue_from_isr(ucn_adapter_rx_queue_t *queue,
+                                             ucn_link_t *ingress_link,
+                                             const uint8_t *data,
+                                             size_t length)
+{
+    ucn_adapter_rx_item_t *item;
+    ucn_port_critical_token_t token;
+
+    if (queue == NULL || ingress_link == NULL || data == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (length > UCN_MAX_FRAME_BYTES || length > UINT16_MAX) {
+        return UCN_ERR_TOO_LARGE;
+    }
+    if (!queue_isr_critical_is_configured(queue)) {
+        return UCN_ERR_CONFIG;
+    }
+
+    token = queue_enter_from_isr(queue);
+    if (queue->count >= UCN_ADAPTER_RX_QUEUE_DEPTH) {
+        queue->stats.dropped_full++;
+        queue_exit_from_isr(queue, token);
+        return UCN_ERR_NO_SPACE;
+    }
+
+    item = &queue->items[queue->tail];
+    item->ingress_link = ingress_link;
+    item->length = (uint16_t)length;
+    if (length != 0U) {
+        (void)memcpy(item->data, data, length);
+    }
+    queue->tail = (queue->tail + 1U) % UCN_ADAPTER_RX_QUEUE_DEPTH;
+    queue->count++;
+    queue->stats.enqueued++;
+    queue_exit_from_isr(queue, token);
     return UCN_OK;
 }
 
@@ -287,15 +346,15 @@ ucn_result_t ucn_adapter_rx_pump(ucn_adapter_rx_queue_t *queue,
         ucn_adapter_rx_item_t item;
         ucn_result_t result;
 
-        queue_enter(queue);
+        queue_enter_task(queue);
         if (queue->count == 0U) {
-            queue_exit(queue);
+            queue_exit_task(queue);
             break;
         }
         item = queue->items[queue->head];
         queue->head = (queue->head + 1U) % UCN_ADAPTER_RX_QUEUE_DEPTH;
         queue->count--;
-        queue_exit(queue);
+        queue_exit_task(queue);
 
         result = ucn_node_receive(node, item.ingress_link, item.data, item.length);
         queue->stats.pumped++;

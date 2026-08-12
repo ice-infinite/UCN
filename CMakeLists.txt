@@ -31,39 +31,57 @@ endif()
 
 message(STATUS "UCN profile: ${UCN_PROFILE_UPPER}; Service: ${UCN_FEATURE_SERVICE}")
 
-set(UCN_CORE_SOURCES
-    src/ucn_core.c
-    src/ucn_adapter.c
-    src/ucn_endpoint.c
-    src/ucn_frame.c
+set(UCN_FOUNDATION_SOURCES
+    src/core/ucn_core.c
+    src/core/ucn_endpoint.c
+    src/core/ucn_frame.c
+    src/core/ucn_link_cost.c
 )
 
+set(UCN_TRANSPORT_SOURCES
+    src/transport/ucn_adapter.c
+    src/transport/ucn_standard_adapter.c
+    src/transport/ucn_protocol_owner.c
+)
+
+set(UCN_NODE_SOURCES)
+set(UCN_ROUTING_SOURCES)
+set(UCN_SERVICE_SOURCES)
+
 if(UCN_PROFILE_UPPER STREQUAL "NANO")
-    list(APPEND UCN_CORE_SOURCES src/ucn_node_nano.c)
+    list(APPEND UCN_NODE_SOURCES src/node/ucn_node_nano.c)
 else()
-    list(APPEND UCN_CORE_SOURCES src/ucn_node.c)
+    list(APPEND UCN_NODE_SOURCES src/node/ucn_node.c)
 endif()
 
 if(NOT UCN_PROFILE_UPPER STREQUAL "FULL")
-    list(APPEND UCN_CORE_SOURCES src/ucn_profile_stubs.c)
+    list(APPEND UCN_NODE_SOURCES src/node/ucn_profile_stubs.c)
 endif()
 
 if(UCN_PROFILE_UPPER STREQUAL "FULL")
-    list(APPEND UCN_CORE_SOURCES
-        src/ucn_path.c
-        src/ucn_policy.c
+    list(APPEND UCN_ROUTING_SOURCES
+        src/routing/ucn_path.c
+        src/routing/ucn_policy.c
     )
 endif()
 
 if(UCN_FEATURE_SERVICE)
-    list(APPEND UCN_CORE_SOURCES
-        src/ucn_service.c
-        src/ucn_service_bridge.c
+    list(APPEND UCN_SERVICE_SOURCES
+        src/service/ucn_service.c
+        src/service/ucn_service_bridge.c
     )
     set(UCN_FEATURE_SERVICE_VALUE 1)
 else()
     set(UCN_FEATURE_SERVICE_VALUE 0)
 endif()
+
+set(UCN_CORE_SOURCES
+    ${UCN_FOUNDATION_SOURCES}
+    ${UCN_TRANSPORT_SOURCES}
+    ${UCN_NODE_SOURCES}
+    ${UCN_ROUTING_SOURCES}
+    ${UCN_SERVICE_SOURCES}
+)
 
 add_library(ucn_core STATIC ${UCN_CORE_SOURCES})
 
@@ -99,6 +117,31 @@ target_compile_options(ucn_core PRIVATE
     $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
 )
 
+# Platform Ports deliberately remain separate link targets.  A product links
+# exactly one selected target (for example ucn_port_freertos); ucn_core itself
+# contains no RTOS-specific wrapper or runtime hook.  EXCLUDE_FROM_ALL keeps
+# unused Port code out of ordinary product builds.
+function(ucn_add_platform_port target source)
+    add_library(${target} STATIC EXCLUDE_FROM_ALL ${source})
+    target_link_libraries(${target} PUBLIC ucn_core)
+    target_compile_options(${target} PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+endfunction()
+
+ucn_add_platform_port(ucn_port_bare_metal
+    src/ports/ucn_port_bare_metal.c)
+ucn_add_platform_port(ucn_port_freertos
+    src/ports/ucn_port_freertos.c)
+ucn_add_platform_port(ucn_port_zephyr
+    src/ports/ucn_port_zephyr.c)
+ucn_add_platform_port(ucn_port_nuttx
+    src/ports/ucn_port_nuttx.c)
+ucn_add_platform_port(ucn_port_rtthread
+    src/ports/ucn_port_rtthread.c)
+ucn_add_platform_port(ucn_port_host_fake
+    src/ports/ucn_port_host_fake.c)
+
 if(UCN_BUILD_SCALE_SIM AND NOT UCN_PROFILE_UPPER STREQUAL "NANO")
     add_executable(ucn_scale_sim tools/ucn_scale_sim.c)
     target_link_libraries(ucn_scale_sim PRIVATE ucn_core)
@@ -124,6 +167,9 @@ if(UCN_BUILD_TESTS)
         tests/test_host_boundary.c
         tests/test_endpoint.c
         tests/test_adapter.c
+        tests/test_standard_adapter.c
+        tests/test_link_cost.c
+        tests/test_protocol_owner.c
         tests/test_profile.c
         tests/test_public_headers.c
         tests/test_node_storage_header.c
@@ -170,13 +216,37 @@ if(UCN_BUILD_TESTS)
         )
     endif()
 
-    target_link_libraries(ucn_tests PRIVATE ucn_core)
+    target_link_libraries(ucn_tests PRIVATE
+        ucn_core
+        ucn_port_bare_metal
+        ucn_port_freertos
+        ucn_port_zephyr
+        ucn_port_nuttx
+        ucn_port_rtthread
+        ucn_port_host_fake
+    )
 
     target_compile_options(ucn_tests PRIVATE
         $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
     )
 
     add_test(NAME ucn_tests COMMAND ucn_tests)
+
+    # This focused executable gives the preset resolver a direct product-header
+    # entry point.  The complete ucn_tests target also supports the same
+    # product-wide UCN_USER_CONFIG_HEADER and is the primary regression suite.
+    if(UCN_USER_CONFIG_HEADER)
+        add_executable(ucn_standard_adapter_product_config_test
+            tests/test_standard_adapter_config_main.c
+            tests/test_standard_adapter.c
+        )
+        target_link_libraries(ucn_standard_adapter_product_config_test PRIVATE ucn_core)
+        target_compile_options(ucn_standard_adapter_product_config_test PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+        )
+        add_test(NAME ucn_standard_adapter_product_config_test
+            COMMAND ucn_standard_adapter_product_config_test)
+    endif()
 
     if(UCN_BUILD_CONFIG_CONTRACT_TESTS)
         add_executable(ucn_config_defaults_test tests/test_config_contract.c)
@@ -223,11 +293,25 @@ if(UCN_BUILD_TESTS)
                     --ticks 20
                     --warmup-ticks 40
                     --drain-ticks 120
+                    --topology auto
                     --traffic two-hop
                     --wire-profile ${UCN_SCALE_WIRE_PROFILE}
                     --quiet
             )
         endforeach()
+        # The tree builder needs four Links at an internal node.  This
+        # contract test explicitly reports SUPPORTED or CAPACITY_SKIPPED;
+        # ordinary smoke tests use topology=auto and never claim a 3-Link
+        # product executed the incompatible tree topology.
+        add_test(NAME ucn_scale_tree_capacity_contract
+            COMMAND ucn_scale_sim
+                --nodes 8
+                --topology tree
+                --topology-capacity-contract
+                --quiet
+        )
+        set_tests_properties(ucn_scale_tree_capacity_contract PROPERTIES
+            PASS_REGULAR_EXPRESSION "SCALE_TOPOLOGY_CAPACITY_(SUPPORTED|SKIPPED)")
         add_test(NAME ucn_scale_w0_address_limit_reject
             COMMAND ucn_scale_sim
                 --nodes 255
@@ -251,6 +335,7 @@ if(UCN_BUILD_TESTS)
             --ticks 20
             --warmup-ticks 40
             --drain-ticks 120
+            --topology auto
             --traffic two-hop
             --wire-mode auto
             --wire-profile w3

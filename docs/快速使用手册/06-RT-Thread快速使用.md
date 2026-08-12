@@ -19,16 +19,16 @@ config PRODUCT_UCN_RX_DEPTH
     default 2
 ```
 
-在产品 `SConscript`（或 BSP 已有构建规则）加入九个 UCN `src/*.c` 和 `include/`。将上述 Kconfig 值映射为 `UCN_MAX_FRAME_BYTES`、`UCN_ADAPTER_RX_QUEUE_DEPTH`、`UCN_SERVICE_*` 等编译宏。不要直接用 Heap 扩容协议表；Core/Router 的容量要在编译期冻结。
+在产品 `SConscript`（或 BSP 已有构建规则）按[总览源文件矩阵](README.md#共同的构建输入)选择 Nano/Lite/Full 与可选 Service 源文件，并加入 `include/`。将上述 Kconfig 值映射为 `UCN_MAX_FRAME_BYTES`、`UCN_ADAPTER_RX_QUEUE_DEPTH`、`UCN_SERVICE_*` 等编译宏；所有编译单元必须共享同一个 `UCN_PROFILE`、`UCN_FEATURE_SERVICE` 和配置头。不要直接用 Heap 扩容协议表；Core/Router 的容量要在编译期冻结。
 
 ## 2. 静态线程和对象
 
-在 `rt_thread_startup()` 前完成 `ucn_node_init()`、`ucn_node_set_wire_profiles()`、可选自动最小档和 Link/Security 注册。Wire Profile 配置属于产品初始化，不能由不同业务线程各自修改；业务线程只通过 Service Router 发送 Endpoint 数据。
+在 `rt_thread_startup()` 前完成 `ucn_node_init()`、`ucn_node_set_wire_profiles()`、可选自动最小档、明文 Boot Session 或生产 Security，以及 Link 注册。Wire Profile 配置属于产品初始化，不能由不同业务线程各自修改；业务线程只通过 Service Router 发送 Endpoint 数据。
 
 ```c
 #include "ucn/ucn_node_storage.h"
 
-static rt_thread_t g_protocol_thread;
+static struct rt_thread g_protocol_thread;
 static rt_uint8_t g_protocol_stack[PRODUCT_UCN_PROTOCOL_STACK_SIZE];
 static struct rt_mutex g_router_lock;
 static struct rt_semaphore g_rx_ready;
@@ -62,17 +62,19 @@ static void ucn_protocol_entry(void *parameter)
     while (RT_TRUE) {
         size_t pumped = 0U;
         rt_uint8_t bridged = 0U;
+        const uint32_t now_ms = (uint32_t)rt_tick_get_millisecond();
 
         product_drain_driver_rx_to_adapter();
         (void)ucn_adapter_rx_pump(&g_rx_queue, &g_node, 4U, &pumped);
-        (void)ucn_service_protocol_bridge_step(&g_bridge, 2U, &bridged);
-        (void)ucn_node_step(&g_node, rt_tick_get_millisecond());
+        (void)ucn_service_protocol_bridge_step_at(&g_bridge, now_ms,
+                                                   2U, &bridged);
+        (void)ucn_node_step(&g_node, now_ms);
         (void)rt_sem_take(&g_rx_ready, PRODUCT_UCN_PROTOCOL_WAIT_TICKS);
     }
 }
 ```
 
-`PRODUCT_UCN_PROTOCOL_WAIT_TICKS` 必须有限，使 `ucn_node_step()` 在空闲时仍能处理 Heartbeat、邻居/路由超时。若接收仅在 Protocol Thread 内轮询，`ucn_adapter_rx_queue_init(..., NULL, NULL)` 可避免额外锁；并发入队时再提供符合 ISR 上下文的 `ucn_port_ops_t` 临界区。
+`PRODUCT_UCN_PROTOCOL_WAIT_TICKS` 必须有限，使 `ucn_node_step()` 在空闲时仍能处理 Heartbeat、邻居/路由超时。若接收仅在 Protocol Thread 内轮询，`ucn_adapter_rx_queue_init(..., NULL, NULL)` 可避免额外锁；任务并发入队时提供任务临界区，ISR 直入完整帧时再额外提供 token 型 ISR 临界区并调用 `ucn_adapter_rx_enqueue_from_isr()`。不能用线程锁替代 ISR token。
 
 ## 4. Router 和本机任务通信
 
@@ -96,6 +98,8 @@ ucn_result_t product_ucn_send(ucn_node_id_t destination,
 
 接收侧以相同短锁调用 `ucn_service_inbox_take()`。远端帧由 Bridge 在 Protocol Thread 投递 Router，随后 observer 通过静态 `rt_mq`、事件或 semaphore 通知正确的 Service 线程。通知仅传 Endpoint/token；Q1 的 Payload 可能已覆盖成最新值，线程必须反复读取 Inbox。
 
+若 Binding 设置 `require_remote_q0_validator=true`，产品必须先调用 `ucn_service_protocol_bridge_set_validator()` 注册校验器，再安装 Endpoint handlers；缺少 Validator 会失败关闭。
+
 不建议把原始 `ucn_node_t` 放在全局头文件让各线程调用；只暴露 `product_ucn_send()`、`product_ucn_inbox_take()` 与受控只读诊断快照。
 
 ## 5. Link 和 RT-Thread 设备框架
@@ -105,6 +109,7 @@ Adapter 将 `rt_device_read()`、UART DMA、CAN 接收或无线模块回调转�
 - `open()` 配置设备、DMA、回调和固定缓冲；
 - `send()` 有界提交 Core 帧；
 - `get_status()` 反映真实连接/Bus-Off/错误；
+- `get_status().mtu` 可报告运行期完整 UCN 帧上限；与 `link.mtu` 同时存在时取较小值；
 - `get_metrics()` 输出平滑后的通用 Cost；
 - `close()` 停止该 Adapter，不改变其他 Bearer。
 

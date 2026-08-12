@@ -1263,6 +1263,14 @@ int test_dynamic_stress(void)
                                            DYNAMIC_MAX_ROUNDS);
 
     TEST_ASSERT(dynamic_test_fixed_resource_bounds() == 0);
+    if (UCN_MAX_LINKS < DYNAMIC_LINKS_PER_NODE ||
+        UCN_MAX_NEIGHBORS < DYNAMIC_LINKS_PER_NODE) {
+        printf("DYNAMIC_STRESS scenario skipped: configured links=%zu neighbors=%zu "
+               "require at least %zu per node\n",
+               (size_t)UCN_MAX_LINKS, (size_t)UCN_MAX_NEIGHBORS,
+               DYNAMIC_LINKS_PER_NODE);
+        return 0;
+    }
     TEST_ASSERT(dynamic_network_init(&network, seed, rounds) == 0);
     if (dynamic_initial_discovery_and_repair(&network) != 0) {
         return 1;

@@ -2,13 +2,15 @@
 
 > 适用：任意有任务、互斥锁和有界队列的 RTOS。当前仓库没有一个通用的 `UcnServiceRtosPort`；本页给出应实现的最小适配边界，保持 C99 Core 不依赖具体 RTOS。
 
+构建时先按[总览](README.md#先选择-build-profile)选择 Nano/Lite/Full，并按[源文件矩阵](README.md#共同的构建输入)加入实现。以下 Router/Bridge 代码仅在 `UCN_FEATURE_SERVICE=1` 时使用。
+
 ## 1. 任务划分
 
 | 上下文 | 允许做的事 | 禁止做的事 |
 | --- | --- | --- |
 | 驱动 ISR / DMA 回调 | 把物理数据写入 ISR 安全的固定环形缓冲或消息队列，发通知。 | 调用 `ucn_node_*`、路由、解密、Service 投递。 |
 | Driver RX Worker（可选） | 解载体编码，形成完整 UCN 帧，送入固定驱动队列。 | 无限等待、动态扩容、执行业务回调。 |
-| **Protocol Task（唯一）** | `ucn_adapter_rx_pump()`、`ucn_service_protocol_bridge_step()`、`ucn_node_step()`、HELLO/发现、Link 生命周期。 | 被其他任务并发调用 Node。 |
+| **Protocol Task（唯一）** | `ucn_adapter_rx_pump()`、`ucn_service_protocol_bridge_step_at()`、`ucn_node_step()`、HELLO/发现、Link 生命周期。 | 被其他任务并发调用 Node。 |
 | Service Task | 通过 Port 包装调用 `ucn_service_send()`/`ucn_service_inbox_take()`；处理自己的 Endpoint。 | 直接持有 `ucn_node_t`、Link 或路由表。 |
 
 Protocol Task 只需要一个；它不是网络中心，其他 MCU 仍各自运行自己的 Protocol Task 和路由。
@@ -59,16 +61,21 @@ static const ucn_service_bridge_inbound_hooks_t g_hooks = {
 
 ## 3. 初始化顺序
 
-在创建任何 RTOS Task 前，由启动线程依次执行 `ucn_node_init()`、`ucn_node_set_wire_profiles()`，可选执行 `ucn_node_set_wire_profile_auto(true)`，然后才注册 Link、安装 Security 和初始化 Router/Bridge。Wire Profile 是 Node 初始化策略，不是每个业务 Task 自己选择的状态。
+在创建任何 RTOS Task 前，由启动线程依次执行 `ucn_node_init()`、`ucn_node_set_wire_profiles()`，可选执行 `ucn_node_set_wire_profile_auto(true)`；明文开发节点设置非零且重启不复用的 `ucn_node_set_plain_session_id()`，生产节点则安装 Security Provider。随后才注册 Link 并初始化 Router/Bridge。Wire Profile 是 Node 初始化策略，不是每个业务 Task 自己选择的状态。
 
 ```c
 void ucn_rtos_start(void)
 {
     /* 已完成 Node、Link、Adapter RX Queue 的静态初始化。 */
-    (void)ucn_service_router_init(&g_router, &g_service_router_config);
-    (void)ucn_service_protocol_bridge_init(&g_bridge, &g_router, &g_node);
-    (void)ucn_service_protocol_bridge_install_endpoint_handlers(&g_bridge);
-    (void)ucn_service_protocol_bridge_set_inbound_hooks(&g_bridge, &g_hooks);
+    if (ucn_service_router_init(&g_router, &g_service_router_config) != UCN_OK ||
+        ucn_service_protocol_bridge_init(&g_bridge, &g_router, &g_node) != UCN_OK ||
+        /* 对每个 require_remote_q0_validator=true 的 Binding 注册 Validator。 */
+        product_register_remote_q0_validators(&g_bridge) != UCN_OK ||
+        ucn_service_protocol_bridge_install_endpoint_handlers(&g_bridge) != UCN_OK ||
+        ucn_service_protocol_bridge_set_inbound_hooks(&g_bridge, &g_hooks) != UCN_OK) {
+        rtos_enter_safe_mode();
+        return;
+    }
 
     rtos_task_create_static(protocol_task, "ucn-proto", &g_protocol_stack);
     rtos_task_create_static(sensor_task, "sensor", &g_sensor_stack);
@@ -86,17 +93,20 @@ static void protocol_task(void *argument)
     for (;;) {
         uint8_t sent = 0U;
         size_t pumped = 0U;
+        const uint32_t now_ms = rtos_monotonic_ms();
 
         drain_driver_rx_to_adapter_queue();
         (void)ucn_adapter_rx_pump(&g_adapter_rx, &g_node, 4U, &pumped);
-        (void)ucn_service_protocol_bridge_step(&g_bridge, 2U, &sent);
-        (void)ucn_node_step(&g_node, rtos_monotonic_ms());
+        (void)ucn_service_protocol_bridge_step_at(&g_bridge, now_ms, 2U, &sent);
+        (void)ucn_node_step(&g_node, now_ms);
         rtos_wait_rx_or_timeout(1U); /* 必须有周期唤醒以维护保活/超时。 */
     }
 }
 ```
 
-驱动若在另一任务中已有固定帧队列，`drain_driver_rx_to_adapter_queue()` 由 Protocol Task 单独执行，此时 Adapter RX Queue 可传 `NULL` Port Ops，因为没有并发访问。若必须多上下文访问 Adapter Queue，则使用适合任务上下文的短临界区；不要从 ISR 使用可能睡眠的 mutex。
+驱动若在另一任务中已有固定帧队列，`drain_driver_rx_to_adapter_queue()` 由 Protocol Task 单独执行，此时 Adapter RX Queue 可传 `NULL` Port Ops，因为没有并发访问。若任务间并发提交，使用成对的任务临界区；若 ISR 直接提交完整帧，则只能走 `ucn_adapter_rx_enqueue_from_isr()`，并提供成对的 ISR token 临界区。缺 ISR 对会得到 `UCN_ERR_CONFIG`，绝不能让 ISR 使用任务 mutex 或任务临界区。
+
+必须使用同一个 `now_ms` 调用 Bridge 和 Node。兼容函数 `ucn_service_protocol_bridge_step()` 读取的是 Node 上一次 Step 保存的时间，不适合作为启用 Q0 Deadline/背压重试后的新模板。
 
 ## 5. Service Task 包装
 

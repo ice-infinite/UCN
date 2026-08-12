@@ -12,20 +12,27 @@ Linux、ROS 2、MAVLink 或地面站可以作为普通 Host/Adapter 接入，但
 - 1 B 最大接收档声明的一跳 HELLO/准入、Heartbeat、压缩 RREQ、受限 AODV-Lite 路由发现、RERR 与路由/邻居老化；发送档与接收上限相互独立。
 - Q0/Q1 有界发送调度、Pending Q1 绝对 Deadline、静态 Endpoint 业务分发和跨介质通用 `route_cost`。
 - W0/W1/W2/W3=`3/3/3/4 B` 的累计 Cost 控制域、Candidate Wire Profile 连续性，以及 Full/Lite/Nano 一致的运行期 Hop Scope 门禁。
+- LC-1 本地动态 Cost：基础 `route_cost` 保持稳定并继续在线上累加；Full 用 Queue、TX/RX 失败、RTT、介质占用/质量和新鲜度生成本地 `effective_select_cost`，用于 Bearer、Candidate 与 Q1 Flow 排序，不把局部拥塞写入 Wire。Lite/Nano 保持静态基础 Cost。
 - Adapter 将物理地址和驱动回调转换为有界 RX 队列；协议任务中再执行路由和应用回调。
 - 按需路径追踪与低频节点快照诊断。节点快照默认拒绝远端请求，产品必须显式配置管理节点授权。
 - 编译期 Nano/Lite/Full Feature Profile；Service Router/Bridge 可独立开启或移除。
 
-仓库同时发布 Core 源码、单元/虚拟拓扑测试、CMake 配置，以及 `docs/` 下的架构、协议设计、任务表和项目操作记录。开始接入时先阅读 [UCN 网络容量与关键参数总览](docs/UCN_网络容量与关键参数总览.md)，再按运行环境阅读 [UCN 快速使用手册](docs/快速使用手册/README.md) 和 [UCN 使用与调用手册](docs/UCN_使用与调用手册.md)；所有 v5 文档与源码的状态入口见 [v5 文档与代码一致性审计](docs/UCN_V5_文档与代码一致性审计.md)，V5-27～V5-30 当前增量见 [异构 Bearer、动态 MTU 与 Policy 修复报告](docs/UCN_V5_27_异构Bearer与动态MTU修复报告.md)，V5-31～V5-33 的 Wire/API 发布修复见 [PATH_INSTALL 兼容与 API 符号修复报告](docs/UCN_V5_31_PATH_INSTALL兼容与API符号修复报告.md)。编译参数集中入口见 [UCN 全局公共配置说明](docs/UCN_全局公共配置说明.md)，跨档接收证据见 [V5-08 全档接收互操作报告](docs/UCN_V5_08_全档接收互操作报告.md)，Wire Profile 单档/混档极限结果见 [V5-10 极限模拟报告](docs/UCN_V5_10_单档与混档极限模拟报告.md)，当前路由控制线格式见 [V5-14 Cost/RREQ/RREP 报告](docs/UCN_V5_14_长距离Cost与RREQ_RREP实现报告.md) 与 [V5-15 控制载荷报告](docs/UCN_V5_15_Profile感知控制载荷实现报告.md)。Adapter 实现者还必须遵守 [Link Metrics 与 Cost 契约](docs/UCN_Link_Metrics与Cost契约.md)。需要追踪实际函数路径时进入 [UCN 调用关系树](docs/calltree/README.md)。继续开发时以 [任务表](docs/00-任务表.md) 为准。
+仓库同时发布 Core 源码、单元/虚拟拓扑测试、CMake 配置，以及 `docs/` 下的架构、协议设计、任务表和项目操作记录。开始接入时先阅读 [工程架构索引](docs/架构/README.md) 与 [UCN 网络容量与关键参数总览](docs/UCN_网络容量与关键参数总览.md)，再按运行环境阅读 [UCN 快速使用手册](docs/快速使用手册/README.md) 和 [UCN 使用与调用手册](docs/UCN_使用与调用手册.md)；Adapter 实现者还必须遵守 [Link Metrics 与 Cost 契约](docs/UCN_Link_Metrics与Cost契约.md)。需要追踪实际函数路径时进入 [UCN 调用关系树](docs/calltree/README.md)。继续开发时以 [任务表](docs/00-任务表.md) 为准。
 
 ## 目录
 
 ```text
 include/ucn/  公共 C API；Node 静态存储布局由 owner 显式选择
-src/          C99 Core 实现
-tests/        单元测试与虚拟 Link 集成测试
+src/core/     配置、Frame Codec、Endpoint 基础语义
+src/node/     Node 生命周期、Neighbor、HELLO、Profile Stub
+src/transport/ Link/Adapter 队列、Preset Resolver、Protocol Owner
+src/routing/  AODV、Candidate、Path、Policy/负载均衡（Full）
+src/service/  本机任务 Service Router/Bridge（可选）
+src/ports/    裸机、各 RTOS、Host Fake 的独立 Port 外壳
+tests/        单元测试与虚拟 Link 集成测试；按逻辑组导航，不强制物理分目录
 tools/        Host-only 规模模拟器与可复现阶梯脚本
 docs/         架构、协议设计、任务表与操作记录
+docs/架构/    系统边界、模块依赖、目录迁移与构建/测试地图
 docs/results/ 规模模拟生成的汇总与逐节点 CSV 证据
 CMakeLists.txt
 ```
@@ -61,6 +68,6 @@ cmake -S . -B build_full -DUCN_PROFILE=FULL -DUCN_FEATURE_SERVICE=ON
 
 ## 使用边界
 
-UCN-Core 只依赖抽象 `Link` 和通用指标。各 Adapter 自行处理 RSSI、SNR、丢包、Bus-Off、CRC 错误、超时等介质细节，并按契约分别提供基础 `route_cost`、可选 RTT、发送失败率和 Adapter 队列压力。真实驱动、产品身份、密钥管理和硬件资源评估由具体产品工程完成。
+UCN-Core 只依赖抽象 `Link` 和通用指标。各 Adapter 自行处理 RSSI、SNR、丢包、Bus-Off、CRC 错误、超时等介质细节，并按契约分别提供基础 `route_cost`、可选 RTT、TX/RX 失败率、Adapter 队列压力、介质占用/质量和单调时间戳。指标缺失可保持 Invalid，禁止伪造；同一个物理计数不得同时作为 busy 与 quality 重复扣分。真实驱动、产品身份、密钥管理、Cost 标定和硬件资源评估由具体产品工程完成。
 
 只传递 `ucn_node_t *` 的业务、Adapter 和 Port 头文件包含 `ucn_node.h`；只有唯一 Protocol Task 的 Node 所有者在需要静态分配时包含 `ucn_node_storage.h`。存储字段不是应用 ABI，禁止跨任务直接访问。

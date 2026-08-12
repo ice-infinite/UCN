@@ -1,7 +1,7 @@
 # UCN 整体架构设计：MCU 自组网优先
 
-> 状态：**UCN v5 V5-01～V5-20、V5-22～V5-26 软件范围闭环（V5-16 为设计、V5-21 阻塞，2026-08-11）**；W0～W3、全 Build Profile 四档接收、Profile-aware 控制面、32 bit Cost 与 3/3/3/4 B Wire Cost、Q1 绝对 Deadline、Candidate Profile 连续性、业务路由约束、运行期 Hop Scope、Pinned Path Remaining Hops、有界 Expanding Ring、Ingress 早拒绝和 Host 软件门禁已完成。v4 已独立冻结；生产密码库、Authorized Class 执行层、目标板资源和多介质多跳实机仍待验证。
-> 日期：2026-08-11
+> 状态：**UCN v5 的协议/软件闭环、V5-46 独立 Platform Port 与 V5-47 工程模块分层已完成（2026-08-12）**；W0～W3、全 Build Profile 四档接收、Profile-aware 控制面、32 bit Cost 与 3/3/3/4 B Wire Cost、Q1 绝对 Deadline、Candidate Profile 连续性、业务路由约束、运行期 Hop Scope、Pinned Path Remaining Hops、有界 Expanding Ring、Ingress 早拒绝和 Host 软件门禁已完成。v4 已独立冻结；生产密码库、Authorized Class 执行层、目标板资源和多介质多跳实机仍待验证。
+> 日期：2026-08-12
 > 目标：以 MCU 为主体完成安全自组网；Linux 仅作为兼容接入端；协议小而可裁剪；资源占用由目标硬件配置决定。
 
 ## 1. 架构结论
@@ -10,7 +10,9 @@ UCN 是一个可移植的 C 通信协议栈。它的最小运行形态不是 Lin
 
 Linux、ROS2、PX4/MAVLink、地面站与 AI 系统可以通过 `UCN-Host` 接入同一网络，但它们不拥有路由中心、入网中心或控制中心的地位，更不替代 Linux 自己已有的网络体系。
 
-当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 与 per-Link 接收上限、1 B RX Ceiling HELLO、3 B Ingress Profile Peek、Profile-aware RREQ/RREP/RERR/Path/诊断控制载荷、32 bit 累计 Cost 与 3/3/3/4 B Wire Cost、Node/Policy Hop-Cost-已验证 RTT 门禁、运行期 Ingress/学习/Path Hop Scope、Profile 绑定 AAD、透明密文中继、显式开启的路由感知最小档选择、Route Epoch/grace、2→4→8→16 受限 AODV-Lite、保持发现 Profile 的 Candidate Probe/Activate 与端到端 RTT EWMA、Endpoint Q1 首包自动寻路和绝对 Deadline、固定邻居表、通用 Link Cost、带 Remaining Hops 的 Path ID 逐跳表、固定/主备与 Q1 流亲和策略，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、Authorized Class 执行层、真实无线多板和小 MTU Carrier 仍是后续任务，不能由软件测试替代。
+当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 与 per-Link 接收上限、1 B RX Ceiling HELLO、3 B Ingress Profile Peek、Profile-aware RREQ/RREP/RERR/Path/诊断控制载荷、32 bit 累计 Cost 与 3/3/3/4 B Wire Cost、Node/Policy Hop-Cost-已验证 RTT 门禁、运行期 Ingress/学习/Path Hop Scope、Profile 绑定 AAD、透明密文中继、显式开启的路由感知最小档选择、Route Epoch/grace、2→4→8→16 受限 AODV-Lite、保持发现 Profile 的 Candidate Probe/Activate、LC-1 本地动态 Cost、Endpoint Q1 首包自动寻路和绝对 Deadline、固定邻居表、带 Remaining Hops 的 Path ID 逐跳表、固定/主备与 Q1 流亲和策略，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、Authorized Class 执行层、真实无线多板和小 MTU Carrier 仍是后续任务，不能由软件测试替代。
+
+V5-47 进一步将仓库内部实现明确归入 `src/core`、`src/node`、`src/transport`、`src/routing`、`src/service`、`src/ports`；公开 `include/ucn/...` 路径与 Wire 行为不变。目录依赖和未来 Adapter/RTOS 扩展规则见 [工程架构索引](架构/README.md)。
 
 这份架构只围绕四项约束设计：
 
@@ -190,11 +192,11 @@ T22.5 进一步把两层选择接起来：Path 表保留安装时的 egress Link
 后续策略执行边界如下：
 
 - `PINNED_FAILOVER` 已使业务正常固定在指定 Primary Path；只有 Link Down、Path RERR/不存在等硬故障才切到 Backup 或按策略寻路，Cost 的短时优劣不触发切换。
-- `AUTO_BALANCE` 已实现但默认不配置：只接受精确 Q1 Policy，Primary/可选 Backup 构成最多两条已验证 Path 成员。每个 `(destination, Endpoint, Q1)` 在固定 Flow 表中默认租约 2 s；首次或租约过期时按 Known 基础 Cost ×（已有 Flow 数 + 1）选择成员，Unknown 不优于 Known。RTT/失败率不进入裸评分，持续 Adapter Queue Pressure 只独立触发拥塞重绑；同一 Flow 租约内不逐帧换路。
+- `AUTO_BALANCE` 已实现但默认不配置：只接受精确 Q1 Policy，Primary/可选 Backup 构成最多两条已验证 Path 成员。每个 `(destination, Endpoint, Q1)` 在固定 Flow 表中默认租约 2 s；首次或租约过期时按 Full 本地 LC-1 `effective_select_cost ×（已有 Flow 数 + 1）` 选择成员，Known 基础 Cost 仍优先于 Unknown。持续 Adapter Queue Pressure 也可按既有三样本门限触发拥塞重绑；同一 Flow 租约内不逐帧换路。
 - Path Down 会使受影响 Flow 只重绑一次到另一健康成员；默认连续 3 个 500 ms 队列压力样本达到 800‰ 才视为持续拥塞并重绑。Q0、自动 Discovery、帧复制和带宽聚合均不属于该能力；实际门限可按 MCU Profile 覆写，尚未完成实机标定。
 - 真正的端到端指定路径需要短小 `Path ID` 和受认证的路径安装/撤销控制面，中继仅按 Path ID 转发。现有 `route_epoch` 只用于 Current/Previous 切换，不能充当 Path ID。
 
-`ucn_link_metrics_t` 已可选携带 RTT、失败率和队列压力；Core 每 500 ms 用固定 25% EWMA 缓存快照。Core 不读取 RSSI/MAC/UART 私有字段；ESP-NOW/UART Adapter 分别把可得质量归一为这些通用字段并明确标记 RTT 不可用。该层与 T21 的“到同一下一跳时选择 WiFi/UART/CAN Bearer”不同：T21 处理一跳承载冗余，T22 处理经不同中继的端到端路径策略。完整边界、API 原则、帧兼容要求和测试门禁见[策略路由与可选负载均衡建议](UCN_策略路由与可选负载均衡建议.md)。
+`ucn_link_metrics_t` 已可选携带 RTT、TX/RX 失败率、队列压力、介质占用/质量和快照时间戳；Full Core 每 500 ms 用固定 25% EWMA 缓存快照并执行 LC-1。Core 不读取 RSSI/MAC/UART 私有字段；真实 Adapter 必须把可得质量归一为通用字段，不能伪造缺失指标。该层与 T21 的“到同一下一跳时选择 WiFi/UART/CAN Bearer”不同：T21 处理一跳承载冗余，T22 处理经不同中继的端到端路径策略。完整边界、API 原则、帧兼容要求和测试门禁见[策略路由与可选负载均衡建议](UCN_策略路由与可选负载均衡建议.md)。
 
 ### 4.4.2 按需路径追踪（T23，Core 已实现）
 
@@ -230,21 +232,21 @@ T22.5 进一步把两层选择接起来：Path 表保留安装时的 egress Link
 
 Core 不直接读取 WiFi RSSI、BLE RSSI、LoRa SNR 或 CAN 专有状态。每个 Link 可选上报一个统一的 16 bit 非零 `route_cost`，值越小表示越适合参与路由；`UCN_UNKNOWN_LINK_ROUTE_COST=UINT16_MAX` 只表示单跳输入未知。多跳累计值为 32 bit，最高 Known 为 `0xFFFFFFFE`、Unknown 为 `0xFFFFFFFF`；任何 Known 都优于 Unknown，真实溢出失败关闭。
 
-| Link 类型 | Adapter 可映射为 `route_cost` 的输入 | 不能直接写入 Core 的原因 |
+| Link 类型 | 稳定基础 `route_cost` 来源 | Adapter 可另行上报的 LC-1 动态指标 |
 | --- | --- | --- |
-| WiFi / ESP-NOW | RSSI、重传次数、丢包率、发送队列积压。 | RSSI 只对无线链路有意义。 |
-| BLE | RSSI、连接间隔、重传和丢包。 | BLE 的连接时序与 WiFi 不同。 |
-| LoRa | RSSI、SNR、空口时间、占空比。 | 低 RSSI 不必然等于不可用。 |
-| CAN / CAN-FD | Bus-Off、错误帧、总线负载、发送等待。 | CAN 没有 RSSI，且总线常为单跳广播域。 |
-| UART / RS485 | CRC 错误、超时、队列积压。 | 是有线字节流，不存在无线信号质量。 |
+| WiFi / ESP-NOW | 标准 Preset + 产品静态覆盖。 | TX/RX failure、Queue、RTT、映射后的 medium quality/busy。 |
+| BLE | 连接档 Preset + 产品覆盖。 | failure、Queue、RTT、映射后的质量；不把连接参数裸相加。 |
+| LoRa | 调制/速率条件 Preset。 | failure、Queue、RTT、SNR 映射 quality、占空/空口 busy。 |
+| CAN / CAN-FD | 仲裁/数据速率 Preset。 | Bus-Off 进入状态门；错误率、Queue、RTT、Bus Load 进入 busy。 |
+| UART / RS485 | 波特率与拓扑 Preset。 | CRC/超时映射 failure、Queue、RTT；没有可靠物理质量时保持 Invalid。 |
 
-这不是动态内存的全网最短路径算法：它只在现有固定路由表和受限 RREQ/RREP 流程中比较候选路径。质量值的采样、平滑和防抖由各 Link Adapter 负责，避免 WiFi RSSI 瞬时波动造成频繁换路。
+这不是动态内存的全网最短路径算法：线上 RREQ/RREP 仍只累加稳定基础 Cost；Full 只在本节点用 LC-1 动态分比较出口。Adapter 负责介质私有值到通用指标的映射，Core 统一执行采样、定点 EWMA、20%/3 样本/Probe 和保持期，避免 WiFi RSSI 等瞬时波动造成频繁换路。
 
 ### 4.6 Adapter：物理介质与 Core 的唯一边界
 
 每种介质都遵循同一条路径：`物理地址 → Candidate Link → 有界收包队列 → 协议任务 pump → Core`。驱动 ISR/WiFi 回调不直接运行路由或应用逻辑；Core 不保存 MAC、CAN ID、串口号或 socket。物理地址到 Link 的静态映射由 Adapter 管理，成功 HELLO 后才由 Core 写入 `peer_node_id`。
 
-当前“跨介质多跳转发”已由 Link + 通用 Cost 支持；T21.1～T21.4 还让同一 Node ID 的 WiFi/UART/CAN 等自动准入 Link 合并为一个固定 Bearer 集（默认最多两条），并在 Primary 明确 Down 后让下一帧使用健康 Backup。每条 Bearer 都独立经过 Provider 准入、Heartbeat 和 `last_seen`；全 Bearer Down 后才回收 Neighbor。健康 Primary 不因一次 Cost 波动改变：候选需低至少 20%、连续 3 个 500 ms 窗口成立，再在该候选 Bearer 上收到 2 次一跳 Heartbeat ACK（最多 3 次尝试）才切换。Probe 不新增线格式、不经中继；当 Probe 到期且连续业务已达默认 4 个发送上限时，它获得一个必要维护槽，未到期时不会抢占业务。Active/Previous Route 与 Candidate 都在业务、Probe、Activate 和中继转发时解析到当前 Primary：单 Bearer Down 不清动态路径；下游断链的 RERR 经当前 Backup 回传；全 Bearer Down 才清动态 Route/Candidate。静态 Route 有意保留给产品层恢复策略。Adapter 仍负责把 RSSI、错误、拥塞等平滑为通用 Cost。
+当前“跨介质多跳转发”已由 Link + 通用 Cost 支持；T21.1～T21.4 还让同一 Node ID 的 WiFi/UART/CAN 等自动准入 Link 合并为一个固定 Bearer 集（默认最多两条），并在 Primary 明确 Down 后让下一帧使用健康 Backup。每条 Bearer 都独立经过 Provider 准入、Heartbeat 和 `last_seen`；全 Bearer Down 后才回收 Neighbor。健康 Primary 不因一次 Cost 波动改变：Full 候选有效分需低至少 20%、连续 3 个 500 ms 窗口成立，再在该候选 Bearer 上收到 2 次一跳 Heartbeat ACK（最多 3 次尝试）才切换，切换后保持 3000 ms。Probe 不新增线格式、不经中继；当 Probe 到期且连续业务已达默认 4 个发送上限时，它获得一个必要维护槽，未到期时不会抢占业务。Active/Previous Route 与 Candidate 都在业务、Probe、Activate 和中继转发时解析到当前 Primary：单 Bearer Down 不清动态路径；下游断链的 RERR 经当前 Backup 回传；全 Bearer Down 才清动态 Route/Candidate。静态 Route 有意保留给产品层恢复策略。Adapter 负责把 RSSI、错误、拥塞等映射为通用指标，Core 负责 LC-1 平滑和评分。
 
 ESP32 T21.6 正常诊断镜像已经让 ESP-NOW Peer Link 和 UART Link（ID `0x70`）各自携带 RX Queue、状态、Cost 与统计，直接进入同一个 Core；`DualMediaLink` 仅保留为 `legacy_dual` 回归对照，不能作为 Core Bearer 切换证据。两块 S3 已实测同一对端合并为 `count=2`，UART Cost 5 为 Primary、ESP-NOW Cost 10 为 Backup；B 临时改为 Wi-Fi-only 后 A 仍保留 Neighbor 并走 ESP-NOW，恢复 B 后自动回到两 Bearer。该控制实验尚不等于物理拔线、P50/P95 切换时延、丢失/乱序、功耗或三板 RERR 验收，因此仍不称为“无缝”多介质冗余。具体边界见 [多介质同对端主备 Link 建议](UCN_多介质同对端主备_Link_建议.md)。
 

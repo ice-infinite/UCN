@@ -46,7 +46,7 @@ Path Trace 的回复随记录节点数增长，例如两个节点为 10/12/14/16
 - Path Trace：四档请求/回复、精确 MTU、坏长度、W3 Auto→W0、记录截断。
 - Node Snapshot：四档请求/回复、精确 MTU、坏长度、W3 Auto→W0、回复保持请求 Profile。
 - Path 控制 authorizer 与 token 调用次数保持原顺序，非法帧不会提前消耗授权预算或写入表。
-- Full Debug 单测通过；V5-15 当时的 Host Full `ucn_node_t=9464 B`、`ucn_link_t=40 B`。V5-33 后当前 Nano/Lite/Full 为 `2648/5960/9752 B`，Link 为 `40 B`，Archive `.text` 为 `19884/68244/127792 B`；增加量来自后续路由约束、Q1 Freshness、Hop Scope、Candidate Profile、Path 能力诊断和非 Full API Stub 等固定代码/状态，不使用动态内存。
+- Full Debug 单测通过；V5-15 当时的 Host Full `ucn_node_t=9464 B`、`ucn_link_t=40 B`。V5-44/V5-36 后当前 Nano/Lite/Full 为 `2648/6024/10080 B`，Link 为 `40 B`，Archive `.text` 为 `27662/73735/139017 B`；增加量来自后续路由约束、Q1 Freshness、Hop Scope、Candidate Profile、Path 能力诊断、Port/架构治理与 LC-1 等固定代码/状态，不使用动态内存。
 
 ## 5. 经评估保持不变的 Schema
 

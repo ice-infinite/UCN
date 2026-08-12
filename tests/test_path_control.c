@@ -1020,21 +1020,25 @@ int test_path_control(void)
     TEST_ASSERT(ucn_node_add_route(&a, UINT32_C(4), &ab) == UCN_OK);
     ucn_node_set_rx_handler(&d, path_receive, &received);
 
-    /* AUTO_BALANCE uses only normalized base Cost plus active-flow count.
-     * Large raw RTT/failure samples on the cheaper P1 must not be added to the
-     * Cost score; queue pressure remains a separate sustained-congestion gate. */
+    /* LC-1 uses each local metric exactly once.  P1 resolves to
+     * 10 + TX(80) + RTT(10) = 100; P2 resolves to
+     * 15 + TX(160) + quality(5) = 180.
+     * The first Flow therefore uses P1 and the second uses P2 after the
+     * active-flow multiplier is applied. */
     cab.metrics.route_cost_valid = true;
     cab.metrics.route_cost = 10U;
     cab.metrics.rtt_valid = true;
-    cab.metrics.rtt_ms = 1000U;
+    cab.metrics.rtt_ms = 25U;
+    cab.metrics.rtt_reference_valid = true;
+    cab.metrics.rtt_reference_ms = 5U;
     cab.metrics.tx_failure_rate_valid = true;
-    cab.metrics.tx_failure_per_mille = 1000U;
+    cab.metrics.tx_failure_per_mille = 100U;
     cac.metrics.route_cost_valid = true;
     cac.metrics.route_cost = 15U;
-    cac.metrics.rtt_valid = true;
-    cac.metrics.rtt_ms = 1U;
     cac.metrics.tx_failure_rate_valid = true;
-    cac.metrics.tx_failure_per_mille = 0U;
+    cac.metrics.tx_failure_per_mille = 200U;
+    cac.metrics.medium_quality_valid = true;
+    cac.metrics.medium_quality_per_mille = 700U;
     TEST_ASSERT(path_step(&a, 0U) == 0);
 
     /* A security Provider alone is not sufficient: remote Path changes are

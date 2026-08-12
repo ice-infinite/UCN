@@ -72,7 +72,9 @@ typedef struct ucn_neighbor_entry {
     uint8_t primary_bearer_index;
     uint32_t suspect_since_ms;
     uint32_t last_bearer_quality_sample_ms;
+    uint32_t bearer_quality_hold_until_ms;
     bool bearer_quality_sampled;
+    bool bearer_quality_hold_active;
     ucn_neighbor_bearer_t bearers[UCN_MAX_BEARERS_PER_NEIGHBOR];
 } ucn_neighbor_entry_t;
 

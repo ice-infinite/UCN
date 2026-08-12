@@ -1,6 +1,6 @@
 # UCN Link Metrics 与 Cost 契约
 
-> 对应稳定化任务：S03/V5-14。本文冻结 Adapter 的**单跳输入语义**和 Core 的累计 Cost 语义；不声称当前 `AUTO_BALANCE` 已经使用四项加权评分。
+> 对应稳定化任务：S03/V5-14/V5-44/V5-36。本文冻结 Adapter 的**单跳输入语义**、Core 的累计 Cost 与 LC-1 本地选择分语义。
 
 ## 1. 结论
 
@@ -10,10 +10,15 @@
 
 | 指标 | 生产者 | 单位/范围 | 当前 Core 用途 |
 | --- | --- | --- | --- |
-| `route_cost` | Adapter | `1..UINT16_MAX-1` 的 UCN Cost，越小越好；`0`、`UINT16_MAX` 或 `route_cost_valid=false` 为未知 | AODV-Lite 的逐跳可加基础代价与直连 Link 选择。 |
-| `rtt_ms` | Adapter | 单跳往返 ms；`0..65535`，单独 `rtt_valid` | 以 500 ms 默认周期采样并 EWMA，仅供诊断和未来显式策略。 |
-| `tx_failure_per_mille` | Adapter | 本 Link 发送失败比，`0..1000`；超范围视为未知 | 采样/EWMA/诊断；当前不参与自动重绑。 |
-| `queue_pressure_per_mille` | Adapter | **Adapter 自己**的发送队列占用比，`0..1000`；超范围视为未知 | 采样/EWMA；当前 `AUTO_BALANCE` 仅用它的连续拥塞样本决定 Q1 Flow 是否重绑。 |
+| `route_cost` | Adapter | `1..UINT16_MAX-1` 的稳定基础 Cost，越小越好；`0`、`UINT16_MAX` 或 `route_cost_valid=false` 为未知 | AODV-Lite 逐跳累加；也是 Full 本地 LC-1 和 Lite/Nano 直连选择的基础。 |
+| `rtt_ms` | Adapter | 单跳往返 ms；`0..65535`，单独 `rtt_valid` | 以 500 ms 默认周期采样并 EWMA；Full 按超过 `rtt_reference_ms` 的部分进入 LC-1。 |
+| `tx_failure_per_mille` | Adapter | 本 Link 发送失败比，`0..1000`；超范围视为未知 | 采样/EWMA/诊断；Full 按 LC-1 固定表加罚。 |
+| `queue_pressure_per_mille` | Adapter | **Adapter 自己**的发送队列占用比，`0..1000`；超范围视为未知 | Full LC-1 加罚；连续拥塞样本还可决定未到期 Q1 Flow 是否重绑。 |
+| `rx_failure_per_mille` | Adapter | Carrier/CRC/重组层在 Core 接收前观察到的失败比，`0..1000` | Full 按独立 EWMA 和 LC-1 固定表加罚。 |
+| `medium_busy_per_mille` | Adapter | 介质不可服务时间比例，`0..1000`，越大越忙 | Full 按 LC-1 加罚；不能与同源 quality 重复计算。 |
+| `medium_quality_per_mille` | Adapter | 已映射为 `0..1000` 的本地单跳质量，越大越好 | Full 按 LC-1 反向质量档位加罚。 |
+| `metrics_timestamp_ms` | Adapter | Protocol Owner 单调时钟域中的快照时间 | `1500/3000/5000 ms` 新鲜度门；旧 Adapter 可置 Invalid，按当前回调时刻处理。 |
+| `rtt_reference_ms` / `administrative_bias` | Preset/产品 | RTT 基准；静态偏置仅允许 `-32..+64` | RTT 归一与唯一可减项；非法偏置失败关闭。 |
 
 指标接口中的“未知”由对应 `*_valid=false` 表示。单跳 Link 输入仍以 `UINT16_MAX` 为 Unknown 哨兵，正常有效单跳 Cost 不得使用这个值；Route/Candidate/RREQ/RREP 的**累计值**已在 V5-14 升级为 `uint32_t`，其中 `0xFFFFFFFF` 为 Unknown、`0xFFFFFFFE` 为最高 Known。V5-23 将线上累计 Cost 固定为 W0/W1/W2/W3=`3/3/3/4 B`，前三档的 3 B 最大 Known `0xFFFFFE` 足以覆盖官方最大 Hop × 合法单跳最大 Cost；各宽度仍保留全 1 为 Unknown。不可表达或真实加法溢出时失败关闭，不能截断。Known Cost 永远优于 Unknown，即使 Known=2000 也不会被 Unknown 错误压过；只有全部候选都 Unknown 时，才按活动 Flow 数和稳定顺序回退。调用方应在调用旧 Adapter 前清零整个指标结构。Core 不把 `0` RTT、`0‰` 失败率或 `0‰` 队列压力误认为未知。
 
@@ -28,7 +33,7 @@
 模式 B：Adapter 提供 composite_cost，Policy 不再读取被它已经包含的动态项
 ```
 
-当前 v5 处于两者之前：没有把四项直接相加。`AUTO_BALANCE` 只用 Known 基础 Cost 与活动 Flow 数评分，Unknown 单独排序；质量快照保留给诊断，队列压力只作 Q1 Flow 的“持续拥塞”触发条件。任何后续加权实现都必须先选择模式 A 或 B、写明权重/归一化和测试向量，不能隐式混用。
+当前 v5 使用模式 A 的冻结版本 LC-1：每个动态项先归一为固定整数惩罚，再与基础 Cost 相加；不做跨量纲裸加。Full 的新建/到期 `AUTO_BALANCE` Flow 使用 `effective_select_cost × (active_flow_count + 1)`，Unknown 单独排序；持续 Queue Pressure 仍可触发未到期 Flow 的拥塞重绑。Adapter 若已生成私有 composite 指标，必须只映射到一个通用字段，不能再把同一原始量重复报告给多个动态项。
 
 ## 3. Adapter 的实现要求
 
@@ -46,6 +51,8 @@
 
 ## 5. 当前验证与后续实机标定
 
-软件测试已覆盖：Known 2000 优于 Unknown、四档累计 Cost 的最高 Known/Unknown/溢出边界、W0/W1 最大合法 Hop × 65,534 的表示域、80,000 对 100,000 的双路径选择、200,000 的 200 Edge 长链、极端 RTT/失败率不被裸加进 `AUTO_BALANCE`、可选指标 EWMA、采样间隔、超过 `1000‰` 的非法值拒绝，以及 Link Down 导致 Policy Path Down。Route Refresh 也覆盖了持续 Q1 背景下取得维护槽。
+软件测试已覆盖：Known 2000 优于 Unknown、四档累计 Cost 的最高 Known/Unknown/溢出边界、W0/W1 最大合法 Hop × 65,534 的表示域、80,000 对 100,000 的双路径选择、200,000 的 200 Edge 长链、LC-1 C01～C10、全部可选指标的定点 EWMA/非法值/同源去重/陈旧门、Bearer 软切换、Candidate 本地动态贡献和 Q1 Flow 动态评分。Route Refresh 也覆盖了持续 Q1 背景下取得维护槽。
 
 尚未用真实 Wi-Fi/UART/CAN/LoRa 标定以下数据：不同介质窗口长度、`route_cost` 基础等级、真实 RTT/丢包/队列的相关性、拥塞阈值和 Flow 重绑收益。这些属于 S03/S06 的实机阶段；在日志和复现实验之前，不能把任何推荐 Cost 数值当作通用默认值。
+
+V5-34 已冻结 Port/Adapter 分层，V5-35 已实现[标准 Port / Adapter 封装与默认 Cost 基线方案](UCN_标准Port_Adapter封装与默认Cost基线方案.md)所定义的 SDK 无关静态 Preset Resolver：产品可显式解析基础 Cost、RTT 参考和最大逻辑 MTU，但 Core 不会自行创建真实 Adapter。V5-43 冻结 [Link Cost 计算规范（LC-1）](UCN_Link_Cost计算规范.md)，V5-44/V5-36 已实现定点 Resolver、Full 质量快照，以及 Bearer/Candidate/Q1 Flow 的本地动态评分。基础 Cost 与动态指标仍严格分离，动态分数不进入 Wire；当前表值只是可执行初值，V5-41 完成真实介质标定前不得把它们写成通用硬件结论。

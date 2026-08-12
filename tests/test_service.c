@@ -23,24 +23,40 @@ static const ucn_service_binding_t TEST_BINDINGS[] = {
       UCN_SERVICE_DELIVERY_Q1_LATEST, TEST_MASK_SENSOR, true, true, false },
     { 0x43U, TEST_SERVICE_CONTROL, 12U, TEST_Q1_MASK,
       UCN_SERVICE_DELIVERY_Q1_LATEST, TEST_MASK_SENSOR, true, true, false },
-    { 0x50U, TEST_SERVICE_CONTROL, 16U, TEST_Q1_MASK,
-      UCN_SERVICE_DELIVERY_Q1_LATEST, TEST_MASK_POWER, true, true, false },
     { 0x60U, TEST_SERVICE_ACTUATOR, 16U, TEST_Q0_MASK,
       UCN_SERVICE_DELIVERY_Q0_FIFO, TEST_MASK_CONTROL, true, true, false },
+    { 0x50U, TEST_SERVICE_CONTROL, 16U, TEST_Q1_MASK,
+      UCN_SERVICE_DELIVERY_Q1_LATEST, TEST_MASK_POWER, true, true, false },
     { 0x61U, TEST_SERVICE_ACTUATOR, 16U, TEST_Q0_MASK,
       UCN_SERVICE_DELIVERY_Q0_FIFO, TEST_MASK_CONTROL, true, true, false }
 };
+
+static uint8_t service_test_binding_count(void)
+{
+    const size_t binding_count = sizeof(TEST_BINDINGS) / sizeof(TEST_BINDINGS[0]);
+
+    return UCN_SERVICE_MAX_BINDINGS >= binding_count &&
+                   UCN_SERVICE_MAX_Q0_BINDINGS >= 2U &&
+                   UCN_SERVICE_MAX_Q1_BINDINGS >= 4U ?
+               (uint8_t)binding_count : 4U;
+}
 
 static int service_init(ucn_service_router_t *router, ucn_node_id_t local_node_id)
 {
     const ucn_service_router_config_t config = {
         local_node_id,
         TEST_BINDINGS,
-        (uint8_t)(sizeof(TEST_BINDINGS) / sizeof(TEST_BINDINGS[0]))
+        service_test_binding_count()
     };
 
     (void)memset(router, 0, sizeof(*router));
     return ucn_service_router_init(router, &config) == UCN_OK ? 0 : 1;
+}
+
+static ucn_endpoint_t service_restart_q0_endpoint(void)
+{
+    return service_test_binding_count() > 4U ?
+               (ucn_endpoint_t)0x61U : (ucn_endpoint_t)0x60U;
 }
 
 static int test_service_configuration(void)
@@ -53,7 +69,7 @@ static int test_service_configuration(void)
     (void)memset(bindings, 0, sizeof(bindings));
     config.local_node_id = UINT32_C(1);
     config.bindings = TEST_BINDINGS;
-    config.binding_count = (uint8_t)(sizeof(TEST_BINDINGS) / sizeof(TEST_BINDINGS[0]));
+    config.binding_count = service_test_binding_count();
     TEST_ASSERT(ucn_service_router_init(NULL, &config) == UCN_ERR_ARGUMENT);
     config.local_node_id = 0U;
     TEST_ASSERT(ucn_service_router_init(&router, &config) == UCN_ERR_ARGUMENT);
@@ -76,7 +92,7 @@ static int test_service_configuration(void)
     bindings[0] = TEST_BINDINGS[0];
     bindings[0].require_remote_q0_validator = true;
     TEST_ASSERT(ucn_service_router_init(&router, &config) == UCN_ERR_CONFIG);
-    bindings[0] = TEST_BINDINGS[4];
+    bindings[0] = TEST_BINDINGS[3];
     bindings[0].accept_remote = false;
     bindings[0].require_remote_q0_validator = true;
     TEST_ASSERT(ucn_service_router_init(&router, &config) == UCN_ERR_CONFIG);
@@ -237,6 +253,7 @@ static int test_service_restart_purges_inbox(void)
     uint8_t old_q0_a = 10U;
     uint8_t old_q0_b = 11U;
     uint8_t new_q0 = 12U;
+    const ucn_endpoint_t q0_endpoint = service_restart_q0_endpoint();
     ucn_service_router_t router;
     ucn_service_message_t message;
     const ucn_service_stats_t *stats;
@@ -260,19 +277,19 @@ static int test_service_restart_purges_inbox(void)
                                        &message) == UCN_OK &&
                 message.payload[0] == new_q1);
 
-    TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_CONTROL, 0x61U,
+    TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_CONTROL, q0_endpoint,
                                  UCN_TRAFFIC_Q0_CRITICAL, &old_q0_a, 1U) == UCN_OK);
-    TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_CONTROL, 0x61U,
+    TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_CONTROL, q0_endpoint,
                                  UCN_TRAFFIC_Q0_CRITICAL, &old_q0_b, 1U) == UCN_OK);
-    TEST_ASSERT(ucn_service_set_ready(&router, 0x61U, false) == UCN_OK);
-    TEST_ASSERT(ucn_service_inbox_take(&router, TEST_SERVICE_ACTUATOR, 0x61U,
+    TEST_ASSERT(ucn_service_set_ready(&router, q0_endpoint, false) == UCN_OK);
+    TEST_ASSERT(ucn_service_inbox_take(&router, TEST_SERVICE_ACTUATOR, q0_endpoint,
                                        &message) == UCN_ERR_NOT_FOUND);
-    TEST_ASSERT(ucn_service_set_ready(&router, 0x61U, true) == UCN_OK);
-    TEST_ASSERT(ucn_service_inbox_take(&router, TEST_SERVICE_ACTUATOR, 0x61U,
+    TEST_ASSERT(ucn_service_set_ready(&router, q0_endpoint, true) == UCN_OK);
+    TEST_ASSERT(ucn_service_inbox_take(&router, TEST_SERVICE_ACTUATOR, q0_endpoint,
                                        &message) == UCN_ERR_NOT_FOUND);
-    TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_CONTROL, 0x61U,
+    TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_CONTROL, q0_endpoint,
                                  UCN_TRAFFIC_Q0_CRITICAL, &new_q0, 1U) == UCN_OK);
-    TEST_ASSERT(ucn_service_inbox_take(&router, TEST_SERVICE_ACTUATOR, 0x61U,
+    TEST_ASSERT(ucn_service_inbox_take(&router, TEST_SERVICE_ACTUATOR, q0_endpoint,
                                        &message) == UCN_OK &&
                 message.payload[0] == new_q0);
 

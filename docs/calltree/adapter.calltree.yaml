@@ -1,14 +1,125 @@
 module: adapter
-description: 将 ESP-NOW、UART、CAN 等物理驱动转换成地址绑定、Link 与固定 RX 队列。
-entry: adapter.ucn_adapter_rx_enqueue
+description: 将 ESP-NOW、UART、CAN 等物理驱动转换成地址绑定、Link、固定 RX 队列与唯一 Protocol Owner 外壳。
+entry: adapter.platform_port_rx_enqueue
 source_files:
-  - src/ucn_adapter.c
+  - src/transport/ucn_adapter.c
+  - src/transport/ucn_protocol_owner.c
+  - src/ports/ucn_port_bare_metal.c
+  - src/ports/ucn_port_freertos.c
+  - src/ports/ucn_port_zephyr.c
+  - src/ports/ucn_port_nuttx.c
+  - src/ports/ucn_port_rtthread.c
+  - src/ports/ucn_port_host_fake.c
 
 nodes:
+  - id: adapter.platform_port_rx_enqueue
+    symbol: ucn_<platform>_port_rx_enqueue
+    type: function
+    file: src/ports/ucn_port_freertos.c
+    layer: adapter
+    role: 所选平台 Port 的驱动/ISR 唯一入口；from_isr=true 分流到 Owner 的 ISR token 入队，false 走任务入队；每个平台各自实现独立函数，成功入队后才通知自己的 Owner。
+    called_by:
+      - external.wifi_uart_can_rx_callback
+      - external.bare_metal_dma_completion
+    calls:
+      - target: adapter.ucn_protocol_owner_rx_enqueue
+        type: direct
+        reason: 按 from_isr 分流到公共 Owner 的任务或 ISR token Queue 入口，并保留满队列/缺锁错误。
+      - target: external.selected_platform_notify
+        type: callback
+        reason: 仅成功入队后通知；FreeRTOS、Zephyr、NuttX、RT-Thread 的 Hook 彼此独立。
+    outputs:
+      - UCN_OK，或既有队列的 UCN_ERR_TOO_LARGE/UCN_ERR_NO_SPACE 等错误。
+    notes:
+      - 裸机入口只入队，不需要通知/等待 Hook。
+      - 不调用 Node Receive、Bridge、Node Step、Endpoint handler 或安全 Provider；不包含任一 RTOS SDK。
+
+  - id: adapter.ucn_protocol_owner_rx_enqueue
+    symbol: ucn_protocol_owner_rx_enqueue
+    type: function
+    file: src/transport/ucn_protocol_owner.c
+    layer: adapter
+    role: 平台无关的完整帧任务入 Adapter 固定 RX Queue；ISR 变体使用独立 token 锁，缺失时失败关闭。
+    called_by:
+      - adapter.platform_port_rx_enqueue
+      - adapter.ucn_bare_metal_port_rx_enqueue
+    calls:
+      - target: adapter.ucn_adapter_rx_enqueue
+        type: direct
+        reason: 任务调用普通 Queue 入口；ISR 调用 from_isr 入口，绝不回退任务锁。
+    notes:
+      - 公共 Owner 不知道当前 RTOS，也不持有通知或等待 Hook。
+
+  - id: adapter.platform_port_step
+    symbol: ucn_<platform>_port_*_step
+    type: scheduler
+    file: src/ports/ucn_port_freertos.c
+    layer: adapter
+    role: 所选平台的 Task/Thread/Super Loop 入口；每个平台独立包装公共 Owner Step。
+    called_by:
+      - external.bare_metal_superloop
+      - external.freertos_protocol_task
+      - external.zephyr_protocol_thread
+      - external.nuttx_protocol_worker
+      - external.rtthread_protocol_thread
+      - external.host_fake_test
+    calls:
+      - target: adapter.ucn_protocol_owner_step
+        type: direct
+        reason: 平台 wrapper 不复制 Pump/Bridge/Node 逻辑。
+    notes:
+      - 产品只包含当前选择的平台头；新增 RTOS 不修改其它 Port。
+
+  - id: adapter.ucn_protocol_owner_step
+    symbol: ucn_protocol_owner_step
+    type: scheduler
+    file: src/transport/ucn_protocol_owner.c
+    layer: adapter
+    role: 唯一 Protocol Owner 的固定单轮调度：同一 now_ms 下按预算 Pump RX、可选 Bridge、Node Step。
+    called_by:
+      - adapter.platform_port_step
+      - adapter.ucn_bare_metal_port_poll
+    calls:
+      - target: external.port_now_ms
+        type: callback
+        reason: 每轮只采样一次单调时间。
+      - target: adapter.ucn_adapter_rx_pump
+        type: direct
+        reason: 最多处理 config.max_rx_frames_per_step 项。
+      - target: service.ucn_service_protocol_bridge_step_at
+        type: direct
+        reason: Service ON 且绑定 Bridge 时，以同一 now_ms 最多处理固定请求数。
+      - target: node_runtime.ucn_node_step
+        type: direct
+        reason: 以同一 now_ms 推进维护与发送。
+    notes:
+      - Core 空闲 UCN_ERR_NOT_FOUND 记录于 Owner stats，但归一为本轮 UCN_OK；其他错误仍返回。
+      - 这是每个 ucn_node_t 唯一允许进入 Node Receive/Step 与 Bridge Step 的上下文。
+
+  - id: adapter.platform_port_wait
+    symbol: ucn_<platform>_port_*_wait
+    type: function
+    file: src/ports/ucn_port_freertos.c
+    layer: adapter
+    role: RTOS/Host Fake Owner 的受限等待适配点；每个平台只调用自己的 wait Hook。
+    called_by:
+      - external.freertos_protocol_task
+      - external.zephyr_protocol_thread
+      - external.nuttx_protocol_worker
+      - external.rtthread_protocol_thread
+      - external.host_fake_test
+    calls:
+      - target: external.port_wait_for_work
+        type: callback
+        reason: 将请求时间裁剪到 UCN_MAX_STEP_INTERVAL_MS 后才交给产品。
+    notes:
+      - Bare metal 没有 wait API，Super Loop 必须自行周期调用 poll。
+      - 公共 Owner 不等待或创建任何 SDK 对象。
+
   - id: adapter.ucn_adapter_bind_peer
     symbol: ucn_adapter_bind_peer
     type: function
-    file: src/ucn_adapter.c
+    file: src/transport/ucn_adapter.c
     layer: adapter
     role: 将一个物理地址绑定到已创建的 ucn_link_t，形成固定 peer 表项。
     called_by:
@@ -27,7 +138,7 @@ nodes:
   - id: adapter.ucn_adapter_rx_queue_init
     symbol: ucn_adapter_rx_queue_init
     type: function
-    file: src/ucn_adapter.c
+    file: src/transport/ucn_adapter.c
     layer: adapter
     role: 初始化固定 RX 环形队列和可选 Port 临界区回调。
     called_by:
@@ -39,9 +150,9 @@ nodes:
   - id: adapter.ucn_adapter_rx_enqueue
     symbol: ucn_adapter_rx_enqueue
     type: function
-    file: src/ucn_adapter.c
+    file: src/transport/ucn_adapter.c
     layer: adapter
-    role: 驱动回调/ISR 后半部复制一帧到固定 RX Queue。
+    role: Task/Owner 上下文复制一帧到固定 RX Queue；ISR 由单独 from_isr API 复制并回送临界区 token。
     called_by:
       - external.wifi_uart_can_rx_callback
     calls:
@@ -56,15 +167,34 @@ nodes:
     notes:
       - 不在此处解码、路由、调用 Endpoint handler 或执行安全 Provider。
 
+  - id: adapter.ucn_adapter_rx_enqueue_from_isr
+    symbol: ucn_adapter_rx_enqueue_from_isr
+    type: function
+    file: src/transport/ucn_adapter.c
+    layer: adapter
+    role: ISR 上下文复制完整帧到固定 RX Queue；只使用 ISR token 临界区，缺失时失败关闭。
+    called_by:
+      - adapter.ucn_protocol_owner_rx_enqueue
+      - external.product_isr_complete_frame
+    calls:
+      - target: adapter.queue_critical_helpers_static
+        type: direct
+        reason: 保存并回送 ISR token，保护环形队列 head/tail/count。
+    outputs:
+      - UCN_OK，或 UCN_ERR_CONFIG/UCN_ERR_NO_SPACE/UCN_ERR_TOO_LARGE。
+    notes:
+      - 不执行 Pump、Node、Bridge、路由或业务回调。
+
   - id: adapter.ucn_adapter_rx_pump
     symbol: ucn_adapter_rx_pump
     type: function
-    file: src/ucn_adapter.c
+    file: src/transport/ucn_adapter.c
     layer: adapter
     role: Protocol Task 每轮最多取 max_frames 项并同步交给 Node 接收入口。
     called_by:
       - external.protocol_task_iteration
       - node_runtime.protocol_task_mainloop
+      - adapter.ucn_protocol_owner_step
     calls:
       - target: node_runtime.ucn_node_receive
         type: direct
@@ -75,7 +205,7 @@ nodes:
   - id: adapter.ucn_adapter_hello_scheduler_step
     symbol: ucn_adapter_hello_scheduler_step
     type: function
-    file: src/ucn_adapter.c
+    file: src/transport/ucn_adapter.c
     layer: adapter
     role: 在一个 Adapter 的固定状态中推进 HELLO 初始抖动、有限快重试、指数退避和准入后低频/停止。
     called_by:
@@ -93,7 +223,7 @@ nodes:
   - id: adapter.hello_scheduler_helpers_static
     symbol: hello_scheduler_helpers
     type: module
-    file: src/ucn_adapter.c
+    file: src/transport/ucn_adapter.c
     layer: adapter
     role: 校验固定 Profile、以 Port Seed 和 Adapter Token 生成独立序列，并计算有上限的重试 Deadline。
     called_by:
@@ -105,7 +235,7 @@ nodes:
   - id: adapter.address_helpers_static
     symbol: address_helpers
     type: module
-    file: src/ucn_adapter.c
+    file: src/transport/ucn_adapter.c
     layer: adapter
     role: 物理地址长度校验、相等比较和固定 peer 表检索。
     called_by:
@@ -113,13 +243,14 @@ nodes:
     calls: []
 
   - id: adapter.queue_critical_helpers_static
-    symbol: queue_enter/queue_exit
+    symbol: queue_enter_task/queue_exit_task + queue_enter_from_isr/queue_exit_from_isr
     type: function
-    file: src/ucn_adapter.c
+    file: src/transport/ucn_adapter.c
     layer: adapter
-    role: 通过可选 ucn_port_ops_t 成对进入/退出短临界区，保护 RX 环形队列。
+    role: 通过 ucn_port_ops_t 的任务锁或 ISR token 锁成对保护 RX 环形队列；ISR 不可使用任务锁替代。
     called_by:
       - adapter.ucn_adapter_rx_enqueue
+      - adapter.ucn_adapter_rx_enqueue_from_isr
       - adapter.ucn_adapter_rx_pump
     calls:
       - target: external.port_enter_exit_critical

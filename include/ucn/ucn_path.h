@@ -41,8 +41,10 @@ typedef struct ucn_path_forward_config {
     /* Number of Link hops from this Node to destination.  A terminal entry
      * must be zero; every forwarding entry must be non-zero. */
     uint8_t remaining_hops;
-    uint8_t maximum_wire_profile;
-    uint16_t minimum_mtu;
+    /* These are the historical final two fields.  Keep this structure at
+     * exactly eight fields: existing C99 positional initializers must compile
+     * cleanly even when -Wmissing-field-initializers is an error.  Optional
+     * capability information belongs to ucn_path_install_capable(), not here. */
     ucn_link_t *egress_link;
     uint32_t expires_at_ms;
 } ucn_path_forward_config_t;
@@ -83,6 +85,14 @@ const ucn_path_forward_entry_t *ucn_path_find(
     ucn_node_id_t destination);
 ucn_result_t ucn_path_install(ucn_path_state_t *state,
                               const ucn_path_forward_config_t *config);
+/* Capability-aware extension of ucn_path_install().  Keep the historical
+ * eight-field config unchanged; capability is optional for a forwarding
+ * entry and is stored only after validation.  A terminal entry must pass
+ * NULL because it has no egress capability to constrain. */
+ucn_result_t ucn_path_install_capable(
+    ucn_path_state_t *state,
+    const ucn_path_forward_config_t *config,
+    const ucn_path_capability_t *capability);
 ucn_result_t ucn_path_revoke(ucn_path_state_t *state,
                              ucn_node_id_t owner,
                              ucn_session_id_t owner_session_id,

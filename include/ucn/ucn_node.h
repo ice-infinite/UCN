@@ -483,6 +483,18 @@ typedef char ucn_sequence_rotation_threshold_must_leave_valid_range[
 #define UCN_NEIGHBOR_REMOVE_TIMEOUT_MS UINT32_C(4000)
 #endif
 
+#ifndef UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS
+#define UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS UINT32_C(250)
+#endif
+
+#ifndef UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS
+#define UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS UINT32_C(1250)
+#endif
+
+#ifndef UCN_LINK_LIVENESS_FAST_REMOVE_TIMEOUT_MS
+#define UCN_LINK_LIVENESS_FAST_REMOVE_TIMEOUT_MS UINT32_C(2000)
+#endif
+
 #ifndef UCN_BEARER_SWITCH_IMPROVEMENT_PERCENT
 #define UCN_BEARER_SWITCH_IMPROVEMENT_PERCENT \
     UCN_ROUTE_SWITCH_IMPROVEMENT_PERCENT
@@ -519,10 +531,18 @@ typedef char ucn_sequence_rotation_threshold_must_leave_valid_range[
 #ifndef UCN_BEARER_QUALITY_PROBE_INTERVAL_MS
 #define UCN_BEARER_QUALITY_PROBE_INTERVAL_MS UINT32_C(100)
 #endif
+#ifndef UCN_BEARER_QUALITY_SWITCH_HOLD_MS
+#define UCN_BEARER_QUALITY_SWITCH_HOLD_MS UINT32_C(3000)
+#endif
 
 #if UCN_FEATURE_DYNAMIC_MESH
 typedef char ucn_neighbor_remove_must_follow_suspect[
     UCN_NEIGHBOR_REMOVE_TIMEOUT_MS > UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS ? 1 : -1];
+typedef char ucn_fast_liveness_remove_must_follow_suspect[
+    UCN_LINK_LIVENESS_FAST_REMOVE_TIMEOUT_MS >
+            UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS ? 1 : -1];
+typedef char ucn_fast_liveness_heartbeat_must_be_positive[
+    UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS > 0U ? 1 : -1];
 typedef char ucn_bearer_switch_improvement_percent_must_be_less_than_100[
     UCN_BEARER_SWITCH_IMPROVEMENT_PERCENT < 100U ? 1 : -1];
 typedef char ucn_bearer_quality_sample_interval_must_be_positive[
@@ -536,6 +556,10 @@ typedef char ucn_bearer_quality_probe_attempts_must_cover_acks[
     UCN_BEARER_QUALITY_PROBE_REQUIRED_ACKS ? 1 : -1];
 typedef char ucn_bearer_quality_probe_interval_must_be_positive[
     UCN_BEARER_QUALITY_PROBE_INTERVAL_MS > 0U ? 1 : -1];
+typedef char ucn_bearer_quality_switch_hold_must_be_wrap_safe[
+    UCN_BEARER_QUALITY_SWITCH_HOLD_MS > 0U &&
+            UCN_BEARER_QUALITY_SWITCH_HOLD_MS <= UCN_MAX_SAFE_DURATION_MS ?
+        1 : -1];
 typedef char ucn_max_step_interval_must_be_wrap_safe[
     UCN_MAX_STEP_INTERVAL_MS > 0U &&
             UCN_MAX_STEP_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS ?
@@ -546,6 +570,11 @@ typedef char ucn_maintenance_service_bound_must_precede_suspect[
     UINT64_C(1) * UCN_HEARTBEAT_INTERVAL_MS +
                 UCN_MAINTENANCE_SERVICE_BOUND_CALC_MS <
             UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS ?
+        1 : -1];
+typedef char ucn_fast_maintenance_service_bound_must_precede_suspect[
+    UINT64_C(1) * UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS +
+                UCN_MAINTENANCE_SERVICE_BOUND_CALC_MS <
+            UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS ?
         1 : -1];
 #endif
 typedef char ucn_node_relative_durations_must_be_wrap_safe[
@@ -567,6 +596,9 @@ typedef char ucn_node_relative_durations_must_be_wrap_safe[
     UCN_HEARTBEAT_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_NEIGHBOR_REMOVE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_LINK_LIVENESS_FAST_REMOVE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_BEARER_QUALITY_SAMPLE_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_BEARER_QUALITY_PROBE_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
 #endif

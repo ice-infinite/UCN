@@ -52,6 +52,9 @@ static ucn_result_t get_link_status(const ucn_link_t *link,
 static void invalidate_routes_by_link(ucn_node_t *node, const ucn_link_t *link);
 static ucn_result_t get_link_status(const ucn_link_t *link, ucn_link_status_t *status);
 static bool link_is_usable(const ucn_link_t *link);
+static uint32_t link_heartbeat_interval_ms(const ucn_link_t *link);
+static uint32_t link_suspect_timeout_ms(const ucn_link_t *link);
+static uint32_t link_remove_timeout_ms(const ucn_link_t *link);
 static ucn_link_t *resolve_egress_link(ucn_node_t *node, ucn_link_t *link);
 #if UCN_FEATURE_PATH
 static void revoke_path_and_mark_local_policy(ucn_node_t *node,
@@ -517,6 +520,41 @@ static ucn_route_cost_t link_route_cost(const ucn_link_t *link)
     return UCN_ROUTE_COST_UNKNOWN;
 }
 
+/* LC-1 never replaces the additive on-wire Cost.  This helper exposes the
+ * Full-only local selection score and deliberately falls back to the stable
+ * base Cost in Lite builds or before the first quality sample. */
+static bool link_local_select_cost(ucn_node_t *node,
+                                   ucn_link_t *link,
+                                   bool *cost_known,
+                                   uint16_t *cost)
+{
+    ucn_route_cost_t base_cost;
+
+    if (node == NULL || link == NULL || cost_known == NULL || cost == NULL ||
+        !link_is_usable(link)) {
+        return false;
+    }
+#if UCN_FEATURE_POLICY
+    {
+        const ucn_policy_link_quality_snapshot_t *quality =
+            ucn_node_get_link_quality(node, link);
+
+        if (quality != NULL) {
+            if (!quality->cost.selectable) {
+                return false;
+            }
+            *cost_known = quality->cost.base_cost_known;
+            *cost = quality->cost.effective_select_cost;
+            return true;
+        }
+    }
+#endif
+    base_cost = link_route_cost(link);
+    *cost_known = route_cost_is_known(base_cost);
+    *cost = *cost_known ? (uint16_t)base_cost : UCN_LINK_ROUTE_COST_UNKNOWN;
+    return true;
+}
+
 static bool route_is_expired(const ucn_node_t *node, const ucn_route_entry_t *route)
 {
     return !route->is_static &&
@@ -560,6 +598,74 @@ static bool candidate_is_sufficiently_better(ucn_route_cost_t active_cost,
     return cost_is_sufficiently_better(active_cost, candidate_cost,
                                        UCN_ROUTE_SWITCH_IMPROVEMENT_PERCENT);
 }
+
+/* Replace only this node's stable one-hop base contribution with LC-1's
+ * local effective score.  The stored/forwarded multi-hop route_cost remains
+ * byte-for-byte unchanged. */
+static bool route_local_selection_score(ucn_node_t *node,
+                                        ucn_route_cost_t route_cost,
+                                        ucn_link_t *local_link,
+                                        bool *score_known,
+                                        ucn_route_cost_t *score)
+{
+    ucn_route_cost_t local_base;
+    uint16_t local_effective;
+    bool local_effective_known;
+    uint64_t adjusted;
+
+    if (score_known == NULL || score == NULL ||
+        !link_local_select_cost(node, local_link, &local_effective_known,
+                                &local_effective)) {
+        return false;
+    }
+    *score_known = route_cost_is_known(route_cost);
+    *score = route_cost;
+    if (!*score_known) {
+        return true;
+    }
+    local_base = link_route_cost(local_link);
+    if (!local_effective_known || !route_cost_is_known(local_base) ||
+        route_cost < local_base) {
+        return true;
+    }
+    adjusted = (uint64_t)(route_cost - local_base) + local_effective;
+    *score = adjusted > UCN_ROUTE_COST_MAX ? UCN_ROUTE_COST_MAX :
+                                              (ucn_route_cost_t)adjusted;
+    return true;
+}
+
+static bool candidate_route_is_locally_better(
+    ucn_node_t *node,
+    const ucn_route_entry_t *active_route,
+    ucn_route_cost_t candidate_route_cost,
+    ucn_link_t *candidate_link)
+{
+    ucn_route_cost_t active_score;
+    ucn_route_cost_t candidate_score;
+    ucn_link_t *active_link;
+    bool active_known;
+    bool candidate_known;
+
+    if (!route_local_selection_score(node, candidate_route_cost, candidate_link,
+                                     &candidate_known, &candidate_score)) {
+        return false;
+    }
+    if (active_route == NULL) {
+        return true;
+    }
+    active_link = resolve_egress_link(node, active_route->egress_link);
+    if (!route_local_selection_score(node, active_route->route_cost, active_link,
+                                     &active_known, &active_score)) {
+        return true;
+    }
+    if (!candidate_known) {
+        return false;
+    }
+    if (!active_known) {
+        return true;
+    }
+    return candidate_is_sufficiently_better(active_score, candidate_score);
+}
 #endif
 
 static ucn_link_t *find_direct_link(ucn_node_t *node,
@@ -567,28 +673,45 @@ static ucn_link_t *find_direct_link(ucn_node_t *node,
 {
     size_t index;
     ucn_link_t *best_direct = NULL;
-    ucn_route_cost_t best_direct_cost = UCN_ROUTE_COST_UNKNOWN;
+    ucn_link_t *fallback_direct = NULL;
+    uint16_t best_direct_cost = UCN_LINK_ROUTE_COST_UNKNOWN;
+    bool best_cost_known = false;
 
     for (index = 0U; index < node->link_count; ++index) {
         ucn_link_t *link = node->links[index];
         ucn_link_t *selected;
-        ucn_route_cost_t route_cost;
+        uint16_t select_cost;
+        bool cost_known;
 
         if (link->peer_node_id != destination) {
             continue;
+        }
+        if (!link_is_usable(link) &&
+            (fallback_direct == NULL ||
+             link->link_id < fallback_direct->link_id)) {
+            fallback_direct = link;
         }
         selected = resolve_egress_link(node, link);
         if (selected != link) {
             continue;
         }
-        route_cost = link_route_cost(link);
-        if (best_direct == NULL || route_cost_is_better(route_cost, best_direct_cost)) {
+        if (!link_local_select_cost(node, link, &cost_known, &select_cost)) {
+            continue;
+        }
+        if (best_direct == NULL ||
+            (cost_known && (!best_cost_known || select_cost < best_direct_cost)) ||
+            (cost_known == best_cost_known && select_cost == best_direct_cost &&
+             link->link_id < best_direct->link_id)) {
             best_direct = link;
-            best_direct_cost = route_cost;
+            best_direct_cost = select_cost;
+            best_cost_known = cost_known;
         }
     }
 
-    return best_direct;
+    /* Preserve the public send() error contract: if a direct Link exists but
+     * is currently down/MTU-less, let send_frame_on_link() report the precise
+     * LINK_DOWN/TOO_LARGE result instead of collapsing it into NOT_FOUND. */
+    return best_direct == NULL ? fallback_direct : best_direct;
 }
 
 static ucn_link_t *find_link(ucn_node_t *node, ucn_node_id_t destination)
@@ -753,6 +876,76 @@ static ucn_neighbor_bearer_t *allocate_neighbor_bearer(ucn_neighbor_entry_t *ent
     return NULL;
 }
 
+static void adjust_route_cost_for_bearer_switch(
+    ucn_route_cost_t *route_cost,
+    const ucn_link_t *old_link,
+    const ucn_link_t *new_link)
+{
+    const ucn_route_cost_t old_local_cost = link_route_cost(old_link);
+    const ucn_route_cost_t new_local_cost = link_route_cost(new_link);
+    ucn_route_cost_t adjusted_cost;
+
+    if (route_cost == NULL || old_link == new_link) {
+        return;
+    }
+    if (!route_cost_is_known(*route_cost) ||
+        !route_cost_is_known(old_local_cost) ||
+        !route_cost_is_known(new_local_cost) ||
+        *route_cost < old_local_cost ||
+        accumulate_route_cost(*route_cost - old_local_cost, new_local_cost,
+                              &adjusted_cost) != UCN_OK) {
+        *route_cost = UCN_ROUTE_COST_UNKNOWN;
+        return;
+    }
+    *route_cost = adjusted_cost;
+}
+
+/* Route/Previous/Candidate entries describe a logical next hop, not one
+ * permanently pinned physical carrier.  Keep their stored representative in
+ * sync with the Neighbor Primary so diagnostics, Route Epoch emission and
+ * local Cost constraints cannot continue to reference an unadmitted Bearer. */
+static void remap_neighbor_egress_references(ucn_node_t *node,
+                                             ucn_neighbor_entry_t *entry,
+                                             ucn_link_t *new_link)
+{
+    size_t index;
+
+    if (node == NULL || entry == NULL || new_link == NULL) {
+        return;
+    }
+    for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
+        ucn_route_entry_t *route = &node->routes[index];
+
+        if (route->valid && route->egress_link != new_link &&
+            find_neighbor_bearer(entry, route->egress_link) != NULL) {
+            adjust_route_cost_for_bearer_switch(&route->route_cost,
+                                                route->egress_link, new_link);
+            route->egress_link = new_link;
+            route->verified_rtt_valid = false;
+            route->verified_rtt_ms = 0U;
+        }
+        if (route->previous_valid && route->previous_egress_link != new_link &&
+            find_neighbor_bearer(entry, route->previous_egress_link) != NULL) {
+            route->previous_egress_link = new_link;
+        }
+    }
+#if UCN_FEATURE_CANDIDATE_ROUTING
+    for (index = 0U; index < UCN_MAX_CANDIDATE_ROUTES; ++index) {
+        ucn_candidate_route_t *candidate = &node->candidates[index];
+
+        if (candidate->valid && candidate->egress_link != new_link &&
+            find_neighbor_bearer(entry, candidate->egress_link) != NULL) {
+            adjust_route_cost_for_bearer_switch(&candidate->route_cost,
+                                                candidate->egress_link,
+                                                new_link);
+            candidate->egress_link = new_link;
+            candidate->verified_rtt_valid = false;
+            candidate->verified_rtt_ms = 0U;
+        }
+    }
+#endif
+}
+
 static size_t bearer_index_from_entry(const ucn_neighbor_entry_t *entry,
                                       const ucn_neighbor_bearer_t *bearer)
 {
@@ -765,11 +958,13 @@ static bool bearer_is_active(const ucn_neighbor_bearer_t *bearer)
                                bearer->state == UCN_NEIGHBOR_BEARER_SUSPECT);
 }
 
-static ucn_neighbor_bearer_t *select_neighbor_bearer(ucn_neighbor_entry_t *entry)
+static ucn_neighbor_bearer_t *select_neighbor_bearer(ucn_node_t *node,
+                                                      ucn_neighbor_entry_t *entry)
 {
     size_t index;
     ucn_neighbor_bearer_t *best = NULL;
-    ucn_route_cost_t best_cost = UCN_ROUTE_COST_UNKNOWN;
+    uint16_t best_cost = UCN_LINK_ROUTE_COST_UNKNOWN;
+    bool best_cost_known = false;
 
     if (entry == NULL) {
         return NULL;
@@ -779,32 +974,51 @@ static ucn_neighbor_bearer_t *select_neighbor_bearer(ucn_neighbor_entry_t *entry
         ucn_neighbor_bearer_t *primary =
             &entry->bearers[entry->primary_bearer_index];
 
-        if (bearer_is_active(primary) && link_is_usable(primary->link)) {
+        bool cost_known;
+        uint16_t cost;
+
+        /* A SUSPECT Primary remains usable only when no admitted sibling is
+         * available.  Prefer a confirmed Backup immediately at the suspect
+         * boundary; the later fallback loop still preserves single-Bearer
+         * connectivity during the bounded grace window. */
+        if (primary->state == UCN_NEIGHBOR_BEARER_ADMITTED &&
+            link_local_select_cost(node, primary->link, &cost_known, &cost)) {
+            remap_neighbor_egress_references(node, entry, primary->link);
             return primary;
         }
     }
     for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
         ucn_neighbor_bearer_t *bearer = &entry->bearers[index];
+        bool cost_known;
+        uint16_t cost;
 
         if (bearer->state != UCN_NEIGHBOR_BEARER_ADMITTED ||
-            !link_is_usable(bearer->link)) {
+            !link_local_select_cost(node, bearer->link, &cost_known, &cost)) {
             continue;
         }
-        if (best == NULL || link_route_cost(bearer->link) < best_cost) {
+        if (best == NULL ||
+            (cost_known && (!best_cost_known || cost < best_cost)) ||
+            (cost_known == best_cost_known && cost == best_cost &&
+             bearer->link->link_id < best->link->link_id)) {
             best = bearer;
-            best_cost = link_route_cost(bearer->link);
+            best_cost = cost;
+            best_cost_known = cost_known;
         }
     }
     if (best != NULL) {
         entry->primary_bearer_index = (uint8_t)bearer_index_from_entry(entry, best);
+        remap_neighbor_egress_references(node, entry, best->link);
         return best;
     }
     for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
         ucn_neighbor_bearer_t *bearer = &entry->bearers[index];
+        bool cost_known;
+        uint16_t cost;
 
         if (bearer->state == UCN_NEIGHBOR_BEARER_SUSPECT &&
-            link_is_usable(bearer->link)) {
+            link_local_select_cost(node, bearer->link, &cost_known, &cost)) {
             entry->primary_bearer_index = (uint8_t)index;
+            remap_neighbor_egress_references(node, entry, bearer->link);
             return bearer;
         }
     }
@@ -841,36 +1055,46 @@ static void reset_neighbor_quality_probes(ucn_neighbor_entry_t *entry)
 }
 
 static ucn_neighbor_bearer_t *find_better_neighbor_bearer(
+    ucn_node_t *node,
     ucn_neighbor_entry_t *entry,
     const ucn_neighbor_bearer_t *primary)
 {
     size_t index;
     ucn_neighbor_bearer_t *best = NULL;
-    ucn_route_cost_t primary_cost;
-    ucn_route_cost_t best_cost = UCN_ROUTE_COST_UNKNOWN;
+    uint16_t primary_cost;
+    uint16_t best_cost = UCN_LINK_ROUTE_COST_UNKNOWN;
+    bool primary_cost_known;
+    bool best_cost_known = false;
 
-    if (entry == NULL || primary == NULL || !link_is_usable(primary->link)) {
+    if (entry == NULL || primary == NULL ||
+        !link_local_select_cost(node, primary->link, &primary_cost_known,
+                                &primary_cost)) {
         return NULL;
     }
-    primary_cost = link_route_cost(primary->link);
     for (index = 0U; index < UCN_MAX_BEARERS_PER_NEIGHBOR; ++index) {
         ucn_neighbor_bearer_t *bearer = &entry->bearers[index];
-        ucn_route_cost_t bearer_cost;
+        uint16_t bearer_cost;
+        bool bearer_cost_known;
 
         if (bearer == primary ||
             bearer->state != UCN_NEIGHBOR_BEARER_ADMITTED ||
-            !link_is_usable(bearer->link)) {
+            !link_local_select_cost(node, bearer->link, &bearer_cost_known,
+                                    &bearer_cost)) {
             continue;
         }
-        bearer_cost = link_route_cost(bearer->link);
-        if (!cost_is_sufficiently_better(
-                primary_cost, bearer_cost,
-                UCN_BEARER_SWITCH_IMPROVEMENT_PERCENT)) {
+        if (!bearer_cost_known ||
+            (primary_cost_known &&
+             !cost_is_sufficiently_better(
+                 primary_cost, bearer_cost,
+                 UCN_BEARER_SWITCH_IMPROVEMENT_PERCENT))) {
             continue;
         }
-        if (best == NULL || bearer_cost < best_cost) {
+        if (best == NULL || !best_cost_known || bearer_cost < best_cost ||
+            (bearer_cost == best_cost &&
+             bearer->link->link_id < best->link->link_id)) {
             best = bearer;
             best_cost = bearer_cost;
+            best_cost_known = true;
         }
     }
     return best;
@@ -888,6 +1112,10 @@ static void switch_neighbor_primary(ucn_node_t *node,
     bearer_index = (uint8_t)bearer_index_from_entry(entry, bearer);
     if (entry->primary_bearer_index != bearer_index) {
         entry->primary_bearer_index = bearer_index;
+        remap_neighbor_egress_references(node, entry, bearer->link);
+        entry->bearer_quality_hold_active = true;
+        entry->bearer_quality_hold_until_ms = ucn_deadline_from_now(
+            node->now_ms, UCN_BEARER_QUALITY_SWITCH_HOLD_MS);
         node->stats.bearer_quality_switches++;
     }
     reset_neighbor_quality_probes(entry);
@@ -907,12 +1135,20 @@ static void evaluate_bearer_quality(ucn_node_t *node, uint32_t now_ms)
             entry->state != UCN_NEIGHBOR_SUSPECT) {
             continue;
         }
-        primary = select_neighbor_bearer(entry);
+        primary = select_neighbor_bearer(node, entry);
         if (primary == NULL) {
             reset_neighbor_quality_probes(entry);
             continue;
         }
-        candidate = find_better_neighbor_bearer(entry, primary);
+        if (entry->bearer_quality_hold_active) {
+            if (!ucn_deadline_expired(now_ms,
+                                      entry->bearer_quality_hold_until_ms)) {
+                reset_neighbor_quality_probes(entry);
+                continue;
+            }
+            entry->bearer_quality_hold_active = false;
+        }
+        candidate = find_better_neighbor_bearer(node, entry, primary);
         for (bearer_index = 0U;
              bearer_index < UCN_MAX_BEARERS_PER_NEIGHBOR;
              ++bearer_index) {
@@ -962,7 +1198,7 @@ static ucn_link_t *resolve_egress_link(ucn_node_t *node, ucn_link_t *link)
     if (entry == NULL) {
         return link;
     }
-    bearer = select_neighbor_bearer(entry);
+    bearer = select_neighbor_bearer(node, entry);
     return bearer == NULL ? NULL : bearer->link;
 }
 
@@ -1131,7 +1367,7 @@ static void revoke_paths_by_unavailable_egress(ucn_node_t *node,
         return;
     }
     neighbor = find_neighbor_by_link(node, failed_link);
-    if (neighbor != NULL && select_neighbor_bearer(neighbor) != NULL) {
+    if (neighbor != NULL && select_neighbor_bearer(node, neighbor) != NULL) {
         return;
     }
     for (index = 0U; index < UCN_MAX_PATH_FORWARD_ENTRIES; ++index) {
@@ -1171,7 +1407,7 @@ static bool link_is_candidate_eligible(ucn_node_t *node, const ucn_link_t *link)
     }
     bearer = find_neighbor_bearer(entry, link);
     return bearer != NULL && bearer->state == UCN_NEIGHBOR_BEARER_ADMITTED &&
-           select_neighbor_bearer(entry) == bearer;
+           select_neighbor_bearer(node, entry) == bearer;
 }
 #endif
 
@@ -1605,7 +1841,7 @@ static ucn_result_t admit_neighbor_entry(ucn_node_t *node,
         entry->state == UCN_NEIGHBOR_SUSPECT) {
         entry->state = UCN_NEIGHBOR_ADMITTED;
         entry->suspect_since_ms = 0U;
-        (void)select_neighbor_bearer(entry);
+        (void)select_neighbor_bearer(node, entry);
         return UCN_OK;
     }
     return result;
@@ -2035,7 +2271,7 @@ static void touch_neighbor(ucn_node_t *node, ucn_link_t *link)
             entry->state = UCN_NEIGHBOR_ADMITTED;
             entry->suspect_since_ms = 0U;
         }
-        (void)select_neighbor_bearer(entry);
+        (void)select_neighbor_bearer(node, entry);
     }
 }
 
@@ -2070,7 +2306,7 @@ static void refresh_neighbor_liveness_state(ucn_node_t *node,
     if (neighbor_has_admitted_bearer(entry)) {
         entry->state = UCN_NEIGHBOR_ADMITTED;
         entry->suspect_since_ms = 0U;
-        (void)select_neighbor_bearer(entry);
+        (void)select_neighbor_bearer(node, entry);
         return;
     }
     if (neighbor_has_active_bearer(entry)) {
@@ -2079,7 +2315,7 @@ static void refresh_neighbor_liveness_state(ucn_node_t *node,
             entry->suspect_since_ms = now_ms;
             node->stats.neighbor_suspected++;
         }
-        (void)select_neighbor_bearer(entry);
+        (void)select_neighbor_bearer(node, entry);
         return;
     }
     remove_neighbor_entry(node, entry);
@@ -2132,12 +2368,12 @@ static void maintain_neighbor_liveness(ucn_node_t *node, uint32_t now_ms)
             }
             if (bearer->state == UCN_NEIGHBOR_BEARER_ADMITTED &&
                 ucn_elapsed_at_least(now_ms, bearer->last_seen_ms,
-                                     UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS)) {
+                                     link_suspect_timeout_ms(bearer->link))) {
                 bearer->state = UCN_NEIGHBOR_BEARER_SUSPECT;
             }
             if (bearer->state == UCN_NEIGHBOR_BEARER_SUSPECT &&
                 ucn_elapsed_at_least(now_ms, bearer->last_seen_ms,
-                                     UCN_NEIGHBOR_REMOVE_TIMEOUT_MS)) {
+                                     link_remove_timeout_ms(bearer->link))) {
                 bearer->state = UCN_NEIGHBOR_BEARER_DOWN;
                 if (entry->primary_bearer_index == bearer_index) {
                     entry->primary_bearer_index = UCN_NEIGHBOR_PRIMARY_BEARER_NONE;
@@ -2332,6 +2568,30 @@ static bool link_is_usable(const ucn_link_t *link)
            ucn_link_effective_mtu(link, &status) != 0U;
 }
 
+static uint32_t link_heartbeat_interval_ms(const ucn_link_t *link)
+{
+    return link != NULL &&
+                   link->liveness_profile == (uint8_t)UCN_LINK_LIVENESS_FAST ?
+               UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS :
+               UCN_HEARTBEAT_INTERVAL_MS;
+}
+
+static uint32_t link_suspect_timeout_ms(const ucn_link_t *link)
+{
+    return link != NULL &&
+                   link->liveness_profile == (uint8_t)UCN_LINK_LIVENESS_FAST ?
+               UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS :
+               UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS;
+}
+
+static uint32_t link_remove_timeout_ms(const ucn_link_t *link)
+{
+    return link != NULL &&
+                   link->liveness_profile == (uint8_t)UCN_LINK_LIVENESS_FAST ?
+               UCN_LINK_LIVENESS_FAST_REMOVE_TIMEOUT_MS :
+               UCN_NEIGHBOR_REMOVE_TIMEOUT_MS;
+}
+
 static ucn_result_t resolve_link_local_receive_profile(
     const ucn_node_t *node,
     const ucn_link_t *link,
@@ -2437,6 +2697,9 @@ static ucn_result_t send_frame_on_link(ucn_node_t *node,
 
     result = get_link_status(link, &status);
     if (result != UCN_OK) {
+        if (result == UCN_ERR_LINK_DOWN) {
+            mark_neighbor_bearer_down(node, link);
+        }
         return result;
     }
     if (!status.is_up) {
@@ -2444,6 +2707,7 @@ static ucn_result_t send_frame_on_link(ucn_node_t *node,
         return UCN_ERR_LINK_DOWN;
     }
     if (ucn_link_effective_mtu(link, &status) == 0U) {
+        mark_neighbor_bearer_down(node, link);
         return UCN_ERR_LINK_DOWN;
     }
     result = prepare_outbound_wire_profile(
@@ -2473,8 +2737,53 @@ static ucn_result_t send_frame_on_link(ucn_node_t *node,
         node->stats.tx_sent++;
     } else {
         node->stats.tx_error_dropped++;
+        if (result == UCN_ERR_LINK_DOWN) {
+            mark_neighbor_bearer_down(node, link);
+        }
     }
     return result;
+}
+
+/* A Driver may report LINK_DOWN only after its status snapshot was selected.
+ * That first attempt cannot have delivered successfully, so a single retry on
+ * the same logical Neighbor's newly selected admitted Bearer is safe. */
+static ucn_result_t send_frame_on_logical_egress(ucn_node_t *node,
+                                                 ucn_link_t *configured_link,
+                                                 const ucn_frame_t *frame,
+                                                 ucn_link_t **last_link)
+{
+    ucn_link_t *link;
+    ucn_link_t *first_link;
+    ucn_result_t result;
+
+    if (last_link != NULL) {
+        *last_link = NULL;
+    }
+    if (node == NULL || configured_link == NULL || frame == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    link = resolve_egress_link(node, configured_link);
+    if (link == NULL) {
+        return UCN_ERR_LINK_DOWN;
+    }
+    first_link = link;
+    if (last_link != NULL) {
+        *last_link = link;
+    }
+    result = send_frame_on_link(node, link, frame);
+    if (result != UCN_ERR_LINK_DOWN) {
+        return result;
+    }
+
+    configured_link = link;
+    link = resolve_egress_link(node, configured_link);
+    if (link == NULL || link == first_link) {
+        return UCN_ERR_LINK_DOWN;
+    }
+    if (last_link != NULL) {
+        *last_link = link;
+    }
+    return send_frame_on_link(node, link, frame);
 }
 
 static ucn_result_t protect_outbound_business(ucn_node_t *node,
@@ -2760,6 +3069,8 @@ static ucn_result_t install_path_forward_entry(ucn_node_t *node,
                                                const ucn_path_capability_t *requested_capability)
 {
     ucn_path_forward_config_t config;
+    const ucn_path_capability_t *capability_to_install = NULL;
+    ucn_path_capability_t installed_capability;
 
     if (node == NULL || owner == 0U || owner == UCN_NODE_BROADCAST ||
         owner_session_id == 0U || path_id == 0U || destination == 0U ||
@@ -2815,11 +3126,13 @@ static ucn_result_t install_path_forward_entry(ucn_node_t *node,
                 capability.minimum_mtu = requested_capability->minimum_mtu;
             }
         }
-        config.maximum_wire_profile =
-            (uint8_t)capability.maximum_wire_profile;
-        config.minimum_mtu = (uint16_t)capability.minimum_mtu;
+        installed_capability.maximum_wire_profile =
+            capability.maximum_wire_profile;
+        installed_capability.minimum_mtu = (uint16_t)capability.minimum_mtu;
+        capability_to_install = &installed_capability;
     }
-    return ucn_path_install(&node->path_state, &config);
+    return ucn_path_install_capable(&node->path_state, &config,
+                                    capability_to_install);
 }
 #endif
 
@@ -4396,20 +4709,23 @@ static ucn_result_t send_due_heartbeat(ucn_node_t *node, uint32_t now_ms)
             if (!bearer_is_active(bearer) || !link_is_usable(bearer->link) ||
                 (bearer->heartbeat_sent &&
                  (uint32_t)(now_ms - bearer->last_heartbeat_sent_ms) <
-                 UCN_HEARTBEAT_INTERVAL_MS)) {
+                 link_heartbeat_interval_ms(bearer->link))) {
                 continue;
             }
             if (bearer->heartbeat_sent) {
                 service_delay_ms =
                     (uint32_t)(now_ms - bearer->last_heartbeat_sent_ms) -
-                    UCN_HEARTBEAT_INTERVAL_MS;
+                    link_heartbeat_interval_ms(bearer->link);
             }
             if (node->next_heartbeat_id == 0U) {
                 node->next_heartbeat_id = 1U;
             }
-            if (!take_control_token(node)) {
-                return UCN_ERR_NO_SPACE;
-            }
+            /* Scheduled Heartbeats are already bounded by one fixed interval
+             * per admitted Bearer and UCN_MAX_LINKS.  They must not compete
+             * with bursty RREQ/Probe/Activate traffic for the generic token
+             * bucket, otherwise an unrelated control burst can create a
+             * false liveness failure.  Peer RX retains its own Heartbeat
+             * request token budget. */
             (void)memset(payload, 0, sizeof(payload));
             payload[0] = UCN_HEARTBEAT_REQUEST;
             write_u32_be(payload + 4U, node->next_heartbeat_id++);
@@ -4452,8 +4768,8 @@ static ucn_result_t send_due_bearer_quality_probe(ucn_node_t *node,
             entry->state != UCN_NEIGHBOR_SUSPECT) {
             continue;
         }
-        primary = select_neighbor_bearer(entry);
-        candidate = find_better_neighbor_bearer(entry, primary);
+        primary = select_neighbor_bearer(node, entry);
+        candidate = find_better_neighbor_bearer(node, entry, primary);
         if (candidate == NULL ||
             candidate->quality_better_samples <
                 UCN_BEARER_QUALITY_STABLE_SAMPLES ||
@@ -5238,6 +5554,9 @@ static ucn_result_t handle_route_reply(ucn_node_t *node,
 
     if (is_candidate && frame->destination == node->config.node_id) {
         ucn_route_entry_t *active_route = find_active_route(node, target);
+        uint16_t candidate_link_cost;
+        bool candidate_link_cost_known;
+        bool candidate_link_selectable;
         bool verification_requested = false;
 
         for (index = 0U; index < UCN_MAX_ROUTE_DISCOVERIES; ++index) {
@@ -5251,9 +5570,15 @@ static ucn_result_t handle_route_reply(ucn_node_t *node,
             }
         }
 
-        if (active_route == NULL || active_route->is_static ||
-            (!candidate_is_sufficiently_better(active_route->route_cost,
-                                                route_cost) &&
+        candidate_link_selectable = link_local_select_cost(
+            node, ingress_link, &candidate_link_cost_known,
+            &candidate_link_cost);
+        (void)candidate_link_cost_known;
+        (void)candidate_link_cost;
+        if (!candidate_link_selectable || active_route == NULL ||
+            active_route->is_static ||
+            (!candidate_route_is_locally_better(node, active_route, route_cost,
+                                                ingress_link) &&
              !(verification_requested && !active_route->verified_rtt_valid &&
                route_cost <= active_route->route_cost &&
                hop_count <= active_route->hop_count))) {
@@ -6131,7 +6456,7 @@ ucn_result_t ucn_node_observe_neighbor(ucn_node_t *node,
             bearer->state = UCN_NEIGHBOR_BEARER_ADMITTED;
             entry->state = UCN_NEIGHBOR_ADMITTED;
             entry->suspect_since_ms = 0U;
-            (void)select_neighbor_bearer(entry);
+            (void)select_neighbor_bearer(node, entry);
             return UCN_OK;
         }
         if (bearer != NULL && bearer->state == UCN_NEIGHBOR_BEARER_CANDIDATE) {
@@ -6205,7 +6530,7 @@ ucn_result_t ucn_node_observe_neighbor(ucn_node_t *node,
     }
     result = admit_neighbor_entry(node, entry);
     if (result == UCN_OK) {
-        (void)select_neighbor_bearer(entry);
+        (void)select_neighbor_bearer(node, entry);
     }
     return result;
 }
@@ -6321,6 +6646,9 @@ ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
     if (node == NULL || link == NULL || link->ops == NULL ||
         link->ops->send == NULL || link->ops->get_status == NULL) {
         return UCN_ERR_ARGUMENT;
+    }
+    if (!ucn_link_liveness_profile_is_valid(link->liveness_profile)) {
+        return UCN_ERR_CONFIG;
     }
     result = resolve_link_local_receive_profile(node, link,
                                                 &local_receive_profile);
@@ -6532,6 +6860,8 @@ static ucn_result_t send_route_discovery_ring(ucn_node_t *node,
     uint8_t payload[UCN_ROUTE_REQ_MAX_PAYLOAD_BYTES];
     ucn_frame_t frame;
     ucn_wire_profile_t request_profile;
+    ucn_rreq_cache_classification_t cache_classification;
+    size_t cache_slot = 0U;
     ucn_result_t result;
 
     if (node == NULL || slot == NULL || hop_limit == 0U ||
@@ -6592,6 +6922,23 @@ static ucn_result_t send_route_discovery_ring(ucn_node_t *node,
     frame.payload = payload;
     frame.payload_length =
         (uint16_t)route_request_payload_size(frame.wire_profile);
+
+    /* Remember the origin's own flood before the first Link send. A
+     * multi-bearer neighbour can legitimately receive the RREQ on one bearer
+     * and re-flood it over another; without this origin entry the returned
+     * copy is learned as a route to self. */
+    cache_classification = classify_route_request(node, &frame, 0U,
+                                                  &cache_slot);
+    if (cache_classification == UCN_RREQ_CACHE_FULL) {
+        slot->active = false;
+        node->stats.route_request_cache_full++;
+        return UCN_ERR_NO_SPACE;
+    }
+    if (cache_classification == UCN_RREQ_CACHE_REPLAY) {
+        slot->active = false;
+        return UCN_ERR_REPLAY;
+    }
+    commit_route_request(node, &frame, 0U, cache_slot);
 
     result = forward_route_request(node, NULL, &frame);
     if (result != UCN_OK) {
@@ -7124,7 +7471,9 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
         frame.hop_limit = route != NULL && route->hop_count != 0U ?
                               route->hop_count : 1U;
     }
-    if (route != NULL && link == route->egress_link && route->route_epoch != 0U) {
+    if (route != NULL &&
+        link == resolve_egress_link(node, route->egress_link) &&
+        route->route_epoch != 0U) {
         frame.flags |= UCN_FRAME_FLAG_ROUTE_EXTENSION;
         frame.has_route_extension = true;
         frame.route_epoch = route->route_epoch;
@@ -7142,7 +7491,7 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
     if (result != UCN_OK) {
         return result;
     }
-    return send_frame_on_link(node, link, &frame);
+    return send_frame_on_logical_egress(node, link, &frame, &link);
 }
 
 /* Re-resolve a Path only after a definitive physical-Bearer failure.  The
@@ -7557,14 +7906,21 @@ static bool auto_balance_path_is_usable(const ucn_node_t *node,
 {
     const ucn_policy_path_entry_t *path;
     const ucn_path_forward_entry_t *wire_path;
+    const ucn_policy_link_quality_snapshot_t *quality;
+    ucn_link_t *active_egress;
 
     path = ucn_node_find_policy_path(node, local_path_id);
     if (path == NULL || path->destination != destination ||
         path->wire_path_id == 0U || path->state != UCN_POLICY_PATH_VERIFIED) {
         return false;
     }
-    if (resolve_policy_path_active_egress((ucn_node_t *)node, path,
-                                          &wire_path) == NULL) {
+    active_egress = resolve_policy_path_active_egress((ucn_node_t *)node, path,
+                                                       &wire_path);
+    if (active_egress == NULL) {
+        return false;
+    }
+    quality = ucn_node_get_link_quality(node, active_egress);
+    if (quality != NULL && !quality->cost.selectable) {
         return false;
     }
     return wire_path != NULL &&
@@ -7604,9 +7960,10 @@ static uint32_t auto_balance_path_score(const ucn_node_t *node,
 {
     const ucn_policy_path_entry_t *path =
         ucn_node_find_policy_path(node, local_path_id);
-    const ucn_policy_link_quality_snapshot_t *quality;
     ucn_link_t *active_egress;
     const uint32_t unknown_score_base = UINT32_MAX / 2U;
+    uint16_t effective_cost;
+    bool effective_cost_known;
     uint32_t score;
     size_t active_flows;
 
@@ -7615,17 +7972,18 @@ static uint32_t auto_balance_path_score(const ucn_node_t *node,
     }
     active_egress = resolve_policy_path_active_egress((ucn_node_t *)node,
                                                        path, NULL);
-    quality = active_egress == NULL ? NULL :
-        ucn_node_get_link_quality(node, active_egress);
     active_flows = auto_balance_active_flow_count(node, local_path_id);
-    if (quality == NULL || !quality->route_cost_valid ||
-        quality->route_cost == 0U ||
-        quality->route_cost == UCN_LINK_ROUTE_COST_UNKNOWN) {
+    if (active_egress == NULL ||
+        !link_local_select_cost((ucn_node_t *)node, active_egress,
+                                &effective_cost_known, &effective_cost)) {
+        return UINT32_MAX;
+    }
+    if (!effective_cost_known) {
         return active_flows >= (size_t)(UINT32_MAX - unknown_score_base) ?
                    UINT32_MAX : unknown_score_base + (uint32_t)active_flows;
     }
     {
-        const uint64_t weighted = (uint64_t)quality->route_cost *
+        const uint64_t weighted = (uint64_t)effective_cost *
                                   (uint64_t)(active_flows + 1U);
 
         score = weighted >= unknown_score_base ? unknown_score_base - 1U :
@@ -7683,7 +8041,8 @@ static uint16_t auto_balance_select_path(const ucn_node_t *node,
             continue;
         }
         score = auto_balance_path_score(node, candidate);
-        if (selected == 0U || score < best_score) {
+        if (selected == 0U || score < best_score ||
+            (score == best_score && candidate < selected)) {
             selected = candidate;
             best_score = score;
         }
@@ -8840,9 +9199,11 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
 #if UCN_FEATURE_PATH
         result = frame.has_path_id ?
                  send_frame_on_path_egress(node, path, &frame, &egress_link) :
-                 send_frame_on_link(node, egress_link, &frame);
+                 send_frame_on_logical_egress(node, egress_link, &frame,
+                                              &egress_link);
 #else
-        result = send_frame_on_link(node, egress_link, &frame);
+        result = send_frame_on_logical_egress(node, egress_link, &frame,
+                                              &egress_link);
 #endif
         if (result == UCN_OK) {
             mark_route_used(node, frame.destination);

@@ -95,13 +95,13 @@ ESP32 测试 Adapter 已提供当前可得输入：ESP-NOW 的 RSSI EWMA、提�
 | `PINNED_FAILOVER` | 固定 Primary。 | 仅硬故障后切已验证 Backup；是否允许再寻路由策略决定。 |
 | `AUTO_BALANCE` | 仅 Q1、仅已验证 Path；按流绑定后分配。 | 受影响流重新绑定到健康成员。 |
 
-自动均衡采用“流亲和 + 租约 + 有界重绑定”：同一 `(source, destination, endpoint[, stream_id])` 在租约内固定 Path；仅在流创建、租约到期、Path Down 或持续拥塞时重新选择。当前实现只以 Known 基础 Cost ×（活动 Flow 数 + 1）选择成员，持续队列压力独立触发重绑；RTT/失败率不进入裸评分。它不复制同一帧，也不做带宽聚合。
+自动均衡采用“流亲和 + 租约 + 有界重绑定”：同一 `(source, destination, endpoint[, stream_id])` 在租约内固定 Path；仅在流创建、租约到期、Path Down 或持续拥塞时重新选择。V5-44/V5-36 后，Full 以 LC-1 `effective_select_cost ×（活动 Flow 数 + 1）` 选择成员，所有动态指标先经固定表归一；持续队列压力仍可独立触发重绑。它不复制同一帧，也不做带宽聚合。
 
 ### 5.1 T22.4 当前实现
 
 当前 Core 的最小 Flow 键为 `(destination, endpoint, Q1)`；同一 Endpoint 真正需要多条独立流时，仍须由产品 Payload ABI 冻结 `stream_id` 后再扩展，而不是给所有帧增加字段。`AUTO_BALANCE` 仅接受精确 Q1 Policy，Primary 必填、Backup 可选，且禁止 `allow_discovery_on_hard_failure`。Primary/Backup 组成最多两条候选 Path，二者都必须是本节点已验证、未到期且 egress 一致的线上 Path。
 
-首次发送或租约到期时，Core 用固定 Flow 表绑定一条成员 Path；`balance_flow_lease_ms=0` 使用默认 2 s。分数为 Known 基础 Cost ×（该 Path 当前活跃 Flow 数 + 1）；Known 永远优于 Unknown。Cost 相同的两个新 Flow 会自然分到不同 Path，而明显更低 Cost 的 Path 可按比例承担更多 Flow。RTT/失败率不直接改变分数，业务帧本身不添加字段。
+首次发送或租约到期时，Core 用固定 Flow 表绑定一条成员 Path；`balance_flow_lease_ms=0` 使用默认 2 s。Full 分数为出口 Link 的 `effective_select_cost ×（该 Path 当前活跃 Flow 数 + 1）`；Known 基础 Cost 永远优于 Unknown。相同分数的新 Flow 按较小 `local_path_id` 确定性选择，活动 Flow 乘数会让后续 Flow 分散。RTT/失败率只通过 LC-1 固定归一表影响本地分数，业务帧本身不添加字段。
 
 同一 Flow 在租约内继续使用原 Path。只有 Path 被硬 Down/不存在，或默认连续 3 个 500 ms 快照的队列压力达到 800‰ 时，才重绑到另一健康成员；当前帧只会在新的成员上发送一次，不复制、不条带化。没有健康成员时返回本地 `LINK_DOWN`/配置错误，不隐式 RREQ；Q0、自动 Discovery 和带宽聚合都被排除。三个宏和租约可按 MCU Profile 覆写，实际门限尚未完成硬件标定。
 

@@ -228,6 +228,8 @@ static int test_profile_contract(void)
     TEST_ASSERT(ucn_path_is_expired(&path_entry, 0U));
     TEST_ASSERT(ucn_path_find(&path_state, 1U, 1U, 1U, 11U) == NULL);
     TEST_ASSERT(ucn_path_install(&path_state, &path_config) == UCN_ERR_CONFIG);
+    TEST_ASSERT(ucn_path_install_capable(&path_state, &path_config,
+                                         &capability) == UCN_ERR_CONFIG);
     TEST_ASSERT(ucn_path_revoke(&path_state, 1U, 1U, 1U, 11U) ==
                 UCN_ERR_CONFIG);
     ucn_path_expire(&path_state, 0U);

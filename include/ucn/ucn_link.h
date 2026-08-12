@@ -14,6 +14,15 @@ typedef struct ucn_link_status {
     uint32_t rx_errors;
 } ucn_link_status_t;
 
+/* Link-local liveness scheduling class.  This changes neither the UCN Wire
+ * frame nor Neighbor identity.  Zero is deliberately DEFAULT so existing
+ * memset/designated product Links preserve the v5 timing contract. */
+typedef enum ucn_link_liveness_profile {
+    UCN_LINK_LIVENESS_DEFAULT = 0,
+    UCN_LINK_LIVENESS_FAST = 1,
+    UCN_LINK_LIVENESS_PROFILE_COUNT = 2
+} ucn_link_liveness_profile_t;
+
 #define UCN_LINK_METRIC_PER_MILLE_MAX ((uint16_t)1000U)
 #define UCN_LINK_ROUTE_COST_UNKNOWN UINT16_MAX
 #define UCN_LINK_ROUTE_COST_MAX ((uint16_t)(UINT16_MAX - 1U))
@@ -38,6 +47,12 @@ typedef struct ucn_link_status {
  *   It is not an application or end-to-end delivery loss ratio.
  * - queue_pressure_per_mille is the Adapter's own outbound queue occupancy
  *   ratio in the same range.  It MUST NOT report UCN Core Q0/Q1 occupancy.
+ * - rx_failure_per_mille covers only Carrier/CRC/reassembly failures observed
+ *   before Core acceptance.  medium_busy and medium_quality are independent
+ *   one-hop physical measurements and may be omitted.
+ * - metrics_timestamp_ms uses the Protocol Owner's monotonic clock domain.
+ *   Legacy Adapters may leave it invalid; Core then treats the callback time
+ *   as the snapshot time and does not invent stale history.
  *
  * Each valid bit controls only its own metric.  For route_cost, zero and the
  * reserved UINT16_MAX sentinel are also rejected even if its valid bit was
@@ -53,6 +68,22 @@ typedef struct ucn_link_metrics {
     uint16_t tx_failure_per_mille;
     bool queue_pressure_valid;
     uint16_t queue_pressure_per_mille;
+    bool rx_failure_rate_valid;
+    uint16_t rx_failure_per_mille;
+    bool medium_busy_valid;
+    uint16_t medium_busy_per_mille;
+    bool medium_quality_valid;
+    uint16_t medium_quality_per_mille;
+    bool medium_metrics_share_source;
+    bool metrics_timestamp_valid;
+    uint32_t metrics_timestamp_ms;
+    bool rtt_reference_valid;
+    uint16_t rtt_reference_ms;
+    bool administrative_bias_valid;
+    int16_t administrative_bias;
+    /* Adapter-owned cumulative diagnostic.  Core adds its own rejected
+     * samples separately and never uses this counter in Cost arithmetic. */
+    uint32_t bad_metric_count;
 } ucn_link_metrics_t;
 
 typedef struct ucn_link ucn_link_t;
@@ -79,6 +110,9 @@ struct ucn_link {
      * inherits the owning Node maximum.  uint8_t deliberately occupies the
      * existing alignment gap on common 32/64-bit ABIs. */
     uint8_t local_receive_wire_profile;
+    /* Stored as one byte in the existing pre-MTU alignment gap on the
+     * supported 32/64-bit ABIs. */
+    uint8_t liveness_profile;
     /* Static Adapter MTU ceiling.  Zero means that the Adapter supplies its
      * current MTU only through get_status(); it does not mean a zero-byte
      * Carrier.  When both ceilings are present, the smaller one wins. */
@@ -89,6 +123,11 @@ struct ucn_link {
      * UNSPECIFIED means a statically provisioned Link with no learned ceiling. */
     ucn_wire_profile_t peer_wire_profile;
 };
+
+static inline bool ucn_link_liveness_profile_is_valid(uint8_t profile)
+{
+    return profile < (uint8_t)UCN_LINK_LIVENESS_PROFILE_COUNT;
+}
 
 /* Resolve the single MTU contract shared by Full/Nano and Adapter-facing
  * code.  A zero result means that no usable MTU is currently known, so the

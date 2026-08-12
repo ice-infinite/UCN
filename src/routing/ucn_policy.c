@@ -186,11 +186,7 @@ static ucn_policy_link_quality_snapshot_t *find_or_allocate_quality_snapshot(
 
 static uint16_t policy_ewma(uint16_t previous, uint16_t sample)
 {
-    const uint32_t alpha = UCN_POLICY_QUALITY_EWMA_ALPHA_PERCENT;
-    const uint32_t value = (uint32_t)previous * (100U - alpha) +
-                           (uint32_t)sample * alpha;
-
-    return (uint16_t)((value + 50U) / 100U);
+    return ucn_link_cost_ewma_update(previous, sample);
 }
 
 static void update_optional_ewma(bool *valid,
@@ -209,6 +205,76 @@ static void update_optional_ewma(bool *valid,
         return;
     }
     *value = policy_ewma(*value, sample);
+}
+
+static void clear_quality_metrics(ucn_policy_link_quality_snapshot_t *snapshot)
+{
+    snapshot->route_cost_valid = false;
+    snapshot->route_cost = 0U;
+    update_optional_ewma(&snapshot->rtt_valid, &snapshot->rtt_ewma_ms,
+                         false, 0U);
+    update_optional_ewma(&snapshot->tx_failure_rate_valid,
+                         &snapshot->tx_failure_ewma_per_mille, false, 0U);
+    update_optional_ewma(&snapshot->queue_pressure_valid,
+                         &snapshot->queue_pressure_ewma_per_mille, false, 0U);
+    update_optional_ewma(&snapshot->rx_failure_rate_valid,
+                         &snapshot->rx_failure_ewma_per_mille, false, 0U);
+    update_optional_ewma(&snapshot->medium_busy_valid,
+                         &snapshot->medium_busy_ewma_per_mille, false, 0U);
+    update_optional_ewma(&snapshot->medium_quality_valid,
+                         &snapshot->medium_quality_ewma_per_mille, false, 0U);
+    snapshot->metrics_timestamp_valid = false;
+    snapshot->metrics_timestamp_ms = 0U;
+    snapshot->rtt_reference_valid = false;
+    snapshot->rtt_reference_ms = 0U;
+    snapshot->administrative_bias = 0;
+    snapshot->adapter_bad_metric_count = 0U;
+}
+
+static void resolve_quality_cost(ucn_policy_state_t *state,
+                                 ucn_policy_link_quality_snapshot_t *snapshot,
+                                 const ucn_link_status_t *status,
+                                 bool medium_metrics_share_source,
+                                 uint32_t now_ms)
+{
+    ucn_link_cost_input_t input;
+    ucn_result_t result;
+
+    (void)memset(&input, 0, sizeof(input));
+    input.link_up = snapshot->is_up;
+    input.mtu_sufficient = status != NULL &&
+                           ucn_link_effective_mtu(snapshot->link, status) != 0U;
+    input.capability_allowed = true;
+    input.base_cost_valid = snapshot->route_cost_valid;
+    input.base_cost = snapshot->route_cost;
+    input.rtt_reference_valid = snapshot->rtt_reference_valid;
+    input.rtt_reference_ms = snapshot->rtt_reference_ms;
+    input.administrative_bias = snapshot->administrative_bias;
+    input.queue_pressure_valid = snapshot->queue_pressure_valid;
+    input.queue_pressure_per_mille = snapshot->queue_pressure_ewma_per_mille;
+    input.tx_failure_rate_valid = snapshot->tx_failure_rate_valid;
+    input.tx_failure_per_mille = snapshot->tx_failure_ewma_per_mille;
+    input.rx_failure_rate_valid = snapshot->rx_failure_rate_valid;
+    input.rx_failure_per_mille = snapshot->rx_failure_ewma_per_mille;
+    input.rtt_valid = snapshot->rtt_valid;
+    input.rtt_ms = snapshot->rtt_ewma_ms;
+    input.medium_busy_valid = snapshot->medium_busy_valid;
+    input.medium_busy_per_mille = snapshot->medium_busy_ewma_per_mille;
+    input.medium_quality_valid = snapshot->medium_quality_valid;
+    input.medium_quality_per_mille = snapshot->medium_quality_ewma_per_mille;
+    input.medium_metrics_share_source = medium_metrics_share_source;
+    input.metrics_timestamp_valid = snapshot->metrics_timestamp_valid;
+    input.metrics_timestamp_ms = snapshot->metrics_timestamp_ms;
+    input.now_ms = now_ms;
+    result = ucn_link_cost_resolve(&input, &snapshot->cost);
+    if (result != UCN_OK) {
+        snapshot->cost.selectable = false;
+        snapshot->rejected_metric_count++;
+        state->stats.quality_bad_metrics++;
+    }
+    if (snapshot->cost.exclusion == UCN_LINK_COST_EXCLUSION_METRICS_STALE) {
+        state->stats.quality_metrics_stale++;
+    }
 }
 
 bool ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
@@ -245,6 +311,9 @@ bool ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
         ucn_link_status_t status;
         ucn_link_metrics_t metrics;
         ucn_result_t result;
+        bool metrics_available;
+        bool medium_metrics_share_source = false;
+        uint32_t rejected_this_sample = 0U;
 
         if (link == NULL || link->ops == NULL || link->ops->get_status == NULL) {
             state->stats.quality_metrics_unavailable++;
@@ -265,26 +334,24 @@ bool ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
         }
 
         (void)memset(&metrics, 0, sizeof(metrics));
-        if (link->ops->get_metrics == NULL ||
-            link->ops->get_metrics(link, &metrics) != UCN_OK) {
-            snapshot->route_cost_valid = false;
-            snapshot->route_cost = 0U;
-            update_optional_ewma(&snapshot->rtt_valid, &snapshot->rtt_ewma_ms,
-                                 false, 0U);
-            update_optional_ewma(&snapshot->tx_failure_rate_valid,
-                                 &snapshot->tx_failure_ewma_per_mille,
-                                 false, 0U);
-            update_optional_ewma(&snapshot->queue_pressure_valid,
-                                 &snapshot->queue_pressure_ewma_per_mille,
-                                 false, 0U);
+        metrics_available = link->ops->get_metrics != NULL &&
+            link->ops->get_metrics(link, &metrics) == UCN_OK;
+        if (!metrics_available) {
+            clear_quality_metrics(snapshot);
             state->stats.quality_metrics_unavailable++;
+            resolve_quality_cost(state, snapshot, &status, false, now_ms);
             continue;
         }
 
-        update_optional_ewma(&snapshot->route_cost_valid, &snapshot->route_cost,
-                             metrics.route_cost_valid && metrics.route_cost != 0U &&
-                                 metrics.route_cost != UCN_LINK_ROUTE_COST_UNKNOWN,
-                             metrics.route_cost);
+        snapshot->route_cost_valid = metrics.route_cost_valid &&
+                                     metrics.route_cost != 0U &&
+                                     metrics.route_cost !=
+                                         UCN_LINK_ROUTE_COST_UNKNOWN;
+        snapshot->route_cost = snapshot->route_cost_valid ?
+                                   metrics.route_cost : 0U;
+        if (metrics.route_cost_valid && !snapshot->route_cost_valid) {
+            rejected_this_sample++;
+        }
         update_optional_ewma(&snapshot->rtt_valid, &snapshot->rtt_ewma_ms,
                              metrics.rtt_valid, metrics.rtt_ms);
         update_optional_ewma(&snapshot->tx_failure_rate_valid,
@@ -293,12 +360,69 @@ bool ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
                                  metrics.tx_failure_per_mille <=
                                      UCN_LINK_METRIC_PER_MILLE_MAX,
                              metrics.tx_failure_per_mille);
+        if (metrics.tx_failure_rate_valid &&
+            metrics.tx_failure_per_mille > UCN_LINK_METRIC_PER_MILLE_MAX) {
+            rejected_this_sample++;
+        }
         update_optional_ewma(&snapshot->queue_pressure_valid,
                              &snapshot->queue_pressure_ewma_per_mille,
                              metrics.queue_pressure_valid &&
                                  metrics.queue_pressure_per_mille <=
                                      UCN_LINK_METRIC_PER_MILLE_MAX,
                              metrics.queue_pressure_per_mille);
+        if (metrics.queue_pressure_valid &&
+            metrics.queue_pressure_per_mille > UCN_LINK_METRIC_PER_MILLE_MAX) {
+            rejected_this_sample++;
+        }
+        update_optional_ewma(&snapshot->rx_failure_rate_valid,
+                             &snapshot->rx_failure_ewma_per_mille,
+                             metrics.rx_failure_rate_valid &&
+                                 metrics.rx_failure_per_mille <=
+                                     UCN_LINK_METRIC_PER_MILLE_MAX,
+                             metrics.rx_failure_per_mille);
+        if (metrics.rx_failure_rate_valid &&
+            metrics.rx_failure_per_mille > UCN_LINK_METRIC_PER_MILLE_MAX) {
+            rejected_this_sample++;
+        }
+        update_optional_ewma(&snapshot->medium_busy_valid,
+                             &snapshot->medium_busy_ewma_per_mille,
+                             metrics.medium_busy_valid &&
+                                 metrics.medium_busy_per_mille <=
+                                     UCN_LINK_METRIC_PER_MILLE_MAX,
+                             metrics.medium_busy_per_mille);
+        if (metrics.medium_busy_valid &&
+            metrics.medium_busy_per_mille > UCN_LINK_METRIC_PER_MILLE_MAX) {
+            rejected_this_sample++;
+        }
+        update_optional_ewma(&snapshot->medium_quality_valid,
+                             &snapshot->medium_quality_ewma_per_mille,
+                             metrics.medium_quality_valid &&
+                                 metrics.medium_quality_per_mille <=
+                                     UCN_LINK_METRIC_PER_MILLE_MAX,
+                             metrics.medium_quality_per_mille);
+        if (metrics.medium_quality_valid &&
+            metrics.medium_quality_per_mille > UCN_LINK_METRIC_PER_MILLE_MAX) {
+            rejected_this_sample++;
+        }
+        medium_metrics_share_source = metrics.medium_metrics_share_source;
+        if (metrics.medium_busy_valid && metrics.medium_quality_valid &&
+            medium_metrics_share_source) {
+            rejected_this_sample++;
+        }
+        snapshot->metrics_timestamp_valid = metrics.metrics_timestamp_valid;
+        snapshot->metrics_timestamp_ms = metrics.metrics_timestamp_valid ?
+                                             metrics.metrics_timestamp_ms : now_ms;
+        snapshot->rtt_reference_valid = metrics.rtt_reference_valid &&
+                                        metrics.rtt_reference_ms != 0U;
+        snapshot->rtt_reference_ms = snapshot->rtt_reference_valid ?
+                                         metrics.rtt_reference_ms : 0U;
+        snapshot->administrative_bias = metrics.administrative_bias_valid ?
+                                            metrics.administrative_bias : 0;
+        snapshot->adapter_bad_metric_count = metrics.bad_metric_count;
+        snapshot->rejected_metric_count += rejected_this_sample;
+        state->stats.quality_bad_metrics += rejected_this_sample;
+        resolve_quality_cost(state, snapshot, &status,
+                             medium_metrics_share_source, now_ms);
         state->stats.quality_samples++;
     }
 

@@ -190,7 +190,7 @@
 
 ### 6.2 V5-REAUD-01 — P2：公开 `ucn_path_forward_config_t` 在中间插入字段，破坏旧调用方的按位置聚合初始化
 
-**v5 归因。** `maximum_wire_profile` 与 `minimum_mtu` 被插入 `remaining_hops` 和既有 `egress_link` 之间，而不是追加到结构体末尾。
+**历史 v5 审计归因。** 当时 `maximum_wire_profile` 与 `minimum_mtu` 被插入 `remaining_hops` 和既有 `egress_link` 之间，而不是追加到结构体末尾；第 7.5 节已记录最终改为独立 API 的修复。
 
 #### 代码证据
 
@@ -212,7 +212,7 @@ ucn_path_forward_config_t cfg = {
 };
 ```
 
-在当前头文件下，`egress_link` 会被赋给 `uint8_t maximum_wire_profile`，`expires_at_ms` 会被赋给 `minimum_mtu`，真正的 `egress_link` 与过期时间则未初始化。使用 Windows x64 GCC 14.2、`-std=c99 -Wall -Wextra -Werror` 对该旧式初始化作独立语法检查，已稳定复现“指针初始化 unsigned char”及“缺少 egress_link 初始化”错误。
+在当时的头文件下，`egress_link` 会被赋给 `uint8_t maximum_wire_profile`，`expires_at_ms` 会被赋给 `minimum_mtu`，真正的 `egress_link` 与过期时间则未初始化。使用 Windows x64 GCC 14.2、`-std=c99 -Wall -Wextra -Werror` 对该旧式初始化作独立语法检查，已稳定复现“指针初始化 unsigned char”及“缺少 egress_link 初始化”错误。
 
 #### 影响
 
@@ -236,3 +236,91 @@ ucn_path_forward_config_t cfg = {
 | `git diff --check -- include src tests docs` | 通过（仅 CRLF 提示，无 diff 格式错误） |
 
 以上均为 Host 软件证据；仍不等价于多板互操作、断链时延、吞吐、栈、功耗或生产密码学验证。
+
+## 7. 2026-08-12 V5-35～V5-47 更新复审（当前未提交工作树）
+
+### 7.1 范围与结论
+
+本轮检查 `ebd3d8f` 之后当前工作树的标准 Preset Resolver、公共 Protocol Owner、Bare metal/FreeRTOS/Zephyr/NuttX/RT-Thread/Host Fake Port，以及 `src` 的模块目录重构与构建矩阵。目录迁移本身未发现改变现有 Core/Path/Policy 行为的证据；新增的 Resolver 也没有把静态 Preset 直接伪装成已实现的物理 Adapter。
+
+该段记录的是修复前审计快照：当时发现 1 项新的 P1、1 项新的 P2；上一轮 `V5-REAUD-01` 的公开结构体位置初始化兼容性 P2 仍未关闭。三项均已在第 7.5 节按最终代码复核关闭。
+
+| 编号 | 严重度 | 范围 | 结论 |
+| --- | --- | --- |
+| V5-REAUD-02 | P1 | Protocol Owner / RTOS Port / Adapter RX Queue | Port API 宣称可由 ISR 直接入队，却未把 `from_isr` 传到 Queue 临界区。单一无令牌的 `enter_critical/exit_critical` 回调无法可移植地同时映射 FreeRTOS 的 Task 与 ISR 临界区，实际接入可能触发断言、破坏中断屏蔽恢复或发生 Queue 竞争。 |
+| V5-REAUD-03 | P2 | CMake + 128 B/3-Link 产品配置 + Scale CTest | 默认启用的 8 节点三叉树 Smoke 需要内部节点 4 条 Link，但代表性产品头固定为 3 条；CMake 仍把该不满足前提的仿真加入 CTest，造成 6 项失败。 |
+| V5-REAUD-01 | P2，保留 | 公共 `ucn_path_forward_config_t` | 第 6.2 节的中间插字段仍在当前头文件中，旧位置初始化的源码兼容性问题未修复。 |
+
+### 7.2 V5-REAUD-02 — P1：ISR 入队路径丢失上下文，临界区接口不足以安全覆盖 RTOS
+
+#### 代码证据
+
+1. 公共 Owner 明确把 `ucn_protocol_owner_rx_enqueue()` 标记为“Driver/ISR entry”。
+
+   - `include/ucn/ports/ucn_protocol_owner.h:58-64`
+
+2. 各 RTOS Port 都向 `*_port_rx_enqueue(..., bool from_isr)` 暴露 ISR 标志；以 FreeRTOS 为例，标志只传给后续通知回调，调用 Queue 的路径没有携带它。
+
+   - `include/ucn/ports/ucn_port_freertos.h:35-40`
+   - `src/ports/ucn_port_freertos.c:27-48`
+
+3. Owner 再调用四参数的 `ucn_adapter_rx_enqueue()`；该函数和 `ucn_port_ops_t` 都没有 ISR 上下文/临界区 token 参数，只能无条件调用同一对 `enter_critical()` / `exit_critical()`。
+
+   - `src/transport/ucn_protocol_owner.c:34-53`
+   - `include/ucn/ucn_adapter.h:133-143`
+   - `include/ucn/ucn_port.h:10-17`
+   - `src/transport/ucn_adapter.c:144-156,241-271`
+
+在 FreeRTOS 等需要区分 `taskENTER_CRITICAL()` 与
+`taskENTER_CRITICAL_FROM_ISR()`（并保存/恢复 ISR mask token）的系统中，产品无法仅凭当前 Queue 回调签名实现一套可移植且可证明正确的锁：按 Task 方式实现在 ISR 调用时非法；按 ISR 方式实现又无法正确覆盖 Owner Task。Host Fake 只计数成对调用，未模拟此上下文差异。
+
+#### 影响
+
+- 这条路径正是 V5-46 和快速手册推荐的“驱动 ISR/回调 → 选定 Port `rx_enqueue()` → Adapter Queue”。在 FreeRTOS/类似 RTOS 的真实 RX 中断压力下，可能发生断言、错误恢复中断状态、Queue 元数据竞争或随机丢帧。
+- 因问题发生在 Node 之前，Host CTest、ASan/UBSan 和 `-fanalyzer` 的单线程通过不能证明此并发合同正确。
+
+#### 修复要求与验收
+
+1. 为 Queue 引入明确的 Task/ISR 两条入口，或在入队 API 和临界区 Ops 中显式传递 `from_isr` 与可恢复的临界区 token；不得由产品猜测当前上下文。
+2. 更保守的替代方案是撤回“ISR 直接进入 Adapter Queue”的合同：ISR 仅写 BSP 自己的 ISR-safe ring 并通知 Owner，Owner Task 再调用普通 `ucn_adapter_rx_enqueue()`。
+3. 在 ESP32 FreeRTOS 等真实目标上验证：连续 ISR RX、同时 Owner Pump、满队列、嵌套中断及通知丢失边界；记录 RX 计数、Queue 不变量和最大 ISR 时长。Host Fake 至少应验证 `from_isr` 被传递到可观测的 Queue 锁路径。
+
+### 7.3 V5-REAUD-03 — P2：低资源产品配置默认 CTest 引入不可满足的 Scale 拓扑
+
+#### 代码证据与复现
+
+1. `tests/config/ucn_test_user_config.h:18-20` 将 `UCN_MAX_LINKS` 固定为 `3`。
+2. `tools/ucn_scale_sim.c:715-724` 的 tree 使用 `parent=(index-1)/3`。8 节点时 Node 1 既连接父节点又连接 4、5、6 三个子节点，度数为 `4`，超过产品上限。
+3. `CMakeLists.txt:286-326` 的默认 Smoke 仍用 8 节点 tree，未先检查 `UCN_MAX_LINKS >= 4`，因此 Full + 产品头且未显式关闭 `UCN_BUILD_SCALE_SIM` 时，`ucn_scale_w0/w1/w2/w3/mixed_smoke` 与 `ucn_scale_auto_smoke` 均以 `SCALE_INIT_FAILED nodes=8 topology=tree` 失败。
+
+相同产品构建的 8 节点 `--topology line` 和 4 节点 tree 均通过；将 `UCN_BUILD_SCALE_SIM=OFF` 后，该产品的 `ucn_tests` 与 `ucn_standard_adapter_product_config_test` 为 `2/2` 通过。这证明失败源于 CTest 选择了超出静态容量的拓扑，而非 Core/Resolver 不能在 128 B 配置工作。
+
+#### 影响与修复要求
+
+- 开发者使用文档中的产品配置进行默认 CMake/CTest，会得到 6 项无诊断的失败；既不能作为有效规模验证，也会掩盖真正的回归。
+- 在配置阶段或注册测试时按拓扑度数门槛跳过并打印原因，或为 `UCN_MAX_LINKS < 4` 改用 line/binary-tree 小规模 Smoke；保留至少一项明确断言“因容量不足被跳过”的测试。
+- Full + 128 B 产品头的发布门禁应分别报告“核心回归通过”和“哪些 Scale 拓扑因产品容量未运行”，不能仅报笼统 CTest 通过。
+
+### 7.4 本次验证记录
+
+| 检查 | 结果 |
+| --- | --- |
+| Windows GCC Full + 配置契约 | `13/13` 通过 |
+| Windows GCC Lite / Nano / Full Service OFF | `10/10`、`1/1`、`10/10` 通过 |
+| Full + 128 B/3-Link 产品头，默认 Scale ON | `5/11` 通过，6 项 tree Smoke 按上述原因失败 |
+| 同一产品头，Scale OFF | `2/2` 通过 |
+| WSL GCC 13.3 Full ASan + UBSan | `13/13` 通过，无 Sanitizer 报错 |
+| WSL GCC 13.3 `-fanalyzer` | `13/13` 通过，无分析告警 |
+| `git diff --check` | 通过（仅 CRLF 提示，无 diff 格式错误） |
+
+Windows MinGW 14.2 本机未安装 `libasan`/`libubsan`，故 Windows Sanitizer 配置阶段无法链接；本轮 Sanitizer 结论以上述 WSL GCC 结果为准。所有结果均是 Host 软件证据，仍未验证真实 FreeRTOS/Zephyr/NuttX/RT-Thread 的 ISR、调度、栈、驱动或实板通信。
+
+### 7.5 V5-48 最终复核与处置（2026-08-12）
+
+| 编号 | 最终代码处置 | 当前软件证据 | 保留边界 |
+| --- | --- | --- | --- |
+| V5-REAUD-02 | `ucn_port_ops_t` 新增 Task/ISR 分离临界区；Adapter/Owner 新增 `*_from_isr()`；五个独立 Port 按 `from_isr` 分流，缺 ISR token 对失败关闭。 | `test_adapter` 断言 token 成对回送/缺锁 `UCN_ERR_CONFIG`；`test_protocol_owner` 覆盖 FreeRTOS、Zephyr、NuttX、RT-Thread、Host Fake 五条 ISR 路径。 | Host Fake 不能证明真实 SDK 的嵌套 ISR、临界区宏、调度或驱动时序。 |
+| V5-REAUD-03 | Scale 常规 Smoke 改为 `--topology auto`；4 Link 选 tree，2～3 Link 选 line；树形容量合同显式输出 `SUPPORTED`/`CAPACITY_SKIPPED`。 | MSVC 128 B/3-Link 产品头 CTest `15/15`；直接运行报告 auto=`line`、tree=`CAPACITY_SKIPPED`。 | line 通过不代表该产品执行过 tree，也不代表真实多板吞吐。 |
+| V5-REAUD-01 | 不再向 `ucn_path_forward_config_t` 添加尾字段；恢复精确八字段，新增独立 `ucn_path_install_capable()` 写入 capability。 | 公共头保留旧八项位置初始化；WSL GCC `-Wmissing-field-initializers -Werror` 构建/CTest `14/14`。 | 这是源码兼容；若存在已编译二进制 ABI，产品仍必须整体重编译。 |
+
+最终回归：Windows MSVC Full+Scale+配置契约 `14/14`，Full+128 B/3-Link 产品头 `15/15`，Lite、Nano、Full Service OFF 各 `1/1`，WSL GCC 13.3 严格告警及 ASan+UBSan+Leak Detection 的 Full+Scale+配置契约均 `14/14`。上述结果仍只构成 Host 软件证据。

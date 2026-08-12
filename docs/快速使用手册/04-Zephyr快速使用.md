@@ -4,28 +4,46 @@
 
 ## 1. 加入 Zephyr 应用构建
 
-在应用 `CMakeLists.txt` 中把 UCN 的九个 C99 源文件作为应用源，并添加仓库 `include/`。路径按你的仓库摆放调整：
+在应用 `CMakeLists.txt` 中按[总览源文件矩阵](README.md#共同的构建输入)选择 UCN C99 源文件，并添加仓库 `include/`。下面明确选择 **Full + Service ON**；换成 Nano/Lite 时必须同时替换源文件和全局 `UCN_PROFILE`，不能只改宏：
 
 ```cmake
 set(UCN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../UCN)
 
+set(UCN_COMMON_SOURCES
+  ${UCN_DIR}/src/core/ucn_core.c
+  ${UCN_DIR}/src/core/ucn_endpoint.c
+  ${UCN_DIR}/src/core/ucn_frame.c
+  ${UCN_DIR}/src/transport/ucn_adapter.c
+  ${UCN_DIR}/src/transport/ucn_standard_adapter.c
+  ${UCN_DIR}/src/transport/ucn_protocol_owner.c)
+set(UCN_PROFILE_SOURCES
+  ${UCN_DIR}/src/node/ucn_node.c
+  ${UCN_DIR}/src/routing/ucn_path.c
+  ${UCN_DIR}/src/routing/ucn_policy.c)
+set(UCN_SERVICE_SOURCES
+  ${UCN_DIR}/src/service/ucn_service.c
+  ${UCN_DIR}/src/service/ucn_service_bridge.c)
+
 target_sources(app PRIVATE
-  ${UCN_DIR}/src/ucn_core.c
-  ${UCN_DIR}/src/ucn_adapter.c
-  ${UCN_DIR}/src/ucn_endpoint.c
-  ${UCN_DIR}/src/ucn_frame.c
-  ${UCN_DIR}/src/ucn_node.c
-  ${UCN_DIR}/src/ucn_path.c
-  ${UCN_DIR}/src/ucn_policy.c
-  ${UCN_DIR}/src/ucn_service.c
-  ${UCN_DIR}/src/ucn_service_bridge.c)
+  ${UCN_COMMON_SOURCES}
+  ${UCN_PROFILE_SOURCES}
+  ${UCN_SERVICE_SOURCES})
 target_include_directories(app PRIVATE ${UCN_DIR}/include)
+target_compile_definitions(app PRIVATE UCN_PROFILE=3 UCN_FEATURE_SERVICE=1)
 ```
 
-`prj.conf` 只需为你的 Protocol Thread、驱动与日志设置资源。以下是起点而非通用 RAM 承诺：
+在应用 `Kconfig` 中定义产品线程栈：
+
+```kconfig
+config APP_UCN_PROTOCOL_STACK_SIZE
+    int "UCN protocol thread stack size"
+    default 2048
+```
+
+再在 `prj.conf` 中配置它。`CONFIG_MAIN_STACK_SIZE` 只控制 Zephyr Main Thread，不能替代独立 Protocol Thread 的栈：
 
 ```ini
-CONFIG_MAIN_STACK_SIZE=2048
+CONFIG_APP_UCN_PROTOCOL_STACK_SIZE=2048
 CONFIG_ASSERT=y
 CONFIG_LOG=y
 ```
@@ -47,7 +65,7 @@ flowchart LR
 
 ## 3. 静态 Protocol Thread
 
-在线程启动前完成 Node 配置：`ucn_node_init()` 后调用 `ucn_node_set_wire_profiles()`，再按产品需要显式开启自动最小档，随后注册 Link 和 Security Provider。建议把固定 TX/最大 RX 档映射为产品 Kconfig 常量，但仍只调用官方 W0～W3 API，不自定义位宽。
+在线程启动前完成 Node 配置：`ucn_node_init()` 后调用 `ucn_node_set_wire_profiles()`，再按产品需要显式开启自动最小档；明文开发节点设置不复用的非零 Boot Session，生产节点安装 Security Provider，随后注册 Link。建议把固定 TX/最大 RX 档映射为产品 Kconfig 常量，但仍只调用官方 W0～W3 API，不自定义位宽。
 
 ```c
 #include <zephyr/kernel.h>
@@ -65,11 +83,12 @@ static void ucn_protocol_thread(void *a, void *b, void *c)
     for (;;) {
         size_t pumped = 0U;
         uint8_t sent = 0U;
+        const uint32_t now_ms = k_uptime_get_32();
 
         app_driver_drain_complete_frames();
         (void)ucn_adapter_rx_pump(&g_rx_queue, &g_node, 4U, &pumped);
-        (void)ucn_service_protocol_bridge_step(&g_bridge, 2U, &sent);
-        (void)ucn_node_step(&g_node, k_uptime_get_32());
+        (void)ucn_service_protocol_bridge_step_at(&g_bridge, now_ms, 2U, &sent);
+        (void)ucn_node_step(&g_node, now_ms);
         k_sleep(K_MSEC(1));
     }
 }
@@ -91,10 +110,11 @@ Zephyr Port 需要三个静态对象：一个 `k_mutex` 保护 Router 短拷贝�
 - 通知对象只存 Endpoint 或计数，不能存第二份大 Payload；业务线程唤醒后循环 `ucn_service_inbox_take()`。
 - 每个 Endpoint 只有一个 Router owner；用 `k_current_get()` 与绑定表拒绝错误线程读取 Inbox。
 - Protocol Thread 必须在同一把 Router 锁下运行 Bridge Step，Hooks 已覆盖 Bridge 的取 Remote TX 和入站投递。
+- `require_remote_q0_validator=true` 的 Binding 必须在安装 Endpoint handlers 前注册产品 Validator；否则 Bridge 按设计返回 `UCN_ERR_CONFIG`。
 
 ## 5. Link 与设备树边界
 
-将 UART、CAN、SPI 无线模块的设备树选择和 Zephyr 驱动 API 放在产品 Adapter 中。Adapter 的 `send()` 把 Core 帧提交给该设备；`get_status()` 反映驱动真实 Up/Down；`get_metrics()` 生成介质无关 Cost。一个对端可有多个 Link（如 UART + Wi-Fi），但保持一个 `peer_node_id`。
+将 UART、CAN、SPI 无线模块的设备树选择和 Zephyr 驱动 API 放在产品 Adapter 中。Adapter 的 `send()` 把 Core 帧提交给该设备；`get_status()` 反映驱动真实 Up/Down/运行期 MTU；`get_metrics()` 生成介质无关 Cost。一个对端可有多个 Link（如 UART + Wi-Fi），但保持一个 `peer_node_id`。静态/动态 MTU 取较小值；窄介质可在注册前设置 Link 本地接收 Wire Profile 上限。
 
 经典 CAN 小 MTU 的分段/重组 Carrier 并不由当前 UCN Core 自动提供；若选 CAN，先实现并单测自己的 Adapter 载体层，再让它向 UCN 交付完整帧。
 

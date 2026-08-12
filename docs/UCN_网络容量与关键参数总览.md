@@ -147,7 +147,7 @@ RREQ档位帧长 × 实际扩散次数 + RREP档位帧长 × 返回跳数
 - Route/Candidate 的累计 Cost 为 32 bit，最高 Known 为 `0xFFFFFFFE`、Unknown 为 `0xFFFFFFFF`；线上 W0/W1/W2/W3 使用 `3/3/3/4 B`。Known 永远优于 Unknown，不可表达或真实溢出失败关闭。
 - Full 的 `AUTO_BALANCE` 只支持 Q1，默认最多 8 个 Flow。
 - 同一 `(Destination, Endpoint, Q1)` 在 2 s 租期内保持 Path 亲和，避免逐帧乱序。
-- 选择分数使用基础 Cost 与活动 Flow 数；Queue Pressure 达 800‰ 且连续 3 个 500 ms 样本后可触发重绑。
+- Full 选择分数使用 LC-1 `effective_select_cost ×（活动 Flow 数 + 1）`；Queue Pressure 达 800‰ 且连续 3 个 500 ms 样本后还可触发未到期 Flow 重绑。
 - Q0 不参与自动均衡，不因瞬时拥塞自动换到未经产品确认的路径。
 
 ## 5. 当前规模模拟结果
@@ -230,9 +230,9 @@ Windows x64、GCC 14.2、Release、Service OFF的当前静态证据：
 
 | Profile | `sizeof(ucn_node_t)` | Core静态库`.text` |
 | --- | ---: | ---: |
-| Nano | 2,648 B | 19,884 B |
-| Lite | 5,960 B | 68,244 B |
-| Full | 9,752 B | 127,792 B |
+| Nano | 2,648 B | 27,662 B |
+| Lite | 6,024 B | 73,735 B |
+| Full | 10,080 B | 139,017 B |
 
 这是 V5-33 后的 Host x64 GCC 14.2 Release/Service OFF 结果；`ucn_link_t=40 B`，Storage Layout Version=5。它只证明固定对象与代码裁剪，不等于目标 MCU ELF/栈/功耗；历史基线见[V5-07 报告](UCN_V5_07_发布门禁与软件验证报告.md)。
 
@@ -280,6 +280,7 @@ Windows x64、GCC 14.2、Release、Service OFF的当前静态证据：
 | Link质量采样 | 500 ms | Core缓存通用质量快照。 |
 | Bearer稳定样本 | 3次 | 候选需要持续明显更优。 |
 | Bearer Probe | 2/最多3次ACK | 防止只凭瞬时Cost切换。 |
+| Bearer切换保持期 | 3000 ms | 软切换后抑制反复横跳；硬失效不等待。 |
 | Q0背压重试 | 最多3次、间隔5 ms | 仅产品显式开启且只处理`NO_SPACE`；不是端到端可靠重传。 |
 
 Driver明确报告Link Down时可立即处理，不必等4秒。Heartbeat也不是唯一活性证据：来自该Neighbor的合法业务或控制帧同样刷新`last_seen`。

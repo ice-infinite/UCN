@@ -33,6 +33,21 @@ static const ucn_service_binding_t VALIDATED_BINDINGS[] = {
       UCN_SERVICE_SOURCE_MASK(BRIDGE_SERVICE_CONTROL), true, true, true }
 };
 
+static bool bridge_has_compact_validator(void)
+{
+    return UCN_SERVICE_MAX_Q0_BINDINGS >= 2U &&
+           UCN_SERVICE_BRIDGE_MAX_VALIDATORS >= 2U;
+}
+
+static uint8_t validated_binding_count(void)
+{
+    const size_t binding_count =
+        sizeof(VALIDATED_BINDINGS) / sizeof(VALIDATED_BINDINGS[0]);
+
+    return (uint8_t)(bridge_has_compact_validator() ? binding_count :
+                                                     binding_count - 1U);
+}
+
 typedef struct bridge_link_context {
     ucn_node_t *peer;
     ucn_link_t *peer_ingress;
@@ -664,8 +679,7 @@ static int test_service_bridge_validator_install_and_replay(void)
     TEST_ASSERT(bridge_init_node(&node, UINT32_C(7)) == 0);
     TEST_ASSERT(bridge_init_router_with_bindings(
                     &router, UINT32_C(7), VALIDATED_BINDINGS,
-                    (uint8_t)(sizeof(VALIDATED_BINDINGS) /
-                              sizeof(VALIDATED_BINDINGS[0]))) == 0);
+                    validated_binding_count()) == 0);
     (void)memset(&bridge, 0, sizeof(bridge));
     (void)memset(&validator_state, 0, sizeof(validator_state));
     TEST_ASSERT(ucn_service_protocol_bridge_init(&bridge, &router, &node) == UCN_OK);
@@ -684,9 +698,15 @@ static int test_service_bridge_validator_install_and_replay(void)
     TEST_ASSERT(ucn_service_protocol_bridge_set_validator(
                     &bridge, 0x60U, bridge_guard_validator,
                     &validator_state) == UCN_OK);
-    TEST_ASSERT(ucn_service_protocol_bridge_set_validator(
-                    &bridge, 0x61U, bridge_compact_validator,
-                    &validator_state) == UCN_OK);
+    if (bridge_has_compact_validator()) {
+        TEST_ASSERT(ucn_service_protocol_bridge_set_validator(
+                        &bridge, 0x61U, bridge_compact_validator,
+                        &validator_state) == UCN_OK);
+    } else {
+        TEST_ASSERT(ucn_service_protocol_bridge_set_validator(
+                        &bridge, 0x61U, bridge_compact_validator,
+                        &validator_state) == UCN_ERR_NOT_FOUND);
+    }
     TEST_ASSERT(ucn_service_protocol_bridge_set_validator(
                     &bridge, 0x40U, bridge_guard_validator,
                     &validator_state) == UCN_ERR_NO_SPACE);
@@ -775,12 +795,10 @@ static int test_service_bridge_validated_two_node_round_trip(void)
     TEST_ASSERT(bridge_init_node(&node_c, UINT32_C(3)) == 0);
     TEST_ASSERT(bridge_init_router_with_bindings(
                     &router_a, UINT32_C(1), VALIDATED_BINDINGS,
-                    (uint8_t)(sizeof(VALIDATED_BINDINGS) /
-                              sizeof(VALIDATED_BINDINGS[0]))) == 0);
+                    validated_binding_count()) == 0);
     TEST_ASSERT(bridge_init_router_with_bindings(
                     &router_c, UINT32_C(3), VALIDATED_BINDINGS,
-                    (uint8_t)(sizeof(VALIDATED_BINDINGS) /
-                              sizeof(VALIDATED_BINDINGS[0]))) == 0);
+                    validated_binding_count()) == 0);
     (void)memset(&ac, 0, sizeof(ac));
     (void)memset(&ca, 0, sizeof(ca));
     (void)memset(&cac, 0, sizeof(cac));
@@ -811,15 +829,19 @@ static int test_service_bridge_validated_two_node_round_trip(void)
     TEST_ASSERT(ucn_service_protocol_bridge_set_validator(
                     &bridge_a, 0x60U, bridge_guard_validator,
                     &validator_a) == UCN_OK);
-    TEST_ASSERT(ucn_service_protocol_bridge_set_validator(
-                    &bridge_a, 0x61U, bridge_compact_validator,
-                    &validator_a) == UCN_OK);
+    if (bridge_has_compact_validator()) {
+        TEST_ASSERT(ucn_service_protocol_bridge_set_validator(
+                        &bridge_a, 0x61U, bridge_compact_validator,
+                        &validator_a) == UCN_OK);
+    }
     TEST_ASSERT(ucn_service_protocol_bridge_set_validator(
                     &bridge_c, 0x60U, bridge_guard_validator,
                     &validator_c) == UCN_OK);
-    TEST_ASSERT(ucn_service_protocol_bridge_set_validator(
-                    &bridge_c, 0x61U, bridge_compact_validator,
-                    &validator_c) == UCN_OK);
+    if (bridge_has_compact_validator()) {
+        TEST_ASSERT(ucn_service_protocol_bridge_set_validator(
+                        &bridge_c, 0x61U, bridge_compact_validator,
+                        &validator_c) == UCN_OK);
+    }
     TEST_ASSERT(ucn_service_protocol_bridge_install_endpoint_handlers(&bridge_a) == UCN_OK);
     TEST_ASSERT(ucn_service_protocol_bridge_install_endpoint_handlers(&bridge_c) == UCN_OK);
 
@@ -998,23 +1020,31 @@ static int test_service_bridge_validated_two_node_round_trip(void)
                     &message) == UCN_ERR_NOT_FOUND);
     TEST_ASSERT(bridge_c.stats.last_inbound_result == UCN_ERR_SECURITY);
 
-    /* A product-specific one-byte format proves Guard is not globally forced. */
-    node_a.session_id = UINT32_C(0x11);
-    TEST_ASSERT(ucn_service_send(
-                    &router_a, UINT32_C(3), BRIDGE_SERVICE_CONTROL, 0x61U,
-                    UCN_TRAFFIC_Q0_CRITICAL, &compact_payload, 1U) == UCN_OK);
-    TEST_ASSERT(ucn_service_protocol_bridge_step_at(
-                    &bridge_a, UINT32_C(1000), 1U, &processed) == UCN_OK);
-    TEST_ASSERT(ucn_service_inbox_take(
-                    &router_c, BRIDGE_SERVICE_ACTUATOR, 0x61U, &message) == UCN_OK &&
-                message.payload_length == 1U && message.payload[0] == compact_payload);
+    if (bridge_has_compact_validator()) {
+        /* A product-specific one-byte format proves Guard is not globally
+         * forced when the selected Service profile has a second Q0 binding. */
+        node_a.session_id = UINT32_C(0x11);
+        TEST_ASSERT(ucn_service_send(
+                        &router_a, UINT32_C(3), BRIDGE_SERVICE_CONTROL, 0x61U,
+                        UCN_TRAFFIC_Q0_CRITICAL, &compact_payload, 1U) == UCN_OK);
+        TEST_ASSERT(ucn_service_protocol_bridge_step_at(
+                        &bridge_a, UINT32_C(1000), 1U, &processed) == UCN_OK);
+        TEST_ASSERT(ucn_service_inbox_take(
+                        &router_c, BRIDGE_SERVICE_ACTUATOR, 0x61U, &message) == UCN_OK &&
+                    message.payload_length == 1U &&
+                    message.payload[0] == compact_payload);
+    }
 
     stats = ucn_service_protocol_bridge_get_stats(&bridge_c);
-    TEST_ASSERT(stats != NULL && stats->inbound_validator_checked == 8U &&
-                stats->inbound_validator_accepted == 3U &&
+    TEST_ASSERT(stats != NULL && stats->inbound_validator_checked ==
+                (bridge_has_compact_validator() ? 8U : 7U) &&
+                stats->inbound_validator_accepted ==
+                (bridge_has_compact_validator() ? 3U : 2U) &&
                 stats->inbound_validator_rejected == 5U &&
                 stats->inbound_validator_missing == 0U &&
-                stats->inbound_delivered == 4U && stats->inbound_rejected == 5U);
+                stats->inbound_delivered ==
+                (bridge_has_compact_validator() ? 4U : 3U) &&
+                stats->inbound_rejected == 5U);
     return 0;
 }
 

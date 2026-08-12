@@ -24,11 +24,11 @@
 | 路径发现 | 应用显式调用 `ucn_node_discover_route()`；`ucn_node_send()` 不会自动发现或缓存等待寻路的业务帧。 |
 | 路径选择 | RREQ 从 `cost=0` 开始，逐 Link 累加 `route_cost`；同一 RREQ 的较低 Cost 副本可替换较高 Cost 副本。 |
 | RREP 度量 | 目标从 `cost=0/hop=0` 回包；每个返回节点按 ingress 对应的目标方向 Link 累加，故缓存字段表示“当前节点到目标”的剩余 Cost/Hop，而不是把源端总 Cost 复制给所有中继。 |
-| 直连多 Link | 每次发送比较同一 Peer 的直接 Link Cost，选较小者。 |
+| 直连多 Link | Full 优先使用本地 LC-1 有效分，Lite/Nano 使用基础 Cost；Known 优先，稳定同分以 `link_id` 确定。 |
 | 多跳缓存 | 每个目标只保存一个 `destination → egress_link` 动态路由，默认 30 秒到期。 |
 | 断链 | 发送发现 `Link Down` 时立即清除相关动态路由，并向上游发送 `ROUTE_ERROR`。 |
 | 自动重选 | 已实现：已使用 Active 路由进入刷新窗口后受限发 RREQ，低 Cost Candidate 经 3 次 Probe/ACK 和 Activate 才替换 Active；普通业务始终先走 Active。 |
-| 指标来源 | Core 只读取通用 `route_cost`；RSSI、SNR、丢包、重传、CRC、Bus-Off 等必须由 Adapter 平滑、归一后提供。 |
+| 指标来源 | Core 只读取通用基础 Cost 与 LC-1 Metrics；RSSI、SNR、重传、CRC、Bus-Off 等必须由 Adapter 先映射，Full 再统一 EWMA/评分。 |
 
 因此，`UCN_ROUTE_ENTRY_LIFETIME_MS=30000` 当前是“最大缓存寿命”，不是“每 30 秒比较并自动切换一次路径”的周期。
 
@@ -54,7 +54,7 @@
 
 当前 C99 Core 使用固定 `ucn_candidate_route_t` 表保存 `(destination, candidate_id) → egress_link`，RREQ/RREP 的末字节标识 Candidate，`PATH_PROBE/ACK` 载荷为 12 B，`PATH_ACTIVATE/ACK` 载荷为 **6 B**（Candidate ID + Route Epoch）。后台仅在路由已使用、距 30 s 验证期不足 6 s、距上次刷新至少 5 s 时启动一次刷新；候选必须比 Active 至少低 20% Cost，并收到 3 个 ACK 才激活。
 
-已验证“候选失败不覆盖 Active、Q0 先于 Probe、成功后经中继激活新 Active、动态业务携带 Epoch 且新旧路径可在 grace 内区分”。v4 默认将 Current/Previous 保留窗口设为 1 s，Unknown Cost 使用 `UINT16_MAX` 保留哨兵且不优于 Known，RREQ/Probe/Activate/Heartbeat 使用固定源端 Token；仍未实现 Cost 抖动窗口和实机标定，因此不能称为绝对无丢包切换。
+已验证“候选失败不覆盖 Active、Q0 先于 Probe、成功后经中继激活新 Active、动态业务携带 Epoch 且新旧路径可在 grace 内区分”。v5 的 Candidate 本地比较已可使用 LC-1 出口贡献，但保存/传播的累计 Cost 不变；同 Neighbor Bearer 另有 20%/3 样本/2 ACK/3000 ms 防抖。Unknown Cost 保留哨兵且不优于 Known，控制帧使用固定源端 Token。真实介质标定仍未完成，因此不能称为绝对无丢包切换。
 
 ## 4. 建议的路由状态模型
 

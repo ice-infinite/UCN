@@ -2,15 +2,15 @@ module: policy_path
 description: 固定 Policy/Path/Flow 表、授权 Path 控制面、Strict/Failover 与 Q1 流亲和均衡。
 entry: policy_path.ucn_node_set_route_policy
 source_files:
-  - src/ucn_policy.c
-  - src/ucn_path.c
-  - src/ucn_node.c
+  - src/routing/ucn_policy.c
+  - src/routing/ucn_path.c
+  - src/node/ucn_node.c
 
 nodes:
   - id: policy_path.ucn_node_set_route_policy
     symbol: ucn_node_set_route_policy
     type: function
-    file: src/ucn_policy.c
+    file: src/routing/ucn_policy.c
     layer: routing
     role: 配置一个精确 (destination, Endpoint, traffic class) 的 AUTO_BEST、Strict、Failover 或 AUTO_BALANCE 策略，并可覆盖 Node 默认 Hop/Cost/RTT 约束。
     called_by:
@@ -23,7 +23,7 @@ nodes:
   - id: policy_path.ucn_node_set_policy_path
     symbol: ucn_node_set_policy_path
     type: function
-    file: src/ucn_policy.c
+    file: src/routing/ucn_policy.c
     layer: routing
     role: 将本地 Path 句柄关联到目标、已认证 wire_path_id、首跳 Link、VERIFIED 状态及可选端到端 Cost/RTT 质量。
     called_by:
@@ -35,7 +35,7 @@ nodes:
   - id: policy_path.ucn_path_install
     symbol: ucn_path_install
     type: function
-    file: src/ucn_path.c
+    file: src/routing/ucn_path.c
     layer: routing
     role: 在固定逐跳转发表安装/更新 (owner, session, path_id, destination) 的下一跳、剩余跳数、共同 Profile/MTU 能力和租约。
     called_by:
@@ -47,7 +47,7 @@ nodes:
   - id: policy_path.ucn_node_install_local_path
     symbol: ucn_node_install_local_path
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 兼容包装：在 Path 源 Node 安装本机首跳，能力参数留空并由本跳逻辑 Bearer 交集派生。
     called_by:
@@ -64,7 +64,7 @@ nodes:
   - id: policy_path.ucn_node_install_local_path_capable
     symbol: ucn_node_install_local_path_capable
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 安装源端 Path，并把控制器提供的整条 Path Profile/MTU 瓶颈与本地逻辑下一跳全部合格 Bearer 的共同能力求交。
     called_by:
@@ -80,7 +80,7 @@ nodes:
   - id: policy_path.ucn_node_send_path_install
     symbol: ucn_node_send_path_install
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 向一个中继或终端发送 v5 基础 PATH_INSTALL，保持旧 v5 接收端可解析的 8/11/14/17 B Schema。
     called_by:
@@ -96,7 +96,7 @@ nodes:
   - id: policy_path.ucn_node_send_path_install_capable
     symbol: ucn_node_send_path_install_capable
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 将控制器已知的整条 Path 最大 Wire Profile 与最小 MTU 编入 PATH_INSTALL，并发送给一个中继或终端。
     called_by:
@@ -112,7 +112,7 @@ nodes:
   - id: policy_path.send_path_install_internal_static
     symbol: send_path_install_internal
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 按调用方显式选择编码基础或扩展 PATH_INSTALL，完成 Profile/字段/MTU 校验后发送。
     called_by:
@@ -129,7 +129,7 @@ nodes:
   - id: policy_path.handle_path_install_static
     symbol: handle_path_install
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 先验证 PATH_INSTALL Profile/长度与运行期 Remaining Hops，再执行权限、预算和下一跳检查，最后安装中继/终端 Path 表项。
     called_by:
@@ -152,7 +152,7 @@ nodes:
   - id: policy_path.handle_path_revoke_static
     symbol: handle_path_revoke
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 验证 PATH_REVOKE 权限与 Payload，在独立预算允许后幂等撤销 Path 表项。
     called_by:
@@ -170,7 +170,7 @@ nodes:
   - id: policy_path.send_endpoint_pinned_static
     symbol: send_endpoint_pinned
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 执行 PINNED_STRICT 或 PINNED_FAILOVER：先过滤不满足 Hop/Cost/RTT 约束的 Path，再走 Primary，只对硬失败尝试 Backup。
     called_by:
@@ -191,7 +191,7 @@ nodes:
   - id: policy_path.send_endpoint_auto_balance_static
     symbol: send_endpoint_auto_balance
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 对 Q1 Flow 在满足 Hop/Cost/RTT 约束的 Primary/Backup 已验证 Path 中选择或复用绑定，之后从选中 Path 发送。
     called_by:
@@ -212,35 +212,38 @@ nodes:
   - id: policy_path.auto_balance_select_path_static
     symbol: auto_balance_select_path
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
-    role: 先解析每条逻辑 Path 当前实际 Bearer，再按 Known 基础 Cost 乘以活跃 Flow 数加一选择最低分 Path；Unknown 不优于 Known。
+    role: 先解析每条逻辑 Path 当前实际 Bearer，再按 LC-1 effective_select_cost 乘以活跃 Flow 数加一选择最低分 Path；Unknown 不优于 Known。
     called_by:
       - policy_path.send_endpoint_auto_balance_static
     calls:
       - target: policy_path.quality_query_helpers_static
         type: direct
-        reason: 读取基础 Cost；RTT/失败率不进入裸评分，持续队列压力只单独触发拥塞重绑。
+        reason: 读取本地 LC-1 结果；持续队列压力仍可按既有三样本门限触发未到期 Flow 重绑。
 
   - id: policy_path.ucn_policy_refresh_link_quality
     symbol: ucn_policy_refresh_link_quality
     type: function
-    file: src/ucn_policy.c
+    file: src/routing/ucn_policy.c
     layer: routing
-    role: 周期读取每条物理 Link 的通用 metrics，并用 EWMA 更新固定质量快照；不直接把某个物理 Link Down 等同于逻辑 Path Down。
+    role: 每 500 ms 读取每条物理 Link 的通用 metrics，以 25% 定点 EWMA 更新固定质量快照并调用 LC-1 Resolver；不直接把某个物理 Link Down 等同于逻辑 Path Down。
     called_by:
       - node_runtime.ucn_node_step
     calls:
       - target: external.link_ops_get_metrics
         type: external
         reason: Adapter 提供 Cost/RTT/失败率/队列压力的真实或可用指标。
+      - target: core.ucn_link_cost_resolve
+        type: direct
+        reason: 生成只在本节点使用的 effective_select_cost 与排除原因。
     notes:
       - Core 不读取 RSSI、CAN 错误寄存器等介质私有字段；未知指标保持未知而非伪造。
 
   - id: policy_path.refresh_policy_path_bearers_static
     symbol: refresh_policy_path_bearers
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 每次完成物理质量采样后，核对 Wire Path 并解析逻辑 Neighbor 当前 Bearer，用该 Bearer 更新 Path 活性、拥塞和 DOWN→VERIFIED 恢复。
     called_by:
@@ -255,7 +258,7 @@ nodes:
   - id: policy_path.ucn_policy_expire_flows
     symbol: ucn_policy_expire_flows
     type: function
-    file: src/ucn_policy.c
+    file: src/routing/ucn_policy.c
     layer: routing
     role: 回收 Q1 Flow 固定表中过期的租约绑定。
     called_by:
@@ -265,7 +268,7 @@ nodes:
   - id: policy_path.ucn_path_expire
     symbol: ucn_path_expire
     type: function
-    file: src/ucn_path.c
+    file: src/routing/ucn_path.c
     layer: routing
     role: 回收租约到期的逐跳 Path 转发表项。
     called_by:
@@ -275,7 +278,7 @@ nodes:
   - id: policy_path.policy_lookup_helpers_static
     symbol: ucn_node_find_route_policy
     type: function
-    file: src/ucn_policy.c
+    file: src/routing/ucn_policy.c
     layer: routing
     role: 按目的 Node、Endpoint、QoS 匹配精确策略或 traffic-class 通配规则。
     called_by:
@@ -285,7 +288,7 @@ nodes:
   - id: policy_path.path_control_helpers_static
     symbol: authorize_path_control/install_path_forward_entry
     type: module
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: Path 控制面权限检查与向固定逐跳表写入/更新的内部组。
     called_by:
@@ -302,7 +305,7 @@ nodes:
   - id: policy_path.path_control_budget_helpers_static
     symbol: find_path_control_source_budget/take_path_control_source_token
     type: module
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 在双重授权后、Path 写入前，以固定 Source/Session 表分别限制 INSTALL 与 REVOKE。
     called_by:
@@ -316,7 +319,7 @@ nodes:
   - id: policy_path.policy_path_send_helpers_static
     symbol: send_endpoint_on_policy_path
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 校验本地 Policy Path 为 VERIFIED 且有 wire_path_id 后走 Path 发送。
     called_by:
@@ -330,7 +333,7 @@ nodes:
   - id: policy_path.flow_binding_helpers_static
     symbol: auto_balance_bind_path/ucn_node_bind_q1_flow
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 创建或更新固定 Q1 Flow 租约绑定，保证同 Flow 不逐帧换 Path。
     called_by:
@@ -340,7 +343,7 @@ nodes:
   - id: policy_path.quality_query_helpers_static
     symbol: ucn_node_get_link_quality
     type: function
-    file: src/ucn_policy.c
+    file: src/routing/ucn_policy.c
     layer: routing
     role: 读取 Node 保存的 Link 质量快照，供均衡评分和管理诊断使用。
     called_by:
@@ -351,7 +354,7 @@ nodes:
   - id: policy_path.path_invalidation_helpers_static
     symbol: revoke_path_and_mark_local_policy/revoke_paths_by_unavailable_egress
     type: module
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 在 Path RERR 或完整逻辑下一跳不可用时，回收受影响 Path 并标记对应本机 Policy Path Down。
     called_by:

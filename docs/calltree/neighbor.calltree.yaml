@@ -2,14 +2,14 @@ module: neighbor
 description: Candidate→Admitted→Suspect/Expired 生命周期，以及同一对端多个 Bearer 的主备管理。
 entry: neighbor.ucn_node_observe_neighbor
 source_files:
-  - src/ucn_node.c
+  - src/node/ucn_node.c
   - include/ucn/ucn_neighbor.h
 
 nodes:
   - id: neighbor.ucn_node_observe_neighbor
     symbol: ucn_node_observe_neighbor
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: Adapter 观察到候选 Link 后创建/刷新 Candidate Neighbor 状态。
     called_by:
@@ -24,7 +24,7 @@ nodes:
   - id: neighbor.ucn_node_broadcast_hello
     symbol: ucn_node_broadcast_hello
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 在指定发现 Link 上发送最小 HELLO，声明本 Node 身份和网络。
     called_by:
@@ -38,7 +38,7 @@ nodes:
   - id: neighbor.handle_hello_static
     symbol: handle_hello
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 收到 HELLO 后验证 Node 身份并依据 Join Policy 创建或合并 Bearer。
     called_by:
@@ -56,7 +56,7 @@ nodes:
   - id: neighbor.admit_neighbor_entry_static
     symbol: admit_neighbor_entry
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 写入固定 Neighbor/Bearer 表，执行 Join Provider/人工准入并选择初始 Primary。
     called_by:
@@ -72,7 +72,7 @@ nodes:
   - id: neighbor.maintain_neighbor_liveness_static
     symbol: maintain_neighbor_liveness
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 基于每 Bearer 的 last_seen/状态推进正常、SUSPECT、Down 和全失效回收。
     called_by:
@@ -93,7 +93,7 @@ nodes:
   - id: neighbor.send_due_heartbeat_static
     symbol: send_due_heartbeat
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 向每个已准入直连 Neighbor 的当前 Primary 发送一跳 Heartbeat。
     called_by:
@@ -108,7 +108,7 @@ nodes:
   - id: neighbor.evaluate_bearer_quality_static
     symbol: evaluate_bearer_quality
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 基于 Link Cost 和一跳 Probe/ACK 判断是否把同一 Neighbor 的 Backup 升为 Primary。
     called_by:
@@ -126,7 +126,7 @@ nodes:
   - id: neighbor.candidate_link_helpers_static
     symbol: link_is_candidate_eligible
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 核验候选 Link 的指针、MTU、对端身份和可用状态。
     called_by:
@@ -137,7 +137,7 @@ nodes:
   - id: neighbor.bearer_lifecycle_helpers_static
     symbol: mark_neighbor_bearer_down/switch_neighbor_primary/send_due_bearer_quality_probe
     type: module
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 单 Bearer Down 标记、Primary 切换以及一跳质量 Probe/ACK 的内部辅助组。
     called_by:
@@ -151,7 +151,7 @@ nodes:
   - id: neighbor.touch_neighbor_static
     symbol: touch_neighbor
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: routing
     role: 已准入 Link 收到有效帧后更新对应 Bearer 的最后活动时间和存活状态。
     called_by:

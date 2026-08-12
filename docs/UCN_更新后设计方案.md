@@ -39,7 +39,7 @@
 | 多跳路由 | Active/Candidate 固定表、初始 RREP Epoch、Current/Previous Route Epoch 和默认 1 s grace。 | 实机窗口标定。 |
 | 最优路径 | 已使用路由在刷新窗口发受限 Candidate RREQ；候选至少低 20% Cost，经 3 次 Probe/ACK 才 Activate；Unknown 使用 `UINT16_MAX` 保留哨兵且不优于 Known。 | Adapter Cost 抖动连续窗口和实机门限。 |
 | 切换 | 旧 Active 持续承载业务直到 Activate ACK；Activate/ACK 携带 Epoch，旧出口在 grace 内可按 Epoch 转发。 | 已交给驱动的帧不迁移；仍不承诺零乱序/零丢失。 |
-| 控制面保护 | RREQ/Probe/Activate/Heartbeat 有固定源端 Token、最小间隔、固定统计和队列上限。 | HELLO 随机退避、每 Adapter/每 Link 空口配额。 |
+| 控制面保护 | RREQ/Probe/Activate 使用固定源端 Token；周期 Heartbeat 由固定 Link/Bearer 上限和 DEFAULT/FAST 节拍独立约束，入站请求仍有每 Peer 固定预算。 | HELLO 随机退避与真实 Adapter 空口参数继续按介质标定。 |
 | 路径诊断 | `PATH_TRACE_REQ/REPLY` 逐跳记录 Node ID，固定 Pending/Reverse 表反向返回，独立低频 Token；仅查询当前 Cache，不触发 RREQ。 | 三板 Trace 时延/断链/重组网、产品 Trace ACL 与拓扑保密策略。 |
 | 节点快照 | `NODE_SNAPSHOT_REQ/REPLY` 受限泛洪，一次窗口汇总可达 Node ID 与直接 Link 数；中继只存短期 Reverse，源端固定结果表。 | 五节点收集率、空口负载、网络分区、默认 ACL 的产品授权表与完整邻接图策略。 |
 | 策略诊断 | `POLICY_DIAGNOSTIC_REQ/REPLY` 经目标 ACL 授权后单播查询一个固定 Policy/Path/Flow/quality 槽位或 Summary 页；8 B 请求、32 B 回复、独立 Token。 | 管理 ACL/Security Provider、真实时延/控制开销、多板并发诊断与故障环境。 |

@@ -1,6 +1,6 @@
 # UCN 节点入离网与网络稳定性建议
 
-> 状态：v4 Core 已实现 Heartbeat/邻居回收和源端 RREQ/Probe/Activate/Heartbeat Token；随机 HELLO 退避与实机 Profile 仍待实施。  
+> 状态：v5 Core 已实现 Heartbeat/邻居回收和每 Link DEFAULT/FAST 存活档位；RREQ/Probe/Activate 使用通用源端 Token，周期 Heartbeat 由固定档位节拍独立约束。随机 HELLO 退避已实现，真实介质参数仍需实机标定。
 > 日期：2026-08-07  
 > 适用范围：一跳邻居发现、入网、存活检测、离网回收与入网波动控制；不改变 MCU-first、固定资源和 Linux 非必需边界。
 

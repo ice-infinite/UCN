@@ -4,7 +4,7 @@
 
 ## 1. 放置方式
 
-将 UCN 当作产品 App 的私有静态库或源码组：加入 `src/` 的九个 C99 文件、`include/ucn/`，再依照你当前 NuttX 树的 App 构建规范注册到该 App。不同 NuttX 版本和项目可能使用 `Make.defs`、`CMakeLists.txt` 或已有的统一 App 规则；应跟随目标树中已有 App 的方式，而不是从其他版本复制构建文件。
+将 UCN 当作产品 App 的私有静态库或源码组：按照[总览的 Profile 源文件矩阵](README.md#共同的构建输入)选择 Nano/Lite/Full 与可选 Service 源文件，加入 `include/ucn/`，再依照当前 NuttX 树的 App 构建规范注册。所有 UCN 与产品编译单元必须共享相同的 `UCN_PROFILE`、`UCN_FEATURE_SERVICE` 和配置头。不同 NuttX 版本和项目可能使用 `Make.defs`、`CMakeLists.txt` 或已有统一 App 规则；应跟随目标树中已有 App 的方式，而不是从其他版本复制构建文件。
 
 建议在产品 Kconfig 定义以下**产品**选项，然后转成 UCN 编译宏：
 
@@ -20,7 +20,7 @@ CONFIG_PRODUCT_UCN_SERVICE_Q0_DEPTH=4
 
 ## 2. 选择唯一的 Protocol 执行上下文
 
-无论选择 pthread 还是 Work Queue，都在其启动前完成 `ucn_node_init()` → `ucn_node_set_wire_profiles()` → 可选 `ucn_node_set_wire_profile_auto(true)` → Link/Security 注册。不要从 shell 命令或第二线程运行时改 Wire 域；需要改变产品域时应安全停网并重建 Node。
+无论选择 pthread 还是 Work Queue，都在其启动前完成 `ucn_node_init()` → `ucn_node_set_wire_profiles()` → 可选 `ucn_node_set_wire_profile_auto(true)` → 明文 Boot Session 或生产 Security → Link 注册。不要从 shell 命令或第二线程运行时改 Wire 域；需要改变产品域时应安全停网并重建 Node。
 
 二选一，不要混用：
 
@@ -40,11 +40,13 @@ static void *ucn_protocol_main(void *argument)
     while (!g_stop_requested) {
         size_t pumped = 0U;
         uint8_t bridged = 0U;
+        const uint32_t now_ms = product_monotonic_ms();
 
         nuttx_adapter_drain_rx_frames();
         (void)ucn_adapter_rx_pump(&g_rx_queue, &g_node, 4U, &pumped);
-        (void)ucn_service_protocol_bridge_step(&g_bridge, 2U, &bridged);
-        (void)ucn_node_step(&g_node, product_monotonic_ms());
+        (void)ucn_service_protocol_bridge_step_at(&g_bridge, now_ms,
+                                                   2U, &bridged);
+        (void)ucn_node_step(&g_node, now_ms);
         product_wait_rx_or_periodic_tick();
     }
     return NULL;
@@ -73,7 +75,7 @@ static void nuttx_adapter_drain_rx_frames(void)
 }
 ```
 
-因为这个 Queue 只由 Protocol Thread 访问，可用 `ucn_adapter_rx_queue_init(&g_rx_queue, NULL, NULL)`。若你确实让其他线程提交 Adapter Queue，必须提供不会在中断中睡眠的 `ucn_port_ops_t` 临界区实现，并重新审查锁顺序。
+因为这个 Queue 只由 Protocol Thread 访问，可用 `ucn_adapter_rx_queue_init(&g_rx_queue, NULL, NULL)`。若其他任务提交，必须提供任务临界区；若 ISR 直接提交完整帧，必须提供返回/恢复 token 的 ISR 临界区并使用 `ucn_adapter_rx_enqueue_from_isr()`。不能把可能睡眠的线程锁用于 ISR。
 
 ## 4. NuttX 业务任务和 Service Router
 
@@ -83,6 +85,7 @@ static void nuttx_adapter_drain_rx_frames(void)
 - 每个固定 Service 的通知 semaphore/轻量事件；
 - Service ID 到 pthread ID 的静态绑定表；
 - `ucn_service_protocol_bridge_set_inbound_hooks()` 的 lock/unlock/observer。
+- 每个要求远端 Q0 Validator 的 Binding 对应一个启动期 Validator 注册；必须早于 Endpoint handler 安装。
 
 业务 pthread 在短锁中调用 `ucn_service_send()` 和 `ucn_service_inbox_take()`；observer 在锁外 `sem_post()` 或等价通知消费者。通知只表示“可能有数据”，消费者必须把自己的 Inbox 读到 `UCN_ERR_NOT_FOUND`。不要用一个全局无界消息队列替换 Router 的 Q0 FIFO/Q1 Latest Value 语义。
 
@@ -90,7 +93,8 @@ static void nuttx_adapter_drain_rx_frames(void)
 
 ## 5. Link、身份与安全
 
-- 把 NuttX 设备文件、SocketCAN 或 UART 初始化封装在产品 Link 的 `open/send/poll_rx/get_status/get_metrics/close` 中。
+- 把 NuttX 设备文件、SocketCAN 或 UART 初始化封装在产品 Link 的 `open/send/poll_rx/get_status/get_metrics/close` 中；Node 注册 Link 时会调用 `open()`，不要预先重复打开。
+- `get_status().mtu` 报告当前运行期完整 UCN 帧上限；与静态 `link.mtu` 同时存在时取较小值，两者都为 0 时暂不可发送，运行期恢复后继续使用原注册 Link。
 - `network_id` 在同一网内相同，`node_id` 由板级受控配置或持久存储给出，网络内不得重复。不要把 `/dev/ttyS*` 或 CAN ID 当 Node ID。
 - NuttX 不会自动提供 UCN 生产安全：若 Endpoint 要求 E2E 保护，产品必须实现并安装 `ucn_security_ops_t`、密钥与单调计数器持久化。
 

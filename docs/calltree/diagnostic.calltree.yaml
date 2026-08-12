@@ -2,13 +2,13 @@ module: diagnostic
 description: 不常驻、不泛洪业务数据的按需 Path Trace、Node Snapshot 与单 Node Policy 诊断。
 entry: diagnostic.ucn_node_request_path_trace
 source_files:
-  - src/ucn_node.c
+  - src/node/ucn_node.c
 
 nodes:
   - id: diagnostic.ucn_node_request_path_trace
     symbol: ucn_node_request_path_trace
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: diagnostic
     role: 由本机管理/测试代码发起到指定目的 Node 的按需路径追踪。
     called_by:
@@ -27,7 +27,7 @@ nodes:
   - id: diagnostic.handle_path_trace_request_static
     symbol: handle_path_trace_request
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: diagnostic
     role: 追加本 Node 到 Trace，抵达目的则反向回复，否则按当前路径继续转发。
     called_by:
@@ -46,7 +46,7 @@ nodes:
   - id: diagnostic.ucn_node_request_node_snapshot
     symbol: ucn_node_request_node_snapshot
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: diagnostic
     role: 发起低频、受限广播的全网可达 Node 快照请求。
     called_by:
@@ -62,7 +62,7 @@ nodes:
   - id: diagnostic.handle_node_snapshot_request_static
     symbol: handle_node_snapshot_request
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: diagnostic
     role: 经过 Snapshot authorizer 后写短期 Reverse、随机抖动排队本机 Reply，并受限泛洪请求。
     called_by:
@@ -81,7 +81,7 @@ nodes:
   - id: diagnostic.ucn_node_request_policy_diagnostic
     symbol: ucn_node_request_policy_diagnostic
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: diagnostic
     role: 向一个指定 Node 请求 Summary 或一个固定 Policy/Path/Flow/quality 槽位。
     called_by:
@@ -93,7 +93,7 @@ nodes:
   - id: diagnostic.handle_policy_diagnostic_request_static
     symbol: handle_policy_diagnostic_request
     type: function
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: diagnostic
     role: 验证管理 Node 授权后，从现有固定 Policy/Path/Flow/质量表构建一页 Reply。
     called_by:
@@ -112,7 +112,7 @@ nodes:
   - id: diagnostic.send_due_diagnostics_static
     symbol: send_due_diagnostics
     type: module
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: diagnostic
     role: Node step 的低优先级诊断发送组：Snapshot Reply、Policy Reply/Request 和路由维护。
     called_by:
@@ -133,7 +133,7 @@ nodes:
   - id: diagnostic.control_handlers
     symbol: diagnostic_control_handlers
     type: module
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: diagnostic
     role: Node receive 中按控制 message_type 分派 Trace、Snapshot 与 Policy Diagnostic 的分组节点。
     called_by:
@@ -152,7 +152,7 @@ nodes:
   - id: diagnostic.path_trace_runtime_helpers_static
     symbol: send_path_trace_request_on_link/send_path_trace_reply_on_link
     type: module
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: diagnostic
     role: 按请求 Wire Profile 编码、转发和反向回送 Path Trace 帧，并管理固定 Reverse/Pending 槽。
     called_by:
@@ -166,7 +166,7 @@ nodes:
   - id: diagnostic.node_snapshot_runtime_helpers_static
     symbol: queue_node_snapshot_reply/forward_node_snapshot_request/send_due_node_snapshot_reply
     type: module
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: diagnostic
     role: Snapshot 的 Reply 固定队列、请求 Profile 继承、抖动延迟发送和受限泛洪辅助组。
     called_by:
@@ -180,7 +180,7 @@ nodes:
   - id: diagnostic.policy_diagnostic_runtime_helpers_static
     symbol: policy_diagnostic_build_reply/queue_reply/send_due_request_reply
     type: module
-    file: src/ucn_node.c
+    file: src/node/ucn_node.c
     layer: diagnostic
     role: 组装固定 32 B Policy Reply，维护固定 Pending/Reply 槽并在低优先级发送。
     called_by:

@@ -85,7 +85,7 @@ Tree + two-hop；100 个测量 Tick；每 Node 每 Tick 1 帧、16 B Payload；�
 
 Wire档位与 Build Profile 正交。Full 是本轮主极限矩阵；Lite 另外重放 W3/4096 和 mixed/254 本地高负载，两组均 100% 交付。V5-10 当时 Host ABI 的 `sizeof(ucn_node_t)` 为 Full `9400 B`、Lite `5888 B`；4096 个 Node 对应当时纯 Node 固定存储约 `38,502,400 B` 与 `24,117,248 B`。
 
-V5-33 后当前 x64 GCC 14.2 Release/Service OFF 的 Nano/Lite/Full Node 为 `2648/5960/9752 B`，Link 为 `40 B`，Archive `.text` 为 `19884/68244/127792 B`，Storage Layout Version=5。V5-10 的 4096 Node 固定存储估算不能套用到当前结构。Harness 的事件堆、直方图和 CSV 内存不进入 MCU；也不能从 Host 工作时间推算 ESP32/STM32 CPU、Task 栈、功耗或真实空口容量。
+V5-33 当时 x64 GCC 14.2 Release/Service OFF 的 Nano/Lite/Full Node 为 `2648/5960/9752 B`，Link 为 `40 B`，Archive `.text` 为 `19884/68244/127792 B`。V5-44/V5-36 后当前值见 S04：`2648/6024/10080 B`、Link `40 B`、Archive `.text` `27662/73735/139017 B`。V5-10 的 4096 Node 固定存储估算不能套用到当前结构。Harness 的事件堆、直方图和 CSV 内存不进入 MCU；也不能从 Host 工作时间推算 ESP32/STM32 CPU、Task 栈、功耗或真实空口容量。
 
 ## 8. 复现入口与结果文件
 

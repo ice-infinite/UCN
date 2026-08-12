@@ -16,6 +16,11 @@ typedef struct adapter_receive_state {
 typedef struct adapter_lock_state {
     uint32_t enter_count;
     uint32_t exit_count;
+    uint32_t isr_enter_count;
+    uint32_t isr_exit_count;
+    ucn_port_critical_token_t next_isr_token;
+    ucn_port_critical_token_t last_isr_enter_token;
+    ucn_port_critical_token_t last_isr_exit_token;
 } adapter_lock_state_t;
 
 static ucn_result_t adapter_link_send(ucn_link_t *link,
@@ -56,8 +61,29 @@ static void adapter_exit_critical(void *context)
     state->exit_count++;
 }
 
+static ucn_port_critical_token_t adapter_enter_critical_from_isr(void *context)
+{
+    adapter_lock_state_t *state = (adapter_lock_state_t *)context;
+
+    state->isr_enter_count++;
+    state->next_isr_token++;
+    state->last_isr_enter_token = state->next_isr_token;
+    return state->last_isr_enter_token;
+}
+
+static void adapter_exit_critical_from_isr(
+    void *context,
+    ucn_port_critical_token_t token)
+{
+    adapter_lock_state_t *state = (adapter_lock_state_t *)context;
+
+    state->isr_exit_count++;
+    state->last_isr_exit_token = token;
+}
+
 static const ucn_port_ops_t ADAPTER_PORT_OPS = {
-    NULL, NULL, NULL, NULL, adapter_enter_critical, adapter_exit_critical
+    NULL, NULL, NULL, NULL, adapter_enter_critical, adapter_exit_critical,
+    adapter_enter_critical_from_isr, adapter_exit_critical_from_isr
 };
 
 static void adapter_receive_callback(void *context, const ucn_frame_t *frame)
@@ -111,6 +137,7 @@ int test_adapter(void)
     adapter_link_context_t link_context, conflicting_context;
     ucn_adapter_peer_binding_t bindings[2];
     ucn_adapter_rx_queue_t queue, overflow_queue;
+    ucn_port_ops_t invalid_port_ops;
     adapter_receive_state_t receive_state;
     adapter_lock_state_t lock_state;
     uint8_t encoded[UCN_MAX_FRAME_BYTES];
@@ -160,13 +187,17 @@ int test_adapter(void)
                                       &conflicting_link) == UCN_OK);
 
     TEST_ASSERT(ucn_adapter_rx_queue_init(&queue, &ADAPTER_PORT_OPS,
-                                          &lock_state) == UCN_OK);
+                                           &lock_state) == UCN_OK);
+    invalid_port_ops = ADAPTER_PORT_OPS;
+    invalid_port_ops.enter_critical_from_isr = NULL;
+    TEST_ASSERT(ucn_adapter_rx_queue_init(&overflow_queue, &invalid_port_ops,
+                                          &lock_state) == UCN_ERR_ARGUMENT);
 #if UCN_FEATURE_DYNAMIC_MESH
     TEST_ASSERT(adapter_encode_frame(UCN_MSG_DATA_Q1, config.network_id,
                                      UINT32_C(1), config.node_id, 0U, 1U,
                                      encoded, &encoded_length) == UCN_OK);
-    TEST_ASSERT(ucn_adapter_rx_enqueue(&queue, &candidate_link, encoded,
-                                       encoded_length) == UCN_OK);
+    TEST_ASSERT(ucn_adapter_rx_enqueue_from_isr(&queue, &candidate_link, encoded,
+                                                encoded_length) == UCN_OK);
     TEST_ASSERT(ucn_adapter_rx_pump(&queue, &node, 1U, &pumped) == UCN_OK);
     TEST_ASSERT(pumped == 1U);
     TEST_ASSERT(ucn_adapter_rx_get_stats(&queue)->rejected_by_core == 1U);
@@ -193,6 +224,9 @@ int test_adapter(void)
     TEST_ASSERT(receive_state.count == 1U);
     TEST_ASSERT(receive_state.source == UINT32_C(1));
     TEST_ASSERT(lock_state.enter_count == lock_state.exit_count);
+    TEST_ASSERT(lock_state.isr_enter_count == lock_state.isr_exit_count);
+    TEST_ASSERT(lock_state.isr_enter_count == 1U);
+    TEST_ASSERT(lock_state.last_isr_enter_token == lock_state.last_isr_exit_token);
 #else
     candidate_link.peer_node_id = UINT32_C(1);
     TEST_ASSERT(ucn_node_register_link(&node, &candidate_link) == UCN_OK);
@@ -206,9 +240,13 @@ int test_adapter(void)
     TEST_ASSERT(pumped == 1U && receive_state.count == 1U);
     TEST_ASSERT(receive_state.source == UINT32_C(1));
     TEST_ASSERT(lock_state.enter_count == lock_state.exit_count);
+    TEST_ASSERT(lock_state.isr_enter_count == 0U);
 #endif
 
     TEST_ASSERT(ucn_adapter_rx_queue_init(&overflow_queue, NULL, NULL) == UCN_OK);
+    TEST_ASSERT(ucn_adapter_rx_enqueue_from_isr(&overflow_queue, &candidate_link,
+                                                encoded, encoded_length) ==
+                UCN_ERR_CONFIG);
     for (index = 0U; index < UCN_ADAPTER_RX_QUEUE_DEPTH; ++index) {
         TEST_ASSERT(ucn_adapter_rx_enqueue(&overflow_queue, &candidate_link, encoded,
                                            encoded_length) == UCN_OK);
