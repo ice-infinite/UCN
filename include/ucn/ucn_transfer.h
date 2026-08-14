@@ -192,6 +192,10 @@ typedef struct ucn_transfer_peer_capability {
     ucn_node_id_t node_id;
     ucn_transfer_class_t maximum_class;
     uint8_t maximum_window_size;
+    /* Fragmented messages allowed to be simultaneously active for this peer.
+     * Zero is normalized to one when the peer is registered, preserving the
+     * original v5 single-reassembly-slot contract. */
+    uint8_t maximum_concurrent_transfers;
 } ucn_transfer_peer_capability_t;
 
 typedef struct ucn_transfer_tx_slot {
@@ -330,6 +334,13 @@ ucn_result_t ucn_transfer_set_peer_window_capability(
     ucn_transfer_t *transfer,
     ucn_node_id_t node_id,
     uint8_t maximum_window_size);
+/* This is a local/product capability contract, not a wire-format change.
+ * Peers default to one concurrent fragmented Transfer. Raise the limit only
+ * when the destination provisions at least the same number of RX Slots. */
+ucn_result_t ucn_transfer_set_peer_concurrency_capability(
+    ucn_transfer_t *transfer,
+    ucn_node_id_t node_id,
+    uint8_t maximum_concurrent_transfers);
 
 /* T32/T64 use the existing single-frame Endpoint path.  T128..T8K retain the
  * caller's immutable buffer until completion and use bounded fragmentation.

@@ -109,6 +109,9 @@ int test_public_headers(void)
     ucn_result_t (*transfer_peer_window_fn)(ucn_transfer_t *, ucn_node_id_t,
                                              uint8_t) =
         ucn_transfer_set_peer_window_capability;
+    ucn_result_t (*transfer_peer_concurrency_fn)(
+        ucn_transfer_t *, ucn_node_id_t, uint8_t) =
+        ucn_transfer_set_peer_concurrency_capability;
     ucn_result_t (*transfer_local_window_fn)(ucn_transfer_t *, uint8_t) =
         ucn_transfer_set_tx_window_size;
     ucn_result_t (*transfer_step_fn)(ucn_transfer_t *) = ucn_transfer_step;
@@ -126,6 +129,7 @@ int test_public_headers(void)
            can_source_write_isr_fn != NULL &&
            can_fd_encode_fn != NULL &&
            transfer_peer_window_fn != NULL &&
+           transfer_peer_concurrency_fn != NULL &&
             transfer_local_window_fn != NULL && transfer_step_fn != NULL &&
             ucn_port_ops_is_compatible(&port_ops_v2) &&
             transfer_config_v2.max_retries == 3U &&

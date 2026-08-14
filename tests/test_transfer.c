@@ -10,6 +10,7 @@ typedef struct transfer_test_link_context {
     ucn_node_t *peer;
     ucn_link_t *peer_ingress;
     bool is_up;
+    bool async_submit;
     bool drop_first_ack;
     bool drop_all_acks;
     bool drop_first_fragment;
@@ -131,8 +132,13 @@ static ucn_result_t transfer_test_link_send(ucn_link_t *link,
             return UCN_OK;
         }
     }
-    return ucn_node_receive(context->peer, context->peer_ingress, bytes,
-                            length);
+    {
+        const ucn_result_t peer_result =
+            ucn_node_receive(context->peer, context->peer_ingress, bytes,
+                             length);
+
+        return context->async_submit ? UCN_OK : peer_result;
+    }
 }
 
 static ucn_result_t transfer_test_link_status(const ucn_link_t *link,
@@ -953,6 +959,137 @@ static int transfer_test_multihop(void)
     return 0;
 }
 
+/* A cold Transfer to a three-hop destination first starts the default two-hop
+ * discovery ring.  Transfer stepping at a normal sub-250-ms cadence must not
+ * restart that active ring; Core must be allowed to expire it and expand to
+ * four hops before the first fragment is sent. */
+static int transfer_test_cold_route_expanding_ring(void)
+{
+#if !UCN_FEATURE_DYNAMIC_MESH
+    return 0;
+#else
+    static ucn_node_t a;
+    static ucn_node_t b;
+    static ucn_node_t c;
+    static ucn_node_t d;
+    static ucn_transfer_t transfer_a;
+    static ucn_transfer_t transfer_d;
+    static ucn_link_t ab;
+    static ucn_link_t ba;
+    static ucn_link_t bc;
+    static ucn_link_t cb;
+    static ucn_link_t cd;
+    static ucn_link_t dc;
+    static transfer_test_link_context_t context_ab;
+    static transfer_test_link_context_t context_ba;
+    static transfer_test_link_context_t context_bc;
+    static transfer_test_link_context_t context_cb;
+    static transfer_test_link_context_t context_cd;
+    static transfer_test_link_context_t context_dc;
+    transfer_test_receive_state_t received;
+    transfer_test_completion_state_t completion;
+    ucn_transfer_config_t config;
+    ucn_transfer_class_t transfer_class;
+    uint16_t transfer_length;
+    uint32_t now_ms = 10U;
+
+    if (UCN_TRANSFER_MAX_MESSAGE_BYTES < 128U) {
+        return 0;
+    }
+    transfer_class = transfer_test_local_max_class();
+    transfer_length = (uint16_t)ucn_transfer_class_max_bytes(transfer_class);
+
+    (void)memset(&a, 0, sizeof(a));
+    (void)memset(&b, 0, sizeof(b));
+    (void)memset(&c, 0, sizeof(c));
+    (void)memset(&d, 0, sizeof(d));
+    (void)memset(&transfer_a, 0, sizeof(transfer_a));
+    (void)memset(&transfer_d, 0, sizeof(transfer_d));
+    (void)memset(&received, 0, sizeof(received));
+    (void)memset(&completion, 0, sizeof(completion));
+    TEST_ASSERT(transfer_test_init_node(&a, UINT32_C(21)) == 0);
+    TEST_ASSERT(transfer_test_init_node(&b, UINT32_C(22)) == 0);
+    TEST_ASSERT(transfer_test_init_node(&c, UINT32_C(23)) == 0);
+    TEST_ASSERT(transfer_test_init_node(&d, UINT32_C(24)) == 0);
+
+    transfer_test_init_link(&ab, &context_ab, 21U, 128U, UINT32_C(22),
+                            &b, &ba);
+    transfer_test_init_link(&ba, &context_ba, 22U, 128U, UINT32_C(21),
+                            &a, &ab);
+    transfer_test_init_link(&bc, &context_bc, 23U, 128U, UINT32_C(23),
+                            &c, &cb);
+    transfer_test_init_link(&cb, &context_cb, 24U, 128U, UINT32_C(22),
+                            &b, &bc);
+    transfer_test_init_link(&cd, &context_cd, 25U, 128U, UINT32_C(24),
+                            &d, &dc);
+    transfer_test_init_link(&dc, &context_dc, 26U, 128U, UINT32_C(23),
+                            &c, &cd);
+    context_ab.async_submit = true;
+    context_ba.async_submit = true;
+    context_bc.async_submit = true;
+    context_cb.async_submit = true;
+    context_cd.async_submit = true;
+    context_dc.async_submit = true;
+    TEST_ASSERT(ucn_node_register_link(&a, &ab) == UCN_OK);
+    TEST_ASSERT(ucn_node_register_link(&b, &ba) == UCN_OK);
+    TEST_ASSERT(ucn_node_register_link(&b, &bc) == UCN_OK);
+    TEST_ASSERT(ucn_node_register_link(&c, &cb) == UCN_OK);
+    TEST_ASSERT(ucn_node_register_link(&c, &cd) == UCN_OK);
+    TEST_ASSERT(ucn_node_register_link(&d, &dc) == UCN_OK);
+
+    (void)memset(&config, 0, sizeof(config));
+    config.node = &a;
+    config.now_ms = transfer_test_now_ms;
+    config.now_context = &now_ms;
+    config.ack_timeout_ms = 10U;
+    TEST_ASSERT(ucn_transfer_init(&transfer_a, &config) == UCN_OK);
+    config.node = &d;
+    TEST_ASSERT(ucn_transfer_init(&transfer_d, &config) == UCN_OK);
+    received.owner = &transfer_d;
+    transfer_test_prepare_receive(&received, TRANSFER_TEST_DATA,
+                                  transfer_length, transfer_class, true);
+    TEST_ASSERT(ucn_transfer_bind_endpoint(
+                    &transfer_d, TRANSFER_TEST_ENDPOINT,
+                    transfer_test_local_max_class(), false,
+                    transfer_test_receive, &received) == UCN_OK);
+    TEST_ASSERT(ucn_transfer_set_peer_capability(
+                    &transfer_a, UINT32_C(24),
+                    transfer_test_local_max_class()) == UCN_OK);
+    TEST_ASSERT(ucn_transfer_send(
+                    &transfer_a, UINT32_C(24), TRANSFER_TEST_ENDPOINT,
+                    transfer_class, TRANSFER_TEST_DATA, transfer_length,
+                    transfer_test_complete, &completion) == UCN_OK);
+
+    TEST_ASSERT(transfer_test_step_at(&transfer_a, 10U) ==
+                UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_node_route_pending(&a, UINT32_C(24)));
+    TEST_ASSERT(ucn_node_get_stats(&a)->route_requests_sent == 1U);
+    TEST_ASSERT(transfer_test_step_at(&transfer_a, 110U) ==
+                UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(transfer_test_step_at(&transfer_a, 210U) ==
+                UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_node_get_stats(&a)->route_requests_sent == 1U);
+
+    now_ms = 10U + UCN_ROUTE_RING_TIMEOUT_MS + 1U;
+    TEST_ASSERT(ucn_node_step(&b, now_ms) == UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_node_step(&c, now_ms) == UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_node_step(&d, now_ms) == UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_node_step(&a, now_ms) == UCN_OK);
+    TEST_ASSERT(!ucn_node_route_pending(&a, UINT32_C(24)));
+    TEST_ASSERT(ucn_node_get_stats(&a)->route_requests_sent == 2U);
+    TEST_ASSERT(ucn_node_get_stats(&a)->route_request_ring_expansions == 1U);
+
+    TEST_ASSERT(transfer_test_run_until_complete(
+                    &transfer_a, &transfer_d, &completion, &now_ms,
+                    2000U) == 0);
+    TEST_ASSERT(completion.status == UCN_TRANSFER_COMPLETION_DELIVERED);
+    TEST_ASSERT(received.count == 1U);
+    TEST_ASSERT(!received.mismatch);
+    TEST_ASSERT(received.release_result == UCN_OK);
+    return 0;
+#endif
+}
+
 static int transfer_test_mtu_matrix(void)
 {
     static const size_t mtus[] = { 64U, 250U, 256U };
@@ -1006,6 +1143,93 @@ static int transfer_test_mtu_matrix(void)
     return 0;
 }
 
+static int transfer_test_peer_concurrency_contract(void)
+{
+    transfer_test_pair_t *pair = &MTU_PAIR;
+    size_t index;
+    ucn_transfer_peer_capability_t *peer = NULL;
+
+    TEST_ASSERT(transfer_test_init_pair(pair, 250U) == 0);
+    for (index = 0U; index < UCN_TRANSFER_MAX_PEERS; ++index) {
+        if (pair->transfer_a.peers[index].occupied &&
+            pair->transfer_a.peers[index].node_id == UINT32_C(2)) {
+            peer = &pair->transfer_a.peers[index];
+            break;
+        }
+    }
+    TEST_ASSERT(peer != NULL);
+    TEST_ASSERT(peer->maximum_concurrent_transfers == 1U);
+    TEST_ASSERT(ucn_transfer_set_peer_concurrency_capability(
+                    &pair->transfer_a, UINT32_C(2), 0U) ==
+                UCN_ERR_ARGUMENT);
+    TEST_ASSERT(ucn_transfer_set_peer_concurrency_capability(
+                    &pair->transfer_a, UINT32_C(99), 1U) ==
+                UCN_ERR_NOT_FOUND);
+    TEST_ASSERT(ucn_transfer_set_peer_concurrency_capability(
+                    &pair->transfer_a, UINT32_C(2), 1U) == UCN_OK);
+    if (UCN_TRANSFER_TX_SLOTS > 1U) {
+        transfer_test_completion_state_t completion[2];
+        uint32_t step;
+
+        TEST_ASSERT(ucn_transfer_set_peer_concurrency_capability(
+                        &pair->transfer_a, UINT32_C(2), 2U) == UCN_OK);
+        if (UCN_TRANSFER_RX_SLOTS > 1U &&
+            UCN_TRANSFER_MAX_MESSAGE_BYTES >= 128U) {
+            TEST_ASSERT(transfer_test_init_pair(pair, 250U) == 0);
+            transfer_test_prepare_receive(
+                &pair->received, TRANSFER_TEST_DATA, 128U,
+                UCN_TRANSFER_CLASS_T128, true);
+            (void)memset(completion, 0, sizeof(completion));
+            TEST_ASSERT(ucn_transfer_send(
+                            &pair->transfer_a, UINT32_C(2),
+                            TRANSFER_TEST_ENDPOINT, UCN_TRANSFER_CLASS_T128,
+                            TRANSFER_TEST_DATA, 128U, transfer_test_complete,
+                            &completion[0]) == UCN_OK);
+            TEST_ASSERT(ucn_transfer_send(
+                            &pair->transfer_a, UINT32_C(2),
+                            TRANSFER_TEST_ENDPOINT, UCN_TRANSFER_CLASS_T128,
+                            TRANSFER_TEST_DATA, 128U, transfer_test_complete,
+                            &completion[1]) == UCN_ERR_NO_SPACE);
+            TEST_ASSERT(ucn_transfer_set_peer_concurrency_capability(
+                            &pair->transfer_a, UINT32_C(2), 2U) == UCN_OK);
+            TEST_ASSERT(ucn_transfer_send(
+                            &pair->transfer_a, UINT32_C(2),
+                            TRANSFER_TEST_ENDPOINT, UCN_TRANSFER_CLASS_T128,
+                            TRANSFER_TEST_DATA, 128U, transfer_test_complete,
+                            &completion[1]) == UCN_OK);
+            for (step = 0U; step < 500U &&
+                            (completion[0].count == 0U ||
+                             completion[1].count == 0U); ++step) {
+                ucn_result_t result;
+
+                pair->now_ms++;
+                result = transfer_test_step_at(&pair->transfer_a,
+                                               pair->now_ms);
+                TEST_ASSERT(result == UCN_OK ||
+                            result == UCN_ERR_NOT_FOUND ||
+                            result == UCN_ERR_NO_SPACE);
+                result = transfer_test_step_at(&pair->transfer_b,
+                                               pair->now_ms);
+                TEST_ASSERT(result == UCN_OK ||
+                            result == UCN_ERR_NOT_FOUND);
+            }
+            TEST_ASSERT(completion[0].count == 1U);
+            TEST_ASSERT(completion[1].count == 1U);
+            TEST_ASSERT(completion[0].status ==
+                        UCN_TRANSFER_COMPLETION_DELIVERED);
+            TEST_ASSERT(completion[1].status ==
+                        UCN_TRANSFER_COMPLETION_DELIVERED);
+            TEST_ASSERT(pair->received.count == 2U);
+            TEST_ASSERT(!pair->received.mismatch);
+        }
+    } else {
+        TEST_ASSERT(ucn_transfer_set_peer_concurrency_capability(
+                        &pair->transfer_a, UINT32_C(2), 2U) ==
+                    UCN_ERR_ARGUMENT);
+    }
+    return 0;
+}
+
 int test_transfer(void)
 {
     TEST_ASSERT(transfer_test_codec() == 0);
@@ -1020,7 +1244,9 @@ int test_transfer(void)
     TEST_ASSERT(transfer_test_window_pipeline_and_gap_recovery() == 0);
     TEST_ASSERT(transfer_test_integrity_failure() == 0);
     TEST_ASSERT(transfer_test_plain_rejection() == 0);
+    TEST_ASSERT(transfer_test_peer_concurrency_contract() == 0);
     TEST_ASSERT(transfer_test_mtu_matrix() == 0);
     TEST_ASSERT(transfer_test_multihop() == 0);
+    TEST_ASSERT(transfer_test_cold_route_expanding_ring() == 0);
     return 0;
 }

@@ -1916,22 +1916,47 @@ static ucn_result_t learn_route(ucn_node_t *node,
         if (node->routes[index].valid &&
             node->routes[index].destination == destination) {
             if (!node->routes[index].is_static) {
-                if (route_cost < node->routes[index].route_cost) {
-                    node->routes[index].egress_link = egress_link;
-                    node->routes[index].route_cost = route_cost;
-                    node->routes[index].hop_count = hop_count;
-                    node->routes[index].route_epoch = route_epoch;
+                ucn_route_entry_t *route = &node->routes[index];
+                const bool lower_cost = route_cost < route->route_cost;
+                const bool same_path_refresh =
+                    route_cost == route->route_cost &&
+                    hop_count == route->hop_count &&
+                    egress_link == route->egress_link;
+
+                if (lower_cost || same_path_refresh) {
+                    if (same_path_refresh && route_epoch != route->route_epoch) {
+                        /* Expanding-ring retries use a fresh request ID and
+                         * therefore a fresh epoch. Relays reached by the
+                         * smaller ring already hold the same reverse path;
+                         * refreshing only its lifetime leaves the returned
+                         * forward path on the new epoch and rejects every
+                         * business frame at the first relay. Keep the old
+                         * epoch briefly for in-flight frames, then publish
+                         * the refreshed epoch on the unchanged egress. */
+                        route->previous_valid = true;
+                        route->previous_egress_link = route->egress_link;
+                        route->previous_route_epoch = route->route_epoch;
+                        route->previous_expires_at_ms =
+                            ucn_deadline_from_now(node->now_ms,
+                                                  UCN_ROUTE_EPOCH_GRACE_MS);
+                    }
+                    route->egress_link = egress_link;
+                    route->route_cost = route_cost;
+                    route->hop_count = hop_count;
+                    route->route_epoch = route_epoch;
                     /* A lower-cost RREP may represent a different downstream
                      * path even when this node keeps the same first hop.  RTT
                      * is end-to-end evidence, so never carry the old sample
                      * across a material Route update. */
-                    node->routes[index].verified_rtt_valid = false;
-                    node->routes[index].verified_rtt_ms = 0U;
+                    if (lower_cost) {
+                        route->verified_rtt_valid = false;
+                        route->verified_rtt_ms = 0U;
+                    }
                 }
-                node->routes[index].expires_at_ms =
+                route->expires_at_ms =
                     ucn_deadline_from_now(node->now_ms,
                                           UCN_ROUTE_ENTRY_LIFETIME_MS);
-                node->routes[index].last_refresh_started_ms = node->now_ms;
+                route->last_refresh_started_ms = node->now_ms;
             }
             return UCN_OK;
         }

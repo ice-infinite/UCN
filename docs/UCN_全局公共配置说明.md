@@ -68,6 +68,9 @@ ucn_config.h 中的统一默认值
 #ifndef UCN_TRANSFER_MAX_MESSAGE_BYTES
 #define UCN_TRANSFER_MAX_MESSAGE_BYTES ((size_t)512U)
 #endif
+#ifndef UCN_TRANSFER_TX_SLOTS
+#define UCN_TRANSFER_TX_SLOTS ((size_t)1U)
+#endif
 #ifndef UCN_TRANSFER_RX_SLOTS
 #define UCN_TRANSFER_RX_SLOTS ((size_t)1U)
 #endif
@@ -77,6 +80,15 @@ ucn_config.h 中的统一默认值
 
 #endif
 ```
+
+`UCN_TRANSFER_TX_SLOTS` 与 `UCN_TRANSFER_RX_SLOTS` 决定能够同时存在的独立
+逻辑消息数，也直接改变 `ucn_transfer_t` 的静态 RAM；
+`UCN_TRANSFER_MAX_WINDOW` 只决定同一条逻辑消息能够同时在途的 Fragment 数。
+三者不是同一个维度。默认 TX/RX Slot 和 Peer 消息并发都为 1；只有产品同时
+增加固定 Slot，并通过 `ucn_transfer_set_peer_concurrency_capability()` 显式声明
+对端能力后，才允许同一目标存在多条分片消息。增加接收 Slot 的 RAM 代价约为
+`UCN_TRANSFER_RX_SLOTS * UCN_TRANSFER_MAX_MESSAGE_BYTES`，必须根据目标 MCU
+实际 RAM 裁剪；普通中继不创建 Transfer 对象，不承担这些完整消息缓冲。
 
 PowerShell/CMake 配置时，带 `.h` 的参数必须整体加引号：
 
@@ -139,7 +151,7 @@ cmake -S . -B build-product `
 - V5-09 自动盘点确认原公共头 103 个分散默认项为 103/103；后续 Transfer 新增项同样同时具备全局默认和 `ucn_transfer.h` 本地回退。
 - `ucn_config_defaults_test`：统一默认值生效。
 - `ucn_config_fallback_test`：定义 `UCN_CONFIG_NO_DEFAULTS` 后，原头文件默认值仍可独立构建并保持一致。
-- `ucn_config_override_test`：产品头将 Transfer 最大消息覆盖为 512 B、RX Slot/编译窗口覆盖为 2，将 Event Runtime Source/Round/Source Budget 覆盖为 3/5/2，把 Stream Ring/Byte Budget/Error Budget/Read Chunk 覆盖为 128/64/2/16 B，并把 CAN Frame Ring/Reassembly Slot/Timeout 覆盖为 4/1/75 ms；其余参数继续使用统一默认。公共 Transfer 编译最大窗口为 8，运行默认仍为 1。
+- `ucn_config_override_test`：产品头将 Transfer 最大消息覆盖为 512 B、RX Slot/编译窗口覆盖为 2，将 Event Runtime Source/Round/Source Budget 覆盖为 3/5/2，把 Stream Ring/Byte Budget/Error Budget/Read Chunk 覆盖为 128/64/2/16 B，并把 CAN Frame Ring/Reassembly Slot/Timeout 覆盖为 4/1/75 ms；其余参数继续使用统一默认。公共 Transfer TX/RX Slot 默认均为 1、编译最大窗口为 8，运行默认窗口与 Peer 消息并发仍为 1。
 - Stream 默认宏为 `UCN_STREAM_SOURCE_DEFAULT_RING_BYTES=512`、`UCN_STREAM_SOURCE_DEFAULT_BYTE_BUDGET=512`、`UCN_STREAM_SOURCE_DEFAULT_ERROR_BUDGET=4`、`UCN_STREAM_SOURCE_READ_CHUNK_BYTES=32`。它们只决定便利 Storage/默认服务预算；产品也可给每个 Source 传入自己的静态 Ring/Frame 数组和运行预算，但同一固件的 ABI 宏仍必须全翻译单元一致。
 - CAN 默认宏为 `UCN_CAN_SOURCE_DEFAULT_RING_FRAMES=8`、`UCN_CAN_SOURCE_DEFAULT_REASSEMBLY_SLOTS=2`、`UCN_CAN_SOURCE_DEFAULT_REASSEMBLY_TIMEOUT_MS=250`。前两项会改变 `ucn_can_source_default_storage_t` 布局，必须全工程一致；产品也可不使用便利 Storage，改传自己的固定 Frame Ring、Slot Descriptor 和扁平重组区。
 - 独立 Full/Service ON 产品配置头构建通过；Nano/Lite/Full Debug/Release 和 Full ASan+UBSan 回归通过。

@@ -48,7 +48,7 @@ Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个�
 
 | 模块 | 当前状态 | 后续范围 |
 | --- | --- | --- |
-| Fixed Frame | 已实现版本 5 的 W0/W1/W2/W3 官方 Codec；基础头 17/21/26/30 B，Route/Path 长度由 Profile+Flags 推导；Node 支持固定域和显式自动最小档，保留 CRC、16 B 可选 Tag、完整范围校验并拒绝 v4。可选 `ucn_transfer` 复用这些正常帧承载 T32～T8K，默认窗口 1、显式窗口 2～8 不改变 Wire。 | Core 自身仍不分片；Transfer 的完整 Path MTU/自动窗口能力协商和其他 Bearer 性能待验收。 |
+| Fixed Frame | 已实现版本 5 的 W0/W1/W2/W3 官方 Codec；基础头 17/21/26/30 B，Route/Path 长度由 Profile+Flags 推导；Node 支持固定域和显式自动最小档，保留 CRC、16 B 可选 Tag、完整范围校验并拒绝 v4。可选 `ucn_transfer` 复用这些正常帧承载 T32～T8K，默认 Fragment 窗口与 Peer 消息并发均为 1；显式窗口 2～8 和静态有界多消息并发均不改变 Wire。 | Core 自身仍不分片；Transfer 的完整 Path MTU、动态窗口/并发能力协商和其他 Bearer 性能待验收。 |
 | Identity & Join | 已实现最小 HELLO、邻居状态机和三种准入策略。 | JOIN 挑战/接受、设备证书/身份格式。 |
 | Session & Replay | 已实现 Provider 回调、会话 ID、持久化发送序号、入站去重、`seal/open`、固定 AAD 和 Node/Endpoint 安全策略。 | 生产 AEAD、密钥轮换、完整重放窗口。 |
 | Trusted Neighbor | 已实现固定 Candidate/Admitted/Suspect/Removed/Rejected/Expired 表、Heartbeat 和已接纳节点撤销/Link 槽复用。 | 随机退避、入网令牌桶与实机在线时间标定。 |
@@ -195,7 +195,7 @@ Adapter 不把 MAC、CAN ID 或蓝牙地址当作 UCN 身份。其统一接口�
 
 ### Phase B：只给必要 MCU 增加 Extended
 
-有界 Transfer 首版已先行实现；后续按实际需要增加服务发现、通用 Q2、时间同步和 Q3。每增加一项都要记录新增 Flash、静态 RAM、峰值 RAM、CPU 和空口占用。
+有界 Transfer 已实现默认单消息、可选静态 Peer 有界多消息并发；后续按实际需要增加动态能力协商、服务发现、通用 Q2、时间同步和 Q3。每增加一项都要记录新增 Flash、静态 RAM、峰值 RAM、CPU 和空口占用。
 
 ### Phase C：最后接入 Host
 

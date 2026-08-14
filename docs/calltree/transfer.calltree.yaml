@@ -1,5 +1,5 @@
 module: transfer
-description: 按需链接的 T32～T8K 有界逻辑消息、固定分片/重组、累计 ACK、显式固定窗口和 RX Handle 生命周期。
+description: 按需链接的 T32～T8K 有界逻辑消息、固定分片/重组、累计 ACK、显式固定窗口、静态 Peer 有界多消息并发和 RX Handle 生命周期。
 entry: transfer.ucn_transfer_send
 source_files:
   - src/extended/ucn_transfer.c
@@ -77,6 +77,19 @@ nodes:
     notes:
       - 当前不写入 HELLO，不改变 v5 Wire；产品必须从静态配置或受控能力目录提供。
 
+  - id: transfer.ucn_transfer_set_peer_concurrency_capability
+    symbol: ucn_transfer_set_peer_concurrency_capability
+    type: function
+    file: src/extended/ucn_transfer.c
+    layer: extended
+    role: 对已登记 Peer 显式声明同一时刻允许存在的独立分片消息数；未声明时保持 1。
+    called_by:
+      - external.protocol_owner_startup
+    calls: []
+    notes:
+      - 上限不能超过本机编译期 UCN_TRANSFER_TX_SLOTS，接收端还必须配置足够的 RX Slot。
+      - 当前是产品静态能力，不写入 HELLO，不改变 Fragment/ACK Wire。
+
   - id: transfer.ucn_transfer_send
     symbol: ucn_transfer_send
     type: function
@@ -98,6 +111,7 @@ nodes:
     notes:
       - 调用者 Buffer 在 Completion 前必须保持有效且只读。
       - UCN_OK 对分片消息只表示本地固定 TX Slot 接受。
+      - T128～T8K 按目标统计活动 TX Slot；默认 Peer 并发为 1，达到静态上限时返回 UCN_ERR_NO_SPACE。
 
   - id: transfer.ucn_transfer_step
     symbol: ucn_transfer_step

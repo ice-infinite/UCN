@@ -568,6 +568,11 @@ ucn_transfer_set_peer_capability(&g_transfer, remote_node_id,
 ucn_transfer_set_tx_window_size(&g_transfer, 4U);
 ucn_transfer_set_peer_window_capability(&g_transfer, remote_node_id, 4U);
 
+/* 可选：多个独立分片消息并发。默认是 1；只有确认目标节点配置了
+ * 至少 2 个 RX Slot 后才允许提高。它与上面的单消息 Fragment 窗口正交。 */
+ucn_transfer_set_peer_concurrency_capability(&g_transfer,
+                                             remote_node_id, 2U);
+
 /* payload 在完成回调之前必须保持有效且不可修改。 */
 ucn_transfer_send(&g_transfer, remote_node_id, 0x80U,
                   UCN_TRANSFER_CLASS_T512,
@@ -577,7 +582,7 @@ ucn_transfer_send(&g_transfer, remote_node_id, 0x80U,
 
 必须在唯一 Protocol Owner 上下文调用 Send/Step。为保证 Core Q0、普通 Q1 和维护优先，先运行所选 Port/Owner Step，只有其返回 `UCN_ERR_NOT_FOUND` 时再调用一次 `ucn_transfer_step(&g_transfer)`。Transfer 的 Send、RX 与 Step 都从 `transfer_cfg.now_ms` 采样同一权威单调时钟；不得再向 Step 传缓存时间。每次最多推进一个新片或重传片；连续空闲 Step 可填满显式固定窗口。
 
-注意四条规则：发送端 Buffer 在 Completion 前归应用所有但必须保持只读；分片接收 Buffer 在 `release_received()` 前占用固定 RX Slot；`ucn_transfer_init()` 会占用 Node 通用 RX Handler，原有通用 Handler 要放入 `fallback_rx_handler/context`；未显式配置 Peer 窗口时有效窗口始终为 1，不能按本机能力猜测远端。窗口使用累计 ACK 和有界 Go-Back-N，不缓存乱序片、不改变 v5 Wire。完整配置、完成状态、安全/MTU 边界见[消息大小等级与有界分片重组](UCN_消息大小等级与有界分片重组建议.md)。
+注意五条规则：发送端 Buffer 在 Completion 前归应用所有但必须保持只读；分片接收 Buffer 在 `release_received()` 前占用固定 RX Slot；`ucn_transfer_init()` 会占用 Node 通用 RX Handler，原有通用 Handler 要放入 `fallback_rx_handler/context`；未显式配置 Peer 窗口时有效 Fragment 窗口始终为 1；未显式配置 Peer 消息并发时，同一目的节点最多只有 1 条分片消息在途。不能按本机能力猜测远端。窗口使用累计 ACK 和有界 Go-Back-N，多消息并发使用彼此独立的 Transfer ID/CRC/Deadline；两者都不改变 v5 Wire。四槽实测对 T128～T1K 有利、对 4/8 KiB 不利，见[V5-66 报告](UCN_V5_66_有界多消息并发Transfer优化.md)。
 
 ## 7. MCU 内多任务通信：Service Router + Bridge
 

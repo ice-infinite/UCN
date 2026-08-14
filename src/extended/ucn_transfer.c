@@ -410,6 +410,21 @@ static void remember_completion(ucn_transfer_t *transfer,
         transfer->now_ms, transfer->config.recent_completion_ms);
 }
 
+/* Transfer is stepped much more frequently than the AODV-lite expanding-ring
+ * timeout.  Reissuing the public discovery request while a discovery is
+ * already active restarts that ring after the Core minimum interval and can
+ * therefore prevent a 2-hop ring from ever expanding to 4/8/16 hops.  A
+ * Transfer only needs to ensure that discovery exists; Core owns its timing
+ * and expansion once the request is pending. */
+static void ensure_route_discovery(ucn_transfer_t *transfer,
+                                   ucn_node_id_t destination)
+{
+    if (!ucn_node_route_pending(transfer->config.node, destination)) {
+        (void)ucn_node_discover_route(transfer->config.node, destination,
+                                      transfer->now_ms);
+    }
+}
+
 static ucn_result_t send_ack(ucn_transfer_t *transfer,
                              ucn_node_id_t destination,
                              ucn_endpoint_t endpoint,
@@ -435,8 +450,7 @@ static ucn_result_t send_ack(ucn_transfer_t *transfer,
     if (result == UCN_OK) {
         transfer->stats.acknowledgements_sent++;
     } else if (result == UCN_ERR_NOT_FOUND) {
-        (void)ucn_node_discover_route(transfer->config.node, destination,
-                                      transfer->now_ms);
+        ensure_route_discovery(transfer, destination);
     }
     return result;
 }
@@ -861,6 +875,9 @@ ucn_result_t ucn_transfer_set_peer_capability(
     if (peer->maximum_window_size == 0U) {
         peer->maximum_window_size = 1U;
     }
+    if (peer->maximum_concurrent_transfers == 0U) {
+        peer->maximum_concurrent_transfers = 1U;
+    }
     return UCN_OK;
 }
 
@@ -881,6 +898,26 @@ ucn_result_t ucn_transfer_set_peer_window_capability(
         return UCN_ERR_NOT_FOUND;
     }
     peer->maximum_window_size = maximum_window_size;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_transfer_set_peer_concurrency_capability(
+    ucn_transfer_t *transfer,
+    ucn_node_id_t node_id,
+    uint8_t maximum_concurrent_transfers)
+{
+    ucn_transfer_peer_capability_t *peer;
+
+    if (transfer == NULL || !transfer->initialized || node_id == 0U ||
+        node_id == UCN_NODE_BROADCAST || maximum_concurrent_transfers == 0U ||
+        maximum_concurrent_transfers > UCN_TRANSFER_TX_SLOTS) {
+        return UCN_ERR_ARGUMENT;
+    }
+    peer = find_peer(transfer, node_id);
+    if (peer == NULL) {
+        return UCN_ERR_NOT_FOUND;
+    }
+    peer->maximum_concurrent_transfers = maximum_concurrent_transfers;
     return UCN_OK;
 }
 
@@ -925,6 +962,19 @@ ucn_result_t ucn_transfer_send(
             }
         }
         return result;
+    }
+    {
+        size_t active_for_peer = 0U;
+
+        for (index = 0U; index < UCN_TRANSFER_TX_SLOTS; ++index) {
+            if (transfer->tx_slots[index].occupied &&
+                transfer->tx_slots[index].destination == destination) {
+                active_for_peer++;
+            }
+        }
+        if (active_for_peer >= peer->maximum_concurrent_transfers) {
+            return UCN_ERR_NO_SPACE;
+        }
     }
     for (index = 0U; index < UCN_TRANSFER_TX_SLOTS; ++index) {
         ucn_transfer_tx_slot_t *slot = &transfer->tx_slots[index];
@@ -1086,8 +1136,7 @@ static ucn_result_t send_tx_fragment(ucn_transfer_t *transfer,
         complete_tx_slot(transfer, slot,
                          UCN_TRANSFER_COMPLETION_SEND_FAILED);
     } else if (result == UCN_ERR_NOT_FOUND) {
-        (void)ucn_node_discover_route(transfer->config.node,
-                                      slot->destination, transfer->now_ms);
+        ensure_route_discovery(transfer, slot->destination);
     }
     return result;
 }

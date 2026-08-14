@@ -176,6 +176,13 @@ Host GCC 64-bit 当前实测对象大小：默认 `1 × 8192 B RX`、编译最�
 | 参数/诊断主控 | T512 或 T2K | 1～2 | 仅为需要的 Endpoint 开启接收。 |
 | 网关/OTA 主控 | T4K 或 T8K | 2 | 必须测量 RAM、栈、CPU 与空口占用。 |
 
+`TX/RX_SLOTS` 是“独立消息并发数”，`UCN_TRANSFER_MAX_WINDOW` 是“一条消息内
+未确认 Fragment 数”，两者不能混为一个参数。默认 Peer 消息并发为 1；只有产品
+确认对端至少有相同数量 RX Slot 后，才调用
+`ucn_transfer_set_peer_concurrency_capability()`。四槽 ESP32 实测显著改善 T128～T1K
+多跳吞吐，但 4/8 KiB 绝对吞吐回退且接收端增加约 24.1 KiB RAM，因此不是统一默认，
+详见[V5-66 报告](UCN_V5_66_有界多消息并发Transfer优化.md)。
+
 完成重组后，RX Slot 变为“已完成、等待 Endpoint 消费”状态。Protocol Task 只向目标任务投递一个固定 Slot Index；任务通过新 API 取得只读 Buffer，处理后必须显式 `release()`。这避免把 8 KiB 再复制到当前默认 `32 B` Service Inbox，也避免在协议任务中执行耗时业务。
 
 ## 8. 准入、安全、路径与兼容性
@@ -185,7 +192,7 @@ Host GCC 64-bit 当前实测对象大小：默认 `1 × 8192 B RX`、编译最�
 - 分片首片只有在现有 Provider/E2E、Endpoint ACL、长度、Class、MTU 和 Slot 容量全部通过后才分配 RX Slot；无效/乱序片不分配内存。
 - 完成的 `(Key, message_crc32)` 放入固定 `Recent Completion` 表一段时间。终端重复的最后一片只重发 ACK，不会第二次执行 Endpoint。
 - 普通 v5 单帧、既有 Header、既有 `DATA_Q0/Q1` 语义完全不改。Transfer 仅在产品为对端静态配置“支持的最大 Class”后才发送 `0x22/0x23`；旧节点不会被主动发送未知 Transfer 帧。
-- `ucn_transfer_init()` 后本机窗口为 1；Peer Class 建立时对端窗口也默认为 1。只有同时调用本机窗口和 Peer 窗口 API 才会流水发送，因此未升级的 v5 Transfer Peer 保持原行为。
+- `ucn_transfer_init()` 后本机 Fragment 窗口为 1；Peer Class 建立时对端窗口和消息并发也都默认为 1。只有分别显式调用窗口/并发 API 才会放宽，因此未知或未升级的 v5 Transfer Peer 保持原行为。
 - 首版不修改 HELLO 长度做动态能力协商，避免重演控制帧兼容问题。后续若确实需要自动发现 Transfer 能力，必须单独设计版本协商/可选扩展并做旧 v5 互通测试。
 
 ## 9. 当前 API 与 Endpoint 合同
@@ -232,6 +239,10 @@ ucn_transfer_set_peer_capability(&g_transfer, remote_node_id,
 ucn_transfer_set_tx_window_size(&g_transfer, 4U);
 ucn_transfer_set_peer_window_capability(&g_transfer, remote_node_id, 4U);
 
+/* 可选：只有接收端固定 RX Slot 足够时才提高；默认仍为 1。 */
+ucn_transfer_set_peer_concurrency_capability(&g_transfer,
+                                             remote_node_id, 2U);
+
 /* data 在 Completion 前必须保持只读有效。 */
 ucn_transfer_send(&g_transfer, remote_node_id, 0x80,
                   UCN_TRANSFER_CLASS_T512,
@@ -253,13 +264,13 @@ V5-62 起 `cfg.now_ms` 是强制的权威单调毫秒时钟；Send、RX、ACK/�
 | --- | --- | --- |
 | EXT-01 | 九档/资源/兼容契约。 | **软件完成**：独立 Header/Target，不改 v5 基础 Header 和 `ucn_node_t`。 |
 | EXT-02 | Codec 与 CRC32。 | **软件完成**：14 B Fragment、8 B ACK、格式/长度/保留位/CRC 向量。 |
-| EXT-03 | 固定 TX/累计 ACK 窗口。 | **当前完成**：默认窗口 1、显式窗口 2～8、旧 Peer 退化、丢 START/中间片 Go-Back-N、ACK 丢失、重试耗尽和最小 MTU 失败关闭；持续 Q0 压力仍待专项。 |
-| EXT-04 | 固定 RX/Recent/Handle。 | **首版完成**：CRC 错、Slot 满、多 Slot、超时、代际 Handle、防重复执行。 |
+| EXT-03 | 固定 TX/累计 ACK 窗口。 | **当前完成**：默认 Fragment 窗口 1、显式窗口 2～8；默认消息并发 1、静态 Peer 显式并发；旧 Peer 退化、丢 START/中间片 Go-Back-N、ACK 丢失、重试耗尽和最小 MTU 失败关闭；持续 Q0 压力仍待专项。 |
+| EXT-04 | 固定 RX/Recent/Handle。 | **首版完成**：CRC 错、Slot 满、多 Slot、超时、代际 Handle、防重复执行；四 RX Slot 已完成 ESP32 UART 三跳 81 阶段门禁，但大消息快速路径仍待优化。 |
 | EXT-05 | 安全/MTU/路径/旧节点。 | **部分完成**：静态 Peer Class/窗口 Capability、明文要求拒绝、64/128/250/256 B MTU、两跳透明中继；自动能力/Path MTU 协商、Endpoint 独立 TX 安全策略、Path 切换和旧固件实机仍待完成。 |
 | EXT-06 | 软件/资源门禁。 | **当前完成**：Full/Lite/Nano、窗口 1/4 与丢首片/中间片、512 B/双 RX 槽/最大窗口 2 产品配置、Core-only、ASan/UBSan、`-fanalyzer`；更大规模并发与目标 CPU 仍待补。 |
 | EXT-07 | 实机门禁。 | **部分完成**：当前三板已完成 115200～5M UART 两跳九档、3M 窗口 1/4 和事件 Owner/窗口 8。最终事件固件三轮 27/27、0 重试，九档平均 `15.712→17.283 KiB/s`（较窗口 4 +10.0%），T8K=29.480 KiB/s；Direct 语义未改变。ESP-NOW-only、单跳、切换中 Transfer、多源并发/Q0、CAN-FD、CPU/功耗/长稳仍待执行。 |
 
-当前可以表述为“已提供可选的有界消息分片/重组模块，默认窗口 1、显式窗口 2～8；一组 ESP32-S3 已完成 115200～5M UART 两跳九档、3M 窗口对比与事件 Owner/窗口 8 三轮门禁”。不得据此表述为“已验证全部 Wi-Fi/UART/CAN 大包性能”，也不得把固定窗口说成完整文件传输/OTA 系统。详见 [V5-52 功能报告](UCN_V5_52_N8R8三节点Transfer实测报告.md)、[V5-53 压力报告](UCN_V5_53_三节点Transfer压力测试报告.md)、[V5-54 921600 报告](UCN_V5_54_921600波特率三节点Transfer压力测试报告.md)、[V5-55 极限报告](UCN_V5_55_UART极限波特率扫描报告.md)、[V5-56 固定窗口报告](UCN_V5_56_固定窗口Transfer优化与三节点对比报告.md)与 [V5-57 事件 Owner 报告](UCN_V5_57_事件驱动Owner与窗口8三节点报告.md)。
+当前可以表述为“已提供可选的有界消息分片/重组模块，默认 Fragment 窗口和 Peer 消息并发均为 1，窗口可显式放宽到 2～8，并可按静态产品能力启用有界多消息并发；一组 ESP32-S3 已完成 115200～5M UART 两跳九档、3M 窗口/事件 Owner 门禁和四节点 1～3 跳并发对比”。四路并发明显改善 T128～T1K 多独立消息及多跳 T2K，但会降低单个 T4K/T8K 顺序大消息吞吐，因此默认配置不变。不得据此表述为“已验证全部 Wi-Fi/UART/CAN 大包性能”，也不得把固定窗口或多消息并发说成完整文件传输/OTA 系统。详见 [V5-52 功能报告](UCN_V5_52_N8R8三节点Transfer实测报告.md)、[V5-53 压力报告](UCN_V5_53_三节点Transfer压力测试报告.md)、[V5-54 921600 报告](UCN_V5_54_921600波特率三节点Transfer压力测试报告.md)、[V5-55 极限报告](UCN_V5_55_UART极限波特率扫描报告.md)、[V5-56 固定窗口报告](UCN_V5_56_固定窗口Transfer优化与三节点对比报告.md)、[V5-57 事件 Owner 报告](UCN_V5_57_事件驱动Owner与窗口8三节点报告.md)与 [V5-66 并发报告](UCN_V5_66_有界多消息并发Transfer优化.md)。
 
 ## 11. 反向核对清单
 

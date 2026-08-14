@@ -9,6 +9,7 @@ typedef struct aodv_link_context {
     ucn_link_t *peer_ingress;
     bool *is_up;
     bool *drop_frames;
+    bool async_submit;
     ucn_wire_profile_t last_hello_profile;
     ucn_wire_profile_t last_route_request_profile;
     ucn_wire_profile_t last_route_reply_profile;
@@ -53,7 +54,12 @@ static ucn_result_t aodv_link_send(ucn_link_t *link,
     if (*context->drop_frames) {
         return UCN_OK;
     }
-    return ucn_node_receive(context->peer, context->peer_ingress, frame, length);
+    {
+        const ucn_result_t peer_result =
+            ucn_node_receive(context->peer, context->peer_ingress, frame, length);
+
+        return context->async_submit ? UCN_OK : peer_result;
+    }
 }
 
 static ucn_result_t aodv_link_status(const ucn_link_t *link, ucn_link_status_t *status)
@@ -324,6 +330,123 @@ static int test_expanding_ring_budget(void)
     return 0;
 }
 
+static const ucn_route_entry_t *aodv_find_route(const ucn_node_t *node,
+                                                ucn_node_id_t destination)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
+        if (node->routes[index].valid &&
+            node->routes[index].destination == destination) {
+            return &node->routes[index];
+        }
+    }
+    return NULL;
+}
+
+/* A 3-hop destination is first missed by the 2-hop ring, then reached by the
+ * expanded 4-hop ring. Every relay has already learned the first request's
+ * reverse route at the same Cost/egress. The second request must refresh that
+ * route's epoch as well as its lifetime; otherwise the returned forward route
+ * uses the new epoch while the first relay rejects business traffic against
+ * the stale reverse epoch. */
+static int test_expanding_ring_epoch_alignment(void)
+{
+    bool links_up = true;
+    bool no_drop = false;
+    const uint8_t payload = 0x6DU;
+    ucn_node_t a, b, c, d;
+    ucn_link_t ab, ba, bc, cb, cd, dc;
+    aodv_link_context_t cab, cba, cbc, ccb, ccd, cdc;
+    aodv_receive_state_t received;
+    const ucn_route_entry_t *a_to_d;
+    const ucn_route_entry_t *b_to_a;
+    const ucn_route_entry_t *b_to_d;
+    const ucn_route_entry_t *c_to_a;
+    const ucn_route_entry_t *c_to_d;
+    const ucn_route_entry_t *d_to_a;
+
+    (void)memset(&a, 0, sizeof(a));
+    (void)memset(&b, 0, sizeof(b));
+    (void)memset(&c, 0, sizeof(c));
+    (void)memset(&d, 0, sizeof(d));
+    (void)memset(&ab, 0, sizeof(ab));
+    (void)memset(&ba, 0, sizeof(ba));
+    (void)memset(&bc, 0, sizeof(bc));
+    (void)memset(&cb, 0, sizeof(cb));
+    (void)memset(&cd, 0, sizeof(cd));
+    (void)memset(&dc, 0, sizeof(dc));
+    (void)memset(&cab, 0, sizeof(cab));
+    (void)memset(&cba, 0, sizeof(cba));
+    (void)memset(&cbc, 0, sizeof(cbc));
+    (void)memset(&ccb, 0, sizeof(ccb));
+    (void)memset(&ccd, 0, sizeof(ccd));
+    (void)memset(&cdc, 0, sizeof(cdc));
+    (void)memset(&received, 0, sizeof(received));
+    TEST_ASSERT(aodv_init_node(&a, UINT32_C(1)) == 0);
+    TEST_ASSERT(aodv_init_node(&b, UINT32_C(2)) == 0);
+    TEST_ASSERT(aodv_init_node(&c, UINT32_C(3)) == 0);
+    TEST_ASSERT(aodv_init_node(&d, UINT32_C(4)) == 0);
+
+    ab.ops = &AODV_LINK_OPS; ab.context = &cab; ab.link_id = 101U;
+    ab.mtu = UCN_MAX_FRAME_BYTES; ab.peer_node_id = UINT32_C(2);
+    ba.ops = &AODV_LINK_OPS; ba.context = &cba; ba.link_id = 102U;
+    ba.mtu = UCN_MAX_FRAME_BYTES; ba.peer_node_id = UINT32_C(1);
+    bc.ops = &AODV_LINK_OPS; bc.context = &cbc; bc.link_id = 103U;
+    bc.mtu = UCN_MAX_FRAME_BYTES; bc.peer_node_id = UINT32_C(3);
+    cb.ops = &AODV_LINK_OPS; cb.context = &ccb; cb.link_id = 104U;
+    cb.mtu = UCN_MAX_FRAME_BYTES; cb.peer_node_id = UINT32_C(2);
+    cd.ops = &AODV_LINK_OPS; cd.context = &ccd; cd.link_id = 105U;
+    cd.mtu = UCN_MAX_FRAME_BYTES; cd.peer_node_id = UINT32_C(4);
+    dc.ops = &AODV_LINK_OPS; dc.context = &cdc; dc.link_id = 106U;
+    dc.mtu = UCN_MAX_FRAME_BYTES; dc.peer_node_id = UINT32_C(3);
+    cab.peer = &b; cab.peer_ingress = &ba;
+    cba.peer = &a; cba.peer_ingress = &ab;
+    cbc.peer = &c; cbc.peer_ingress = &cb;
+    ccb.peer = &b; ccb.peer_ingress = &bc;
+    ccd.peer = &d; ccd.peer_ingress = &dc;
+    cdc.peer = &c; cdc.peer_ingress = &cd;
+    cab.is_up = cba.is_up = cbc.is_up = ccb.is_up = &links_up;
+    ccd.is_up = cdc.is_up = &links_up;
+    cab.drop_frames = cba.drop_frames = cbc.drop_frames = ccb.drop_frames =
+        &no_drop;
+    ccd.drop_frames = cdc.drop_frames = &no_drop;
+    cab.async_submit = cba.async_submit = cbc.async_submit = true;
+    ccb.async_submit = ccd.async_submit = cdc.async_submit = true;
+    TEST_ASSERT(ucn_node_register_link(&a, &ab) == UCN_OK);
+    TEST_ASSERT(ucn_node_register_link(&b, &ba) == UCN_OK);
+    TEST_ASSERT(ucn_node_register_link(&b, &bc) == UCN_OK);
+    TEST_ASSERT(ucn_node_register_link(&c, &cb) == UCN_OK);
+    TEST_ASSERT(ucn_node_register_link(&c, &cd) == UCN_OK);
+    TEST_ASSERT(ucn_node_register_link(&d, &dc) == UCN_OK);
+    ucn_node_set_rx_handler(&d, aodv_rx, &received);
+
+    TEST_ASSERT(ucn_node_discover_route(&a, UINT32_C(4), 10U) == UCN_OK);
+    TEST_ASSERT(ucn_node_route_pending(&a, UINT32_C(4)));
+    TEST_ASSERT(ucn_node_step(&a, 10U + UCN_ROUTE_RING_TIMEOUT_MS + 1U) ==
+                UCN_OK);
+    TEST_ASSERT(!ucn_node_route_pending(&a, UINT32_C(4)));
+
+    a_to_d = aodv_find_route(&a, UINT32_C(4));
+    b_to_a = aodv_find_route(&b, UINT32_C(1));
+    b_to_d = aodv_find_route(&b, UINT32_C(4));
+    c_to_a = aodv_find_route(&c, UINT32_C(1));
+    c_to_d = aodv_find_route(&c, UINT32_C(4));
+    d_to_a = aodv_find_route(&d, UINT32_C(1));
+    TEST_ASSERT(a_to_d != NULL && b_to_a != NULL && b_to_d != NULL &&
+                c_to_a != NULL && c_to_d != NULL && d_to_a != NULL);
+    TEST_ASSERT(a_to_d->route_epoch != 0U &&
+                b_to_a->route_epoch == a_to_d->route_epoch &&
+                b_to_d->route_epoch == a_to_d->route_epoch &&
+                c_to_a->route_epoch == a_to_d->route_epoch &&
+                c_to_d->route_epoch == a_to_d->route_epoch &&
+                d_to_a->route_epoch == a_to_d->route_epoch);
+    TEST_ASSERT(ucn_node_send(&a, UINT32_C(4), UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q1_REALTIME, &payload, 1U) == UCN_OK);
+    TEST_ASSERT(received.count == 1U && received.last_payload == payload);
+    return 0;
+}
+
 static int test_origin_rreq_loop_guard(void)
 {
     bool link_up = true;
@@ -405,6 +528,7 @@ int test_aodv_lite(void)
     TEST_ASSERT(test_route_error_profile_payloads() == 0);
     TEST_ASSERT(test_adaptive_wire_control_chain() == 0);
     TEST_ASSERT(test_expanding_ring_budget() == 0);
+    TEST_ASSERT(test_expanding_ring_epoch_alignment() == 0);
     TEST_ASSERT(test_origin_rreq_loop_guard() == 0);
 
     ab.ops = &AODV_LINK_OPS; ab.context = &cab; ab.link_id = 1U;

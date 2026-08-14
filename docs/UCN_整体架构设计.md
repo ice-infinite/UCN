@@ -1,6 +1,6 @@
 # UCN 整体架构设计：MCU 自组网优先
 
-> 状态：**UCN v5 的协议/软件闭环、V5-46 独立 Platform Port、V5-47 工程模块分层与 V5-62 预发布 API V2 修复已完成（2026-08-14）**；W0～W3、全 Build Profile 四档接收、Profile-aware 控制面、32 bit Cost 与 3/3/3/4 B Wire Cost、Q1 绝对 Deadline、Candidate Profile 连续性、业务路由约束、运行期 Hop Scope、Pinned Path Remaining Hops、有界 Expanding Ring、Ingress 早拒绝和 Host 软件门禁已完成。v4 已独立冻结；生产密码库、Authorized Class 执行层、目标板资源和多介质多跳实机仍待验证。
+> 状态：**UCN v5 的协议/软件闭环、V5-46 独立 Platform Port、V5-47 工程模块分层、V5-62 API V2 和 V5-63 扩展环 Epoch 修复已完成（2026-08-14）**；W0～W3、Profile-aware 控制面、32 bit Cost、Q1 Deadline、Candidate、业务路由约束、有界 Expanding Ring、Ingress 早拒绝和 Host 软件门禁已完成。v4 已独立冻结；四板 UART-only 单源三跳已实测，生产密码库、Authorized Class、ESP-NOW 四节点、多 Origin、其他 BSP/介质和产品资源仍待验证。
 > 日期：2026-08-14
 > 目标：以 MCU 为主体完成安全自组网；Linux 仅作为兼容接入端；协议小而可裁剪；资源占用由目标硬件配置决定。
 
@@ -15,6 +15,12 @@ Linux、ROS2、PX4/MAVLink、地面站与 AI 系统可以通过 `UCN-Host` 接�
 V5-47 进一步将仓库内部实现明确归入 `src/core`、`src/node`、`src/transport`、`src/routing`、`src/service`、`src/ports`；公开 `include/ucn/...` 路径与 Wire 行为不变。目录依赖和未来 Adapter/RTOS 扩展规则见 [工程架构索引](架构/README.md)。
 
 V5-62 在尚未对外稳定发布的前提下选择工程 API 最优而非旧源码兼容：`ucn_port_ops_t` 使用 `struct_size/api_version` 的 Port API V2，Transfer 只接受一个权威单调时钟，经典 CAN 完成 Carrier 必须先提交再消费下一 START。旧对象必须全量重编译；Wire 仍是 v5，Frame/Header/消息编号不变。迁移与验证见 [V5-62 修复报告](UCN_V5_62_Port_API_V2与审计缺陷修复报告.md)。
+
+V5-63 修复了扩展环路由的同路径 Epoch 刷新：较小 Ring 已触达的中继在较大
+Ring 使用新 Request ID/Epoch 时，会同步更新反向 Route Epoch，并以固定 Grace
+期接收旧在途帧。软件回归和四块 N16R8 的 UART-only 单源三跳九档消息均已
+通过；多 Origin Epoch 所有权与 ESP-NOW 四节点仍是独立待办。见
+[V5-63 修复与实测](UCN_V5_63_扩展环Epoch一致性与四节点三跳实测.md)。
 
 这份架构只围绕四项约束设计：
 
@@ -81,7 +87,7 @@ flowchart TB
 | Identity & Join | 最小 `HELLO`、Candidate/Admitted/Suspect/Removed/Rejected/Expired 邻居表、`Manual`/`Open`/`Provider` 准入。 | `JOIN_REQ`/挑战/接受状态机、出厂身份格式。 |
 | Session & Replay | 可注入 Provider 的会话 ID、发送序号持久化、TX/RX 授权、固定 `seal/open`、30 B 不可变 AAD（Path 帧含 Path ID）、明文/受保护策略和入站去重缓存。 | 生产 AEAD、密钥轮换、完整重放窗口与产品 ACL 表。 |
 | Route / Forwarding | 固定 Active/Candidate 表、2→4→8→16 有界 AODV-Lite、RREQ/RREP/RERR、`PATH_PROBE/ACK` 的端到端 RTT EWMA、携带 Candidate ID + Epoch 的 `PATH_ACTIVATE/ACK`、TTL、断链清表、32 bit Route Cost；Node/Policy 可按 Hop/Cost/已验证 RTT 门禁业务路线，按 `(destination, route_epoch)` 区分 Current/Previous，默认 1 s grace。 | 自动业务重发、全网拓扑。 |
-| Core QoS | Q0/Q1 固定队列、deadline、`best_effort`、`latest_value`；Endpoint Q1 首包固定 4 槽/1 s 等待并合并同 `(destination, Endpoint)`。Extended Transfer 以独立固定槽提供默认窗口 1、显式窗口 2～8、累计 ACK 和有界 Go-Back-N，不改变 Core 队列或 v5 Wire。 | 通用 Q2/Q3、文件级续传和高吞吐流。 |
+| Core QoS | Q0/Q1 固定队列、deadline、`best_effort`、`latest_value`；Endpoint Q1 首包固定 4 槽/1 s 等待并合并同 `(destination, Endpoint)`。Extended Transfer 以独立固定槽提供默认 Fragment 窗口 1、显式窗口 2～8、默认 Peer 消息并发 1、静态显式 Peer 并发、累计 ACK 和有界 Go-Back-N，不改变 Core 队列或 v5 Wire。 | 通用 Q2/Q3、文件级续传、动态并发能力协商和高吞吐流。 |
 | Node 内任务通信 | Core 外已有固定 Router、本机 Inbox、Remote TX、Bridge、FreeRTOS 静态事件通知；高风险远端 Q0 可在入队前强制产品 Validator，并使用固定 Replay 表。 | 产品执行器、真实 Task 时延/失联安全与板级验收；详见[节点内任务通信建议](UCN_节点内任务通信建议.md)。 |
 | Health | 8 B 一跳 `HEARTBEAT` 请求/ACK、业务帧刷新存活、`ADMITTED → SUSPECT → REMOVED`、路由/Link 槽回收。 | `LINK_STATE` 线协议消息、对应用的统一失联事件、介质专用 Profile 实机标定。 |
 
@@ -248,7 +254,7 @@ Core 不直接读取 WiFi RSSI、BLE RSSI、LoRa SNR 或 CAN 专有状态。每�
 
 每种介质都遵循同一条路径：`物理地址 → Candidate Link → 驱动固定 Ring/有界收包队列 → 事件唤醒唯一 Protocol Owner → 有预算地批量 pump → Core`。驱动 ISR/WiFi 回调不直接运行路由或应用逻辑；它们只搬运数据、投递固定队列并通知 Owner。正常数据不等待 Heartbeat 或固定轮询周期；最多 10 ms 的定时唤醒只负责协议维护、漏通知和无中断平台兜底。Core 不保存 MAC、CAN ID、串口号或 socket。物理地址到 Link 的静态映射由 Adapter 管理，成功 HELLO 后才由 Core 写入 `peer_node_id`。
 
-Owner 必须设置单次 Drain 的轮数/时间预算，防止连续外设流量独占 MCU；达到预算后让出 CPU，再处理后续通知。Frame 解码、寻路、解密、Transfer 重组、Endpoint 回调和同步日志禁止放进 ISR。ESP32 三板参考已用 UART/ESP-NOW 事件通知验证这一模型，详见 [V5-57 报告](UCN_V5_57_事件驱动Owner与窗口8三节点报告.md)；其他 RTOS/BSP 仍需各自实机门禁。
+Owner 必须设置单次 Drain 的轮数/时间预算，防止连续外设流量独占 MCU；达到预算后让出 CPU，再处理后续通知。Frame 解码、寻路、解密、Transfer 重组、Endpoint 回调和同步日志禁止放进 ISR。ESP32 三板参考已用 UART/ESP-NOW 事件通知验证这一模型，四板 UART-only 又完成单源三跳 9/9；详见 [V5-57 报告](UCN_V5_57_事件驱动Owner与窗口8三节点报告.md)和 [V5-63 报告](UCN_V5_63_扩展环Epoch一致性与四节点三跳实测.md)。其他 RTOS/BSP 与 ESP-NOW 四节点仍需各自实机门禁。
 
 当前“跨介质多跳转发”已由 Link + 通用 Cost 支持；T21.1～T21.4 还让同一 Node ID 的 WiFi/UART/CAN 等自动准入 Link 合并为一个固定 Bearer 集（默认最多两条），并在 Primary 明确 Down 后让下一帧使用健康 Backup。每条 Bearer 都独立经过 Provider 准入、Heartbeat 和 `last_seen`；全 Bearer Down 后才回收 Neighbor。健康 Primary 不因一次 Cost 波动改变：Full 候选有效分需低至少 20%、连续 3 个 500 ms 窗口成立，再在该候选 Bearer 上收到 2 次一跳 Heartbeat ACK（最多 3 次尝试）才切换，切换后保持 3000 ms。Probe 不新增线格式、不经中继；当 Probe 到期且连续业务已达默认 4 个发送上限时，它获得一个必要维护槽，未到期时不会抢占业务。Active/Previous Route 与 Candidate 都在业务、Probe、Activate 和中继转发时解析到当前 Primary：单 Bearer Down 不清动态路径；下游断链的 RERR 经当前 Backup 回传；全 Bearer Down 才清动态 Route/Candidate。静态 Route 有意保留给产品层恢复策略。Adapter 负责把 RSSI、错误、拥塞等映射为通用指标，Core 负责 LC-1 平滑和评分。
 
