@@ -11,7 +11,7 @@
 include/ucn/ucn_config.h
 ```
 
-排除 include guard 与配置控制宏后，它集中列出当前公共头中的 103 个分散 `#ifndef UCN_*` 默认项，覆盖 Build Profile、Frame/MTU、静态容量、路由/邻居/控制预算、诊断、Path/Policy 和 Service。原来分布在 `ucn_profile.h`、`ucn_types.h`、`ucn_node.h`、Adapter、Neighbor、Path、Policy、Service/Bridge 中的默认定义没有删除。
+V5-09 建立时它集中收录了 103 个分散默认项；此后新增的 Link 存活档和 Transfer 配置也继续进入同一入口。当前覆盖 Build Profile、Frame/MTU、静态容量、路由/邻居/控制预算、诊断、Path/Policy、Service 和可选 Transfer。各功能头中的 `#ifndef` 回退仍保留。
 
 加载顺序是：
 
@@ -54,6 +54,26 @@ ucn_config.h 中的统一默认值
 #ifndef UCN_ADAPTER_RX_QUEUE_DEPTH
 #define UCN_ADAPTER_RX_QUEUE_DEPTH 3U
 #endif
+/* 一个 UART/CAN 控制器/USB Endpoint/无线 Adapter 各占一个 Source。 */
+#ifndef UCN_EVENT_RUNTIME_MAX_SOURCES
+#define UCN_EVENT_RUNTIME_MAX_SOURCES 4U
+#endif
+#ifndef UCN_EVENT_RUNTIME_DEFAULT_DRAIN_ROUNDS
+#define UCN_EVENT_RUNTIME_DEFAULT_DRAIN_ROUNDS 8U
+#endif
+#ifndef UCN_EVENT_RUNTIME_DEFAULT_SOURCE_BUDGET
+#define UCN_EVENT_RUNTIME_DEFAULT_SOURCE_BUDGET 4U
+#endif
+/* 只有链接并创建 ucn_transfer_t 的产品才会使用这些 RAM 上限。 */
+#ifndef UCN_TRANSFER_MAX_MESSAGE_BYTES
+#define UCN_TRANSFER_MAX_MESSAGE_BYTES ((size_t)512U)
+#endif
+#ifndef UCN_TRANSFER_RX_SLOTS
+#define UCN_TRANSFER_RX_SLOTS ((size_t)1U)
+#endif
+#ifndef UCN_TRANSFER_MAX_WINDOW
+#define UCN_TRANSFER_MAX_WINDOW ((uint8_t)2U)
+#endif
 
 #endif
 ```
@@ -82,8 +102,8 @@ cmake -S . -B build-product `
 | --- | --- |
 | 构建裁剪 | `UCN_PROFILE`、`UCN_FEATURE_SERVICE` |
 | 帧与范围 | `UCN_MAX_FRAME_BYTES`、`UCN_MAX_PAYLOAD_BYTES`、`UCN_MAX_HOPS` |
-| 固定 RAM 容量 | Link、Neighbor、Bearer、Route、Queue、Endpoint、Path、Policy、Service 深度 |
-| 时间与预算 | Heartbeat、Route 生命周期、Token、Step 上限、Probe、诊断超时 |
+| 固定 RAM 容量 | Link、Neighbor、Bearer、Route、Queue、Endpoint、Path、Policy、Service、`UCN_EVENT_RUNTIME_MAX_SOURCES`，以及 `UCN_TRANSFER_MAX_MESSAGE_BYTES`/TX/RX Slot 深度/`UCN_TRANSFER_MAX_WINDOW` |
+| 时间与预算 | Heartbeat、Route 生命周期、Token、Step 上限、Probe、诊断超时、`UCN_EVENT_RUNTIME_DEFAULT_DRAIN_ROUNDS`/`SOURCE_BUDGET` |
 | 产品安全门禁 | `UCN_SECURITY_REQUIRED_BY_DEFAULT` |
 
 协议版本、Magic、线上字段宽度、消息编号、CRC/AAD 布局、广播保留值等协议不变量不是产品配置，不能通过全局头随意改变。
@@ -102,7 +122,7 @@ cmake -S . -B build-product `
 
 ## 5. ABI 与失败关闭
 
-很多宏会改变 `ucn_node_t`、Adapter Queue、Service Router 等对象布局。同一个固件中的 Core、Adapter、Service 和业务 Translation Unit 必须看到完全相同的配置；不能只给某一个 `.c` 单独定义容量宏。
+很多宏会改变 `ucn_node_t`、Adapter Queue、Service Router、`ucn_transfer_t` 等对象布局。同一个固件中的 Core、Adapter、Service、Transfer 和业务 Translation Unit 必须看到完全相同的配置；不能只给某一个 `.c` 单独定义容量宏。
 
 原有静态编译门禁继续生效，例如：
 
@@ -116,8 +136,10 @@ cmake -S . -B build-product `
 
 ## 6. 软件证据
 
-- 自动盘点确认：排除 include guard 与配置控制宏后，原公共头 103 个分散 `#ifndef` 默认项在 `ucn_config.h` 中 103/103 有对应项。
+- V5-09 自动盘点确认原公共头 103 个分散默认项为 103/103；后续 Transfer 新增项同样同时具备全局默认和 `ucn_transfer.h` 本地回退。
 - `ucn_config_defaults_test`：统一默认值生效。
 - `ucn_config_fallback_test`：定义 `UCN_CONFIG_NO_DEFAULTS` 后，原头文件默认值仍可独立构建并保持一致。
-- `ucn_config_override_test`：产品头只覆盖部分参数，其余参数继续使用统一默认。
+- `ucn_config_override_test`：产品头将 Transfer 最大消息覆盖为 512 B、RX Slot/编译窗口覆盖为 2，将 Event Runtime Source/Round/Source Budget 覆盖为 3/5/2，把 Stream Ring/Byte Budget/Error Budget/Read Chunk 覆盖为 128/64/2/16 B，并把 CAN Frame Ring/Reassembly Slot/Timeout 覆盖为 4/1/75 ms；其余参数继续使用统一默认。公共 Transfer 编译最大窗口为 8，运行默认仍为 1。
+- Stream 默认宏为 `UCN_STREAM_SOURCE_DEFAULT_RING_BYTES=512`、`UCN_STREAM_SOURCE_DEFAULT_BYTE_BUDGET=512`、`UCN_STREAM_SOURCE_DEFAULT_ERROR_BUDGET=4`、`UCN_STREAM_SOURCE_READ_CHUNK_BYTES=32`。它们只决定便利 Storage/默认服务预算；产品也可给每个 Source 传入自己的静态 Ring/Frame 数组和运行预算，但同一固件的 ABI 宏仍必须全翻译单元一致。
+- CAN 默认宏为 `UCN_CAN_SOURCE_DEFAULT_RING_FRAMES=8`、`UCN_CAN_SOURCE_DEFAULT_REASSEMBLY_SLOTS=2`、`UCN_CAN_SOURCE_DEFAULT_REASSEMBLY_TIMEOUT_MS=250`。前两项会改变 `ucn_can_source_default_storage_t` 布局，必须全工程一致；产品也可不使用便利 Storage，改传自己的固定 Frame Ring、Slot Descriptor 和扁平重组区。
 - 独立 Full/Service ON 产品配置头构建通过；Nano/Lite/Full Debug/Release 和 Full ASan+UBSan 回归通过。

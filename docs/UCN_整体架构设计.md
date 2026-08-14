@@ -1,7 +1,7 @@
 # UCN 整体架构设计：MCU 自组网优先
 
 > 状态：**UCN v5 的协议/软件闭环、V5-46 独立 Platform Port 与 V5-47 工程模块分层已完成（2026-08-12）**；W0～W3、全 Build Profile 四档接收、Profile-aware 控制面、32 bit Cost 与 3/3/3/4 B Wire Cost、Q1 绝对 Deadline、Candidate Profile 连续性、业务路由约束、运行期 Hop Scope、Pinned Path Remaining Hops、有界 Expanding Ring、Ingress 早拒绝和 Host 软件门禁已完成。v4 已独立冻结；生产密码库、Authorized Class 执行层、目标板资源和多介质多跳实机仍待验证。
-> 日期：2026-08-12
+> 日期：2026-08-14
 > 目标：以 MCU 为主体完成安全自组网；Linux 仅作为兼容接入端；协议小而可裁剪；资源占用由目标硬件配置决定。
 
 ## 1. 架构结论
@@ -10,7 +10,7 @@ UCN 是一个可移植的 C 通信协议栈。它的最小运行形态不是 Lin
 
 Linux、ROS2、PX4/MAVLink、地面站与 AI 系统可以通过 `UCN-Host` 接入同一网络，但它们不拥有路由中心、入网中心或控制中心的地位，更不替代 Linux 自己已有的网络体系。
 
-当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 与 per-Link 接收上限、1 B RX Ceiling HELLO、3 B Ingress Profile Peek、Profile-aware RREQ/RREP/RERR/Path/诊断控制载荷、32 bit 累计 Cost 与 3/3/3/4 B Wire Cost、Node/Policy Hop-Cost-已验证 RTT 门禁、运行期 Ingress/学习/Path Hop Scope、Profile 绑定 AAD、透明密文中继、显式开启的路由感知最小档选择、Route Epoch/grace、2→4→8→16 受限 AODV-Lite、保持发现 Profile 的 Candidate Probe/Activate、LC-1 本地动态 Cost、Endpoint Q1 首包自动寻路和绝对 Deadline、固定邻居表、带 Remaining Hops 的 Path ID 逐跳表、固定/主备与 Q1 流亲和策略，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、Authorized Class 执行层、真实无线多板和小 MTU Carrier 仍是后续任务，不能由软件测试替代。
+当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 与 per-Link 接收上限、1 B RX Ceiling HELLO、Ingress Profile/真实长度 Peek、Profile-aware 控制载荷、32 bit Cost、Hop-Cost-RTT 门禁、Profile 绑定 AAD、透明密文中继、路由感知最小档、受限 AODV-Lite、Candidate Probe/Activate、LC-1 本地动态 Cost、Endpoint Q1 首包寻路、固定邻居/Path/Policy、公共多 Source Event Runtime、UART/RS-485/USB CDC Stream Source、CAN/CAN-FD Frame Source、经典 CAN 有界 Carrier，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、Authorized Class 执行层、真实 BSP/DMA/USB/CAN 控制器/RTOS、多源实机仍是后续任务，不能由软件测试替代。
 
 V5-47 进一步将仓库内部实现明确归入 `src/core`、`src/node`、`src/transport`、`src/routing`、`src/service`、`src/ports`；公开 `include/ucn/...` 路径与 Wire 行为不变。目录依赖和未来 Adapter/RTOS 扩展规则见 [工程架构索引](架构/README.md)。
 
@@ -75,11 +75,11 @@ flowchart TB
 
 | 模块 | 当前已实现 | 明确尚未实现 |
 | --- | --- | --- |
-| Packet | v5 W0～W3 基础头 17/21/26/30 B；Nano/Lite/Full 都解析四档。固定域和最大接收档可配置，推荐最低够用 TX/W3 RX；自动模式按字段、路由 Hop、Path 共同 Profile/MTU、对端上限及 Tag 选择最小可用档。Ingress 先用 3 B Prefix 按 per-Link RX Ceiling 早拒绝，再执行完整长度/CRC/Network/Hop/Flag/字段校验。 | 跨 Link 分片仍未实现。 |
+| Packet | v5 W0～W3 基础头 17/21/26/30 B；Nano/Lite/Full 都解析四档。固定域和最大接收档可配置，推荐最低够用 TX/W3 RX；自动模式按字段、路由 Hop、Path 共同 Profile/MTU、对端上限及 Tag 选择最小可用档。Ingress 先用 3 B Prefix 按 per-Link RX Ceiling 早拒绝，再执行完整长度/CRC/Network/Hop/Flag/字段校验。可选 `ucn_transfer` 已提供 T32～T8K 有界逻辑消息。 | Transfer 的真实 Bearer 性能、完整 Path MTU 主动协商和生产安全实测。 |
 | Identity & Join | 最小 `HELLO`、Candidate/Admitted/Suspect/Removed/Rejected/Expired 邻居表、`Manual`/`Open`/`Provider` 准入。 | `JOIN_REQ`/挑战/接受状态机、出厂身份格式。 |
 | Session & Replay | 可注入 Provider 的会话 ID、发送序号持久化、TX/RX 授权、固定 `seal/open`、30 B 不可变 AAD（Path 帧含 Path ID）、明文/受保护策略和入站去重缓存。 | 生产 AEAD、密钥轮换、完整重放窗口与产品 ACL 表。 |
 | Route / Forwarding | 固定 Active/Candidate 表、2→4→8→16 有界 AODV-Lite、RREQ/RREP/RERR、`PATH_PROBE/ACK` 的端到端 RTT EWMA、携带 Candidate ID + Epoch 的 `PATH_ACTIVATE/ACK`、TTL、断链清表、32 bit Route Cost；Node/Policy 可按 Hop/Cost/已验证 RTT 门禁业务路线，按 `(destination, route_epoch)` 区分 Current/Previous，默认 1 s grace。 | 自动业务重发、全网拓扑。 |
-| Core QoS | Q0/Q1 固定队列、deadline、`best_effort`、`latest_value`；Endpoint Q1 首包固定 4 槽/1 s 等待并合并同 `(destination, Endpoint)`。 | Q2/Q3、可靠确认、分片。 |
+| Core QoS | Q0/Q1 固定队列、deadline、`best_effort`、`latest_value`；Endpoint Q1 首包固定 4 槽/1 s 等待并合并同 `(destination, Endpoint)`。Extended Transfer 以独立固定槽提供默认窗口 1、显式窗口 2～8、累计 ACK 和有界 Go-Back-N，不改变 Core 队列或 v5 Wire。 | 通用 Q2/Q3、文件级续传和高吞吐流。 |
 | Node 内任务通信 | Core 外已有固定 Router、本机 Inbox、Remote TX、Bridge、FreeRTOS 静态事件通知；高风险远端 Q0 可在入队前强制产品 Validator，并使用固定 Replay 表。 | 产品执行器、真实 Task 时延/失联安全与板级验收；详见[节点内任务通信建议](UCN_节点内任务通信建议.md)。 |
 | Health | 8 B 一跳 `HEARTBEAT` 请求/ACK、业务帧刷新存活、`ADMITTED → SUSPECT → REMOVED`、路由/Link 槽回收。 | `LINK_STATE` 线协议消息、对应用的统一失联事件、介质专用 Profile 实机标定。 |
 
@@ -244,7 +244,9 @@ Core 不直接读取 WiFi RSSI、BLE RSSI、LoRa SNR 或 CAN 专有状态。每�
 
 ### 4.6 Adapter：物理介质与 Core 的唯一边界
 
-每种介质都遵循同一条路径：`物理地址 → Candidate Link → 有界收包队列 → 协议任务 pump → Core`。驱动 ISR/WiFi 回调不直接运行路由或应用逻辑；Core 不保存 MAC、CAN ID、串口号或 socket。物理地址到 Link 的静态映射由 Adapter 管理，成功 HELLO 后才由 Core 写入 `peer_node_id`。
+每种介质都遵循同一条路径：`物理地址 → Candidate Link → 驱动固定 Ring/有界收包队列 → 事件唤醒唯一 Protocol Owner → 有预算地批量 pump → Core`。驱动 ISR/WiFi 回调不直接运行路由或应用逻辑；它们只搬运数据、投递固定队列并通知 Owner。正常数据不等待 Heartbeat 或固定轮询周期；最多 10 ms 的定时唤醒只负责协议维护、漏通知和无中断平台兜底。Core 不保存 MAC、CAN ID、串口号或 socket。物理地址到 Link 的静态映射由 Adapter 管理，成功 HELLO 后才由 Core 写入 `peer_node_id`。
+
+Owner 必须设置单次 Drain 的轮数/时间预算，防止连续外设流量独占 MCU；达到预算后让出 CPU，再处理后续通知。Frame 解码、寻路、解密、Transfer 重组、Endpoint 回调和同步日志禁止放进 ISR。ESP32 三板参考已用 UART/ESP-NOW 事件通知验证这一模型，详见 [V5-57 报告](UCN_V5_57_事件驱动Owner与窗口8三节点报告.md)；其他 RTOS/BSP 仍需各自实机门禁。
 
 当前“跨介质多跳转发”已由 Link + 通用 Cost 支持；T21.1～T21.4 还让同一 Node ID 的 WiFi/UART/CAN 等自动准入 Link 合并为一个固定 Bearer 集（默认最多两条），并在 Primary 明确 Down 后让下一帧使用健康 Backup。每条 Bearer 都独立经过 Provider 准入、Heartbeat 和 `last_seen`；全 Bearer Down 后才回收 Neighbor。健康 Primary 不因一次 Cost 波动改变：Full 候选有效分需低至少 20%、连续 3 个 500 ms 窗口成立，再在该候选 Bearer 上收到 2 次一跳 Heartbeat ACK（最多 3 次尝试）才切换，切换后保持 3000 ms。Probe 不新增线格式、不经中继；当 Probe 到期且连续业务已达默认 4 个发送上限时，它获得一个必要维护槽，未到期时不会抢占业务。Active/Previous Route 与 Candidate 都在业务、Probe、Activate 和中继转发时解析到当前 Primary：单 Bearer Down 不清动态路径；下游断链的 RERR 经当前 Backup 回传；全 Bearer Down 才清动态 Route/Candidate。静态 Route 有意保留给产品层恢复策略。Adapter 负责把 RSSI、错误、拥塞等映射为通用指标，Core 负责 LC-1 平滑和评分。
 
@@ -254,7 +256,7 @@ ESP32 T21.6 正常诊断镜像已经让 ESP-NOW Peer Link 和 UART Link（ID `0x
 
 Adapter 的默认收包队列是两个最大帧缓存，可按 MCU RAM 编译期缩小。队列满必须显式丢弃并计数。接口、状态机、各介质映射和实际限制见 [UCN Adapter 契约](UCN_Adapter_契约.md)。
 
-当前 Core 不做跨 Link 分片/重组。每个发送帧必须小于实际 Path/Bearer 的有效 MTU；静态 `link->mtu` 和动态 `get_status().mtu` 同时存在时取较小值，任一为零时使用另一方，两者均零时 Link 暂不可发送。64 B CAN-FD 可使用更小的 Build Frame 配置或严格限制业务帧；经典 CAN 的 8 B 载荷不能直接承载 W0 的 17 B 基础头，仍需 Adapter 侧有界 Carrier 分段/重组。
+Core 本身不做跨 Link 分片/重组；可选 `ucn_transfer` 在 Core 之上把 T128～T8K 逻辑消息切为多个正常 UCN 帧，中继仍只转发。每个物理 UCN 帧必须小于实际 Path/Bearer 的有效 MTU；静态 `link->mtu` 和动态 `get_status().mtu` 同时存在时取较小值，任一为零时使用另一方，两者均零时 Link 暂不可发送。64 B CAN-FD 直接承载完整小帧；经典 CAN 由 `ucn_can_source_t` 的固定 8 B Carrier 在单条 Link 内先重组成完整 UCN 帧，仍不等于业务 Transfer。
 
 ## 5. UCN-Extended：仅给需要它的 MCU 开启
 
@@ -265,7 +267,7 @@ Adapter 的默认收包队列是两个最大帧缓存，可按 MCU RAM 编译期
 | Service Discovery | 发布/查询 `motor.control`、`imu.data` 等服务与版本。 | 使用预配置 Node ID + Message Type 通信。 |
 | Group / Multicast | 面向编队或同类传感器的受权限组消息。 | 使用受限广播或多次单播。 |
 | Q2 Reliable | 参数写入、配置、普通确认。 | Core 不承担可靠参数服务。 |
-| Fragmentation | 小 MTU Link 上的大消息重组。 | 超过 Core 最大负载直接拒绝，不隐式分片。 |
+| Fragmentation | `ucn_transfer` 已实现九档、固定槽、CRC32、ACK/重试和显式 release；仅目标端重组。 | 未链接 Transfer 时仍直接拒绝超 Core 负载；不提供无限消息或隐式文件传输。 |
 | Q3 Bulk | 日志、OTA、文件等限速流量。 | 不在普通 MCU Mesh 上进行大数据传输。 |
 | Time Sync | 编队、传感器融合和日志关联。 | 使用本地单调时间完成 Core 超时与防重放。 |
 | Diagnostics | 详细统计、抓包镜像、长期质量历史。 | 仅保留必要故障计数。 |

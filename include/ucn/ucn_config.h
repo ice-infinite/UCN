@@ -56,12 +56,92 @@
 #define UCN_MAX_HOPS ((uint8_t)16U)
 #endif
 
+/* Optional UCN-Extended Transfer object.  These limits allocate storage only
+ * in an application-owned ucn_transfer_t; ucn_node_t and the base Core do not
+ * contain large-message buffers. */
+#ifndef UCN_TRANSFER_MAX_MESSAGE_BYTES
+#define UCN_TRANSFER_MAX_MESSAGE_BYTES ((size_t)8192U)
+#endif
+#ifndef UCN_TRANSFER_TX_SLOTS
+#define UCN_TRANSFER_TX_SLOTS ((size_t)1U)
+#endif
+#ifndef UCN_TRANSFER_MAX_WINDOW
+#define UCN_TRANSFER_MAX_WINDOW ((uint8_t)8U)
+#endif
+#ifndef UCN_TRANSFER_RX_SLOTS
+#define UCN_TRANSFER_RX_SLOTS ((size_t)1U)
+#endif
+#ifndef UCN_TRANSFER_MAX_ENDPOINTS
+#define UCN_TRANSFER_MAX_ENDPOINTS ((size_t)4U)
+#endif
+#ifndef UCN_TRANSFER_MAX_PEERS
+#define UCN_TRANSFER_MAX_PEERS ((size_t)4U)
+#endif
+#ifndef UCN_TRANSFER_RECENT_COMPLETIONS
+#define UCN_TRANSFER_RECENT_COMPLETIONS ((size_t)4U)
+#endif
+#ifndef UCN_TRANSFER_MAX_RETRIES
+#define UCN_TRANSFER_MAX_RETRIES ((uint8_t)3U)
+#endif
+#ifndef UCN_TRANSFER_ACK_TIMEOUT_MS
+#define UCN_TRANSFER_ACK_TIMEOUT_MS ((uint32_t)250U)
+#endif
+#ifndef UCN_TRANSFER_RX_TIMEOUT_MS
+#define UCN_TRANSFER_RX_TIMEOUT_MS ((uint32_t)5000U)
+#endif
+#ifndef UCN_TRANSFER_COMPLETED_HOLD_MS
+#define UCN_TRANSFER_COMPLETED_HOLD_MS ((uint32_t)30000U)
+#endif
+#ifndef UCN_TRANSFER_RECENT_COMPLETION_MS
+#define UCN_TRANSFER_RECENT_COMPLETION_MS ((uint32_t)5000U)
+#endif
+#ifndef UCN_TRANSFER_MIN_FRAGMENT_DATA_BYTES
+#define UCN_TRANSFER_MIN_FRAGMENT_DATA_BYTES ((uint16_t)16U)
+#endif
+
 /* Adapter and physical identity buffers. */
 #ifndef UCN_ADAPTER_RX_QUEUE_DEPTH
 #define UCN_ADAPTER_RX_QUEUE_DEPTH 2U
 #endif
 #ifndef UCN_ADAPTER_PHYSICAL_ADDRESS_MAX
 #define UCN_ADAPTER_PHYSICAL_ADDRESS_MAX 8U
+#endif
+
+/* Optional standard event Runtime.  Storage is allocated only when a product
+ * instantiates ucn_event_runtime_t; it is not embedded in ucn_node_t. */
+#ifndef UCN_EVENT_RUNTIME_MAX_SOURCES
+#define UCN_EVENT_RUNTIME_MAX_SOURCES 8U
+#endif
+#ifndef UCN_EVENT_RUNTIME_DEFAULT_DRAIN_ROUNDS
+#define UCN_EVENT_RUNTIME_DEFAULT_DRAIN_ROUNDS 8U
+#endif
+#ifndef UCN_EVENT_RUNTIME_DEFAULT_SOURCE_BUDGET
+#define UCN_EVENT_RUNTIME_DEFAULT_SOURCE_BUDGET 4U
+#endif
+
+/* Optional caller-storage Stream Carrier Source for UART/RS-485/USB CDC. */
+#ifndef UCN_STREAM_SOURCE_DEFAULT_RING_BYTES
+#define UCN_STREAM_SOURCE_DEFAULT_RING_BYTES 512U
+#endif
+#ifndef UCN_STREAM_SOURCE_DEFAULT_BYTE_BUDGET
+#define UCN_STREAM_SOURCE_DEFAULT_BYTE_BUDGET 512U
+#endif
+#ifndef UCN_STREAM_SOURCE_DEFAULT_ERROR_BUDGET
+#define UCN_STREAM_SOURCE_DEFAULT_ERROR_BUDGET 4U
+#endif
+#ifndef UCN_STREAM_SOURCE_READ_CHUNK_BYTES
+#define UCN_STREAM_SOURCE_READ_CHUNK_BYTES 32U
+#endif
+
+/* Optional caller-storage CAN/CAN-FD Frame Source. */
+#ifndef UCN_CAN_SOURCE_DEFAULT_RING_FRAMES
+#define UCN_CAN_SOURCE_DEFAULT_RING_FRAMES 8U
+#endif
+#ifndef UCN_CAN_SOURCE_DEFAULT_REASSEMBLY_SLOTS
+#define UCN_CAN_SOURCE_DEFAULT_REASSEMBLY_SLOTS 2U
+#endif
+#ifndef UCN_CAN_SOURCE_DEFAULT_REASSEMBLY_TIMEOUT_MS
+#define UCN_CAN_SOURCE_DEFAULT_REASSEMBLY_TIMEOUT_MS 250U
 #endif
 
 /* Core queues, scheduling and static tables. */

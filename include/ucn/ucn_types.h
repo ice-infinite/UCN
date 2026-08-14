@@ -161,7 +161,12 @@ typedef enum ucn_message_type {
     UCN_MSG_POLICY_DIAGNOSTIC_REQ = 0x1E,
     UCN_MSG_POLICY_DIAGNOSTIC_REPLY = 0x1F,
     UCN_MSG_DATA_Q0 = 0x20,
-    UCN_MSG_DATA_Q1 = 0x21
+    UCN_MSG_DATA_Q1 = 0x21,
+    /* Optional UCN-Extended Transfer messages.  They remain ordinary routed
+     * data for the Core; only endpoint nodes that instantiate ucn_transfer_t
+     * interpret or reassemble them. */
+    UCN_MSG_TRANSFER_FRAGMENT = 0x22,
+    UCN_MSG_TRANSFER_ACK = 0x23
 } ucn_message_type_t;
 
 typedef struct ucn_frame {

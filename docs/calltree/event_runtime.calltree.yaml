@@ -1,0 +1,125 @@
+module: event_runtime
+description: 多 Bearer 固定 Source、Task/ISR 事件合并、有界 Drain 与唯一 Protocol Owner 调度。
+entry: event_runtime.ucn_event_runtime_task_cycle
+source_files:
+  - src/transport/ucn_event_runtime.c
+  - include/ucn/ports/ucn_event_runtime.h
+
+nodes:
+  - id: event_runtime.ucn_event_runtime_init
+    symbol: ucn_event_runtime_init
+    type: function
+    file: src/transport/ucn_event_runtime.c
+    layer: adapter
+    role: 初始化固定 Runtime、公共 Protocol Owner、Scheduler Hook 与 Source/Round 预算。
+    called_by:
+      - external.product_startup
+    calls:
+      - target: adapter.ucn_protocol_owner_init
+        type: direct
+        reason: Runtime 静态拥有一个公共 Owner，后续所有 Node 执行都经它进入。
+    notes:
+      - 不创建 RTOS 对象、Driver Ring 或 Bearer 驱动。
+
+  - id: event_runtime.ucn_event_runtime_bind_source
+    symbol: ucn_event_runtime_bind_source
+    type: function
+    file: src/transport/ucn_event_runtime.c
+    layer: adapter
+    role: 启动期把一个固定 Source ID 绑定到 SDK 无关 service 回调和上下文。
+    called_by:
+      - external.adapter_startup
+    calls: []
+    notes:
+      - 每个 UART、CAN 控制器、USB Endpoint 或无线 Adapter 使用独立 Source/Driver Ring。
+
+  - id: event_runtime.ucn_event_runtime_signal_source_from_isr
+    symbol: ucn_event_runtime_signal_source_from_isr
+    type: function
+    file: src/transport/ucn_event_runtime.c
+    layer: adapter
+    role: 在 ISR token 临界区 OR Source Pending 位，并通过 Scheduler Hook 通知唯一 Owner。
+    called_by:
+      - external.uart_isr
+      - external.can_isr
+      - external.usb_callback
+      - external.wireless_callback
+    calls:
+      - target: external.scheduler_notify_owner
+        type: callback
+        reason: 产品按 from_isr 映射到目标 RTOS 的普通或 FromISR 通知。
+    notes:
+      - 事件可合并，真实数据必须先留在该 Source 自己的固定 Ring/帧队列。
+      - ISR 不解帧、不运行 Node、Security、Transfer、Endpoint 或日志。
+
+  - id: event_runtime.source_service_callback
+    symbol: ucn_event_source_service_fn
+    type: callback
+    file: include/ucn/ports/ucn_event_runtime.h
+    layer: adapter
+    role: 只在 Owner 上下文按 max_work 有界 Drain Driver Ring/Carrier，并返回仍待处理事件。
+    called_by:
+      - event_runtime.ucn_event_runtime_run
+    calls:
+      - target: event_runtime.ucn_event_runtime_submit_frame
+        type: direct
+        reason: Carrier 得到完整 UCN 帧后提交公共 Adapter RX Queue。
+    notes:
+      - Queue 背压时不得丢失尚未从 Driver Ring 提交成功的数据。
+
+  - id: event_runtime.ucn_event_runtime_submit_frame
+    symbol: ucn_event_runtime_submit_frame
+    type: function
+    file: src/transport/ucn_event_runtime.c
+    layer: adapter
+    role: 把一个完整 UCN 帧复制进公共固定 RX Queue，并置位 Owner RX 工作。
+    called_by:
+      - event_runtime.source_service_callback
+      - external.packet_adapter_callback
+    calls:
+      - target: adapter.ucn_protocol_owner_rx_enqueue
+        type: direct
+        reason: 复用公共 Task 上下文完整帧入队边界。
+
+  - id: event_runtime.ucn_event_runtime_run
+    symbol: ucn_event_runtime_run
+    type: scheduler
+    file: src/transport/ucn_event_runtime.c
+    layer: adapter
+    role: 原子取得所有 Pending，按 Source ID/预算调用 service，再运行一次公共 Owner；有剩余工作则在固定 Round 内续跑。
+    called_by:
+      - event_runtime.ucn_event_runtime_task_cycle
+      - external.bare_metal_super_loop
+    calls:
+      - target: event_runtime.source_service_callback
+        type: callback
+        reason: 有界 Drain 各独立 Driver Source。
+      - target: adapter.ucn_protocol_owner_step
+        type: direct
+        reason: Pump 完整帧、可选 Bridge，再执行 Node Step。
+      - target: external.scheduler_yield_owner
+        type: callback
+        reason: Round 预算耗尽且仍有工作时让出 CPU。
+    notes:
+      - Source 返回 pending_events 或 Owner 内部工作饱和时重新置位，下一轮不会先睡眠。
+
+  - id: event_runtime.ucn_event_runtime_task_cycle
+    symbol: ucn_event_runtime_task_cycle
+    type: scheduler
+    file: src/transport/ucn_event_runtime.c
+    layer: adapter
+    role: 有 Pending 时立即运行；否则有界等待，超时后执行一次全部 Source FALLBACK Scan。
+    called_by:
+      - external.freertos_protocol_task
+      - external.zephyr_protocol_thread
+      - external.nuttx_protocol_worker
+      - external.rtthread_protocol_thread
+    calls:
+      - target: external.scheduler_wait_owner
+        type: callback
+        reason: 等待上限裁剪到 UCN_MAX_STEP_INTERVAL_MS。
+      - target: event_runtime.ucn_event_runtime_run
+        type: direct
+        reason: 统一执行事件或超时兜底工作。
+    notes:
+      - Scheduler 通知必须有状态或计数，不能是可能在 Wait 前丢失的裸边沿。

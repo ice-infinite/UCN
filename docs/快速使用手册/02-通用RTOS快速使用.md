@@ -139,3 +139,9 @@ ucn_result_t product_service_send(ucn_node_id_t destination,
 ## 7. S16 Protocol Task 时限
 
 冻结该 Task 的最低优先级、`UCN_MAX_STEP_INTERVAL_MS`、最大 Queue Wait/Sleep、每轮 Adapter Pump/Bridge 预算和 Link `send()` WCET。不要用无限等待的消息队列驱动 Protocol Task；可用小于最大 Step 的超时或周期唤醒。运行时记录 `max_step_gap_ms`、`step_interval_violations`，并在压力测试中同时检查 Heartbeat/Probe 延迟。
+
+## 8. V5-58/59 通用事件 Runtime 与 Stream Source
+
+自研 RTOS 不需要复制 UCN 调度器：实现 `ucn_event_runtime_scheduler_ops_t` 的 `notify_owner(context, from_isr)`、有界 `wait_owner()` 和可选 `yield_owner()` 即可。通知必须是有状态或计数型，不能使用可能在 Wait 前丢失的裸边沿；UART/CAN/USB/Wi-Fi 各自注册固定 Source 和 Driver Ring，所有 `service()` 只在唯一 Protocol Task 执行。
+
+UART、RS-485、USB CDC 直接为每个实例初始化一个 `ucn_stream_source_t`；驱动线程/ISR 调用对应 `write`/`write_from_isr`，无需为本 RTOS 复制 COBS 状态机。RTOS glue 只负责调度通知和 BSP TX/RX，Stream Source 仍在唯一 Protocol Task 解帧。

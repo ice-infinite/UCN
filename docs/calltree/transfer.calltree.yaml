@@ -1,0 +1,148 @@
+module: transfer
+description: 按需链接的 T32～T8K 有界逻辑消息、固定分片/重组、累计 ACK、显式固定窗口和 RX Handle 生命周期。
+entry: transfer.ucn_transfer_send
+source_files:
+  - src/extended/ucn_transfer.c
+
+nodes:
+  - id: transfer.ucn_transfer_init
+    symbol: ucn_transfer_init
+    type: function
+    file: src/extended/ucn_transfer.c
+    layer: extended
+    role: 清零应用提供的静态 Transfer 对象、解析默认配置，并安装 0x22/0x23 通用 RX Handler。
+    called_by:
+      - external.protocol_owner_startup
+    calls:
+      - target: node_runtime.ucn_node_set_rx_handler
+        type: direct
+        reason: Transfer 接管 Fragment/ACK，并把其它普通消息转给可选 fallback。
+    notes:
+      - 不创建动态内存或 RTOS 对象。
+      - 同一 Node 只有一个通用 RX Handler；原 Handler 必须作为 fallback 传入。
+
+  - id: transfer.ucn_transfer_bind_endpoint
+    symbol: ucn_transfer_bind_endpoint
+    type: function
+    file: src/extended/ucn_transfer.c
+    layer: extended
+    role: 静态绑定目标 Endpoint、最大 Class、E2E 要求和完整消息回调。
+    called_by:
+      - external.protocol_owner_startup
+    calls:
+      - target: node_runtime.ucn_node_set_endpoint_handler
+        type: direct
+        reason: T32/T64 继续走无额外字段的单帧 Endpoint 路径。
+    notes:
+      - T128～T8K 由通用 Fragment Handler 根据信封内 target_endpoint 查找同一 Binding。
+
+  - id: transfer.ucn_transfer_set_peer_capability
+    symbol: ucn_transfer_set_peer_capability
+    type: function
+    file: src/extended/ucn_transfer.c
+    layer: extended
+    role: 在固定 Peer 表中声明目标节点允许的最大 Transfer Class。
+    called_by:
+      - external.protocol_owner_startup
+    calls: []
+    notes:
+      - 首版没有 HELLO 动态协商；没有静态能力记录就拒绝发送。
+
+  - id: transfer.ucn_transfer_set_tx_window_size
+    symbol: ucn_transfer_set_tx_window_size
+    type: function
+    file: src/extended/ucn_transfer.c
+    layer: extended
+    role: 在没有活动 TX Slot 时设置本机希望使用的固定发送窗口；初始化默认值为 1。
+    called_by:
+      - external.protocol_owner_startup
+    calls: []
+    notes:
+      - 编译默认最大值由 UCN_TRANSFER_MAX_WINDOW 限制为 8；运行期默认仍为 1。
+      - 活动发送期间修改返回 UCN_ERR_ACCESS。
+
+  - id: transfer.ucn_transfer_set_peer_window_capability
+    symbol: ucn_transfer_set_peer_window_capability
+    type: function
+    file: src/extended/ucn_transfer.c
+    layer: extended
+    role: 对已登记 Peer 显式声明其可接受的最大在途 Fragment 数；未声明时保持 1。
+    called_by:
+      - external.protocol_owner_startup
+    calls: []
+    notes:
+      - 当前不写入 HELLO，不改变 v5 Wire；产品必须从静态配置或受控能力目录提供。
+
+  - id: transfer.ucn_transfer_send
+    symbol: ucn_transfer_send
+    type: function
+    file: src/extended/ucn_transfer.c
+    layer: extended
+    role: 校验 Class/长度/Peer 后发送 T32/T64，或把 T128～T8K 放入固定 TX Slot。
+    called_by:
+      - external.protocol_owner_or_service_bridge
+    calls:
+      - target: route.ucn_node_send_endpoint
+        type: direct
+        reason: T32/T64 必须保持单帧且不进入 Fragment 协议。
+      - target: transfer.ucn_transfer_step
+        type: queue
+        reason: T128～T8K 只登记借用 Buffer，后续由唯一 Owner 逐片推进。
+    notes:
+      - 调用者 Buffer 在 Completion 前必须保持有效且只读。
+      - UCN_OK 对分片消息只表示本地固定 TX Slot 接受。
+
+  - id: transfer.ucn_transfer_step
+    symbol: ucn_transfer_step
+    type: scheduler
+    file: src/extended/ucn_transfer.c
+    layer: extended
+    role: 回收超时状态，并在一次调用中最多发送一个新片或重试片。
+    called_by:
+      - external.unique_protocol_owner_when_core_idle
+    calls:
+      - target: route.ucn_node_send
+        type: direct
+        reason: 用普通可路由消息 0x22 发送 Fragment；无路由时触发现有受限发现。
+      - target: route.ucn_node_discover_route
+        type: direct
+        reason: 首次发送返回 NOT_FOUND 时请求现有 AODV-Lite 寻路。
+      - target: external.transfer_completion_callback
+        type: callback
+        reason: 完成、远端拒绝、超时、重试耗尽或永久发送失败。
+    notes:
+      - 产品必须先执行 Core/Port Step，Core 空闲后再执行本函数，才能保持 Q0/维护优先。
+      - 默认窗口 1；双方显式允许时可使用 2～8。一次 Step 只提交一个片，但事件唤醒后的连续空闲 Step 可填充窗口。
+      - 缺口/超时执行受最大恢复轮和消息 Deadline 限制的 Go-Back-N；不缓存乱序片、不无限重试。
+
+  - id: transfer.transfer_node_rx_handler
+    symbol: transfer_node_rx_handler
+    type: callback
+    file: src/extended/ucn_transfer.c
+    layer: extended
+    role: 在目标 Node 上处理 Fragment/ACK；中继 Node 不进入此回调，只执行 Core 转发。
+    called_by:
+      - node_runtime.ucn_node_receive
+    calls:
+      - target: route.ucn_node_send
+        type: direct
+        reason: 回送带累计 next_expected_offset 的 0x23 ACK/NACK。
+      - target: external.transfer_receive_callback
+        type: callback
+        reason: CRC32 正确且完整重组后只投递一次只读 Buffer 与 Handle。
+    notes:
+      - RX Slot、Recent Completion 和片段上限均为编译期固定容量。
+      - Endpoint 要求 E2E 时，明文 Fragment 在分配 Slot 前失败关闭。
+
+  - id: transfer.ucn_transfer_release_received
+    symbol: ucn_transfer_release_received
+    type: function
+    file: src/extended/ucn_transfer.c
+    layer: extended
+    role: 校验 Slot Index 与 generation 后释放已完成的固定 RX Buffer。
+    called_by:
+      - external.transfer_receive_callback_or_consumer
+    calls: []
+    notes:
+      - 旧 Handle 不能释放复用后的新消息。
+      - T32/T64 的 DIRECT Handle 为 0，不调用本函数。

@@ -39,6 +39,9 @@ int test_adapter(void);
 int test_standard_adapter(void);
 int test_link_cost(void);
 int test_protocol_owner(void);
+int test_event_runtime(void);
+int test_stream_source(void);
+int test_can_source(void);
 int test_adapter_hello(void);
 int test_protocol_version(void);
 int test_path_trace(void);
@@ -57,5 +60,6 @@ int test_dynamic_stress(void);
 int test_profile(void);
 int test_public_headers(void);
 int test_node_storage_header(void);
+int test_transfer(void);
 
 #endif

@@ -1,6 +1,6 @@
 # UCN FreeRTOS 快速使用
 
-> 适用：FreeRTOS MCU。ESP32 测试工程中的 `UcnServiceFreeRtosPort`（`E:\File\PlatformIO\ESP32_UCN\ESP32S3_N16R8_UCN_Test1`）可作为静态对象、短临界区和通知模型的历史参考，但该工程当前仍用静态断言锁定线协议 v4，不能作为 v5 已编译/已烧录证据。它也不是打包进 UCN Core 的通用 FreeRTOS 库；移植到其他芯片时不能直接依赖 ESP32 的 `portMUX_TYPE`。
+> 适用：FreeRTOS MCU。ESP32 测试工程（`E:\File\PlatformIO\ESP32_UCN\ESP32S3_N16R8_UCN_Test1`）已形成 v5 事件 Owner/多板 UART Bench 证据，可作为 Arduino-ESP32 静态对象、短临界区和通知模型的产品参考；它仍不是打包进 Core 的通用 FreeRTOS SDK glue，不能把 ESP32 的 `portMUX_TYPE`、引脚、任务栈或实测吞吐直接外推到其他芯片。
 
 构建 v5 时按[总览的 Build Profile 与源文件矩阵](README.md#先选择-build-profile)重新选择 Nano/Lite/Full 源文件，并在所有 C/C++ 编译单元保持相同的 `UCN_PROFILE` 与 `UCN_FEATURE_SERVICE`。当前 ESP32 工程的源文件选择脚本已经具备该矩阵，但应用层 `main.cpp`/UART Benchmark 仍需另行迁移掉 v4 锁定后，才能称为 v5 FreeRTOS 实机参考。
 
@@ -145,3 +145,9 @@ static ucn_result_t send_servo(ucn_node_id_t destination,
 ## 7. S16 Protocol Task 时限
 
 ESP32 参考端把 Arduino `loopTask` 作为唯一 Protocol Task，并冻结最低优先级 1、最大 Block 1 ms、Wi-Fi/UART Pump 各 4 帧、Bridge 2 条、`UCN_MAX_STEP_INTERVAL_MS=10`。移植时必须按目标板重新测量这些值和 Link `send()` WCET；启动日志与周期统计应包含 `max_step_gap_ms`、`step_interval_violations`。不要把业务 Task 的 50 ms Queue Wait 复制给 Protocol Task。
+
+## 8. V5-58/59 FreeRTOS Event Runtime 与 Stream 映射
+
+新产品将 `notify_owner(false)` 映射到 Task Notification Give，将 `notify_owner(true)` 映射到目标 Port 的 FromISR Give 并按需要请求切换；`wait_owner()` 用有界 `ulTaskNotifyTake()` 返回是否被通知，`yield_owner()` 使用任务上下文 Yield。每个 UART/CAN/USB/Wi-Fi Source 有自己的静态 Ring；中断里只写 Ring 和 Signal。现有 `ucn_freertos_port_*` 是单 Queue 兼容入口，不能与新的 Runtime 同时成为同一 Node 的两个 Owner。
+
+UART/RS-485/USB CDC 使用公共 `ucn_stream_source_t`：RX Task/ISR 只调用 `ucn_stream_source_write[_from_isr]()`，COBS 和公共 Queue 背压只在 Protocol Task 运行。FreeRTOS 仍负责实际 UART Event/DMA、Task Notification、TX Queue 和 FromISR Yield。

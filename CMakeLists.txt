@@ -40,8 +40,14 @@ set(UCN_FOUNDATION_SOURCES
 
 set(UCN_TRANSPORT_SOURCES
     src/transport/ucn_adapter.c
+    src/transport/ucn_event_runtime.c
     src/transport/ucn_standard_adapter.c
     src/transport/ucn_protocol_owner.c
+)
+
+set(UCN_ADAPTER_SOURCES
+    src/adapters/can/ucn_can_source.c
+    src/adapters/stream/ucn_stream_source.c
 )
 
 set(UCN_NODE_SOURCES)
@@ -78,6 +84,7 @@ endif()
 set(UCN_CORE_SOURCES
     ${UCN_FOUNDATION_SOURCES}
     ${UCN_TRANSPORT_SOURCES}
+    ${UCN_ADAPTER_SOURCES}
     ${UCN_NODE_SOURCES}
     ${UCN_ROUTING_SOURCES}
     ${UCN_SERVICE_SOURCES}
@@ -114,6 +121,17 @@ if(UCN_USER_CONFIG_HEADER)
 endif()
 
 target_compile_options(ucn_core PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+
+# Large logical messages are an opt-in Extended component.  Keeping this as a
+# separate archive means Core-only MCU products do not pay for reassembly RAM,
+# retry state, or Transfer code unless they explicitly link ucn_transfer.
+add_library(ucn_transfer STATIC EXCLUDE_FROM_ALL
+    src/extended/ucn_transfer.c
+)
+target_link_libraries(ucn_transfer PUBLIC ucn_core)
+target_compile_options(ucn_transfer PRIVATE
     $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
 )
 
@@ -169,10 +187,14 @@ if(UCN_BUILD_TESTS)
         tests/test_adapter.c
         tests/test_standard_adapter.c
         tests/test_link_cost.c
+        tests/test_event_runtime.c
+        tests/test_stream_source.c
+        tests/test_can_source.c
         tests/test_protocol_owner.c
         tests/test_profile.c
         tests/test_public_headers.c
         tests/test_node_storage_header.c
+        tests/test_transfer.c
     )
 
     if(NOT UCN_PROFILE_UPPER STREQUAL "NANO")
@@ -218,6 +240,7 @@ if(UCN_BUILD_TESTS)
 
     target_link_libraries(ucn_tests PRIVATE
         ucn_core
+        ucn_transfer
         ucn_port_bare_metal
         ucn_port_freertos
         ucn_port_zephyr

@@ -128,3 +128,9 @@ Zephyr Port 需要三个静态对象：一个 `k_mutex` 保护 Router 短拷贝�
 ## 7. S16 Protocol Thread 时限
 
 用 Kconfig/Product Profile 冻结 `UCN_MAX_STEP_INTERVAL_MS`、线程优先级、最大 `k_poll()`/`k_sleep()` 超时、RX Pump/Bridge 预算与 Link `send()` WCET。线程必须周期唤醒，不能只等业务事件。压力测试记录 `max_step_gap_ms`、`step_interval_violations` 和 Heartbeat/Probe 延迟；仓库当前没有 Zephyr Port 实测结果。
+
+## 8. V5-58/59 Zephyr Event Runtime 与 Stream 映射
+
+产品用 `k_sem` 或 `k_event` 实现同一组 Scheduler Hook：ISR/线程都只 Post/Give，`wait_owner()` 有界等待并返回是否收到事件，Round 预算耗尽时可 `k_yield()`。UART async、CAN callback、USB CDC 和无线回调各写自己的固定 Ring/Frame Queue 后 Signal Source；Zephyr 类型只存在产品 glue，不进入 UCN 公共对象。当前仍需目标 Zephyr 构建和实机门禁。
+
+Zephyr UART async/USB CDC 的原始字节可直接写入每实例 `ucn_stream_source_t`，公共模块在 Protocol Thread 完成 COBS/重同步；`uart_event`、`k_work`、DMA Buffer 生命周期和 TX 完成仍由产品 glue 管理。

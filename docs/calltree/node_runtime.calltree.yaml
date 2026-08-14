@@ -57,6 +57,19 @@ nodes:
     notes:
       - 已被 Bridge 或其他组件占用的 Endpoint 不应被覆盖；回调运行在 Protocol Task。
 
+  - id: node_runtime.ucn_node_set_rx_handler
+    symbol: ucn_node_set_rx_handler
+    type: function
+    file: src/node/ucn_node.c
+    layer: core
+    role: 安装一个处理非控制、非静态 Endpoint 普通消息的通用回调。
+    called_by:
+      - transfer.ucn_transfer_init
+      - external.single_context_application
+    calls: []
+    notes:
+      - Node 只有一个通用 RX Handler；组合组件必须显式提供 fallback，不能静默覆盖。
+
   - id: node_runtime.send_control_on_link_static
     symbol: send_control_on_link/send_control_on_link_profile/send_control_on_link_adaptive
     type: function

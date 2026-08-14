@@ -48,7 +48,7 @@ Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个�
 
 | 模块 | 当前状态 | 后续范围 |
 | --- | --- | --- |
-| Fixed Frame | 已实现版本 5 的 W0/W1/W2/W3 官方 Codec；基础头 17/21/26/30 B，Route/Path 长度由 Profile+Flags 推导；Node 支持固定域和显式自动最小档，保留 CRC、16 B 可选 Tag、完整范围校验并拒绝 v4。 | 跨 Link 分片。 |
+| Fixed Frame | 已实现版本 5 的 W0/W1/W2/W3 官方 Codec；基础头 17/21/26/30 B，Route/Path 长度由 Profile+Flags 推导；Node 支持固定域和显式自动最小档，保留 CRC、16 B 可选 Tag、完整范围校验并拒绝 v4。可选 `ucn_transfer` 复用这些正常帧承载 T32～T8K，默认窗口 1、显式窗口 2～8 不改变 Wire。 | Core 自身仍不分片；Transfer 的完整 Path MTU/自动窗口能力协商和其他 Bearer 性能待验收。 |
 | Identity & Join | 已实现最小 HELLO、邻居状态机和三种准入策略。 | JOIN 挑战/接受、设备证书/身份格式。 |
 | Session & Replay | 已实现 Provider 回调、会话 ID、持久化发送序号、入站去重、`seal/open`、固定 AAD 和 Node/Endpoint 安全策略。 | 生产 AEAD、密钥轮换、完整重放窗口。 |
 | Trusted Neighbor | 已实现固定 Candidate/Admitted/Suspect/Removed/Rejected/Expired 表、Heartbeat 和已接纳节点撤销/Link 槽复用。 | 随机退避、入网令牌桶与实机在线时间标定。 |
@@ -145,7 +145,7 @@ Core 禁止以下实现方式：
 
 这套流程只要求 MCU 能使用至少一种 Link。STM32 没有无线收发器时，可以通过 CAN-FD/RS485 成网，或外挂无线模块；协议本身不要求 Linux。
 
-Adapter 不把 MAC、CAN ID 或蓝牙地址当作 UCN 身份。其统一接口、固定队列和物理地址映射见 [UCN Adapter 契约](UCN_Adapter_契约.md)。当前 Core 不做跨 Link 分片。`link->mtu=0` 表示静态值未知，由 `get_status().mtu` 动态提供；两者非零取较小值，两者都为零时 Link 暂不可发送。每个实际发送帧仍必须小于对应 Path/Bearer 的有效 MTU；经典 CAN 需要 Adapter 提供有界 Carrier 分段/重组。
+Adapter 不把 MAC、CAN ID 或蓝牙地址当作 UCN 身份。其统一接口、固定队列和物理地址映射见 [UCN Adapter 契约](UCN_Adapter_契约.md)。Core 不做逻辑消息分片；可选 `ucn_transfer` 在 Core 上层切片，但每个实际 UCN 帧仍必须小于对应 Path/Bearer 的有效 MTU。`link->mtu=0` 表示静态值未知，由 `get_status().mtu` 动态提供；两者非零取较小值，两者都为零时 Link 暂不可发送。经典 CAN 已由独立 Adapter Carrier 有界分段/重组，这与 Transfer 的业务消息分片不是同一层；真实 CAN 控制器驱动仍归产品。
 
 ## 4. UCN-Extended：按需增加而非默认常驻
 
@@ -159,7 +159,7 @@ Adapter 不把 MAC、CAN ID 或蓝牙地址当作 UCN 身份。其统一接口�
 | Time Sync | 日志关联、编队与传感融合时间基准。 | 使用本地单调时间，不提供跨节点精密时间。 |
 | Diagnostics | 详细统计、抓包镜像、长期质量历史。 | Core 只保留必要的错误计数和健康状态。 |
 
-`Extended` 节点仍必须服从 Core 的固定内存原则。尤其是分片和 Q3 必须有独立配额，绝不能吞掉 Q0/Q1 的队列、会话或路由内存。
+`Extended` 节点仍必须服从 Core 的固定内存原则。当前 `ucn_transfer` 已使用独立、可裁剪的 TX/RX/Endpoint/Peer 固定表，并作为 `EXCLUDE_FROM_ALL` Target；没有链接/创建该对象的节点不支付大消息 RAM。未来 Q3 仍必须另设配额，绝不能吞掉 Q0/Q1 的队列、会话或路由内存。
 
 ## 5. UCN-Host：兼容层，不是协议中心
 
@@ -195,7 +195,7 @@ Adapter 不把 MAC、CAN ID 或蓝牙地址当作 UCN 身份。其统一接口�
 
 ### Phase B：只给必要 MCU 增加 Extended
 
-先增加服务发现与 Q2 可靠参数，再按实际需要增加时间同步、分片和 Q3。每增加一项都要记录新增 Flash、静态 RAM、峰值 RAM、CPU 和空口占用。
+有界 Transfer 首版已先行实现；后续按实际需要增加服务发现、通用 Q2、时间同步和 Q3。每增加一项都要记录新增 Flash、静态 RAM、峰值 RAM、CPU 和空口占用。
 
 ### Phase C：最后接入 Host
 

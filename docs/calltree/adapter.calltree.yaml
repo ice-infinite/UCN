@@ -12,6 +12,19 @@ source_files:
   - src/ports/ucn_port_host_fake.c
 
 nodes:
+  - id: adapter.ucn_protocol_owner_init
+    symbol: ucn_protocol_owner_init
+    type: function
+    file: src/transport/ucn_protocol_owner.c
+    layer: adapter
+    role: 将一个 Node、固定 Adapter RX Queue、Port 时钟/临界区、RX 预算和可选 Bridge 绑定为唯一公共 Owner。
+    called_by:
+      - adapter.platform_port_init
+      - event_runtime.ucn_event_runtime_init
+    calls: []
+    notes:
+      - 不创建 Task、线程、通知对象或驱动。
+
   - id: adapter.platform_port_rx_enqueue
     symbol: ucn_<platform>_port_rx_enqueue
     type: function
@@ -79,6 +92,7 @@ nodes:
     called_by:
       - adapter.platform_port_step
       - adapter.ucn_bare_metal_port_poll
+      - event_runtime.ucn_event_runtime_run
     calls:
       - target: external.port_now_ms
         type: callback

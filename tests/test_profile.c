@@ -3,6 +3,10 @@
 
 #include "ucn/ucn.h"
 #include "ucn/ucn_node.h"
+#include "ucn/ucn_transfer.h"
+#include "ucn/ports/ucn_event_runtime.h"
+#include "ucn/adapters/ucn_can_source.h"
+#include "ucn/adapters/ucn_stream_source.h"
 #if UCN_FEATURE_SERVICE
 #include "ucn/ucn_service.h"
 #endif
@@ -275,8 +279,18 @@ int test_profile(void)
 #if UCN_FEATURE_SERVICE
     TEST_ASSERT(test_profile_service_switch() == 0);
 #endif
-    printf("UCN_PROFILE name=%s value=%d service=%d node_bytes=%zu link_bytes=%zu\n",
+    printf("UCN_PROFILE name=%s value=%d service=%d node_bytes=%zu "
+           "link_bytes=%zu event_runtime_bytes=%zu stream_source_bytes=%zu "
+           "stream_default_storage_bytes=%zu can_source_bytes=%zu "
+           "can_default_storage_bytes=%zu transfer_bytes=%zu "
+           "transfer_rx_bytes=%zu\n",
            UCN_PROFILE_NAME, UCN_PROFILE, UCN_FEATURE_SERVICE,
-           sizeof(ucn_node_t), sizeof(ucn_link_t));
+           sizeof(ucn_node_t), sizeof(ucn_link_t),
+           sizeof(ucn_event_runtime_t), sizeof(ucn_stream_source_t),
+           sizeof(ucn_stream_source_default_storage_t),
+           sizeof(ucn_can_source_t),
+           sizeof(ucn_can_source_default_storage_t),
+           sizeof(ucn_transfer_t),
+           UCN_TRANSFER_RX_SLOTS * UCN_TRANSFER_MAX_MESSAGE_BYTES);
     return 0;
 }

@@ -1,6 +1,6 @@
 # UCN 调用关系树（Call Tree）
 
-> 数据依据：`E:\File\MESH\UCN` 当前 v5 V5-33 工作树的 `include/ucn/`、`src/` 与测试入口；`f941ae9` 是本轮修复前审计基线，v4 调用树由 `v4.0.0-final-before-v5` 标签保留。
+> 数据依据：`E:\File\MESH\UCN` 当前 v5 V5-60 工作树的 `include/ucn/`、`src/` 与测试入口；v4 调用树由 `v4.0.0-final-before-v5` 标签保留。
 > 目的：回答“一个 API 被谁调用、它继续调用什么、在哪个上下文运行、会经过哪些固定队列/回调”。源码是最终事实；本文档不替代源码或测试。
 
 本目录参考 `E:\File\PlatformIO\F405_Zephyr_Parachute\docs\calltree` 的组织方式：以 YAML 为调用关系源数据，按模块拆分，节点使用唯一 ID，关系只记录真实的直接调用、回调或固定队列边界。
@@ -8,9 +8,14 @@
 ## 1. 先从三条主链读起
 
 ```text
-物理 RX 回调
-  → adapter.platform_port_rx_enqueue（选择一个平台的独立 Port）
-  → adapter.ucn_adapter_rx_enqueue
+物理 RX ISR/回调
+  → stream_source.ucn_stream_source_write_from_isr（UART/RS-485/USB CDC）
+    或 can_source.ucn_can_source_write_from_isr（CAN/CAN-FD）
+  → event_runtime.ucn_event_runtime_signal_source_from_isr
+  → event_runtime.ucn_event_runtime_task_cycle
+  → stream_source.stream_source_service（固定 Byte Ring/COBS）
+    或 can_source.can_source_service（固定 Frame Ring/经典 CAN 重组）
+  → event_runtime.ucn_event_runtime_submit_frame
   → adapter.ucn_protocol_owner_step
   → adapter.ucn_adapter_rx_pump
   → node_runtime.ucn_node_receive
@@ -34,15 +39,26 @@
   → frame.ucn_frame_encode
   → Link ops->send
 
-唯一 Protocol Task 周期调度
-  → adapter.platform_port_step → adapter.ucn_protocol_owner_step（每轮仅采样一次 now_ms）
+唯一 Protocol Task 事件调度
+  → event_runtime.ucn_event_runtime_task_cycle（有事件立即醒，超时才 FALLBACK）
+  → event_runtime.ucn_event_runtime_run（固定 Source/Round 预算）
+  → adapter.ucn_protocol_owner_step（每轮仅采样一次 now_ms）
   → adapter.ucn_adapter_rx_pump（有限帧数）
   → service.ucn_service_protocol_bridge_step_at（有限请求数，共用本轮 now_ms）
   → node_runtime.ucn_node_step
   → Q0/Q1/Pending Q1；Q0 背压等待时仍可插入必要维护；最后才是诊断
+
+按需大消息（仅链接 `ucn_transfer` 的端点）
+  → transfer.ucn_transfer_send（T32/T64 直接 Endpoint；T128～T8K 固定 TX Slot）
+  → Core/Port Step 返回空闲
+  → transfer.ucn_transfer_step（一次最多一个 Fragment）
+  → route.ucn_node_send → 正常选路/转发
+  → transfer.transfer_node_rx_handler → CRC32/固定 RX Slot/ACK
+  → external.transfer_receive_callback
+  → transfer.ucn_transfer_release_received
 ```
 
-“唯一 Protocol Task”是最重要的并发边界：业务 Task、驱动回调和 ISR 不直接并发访问 `ucn_node_t`。业务 Task 只调用 Service/Port；驱动 RX 回调只入 Adapter 固定队列。
+“唯一 Protocol Task”是最重要的并发边界：业务 Task、驱动回调和 ISR 不直接并发访问 `ucn_node_t`。业务 Task 只调用 Service/Port；驱动 RX 回调优先只写各 Source 固定 Ring 并通知 Event Runtime，Source 再在 Owner 上下文提交 Adapter 固定队列。现有 Platform Port 仍是单 Queue 兼容链。
 
 这个所有权也体现在头文件中：指针/API 使用者只包含 `ucn_node.h`；实际静态分配 Node 的 Protocol Task owner 才包含 `ucn_node_storage.h`。调用树描述公开函数关系，不把存储头中的内部表项当作应用可调用接口。
 
@@ -60,6 +76,8 @@ V5-17～V5-20、V5-22～V5-33 后，Wire 可表达与业务可用分开判断：
 
 V5-46 将“唯一 Protocol Task”拆为公共 `ucn_protocol_owner_*` 与独立 Platform Port：驱动/ISR 先调用当前平台的 `ucn_<platform>_port_rx_enqueue()`，成功入队后才通过该平台自己的 Hook 通知 Owner；平台 Step 再进入公共 Owner，在同一 `now_ms` 下有界 Pump、可选 Bridge、最后 Node Step。V5-48 继续把 `from_isr` 传至 Adapter Queue：任务入口使用任务锁，ISR 入口使用可恢复 token 的 ISR 锁；缺少 token 对即失败关闭，绝不将 ISR 回退到任务锁。裸机、FreeRTOS、Zephyr、NuttX、RT-Thread 与 Host Fake 彼此没有枚举或头文件耦合，Core 不创建 RTOS SDK 对象；空闲 `ucn_node_step()` 的 `UCN_ERR_NOT_FOUND` 只保留在 Owner 统计，不会把周期循环误报失败。
 
+V5-58 在公共 Owner 外增加 SDK 无关 `ucn_event_runtime_t`：产品启动期为 UART/CAN/USB/Wi-Fi 等实例静态绑定 Source ID；Task/ISR 只 OR Pending 并通知，Owner 按 Source/Round 预算调用 `service()`、提交完整帧和运行公共 Owner。V5-59 提供 Stream Source；V5-60 提供独立 CAN Source，包含 CAN-FD DLC 零填充、经典 CAN 8 B Carrier、固定重组槽、过滤映射和 Bus State。事件可以合并，数据不能只存在通知中；具体 BSP/控制器/收发器实机仍在产品边界。
+
 ## 2. 目录和阅读顺序
 
 ```text
@@ -70,12 +88,16 @@ docs/calltree/
 ├── core.calltree.yaml                配置和 Endpoint 编号边界
 ├── frame.calltree.yaml               编解码、CRC、E2E AAD
 ├── adapter.calltree.yaml             物理地址、固定 RX Queue、标准 Owner、Pump
+├── event_runtime.calltree.yaml       多 Source 事件、ISR 通知、有界 Drain/Wait/Fallback
+├── stream_source.calltree.yaml       UART/RS-485/USB CDC Ring、COBS、缺口恢复与背压
+├── can_source.calltree.yaml          CAN-FD 直接帧、经典 CAN Carrier、Bus State
 ├── node_runtime.calltree.yaml        Node 初始化、收包总入口、step 调度
 ├── neighbor.calltree.yaml            HELLO、准入、Heartbeat、Bearer 主备
 ├── route.calltree.yaml               自动 Route、RREQ/RREP/RERR、业务发送
 ├── policy_path.calltree.yaml         Policy、受控 Path、Strict/Failover/Balance
 ├── security.calltree.yaml            Provider、ACL、端到端保护/透明转发
 ├── service.calltree.yaml             Router、Bridge、任务 Inbox/Remote TX
+├── transfer.calltree.yaml            九档消息、固定分片/重组、ACK 与 Handle
 └── diagnostic.calltree.yaml          Path Trace、Node Snapshot、Policy Diagnostic
 ```
 
@@ -88,7 +110,7 @@ docs/calltree/
 | 字段 | 含义 |
 | --- | --- |
 | `type` | `function`、`callback`、`queue`、`scheduler`、`security_provider` 或 `module`。 |
-| `layer` | `application`、`adapter`、`core`、`routing`、`security`、`service`、`diagnostic`、`external`。 |
+| `layer` | `application`、`adapter`、`core`、`routing`、`security`、`service`、`extended`、`diagnostic`、`external`。 |
 | `called_by` | 已知上游入口；`external.*` 表示由产品/驱动/业务调用。 |
 | `calls` | 下游节点，`type` 说明是直接调用、回调、队列或外部操作。 |
 | `notes` | Q0/Q1、并发、固定容量、权限或验证边界。 |

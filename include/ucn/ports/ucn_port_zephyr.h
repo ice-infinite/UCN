@@ -7,7 +7,9 @@
 extern "C" {
 #endif
 
-/* Product glue maps these callbacks to ISR-safe k_sem_give()/work submission
+/* Compatibility single-Queue wrapper.  New multi-Bearer products should use
+ * ucn_event_runtime_t with scheduler hooks implemented in Zephyr glue.
+ * Product glue maps these callbacks to ISR-safe k_sem_give()/work submission
  * and a bounded k_sem_take()/thread wait.  No Zephyr SDK type enters Core. */
 typedef struct ucn_zephyr_port_ops {
     void (*notify_protocol_thread)(void *context, bool from_isr);

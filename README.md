@@ -11,9 +11,10 @@ Linux、ROS 2、MAVLink 或地面站可以作为普通 Host/Adapter 接入，但
 - 全局公共编译配置位于 `include/ucn/ucn_config.h`；产品可用独立 `UCN_USER_CONFIG_HEADER` 只覆盖需要调整的项，未配置项继续使用统一默认和原头文件回退。
 - 1 B 最大接收档声明的一跳 HELLO/准入、Heartbeat、压缩 RREQ、受限 AODV-Lite 路由发现、RERR 与路由/邻居老化；发送档与接收上限相互独立。
 - Q0/Q1 有界发送调度、Pending Q1 绝对 Deadline、静态 Endpoint 业务分发和跨介质通用 `route_cost`。
+- 可选 `ucn_transfer` Extended 库：按需选择 T32/T64/T128/T256/T512/T1K/T2K/T4K/T8K 九档逻辑消息上限；T128～T8K 使用固定 TX/RX Slot、MTU 自适应分片、CRC32、ACK/有界重试和显式 RX Handle 释放。Core-only 节点不链接该库，不增加 8 KiB 缓冲；真实 Bearer 性能仍待实机验收。
 - W0/W1/W2/W3=`3/3/3/4 B` 的累计 Cost 控制域、Candidate Wire Profile 连续性，以及 Full/Lite/Nano 一致的运行期 Hop Scope 门禁。
 - LC-1 本地动态 Cost：基础 `route_cost` 保持稳定并继续在线上累加；Full 用 Queue、TX/RX 失败、RTT、介质占用/质量和新鲜度生成本地 `effective_select_cost`，用于 Bearer、Candidate 与 Q1 Flow 排序，不把局部拥塞写入 Wire。Lite/Nano 保持静态基础 Cost。
-- Adapter 将物理地址和驱动回调转换为有界 RX 队列；协议任务中再执行路由和应用回调。
+- Adapter 将物理地址和驱动回调转换为有界 RX 队列；公共 `ucn_event_runtime_t` 可静态注册最多 8 个 UART/CAN/USB/Wi-Fi 等事件 Source，合并 Task/ISR 通知并按 Source/Round 预算唤醒唯一 Protocol Owner。UART、RS-485 与 USB CDC 可复用 `ucn_stream_source_t` 的固定 Ring/COBS；CAN-FD 与经典 CAN 可复用 `ucn_can_source_t` 的固定 Frame Ring、DLC 零填充校验、8 B 有界 Carrier、重组超时和 Bus-Off 状态。ISR 不进入 Core，轮询只用于无中断平台、协议定时器或漏通知兜底；真实 BSP 驱动、DMA、控制器过滤器、收发器、引脚和 RTOS SDK glue 仍由产品实现。
 - 按需路径追踪与低频节点快照诊断。节点快照默认拒绝远端请求，产品必须显式配置管理节点授权。
 - 编译期 Nano/Lite/Full Feature Profile；Service Router/Bridge 可独立开启或移除。
 
@@ -26,9 +27,11 @@ include/ucn/  公共 C API；Node 静态存储布局由 owner 显式选择
 src/core/     配置、Frame Codec、Endpoint 基础语义
 src/node/     Node 生命周期、Neighbor、HELLO、Profile Stub
 src/transport/ Link/Adapter 队列、Preset Resolver、Protocol Owner
+src/adapters/ SDK 无关 Carrier/Source；含 Stream 与 CAN/CAN-FD 独立模块
 src/routing/  AODV、Candidate、Path、Policy/负载均衡（Full）
 src/service/  本机任务 Service Router/Bridge（可选）
 src/ports/    裸机、各 RTOS、Host Fake 的独立 Port 外壳
+src/extended/ 按需链接的有界大消息 Transfer；不进入 Core-only 产品
 tests/        单元测试与虚拟 Link 集成测试；按逻辑组导航，不强制物理分目录
 tools/        Host-only 规模模拟器与可复现阶梯脚本
 docs/         架构、协议设计、任务表与操作记录

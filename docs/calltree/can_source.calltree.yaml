@@ -1,0 +1,117 @@
+module: can_source
+description: CAN/CAN-FD SDK 无关固定 Frame Ring、直接帧、经典 CAN Carrier、Bus State 与 Owner Source。
+entry: can_source.ucn_can_source_write_from_isr
+source_files:
+  - src/adapters/can/ucn_can_source.c
+
+nodes:
+  - id: can_source.ucn_can_source_init
+    symbol: ucn_can_source_init
+    type: function
+    file: src/adapters/can/ucn_can_source.c
+    layer: adapter
+    role: 绑定一个控制器实例的固定 Frame Ring、经典 CAN 重组区、CAN ID Resolver 和 Event Source ID。
+    called_by:
+      - external.product_can_init
+    calls:
+      - target: event_runtime.ucn_event_runtime_bind_source
+        type: direct
+        reason: Source service 只在唯一 Owner 上下文运行。
+    notes:
+      - 不打开控制器、不设置引脚/位时序/硬件 Filter，也不创建 Task。
+
+  - id: can_source.ucn_can_source_write_from_isr
+    symbol: ucn_can_source_write_from_isr
+    type: function
+    file: src/adapters/can/ucn_can_source.c
+    layer: adapter
+    role: 将一个 DLC 已解码的规范化物理帧有界复制进固定 Frame Ring。
+    called_by:
+      - external.can_rx_isr
+      - external.can_driver_callback
+    calls:
+      - target: event_runtime.ucn_event_runtime_signal_source_from_isr
+        type: direct
+        reason: 成功入 Ring 后只置 RX Ready 并唤醒 Owner。
+    notes:
+      - 缺 ISR token 临界区返回 UCN_ERR_CONFIG；不在 ISR 中解析或重组。
+
+  - id: can_source.can_source_service
+    symbol: can_source_service
+    type: callback
+    file: src/adapters/can/ucn_can_source.c
+    layer: adapter
+    role: Owner 按预算处理物理帧、超时和完整重组 Slot。
+    called_by:
+      - event_runtime.ucn_event_runtime_run
+    calls:
+      - target: external.product_can_id_resolver
+        type: callback
+        reason: 将硬件 Filter 后的 CAN ID 静态映射为 ingress Link。
+      - target: can_source.ucn_frame_peek_encoded_size
+        type: direct
+        reason: CAN-FD 去除合法 DLC 零填充，经典 CAN 验证重组总长度。
+      - target: event_runtime.ucn_event_runtime_submit_frame
+        type: direct
+        reason: 只提交精确长度的完整 UCN 帧；Queue 背压时保留当前物理帧或完整 Slot。
+    notes:
+      - BUS_OFF/RECOVERING 不处理数据；超时由 Fallback Scan 保底。
+
+  - id: can_source.ucn_frame_peek_encoded_size
+    symbol: ucn_frame_peek_encoded_size
+    type: function
+    file: src/core/ucn_frame.c
+    layer: core
+    role: 从 v5 Prefix/Profile/Header 读取真实编码长度，允许输入尾部存在 Carrier Padding。
+    called_by:
+      - can_source.can_source_service
+      - can_source.ucn_can_fd_carrier_encode
+      - can_source.ucn_can_classic_carrier_encode_segment
+    calls: []
+    notes:
+      - 不校验 CRC、Network、Security 或 Replay；完整 Decode 仍由 Node 完成。
+
+  - id: can_source.ucn_can_fd_carrier_encode
+    symbol: ucn_can_fd_carrier_encode
+    type: function
+    file: src/adapters/can/ucn_can_source.c
+    layer: adapter
+    role: 将一个不超过 64 B 的完整 UCN 帧零填充到最小合法 CAN-FD 数据长度。
+    called_by:
+      - external.can_link_send
+    calls:
+      - target: can_source.ucn_frame_peek_encoded_size
+        type: direct
+        reason: 要求输入本身是精确长度的 v5 帧。
+    notes:
+      - 不写控制器、不等待物理发送完成。
+
+  - id: can_source.ucn_can_classic_carrier_encode_segment
+    symbol: ucn_can_classic_carrier_encode_segment
+    type: function
+    file: src/adapters/can/ucn_can_source.c
+    layer: adapter
+    role: 按 C1/C2、Transfer ID 和严格 Segment Index 生成一个最多 8 B 的经典 CAN 段。
+    called_by:
+      - external.can_link_send
+    calls:
+      - target: can_source.ucn_frame_peek_encoded_size
+        type: direct
+        reason: 禁止把 Padding 或非精确 UCN 帧再次分段。
+    notes:
+      - 最多 256 段、1278 B；产品 TX Queue 负责有界调度全部段。
+
+  - id: can_source.ucn_can_source_set_bus_state_from_isr
+    symbol: ucn_can_source_set_bus_state_from_isr
+    type: function
+    file: src/adapters/can/ucn_can_source.c
+    layer: adapter
+    role: 显式接收 Error-Passive、Bus-Off、Recovering 或 Active 状态并通知 Owner。
+    called_by:
+      - external.can_status_isr
+    calls:
+      - target: event_runtime.ucn_event_runtime_signal_source_from_isr
+        type: direct
+        reason: Owner 清理重组状态并继续统一调度。
+    notes:
+      - Bus-Off 清 Ring 并拒绝新帧；硬件恢复和 Link is_up 由产品负责。

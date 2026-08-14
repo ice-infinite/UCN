@@ -25,6 +25,27 @@ modules:
     entry: adapter.platform_port_rx_enqueue
     source_files: [src/transport/ucn_adapter.c, src/transport/ucn_protocol_owner.c, src/ports/ucn_port_freertos.c]
 
+  - id: event_runtime
+    file: event_runtime.calltree.yaml
+    status: current_host_software_verified
+    role: 固定多 Bearer Source、Task/ISR 事件合并、有界 Drain 与 Owner 唤醒
+    entry: event_runtime.ucn_event_runtime_task_cycle
+    source_files: [src/transport/ucn_event_runtime.c]
+
+  - id: stream_source
+    file: stream_source.calltree.yaml
+    status: current_host_software_verified
+    role: UART/RS-485/USB CDC 固定 Byte Ring、COBS+0 Carrier、缺口恢复与 Queue 背压
+    entry: stream_source.ucn_stream_source_write_from_isr
+    source_files: [src/adapters/stream/ucn_stream_source.c]
+
+  - id: can_source
+    file: can_source.calltree.yaml
+    status: current_host_software_verified
+    role: CAN-FD 直接帧、经典 CAN 有界 Carrier、固定 Frame Ring、Bus-Off 与过滤
+    entry: can_source.ucn_can_source_write_from_isr
+    source_files: [src/adapters/can/ucn_can_source.c]
+
   - id: node_runtime
     file: node_runtime.calltree.yaml
     status: current
@@ -65,6 +86,13 @@ modules:
     role: MCU 内任务 Router、Remote TX 与 Protocol Task Bridge
     entry: service.ucn_service_send
     source_files: [src/service/ucn_service.c, src/service/ucn_service_bridge.c]
+
+  - id: transfer
+    file: transfer.calltree.yaml
+    status: current_host_software_verified
+    role: T32～T8K 有界逻辑消息、固定分片/重组、ACK/重试和 RX Handle
+    entry: transfer.ucn_transfer_send
+    source_files: [src/extended/ucn_transfer.c]
 
   - id: diagnostic
     file: diagnostic.calltree.yaml

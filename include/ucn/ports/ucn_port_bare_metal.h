@@ -7,8 +7,10 @@
 extern "C" {
 #endif
 
-/* Bare-metal Port: call poll() from the product super loop or timer-owned
- * protocol context.  It deliberately has no wait/notification hooks. */
+/* Compatibility single-Queue Port: call poll() from the product super loop.
+ * Multi-Bearer bare-metal products may instead use ucn_event_runtime_t
+ * without scheduler hooks, signal fixed Sources from ISR, and run it from
+ * the same unique super-loop context. */
 typedef struct ucn_bare_metal_port {
     ucn_protocol_owner_t owner;
 } ucn_bare_metal_port_t;

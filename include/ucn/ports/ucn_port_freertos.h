@@ -7,7 +7,9 @@
 extern "C" {
 #endif
 
-/* Product glue maps these callbacks to xTaskNotifyGive(),
+/* Compatibility single-Queue wrapper.  New multi-Bearer products should use
+ * ucn_event_runtime_t and map its scheduler hooks to the same primitives.
+ * Product glue maps these callbacks to xTaskNotifyGive(),
  * vTaskNotifyGiveFromISR(), and ulTaskNotifyTake() (or an equivalent static
  * queue/semaphore).  UCN intentionally does not include FreeRTOS headers. */
 typedef struct ucn_freertos_port_ops {

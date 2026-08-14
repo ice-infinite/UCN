@@ -488,6 +488,63 @@ ucn_result_t ucn_frame_peek_wire_profile(const uint8_t *input,
     return UCN_OK;
 }
 
+ucn_result_t ucn_frame_peek_encoded_size(const uint8_t *input,
+                                         size_t available_length,
+                                         size_t *encoded_length)
+{
+    const ucn_wire_profile_descriptor_t *descriptor;
+    ucn_wire_profile_t profile;
+    uint8_t flags;
+    size_t header_size;
+    size_t payload_length_offset;
+    uint32_t payload_length;
+    size_t expected_length;
+    ucn_result_t result;
+
+    if (input == NULL || encoded_length == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    *encoded_length = 0U;
+    result = ucn_frame_peek_wire_profile(input, available_length, &profile);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (available_length < UCN_FRAME_W0_HEADER_SIZE) {
+        return UCN_ERR_MALFORMED;
+    }
+    descriptor = ucn_wire_profile_get_descriptor(profile);
+    flags = input[UCN_OFFSET_TRAFFIC_FLAGS] & UCN_WIRE_FLAGS_MASK;
+    if (descriptor == NULL || !flags_are_valid(flags)) {
+        return UCN_ERR_MALFORMED;
+    }
+    header_size = ucn_frame_header_size_for_profile(profile, flags);
+    if (header_size == 0U || available_length < header_size) {
+        return UCN_ERR_MALFORMED;
+    }
+
+    payload_length_offset = UCN_OFFSET_VARIABLE +
+                            (size_t)4U * descriptor->address_bytes +
+                            sizeof(uint32_t);
+    payload_length = read_uint_be(&input[payload_length_offset],
+                                  descriptor->payload_length_bytes);
+    if (payload_length > UINT16_MAX ||
+        (size_t)payload_length >
+            ucn_frame_max_payload_for_profile(profile, flags)) {
+        return UCN_ERR_TOO_LARGE;
+    }
+    expected_length = header_size + (size_t)payload_length +
+        (((flags & UCN_FRAME_FLAG_E2E_PROTECTED) != 0U) ?
+             UCN_E2E_TAG_SIZE : 0U);
+    if (expected_length > UCN_MAX_FRAME_BYTES) {
+        return UCN_ERR_TOO_LARGE;
+    }
+    if (expected_length > available_length) {
+        return UCN_ERR_MALFORMED;
+    }
+    *encoded_length = expected_length;
+    return UCN_OK;
+}
+
 ucn_result_t ucn_frame_decode(const uint8_t *input,
                               size_t input_length,
                               ucn_frame_t *frame)

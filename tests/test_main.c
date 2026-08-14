@@ -51,6 +51,9 @@ int main(void)
     result |= test_adapter();
     result |= test_standard_adapter();
     result |= test_link_cost();
+    result |= test_event_runtime();
+    result |= test_stream_source();
+    result |= test_can_source();
     result |= test_protocol_owner();
 #if UCN_FEATURE_SERVICE
     result |= test_service();
@@ -59,6 +62,7 @@ int main(void)
     result |= test_profile();
     result |= test_public_headers();
     result |= test_node_storage_header();
+    result |= test_transfer();
 
     if (result == 0) {
         printf("All UCN tests passed.\n");

@@ -7,7 +7,9 @@
 extern "C" {
 #endif
 
-/* Product glue maps these callbacks to its selected NuttX semaphore, poll,
+/* Compatibility single-Queue wrapper.  New multi-Bearer products should use
+ * ucn_event_runtime_t with scheduler hooks implemented in NuttX glue.
+ * Product glue maps these callbacks to its selected NuttX semaphore, poll,
  * work queue, or task mechanism.  UCN does not select an NuttX primitive. */
 typedef struct ucn_nuttx_port_ops {
     void (*notify_protocol_worker)(void *context, bool from_isr);

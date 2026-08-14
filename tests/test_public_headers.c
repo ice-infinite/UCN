@@ -4,12 +4,16 @@
 #include "ucn/ucn_node.h"
 #include "ucn/ucn_path.h"
 #include "ucn/ucn_standard_adapter.h"
+#include "ucn/ucn_transfer.h"
 #include "ucn/ports/ucn_port_bare_metal.h"
 #include "ucn/ports/ucn_port_freertos.h"
 #include "ucn/ports/ucn_port_host_fake.h"
 #include "ucn/ports/ucn_port_nuttx.h"
 #include "ucn/ports/ucn_port_rtthread.h"
 #include "ucn/ports/ucn_port_zephyr.h"
+#include "ucn/ports/ucn_event_runtime.h"
+#include "ucn/adapters/ucn_can_source.h"
+#include "ucn/adapters/ucn_stream_source.h"
 #if UCN_FEATURE_SERVICE
 #include "ucn/ucn_service_bridge.h"
 #endif
@@ -28,6 +32,10 @@ int test_public_headers(void)
     const ucn_path_forward_config_t legacy_path = {
         UINT32_C(1), UINT32_C(2), UINT32_C(3), UINT32_C(4), UINT32_C(5),
         2U, &legacy_link, UINT32_C(1000)
+    };
+    const ucn_transfer_config_t legacy_transfer_config = {
+        node, 0U, 3U, UINT32_C(100), UINT32_C(200), UINT32_C(300),
+        UINT32_C(400), NULL, NULL
     };
     ucn_result_t (*step_fn)(ucn_node_t *, uint32_t) = ucn_node_step;
     const ucn_node_stats_t *(*stats_fn)(const ucn_node_t *) =
@@ -59,12 +67,53 @@ int test_public_headers(void)
     ucn_result_t (*host_fake_init_fn)(
         ucn_host_fake_port_t *, const ucn_host_fake_port_config_t *) =
         ucn_host_fake_port_init;
+    ucn_result_t (*event_runtime_init_fn)(
+        ucn_event_runtime_t *, const ucn_event_runtime_config_t *) =
+        ucn_event_runtime_init;
+    ucn_result_t (*stream_source_init_fn)(
+        ucn_stream_source_t *, const ucn_stream_source_config_t *) =
+        ucn_stream_source_init;
+    ucn_result_t (*stream_source_write_isr_fn)(
+        ucn_stream_source_t *, const uint8_t *, size_t) =
+        ucn_stream_source_write_from_isr;
+    ucn_result_t (*stream_carrier_encode_fn)(
+        const uint8_t *, size_t, uint8_t *, size_t, size_t *) =
+        ucn_stream_carrier_encode;
+    ucn_result_t (*can_source_init_fn)(
+        ucn_can_source_t *, const ucn_can_source_config_t *) =
+        ucn_can_source_init;
+    ucn_result_t (*can_source_write_isr_fn)(
+        ucn_can_source_t *, const ucn_can_frame_t *) =
+        ucn_can_source_write_from_isr;
+    ucn_result_t (*can_fd_encode_fn)(
+        const uint8_t *, size_t, uint8_t *, size_t *) =
+        ucn_can_fd_carrier_encode;
+    size_t (*transfer_class_size_fn)(ucn_transfer_class_t) =
+        ucn_transfer_class_max_bytes;
+    ucn_result_t (*transfer_peer_window_fn)(ucn_transfer_t *, ucn_node_id_t,
+                                             uint8_t) =
+        ucn_transfer_set_peer_window_capability;
+    ucn_result_t (*transfer_local_window_fn)(ucn_transfer_t *, uint8_t) =
+        ucn_transfer_set_tx_window_size;
 
     return node == NULL && step_fn != NULL && stats_fn != NULL && preset_fn != NULL &&
            isr_enqueue_fn != NULL && path_install_capable_fn != NULL &&
            bare_metal_init_fn != NULL && freertos_init_fn != NULL &&
            zephyr_init_fn != NULL && nuttx_init_fn != NULL &&
            rtthread_init_fn != NULL && host_fake_init_fn != NULL &&
+           event_runtime_init_fn != NULL &&
+           stream_source_init_fn != NULL &&
+           stream_source_write_isr_fn != NULL &&
+           stream_carrier_encode_fn != NULL &&
+           can_source_init_fn != NULL &&
+           can_source_write_isr_fn != NULL &&
+           can_fd_encode_fn != NULL &&
+           transfer_peer_window_fn != NULL &&
+           transfer_local_window_fn != NULL &&
+           legacy_transfer_config.max_retries == 3U &&
+           legacy_transfer_config.ack_timeout_ms == UINT32_C(100) &&
+           legacy_transfer_config.fallback_rx_handler == NULL &&
+           transfer_class_size_fn(UCN_TRANSFER_CLASS_T8K) == 8192U &&
            preset_fn(UCN_STANDARD_PRESET_UART_115200_8N1, NULL) == UCN_ERR_ARGUMENT &&
            bare_metal_init_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&
            freertos_init_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&
@@ -72,6 +121,8 @@ int test_public_headers(void)
            nuttx_init_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&
            rtthread_init_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&
            host_fake_init_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&
+           event_runtime_init_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&
+           stream_source_init_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&
            legacy_path.egress_link == &legacy_link &&
            legacy_path.expires_at_ms == UINT32_C(1000) &&
            path_install_capable_fn(NULL, NULL, &capability) == UCN_ERR_ARGUMENT &&

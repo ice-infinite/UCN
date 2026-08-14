@@ -53,6 +53,14 @@ ucn_result_t ucn_frame_encode(const ucn_frame_t *frame,
 ucn_result_t ucn_frame_peek_wire_profile(const uint8_t *input,
                                          size_t input_length,
                                          ucn_wire_profile_t *profile);
+/* Inspect the v5 header far enough to recover the exact encoded UCN length
+ * from a buffer that may contain transport padding (for example CAN-FD DLC
+ * rounding).  This validates only prefix, profile, flags and representable
+ * length.  It does not validate CRC, addresses, security, or require the
+ * available buffer to end at the encoded frame. */
+ucn_result_t ucn_frame_peek_encoded_size(const uint8_t *input,
+                                         size_t available_length,
+                                         size_t *encoded_length);
 ucn_result_t ucn_frame_decode(const uint8_t *input,
                               size_t input_length,
                               ucn_frame_t *frame);

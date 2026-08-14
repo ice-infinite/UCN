@@ -1,6 +1,10 @@
 #include "ucn/ucn_adapter.h"
 #include "ucn/ucn_node_storage.h"
 #include "ucn/ucn_service_bridge.h"
+#include "ucn/ucn_transfer.h"
+#include "ucn/ports/ucn_event_runtime.h"
+#include "ucn/adapters/ucn_can_source.h"
+#include "ucn/adapters/ucn_stream_source.h"
 
 #define CONFIG_ASSERT(name, condition) \
     typedef char name[(condition) ? 1 : -1]
@@ -11,7 +15,33 @@ CONFIG_ASSERT(config_protocol_version, UCN_PROTOCOL_VERSION == 5U);
 CONFIG_ASSERT(config_override_frame, UCN_MAX_FRAME_BYTES == 128U);
 CONFIG_ASSERT(config_override_payload, UCN_MAX_PAYLOAD_BYTES == 64U);
 CONFIG_ASSERT(config_override_hops, UCN_MAX_HOPS == 8U);
+CONFIG_ASSERT(config_override_transfer_max,
+              UCN_TRANSFER_MAX_MESSAGE_BYTES == 512U);
+CONFIG_ASSERT(config_override_transfer_rx_slots,
+              UCN_TRANSFER_RX_SLOTS == 2U);
+CONFIG_ASSERT(config_override_transfer_window,
+              UCN_TRANSFER_MAX_WINDOW == 2U);
 CONFIG_ASSERT(config_override_adapter_queue, UCN_ADAPTER_RX_QUEUE_DEPTH == 3U);
+CONFIG_ASSERT(config_override_event_sources,
+              UCN_EVENT_RUNTIME_MAX_SOURCES == 3U);
+CONFIG_ASSERT(config_override_event_rounds,
+              UCN_EVENT_RUNTIME_DEFAULT_DRAIN_ROUNDS == 5U);
+CONFIG_ASSERT(config_override_event_source_budget,
+              UCN_EVENT_RUNTIME_DEFAULT_SOURCE_BUDGET == 2U);
+CONFIG_ASSERT(config_override_stream_ring,
+              UCN_STREAM_SOURCE_DEFAULT_RING_BYTES == 128U);
+CONFIG_ASSERT(config_override_stream_byte_budget,
+              UCN_STREAM_SOURCE_DEFAULT_BYTE_BUDGET == 64U);
+CONFIG_ASSERT(config_override_stream_error_budget,
+              UCN_STREAM_SOURCE_DEFAULT_ERROR_BUDGET == 2U);
+CONFIG_ASSERT(config_override_can_ring,
+              UCN_CAN_SOURCE_DEFAULT_RING_FRAMES == 4U);
+CONFIG_ASSERT(config_override_can_slots,
+              UCN_CAN_SOURCE_DEFAULT_REASSEMBLY_SLOTS == 1U);
+CONFIG_ASSERT(config_override_can_timeout,
+              UCN_CAN_SOURCE_DEFAULT_REASSEMBLY_TIMEOUT_MS == 75U);
+CONFIG_ASSERT(config_override_stream_chunk,
+              UCN_STREAM_SOURCE_READ_CHUNK_BYTES == 16U);
 CONFIG_ASSERT(config_override_links, UCN_MAX_LINKS == 3U);
 CONFIG_ASSERT(config_override_q0, UCN_TX_Q0_DEPTH == 2U);
 CONFIG_ASSERT(config_override_neighbors, UCN_MAX_NEIGHBORS == 4U);
@@ -32,9 +62,36 @@ CONFIG_ASSERT(config_default_service, UCN_FEATURE_SERVICE == 1);
 CONFIG_ASSERT(config_default_frame, UCN_MAX_FRAME_BYTES == 256U);
 CONFIG_ASSERT(config_default_payload, UCN_MAX_PAYLOAD_BYTES == 224U);
 CONFIG_ASSERT(config_default_hops, UCN_MAX_HOPS == 16U);
+CONFIG_ASSERT(config_default_transfer_max,
+              UCN_TRANSFER_MAX_MESSAGE_BYTES == 8192U);
+CONFIG_ASSERT(config_default_transfer_tx_slots, UCN_TRANSFER_TX_SLOTS == 1U);
+CONFIG_ASSERT(config_default_transfer_rx_slots, UCN_TRANSFER_RX_SLOTS == 1U);
+CONFIG_ASSERT(config_default_transfer_window, UCN_TRANSFER_MAX_WINDOW == 8U);
+CONFIG_ASSERT(config_default_transfer_retries,
+              UCN_TRANSFER_MAX_RETRIES == 3U);
 CONFIG_ASSERT(config_default_adapter_queue, UCN_ADAPTER_RX_QUEUE_DEPTH == 2U);
 CONFIG_ASSERT(config_default_physical_address,
               UCN_ADAPTER_PHYSICAL_ADDRESS_MAX == 8U);
+CONFIG_ASSERT(config_default_event_sources,
+              UCN_EVENT_RUNTIME_MAX_SOURCES == 8U);
+CONFIG_ASSERT(config_default_event_rounds,
+              UCN_EVENT_RUNTIME_DEFAULT_DRAIN_ROUNDS == 8U);
+CONFIG_ASSERT(config_default_event_source_budget,
+              UCN_EVENT_RUNTIME_DEFAULT_SOURCE_BUDGET == 4U);
+CONFIG_ASSERT(config_default_stream_ring,
+              UCN_STREAM_SOURCE_DEFAULT_RING_BYTES == 512U);
+CONFIG_ASSERT(config_default_stream_byte_budget,
+              UCN_STREAM_SOURCE_DEFAULT_BYTE_BUDGET == 512U);
+CONFIG_ASSERT(config_default_stream_error_budget,
+              UCN_STREAM_SOURCE_DEFAULT_ERROR_BUDGET == 4U);
+CONFIG_ASSERT(config_default_stream_chunk,
+              UCN_STREAM_SOURCE_READ_CHUNK_BYTES == 32U);
+CONFIG_ASSERT(config_default_can_ring,
+              UCN_CAN_SOURCE_DEFAULT_RING_FRAMES == 8U);
+CONFIG_ASSERT(config_default_can_slots,
+              UCN_CAN_SOURCE_DEFAULT_REASSEMBLY_SLOTS == 2U);
+CONFIG_ASSERT(config_default_can_timeout,
+              UCN_CAN_SOURCE_DEFAULT_REASSEMBLY_TIMEOUT_MS == 250U);
 CONFIG_ASSERT(config_default_security_required,
               UCN_SECURITY_REQUIRED_BY_DEFAULT == 0);
 CONFIG_ASSERT(config_default_links, UCN_MAX_LINKS == 4U);

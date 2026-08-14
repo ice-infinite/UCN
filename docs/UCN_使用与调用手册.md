@@ -57,6 +57,7 @@ Linux、ROS 2、地面站可以通过一个 Link/Adapter 作为普通 Node 接�
 | `ucn_port.h` | 时间、随机数、持久计数器、任务临界区和 ISR token 临界区的 Port 操作表 | Adapter RX Queue 和产品 Port | 把平台 API 泄漏到 C99 Core，或用任务锁替代 ISR token 锁。 |
 | `ucn_adapter.h` | 驱动回调到 Protocol Task 的固定 RX 队列 | 任务使用 `ucn_adapter_rx_enqueue()`；完整帧 ISR 仅用 `ucn_adapter_rx_enqueue_from_isr()` | 在中断/驱动回调内执行路由、解密或业务回调；缺 ISR token 锁仍强行入队。 |
 | `ucn_standard_adapter.h` | SDK 无关的 Bearer/Preset、静态产品 Link 配置和 Cost/MTU/RTT Resolver | Adapter 初始化前统一取得默认事实、校验产品覆盖 | 以为它会初始化 UART/CAN/Wi-Fi/USB、注册 `ucn_link_t` 或执行动态选路。 |
+| `ucn/ports/ucn_event_runtime.h` | 固定多 Source 注册、Task/ISR 事件合并、有界 Drain、公共 Owner 运行与超时兜底 | 新多 Bearer 产品的唯一 Protocol Task/裸机主循环；ISR 只调用 signal | 在 Source/ISR 中执行业务、把通知次数当数据队列、以为它自带 Carrier/驱动。 |
 | `ucn/ports/ucn_protocol_owner.h` + `ucn/ports/ucn_port_<platform>.h` | 公共唯一 Owner 与独立平台 RX 通知、等待、固定预算、统一时钟 | 只包含当前产品所选的裸机/FreeRTOS/Zephyr/NuttX/RT-Thread Port | 以为包含一个头就会创建真实 Task/Queue/Semaphore 或实现介质驱动。 |
 | `ucn_service.h` | Node 内任务通信：本机直投、远端请求、Q0/Q1 Inbox | Service/Port，短临界区保护 | 直接访问 Link 或 `ucn_node_t`。 |
 | `ucn_service_bridge.h` | Router 和 Node 的唯一桥接 | **唯一 Protocol Task** | 创建 RTOS Task、动态队列或重试伪 ACK。 |
@@ -186,6 +187,10 @@ if (ucn_standard_link_config_resolve(&link_config, &link_defaults) != UCN_OK) {
 - `get_metrics()`：报告平滑后的通用 Cost，及可选 RTT、发送失败率、队列压力；
 - `close()`：释放本 Adapter 的硬件状态。
 
+现代 MCU/RTOS 的正常 RX 路径应使用中断、DMA completion 或驱动事件通知，不应让
+Protocol Task 高频空转查询。`poll_rx()` 保留给没有事件设施的裸机、特殊外设和保底
+恢复；即使使用事件，Owner 仍需按协议下一个定时器设置有限等待，不能无限阻塞。
+
 MTU 有统一的动态语义：`.mtu != 0` 是静态硬上限；`get_status().mtu != 0` 是当前运行时上限；两者都存在取较小值。`.mtu = 0` 允许注册，表示只依赖运行时 MTU；若两者都为 0，发送暂时返回 `UCN_ERR_LINK_DOWN`，运行时 MTU 恢复后无需重新注册。这里的 MTU 必须是 Adapter 分段/重组后的 UCN 逻辑帧上限。
 
 ```c
@@ -212,27 +217,219 @@ static void register_uart_link(void)
 
 V5-46 起，产品不能再包含集中式 Port 头。先按运行环境选择一个文件：裸机使用 `ucn/ports/ucn_port_bare_metal.h`，FreeRTOS 使用 `ucn/ports/ucn_port_freertos.h`，Zephyr/NuttX/RT-Thread 分别使用自己的独立头。CMake 产品只链接对应的 `ucn_port_<platform>` 目标；所有 Port 在内部调用同一个 SDK 无关公共 Owner。Owner 不创建平台对象，产品仍持有静态 Node、RX Queue、`ucn_port_ops_t` 和可选 Bridge。
 
-V5-48 将 `from_isr` 继续传入 Queue：产品若允许 ISR 直接提交完整帧，必须为 `ucn_port_ops_t` 同时提供任务临界区和可返回/恢复 mask 的 ISR token 临界区。ISR 回调缺这一对时会得到 `UCN_ERR_CONFIG`；推荐路径仍是 ISR 写 BSP ring、Protocol Task 普通入队。
+V5-48 将 `from_isr` 继续传入 Queue：产品若允许 ISR 直接提交完整帧，必须为 `ucn_port_ops_t` 同时提供任务临界区和可返回/恢复 mask 的 ISR token 临界区。ISR 回调缺这一对时会得到 `UCN_ERR_CONFIG`；推荐路径仍是 ISR 写 BSP ring，并用 ISR-safe Notification 唤醒 Protocol Task，由 Task 普通入队。无论哪条路径，通知成功后 Owner 都应立即运行，不等待 Heartbeat。
+
+#### 5.3.1 新产品：统一多 Source Event Runtime
+
+V5-58 起，新产品优先直接包含 `ucn/ports/ucn_event_runtime.h`。一个 UART、一个 CAN 控制器、一个 USB Endpoint 或一个 Wi-Fi Adapter 各占一个固定 Source ID；Source 之间不共享 Driver Ring。RTOS 只实现下面三个 Scheduler Hook，Carrier/Bearer 不复制 RTOS 状态机：
 
 ```c
-/* 驱动回调或 ISR 后半部：不调用 Node，不运行应用回调。 */
-void uart_rx_callback(const uint8_t *data, size_t length)
+enum {
+    PRODUCT_SOURCE_UART0 = 0,
+    PRODUCT_SOURCE_CAN0 = 1,
+    PRODUCT_SOURCE_USB0 = 2,
+    PRODUCT_SOURCE_WIFI0 = 3
+};
+
+static ucn_event_runtime_t g_runtime;
+
+static const ucn_event_runtime_scheduler_ops_t g_scheduler_ops = {
+    product_notify_owner, /* 内部按 from_isr 选普通/FromISR API */
+    product_wait_owner,   /* true=收到通知，false=超时 */
+    product_yield_owner   /* Drain Round 达上限时让出 CPU，可为 NULL */
+};
+
+/* 仅用于尚无公共模板的自定义 Packet/Frame Source；UART/RS-485/
+ * USB CDC 直接使用下一节的 ucn_stream_source_t。 */
+static ucn_result_t custom_source_service(
+    void *context, ucn_event_source_events_t events, size_t max_work,
+    ucn_event_source_service_result_t *out)
+{
+    size_t completed = 0U;
+    (void)context;
+    (void)events;
+
+    /* product_source_drain() 只在 Owner Task 运行；它从本 Source
+     * 固定帧队列取出最多 max_work 个完整帧，并逐帧调用
+     * ucn_event_runtime_submit_frame(&g_runtime, &g_uart_link, data, len)。
+     * Queue 满时必须保留未提交帧，下一 Round 再试。 */
+    ucn_result_t result = product_source_drain(max_work, &completed);
+    out->work_done = completed;
+    out->pending_events = product_source_has_data() ?
+        UCN_EVENT_SOURCE_RX_READY : 0U;
+    return result;
+}
+```
+
+初始化顺序为 Node/Link/RX Queue/可选 Bridge → `ucn_event_runtime_init()` → 对每个实例调用 `ucn_event_runtime_bind_source()` → 启动调度器和外设中断。`ucn_event_runtime_config_t.owner` 仍显式给出 RX/Bridge 每步预算；Runtime 的 Source/Round 默认预算可由产品配置头覆盖。
+
+```c
+/* UART ISR：只搬入 UART0 自己的固定 Ring，然后置位并通知。 */
+void uart0_isr(void)
+{
+    product_uart0_ring_write_from_isr();
+    (void)ucn_event_runtime_signal_source_from_isr(
+        &g_runtime, PRODUCT_SOURCE_UART0, UCN_EVENT_SOURCE_RX_READY);
+}
+
+/* 唯一 Owner Task；有数据立即醒，10 ms 只是协议维护/漏通知上限。 */
+void protocol_task(void *argument)
+{
+    ucn_event_runtime_run_result_t run;
+    (void)argument;
+    for (;;) {
+        (void)ucn_event_runtime_task_cycle(
+            &g_runtime, UCN_MAX_STEP_INTERVAL_MS, &run);
+    }
+}
+```
+
+多个 ISR 通知允许合并，因为通知只表示“某 Source 可能有工作”，真实字节/帧仍在 Ring。`service()` 返回 `pending_events` 时 Runtime 在固定 Round 预算内继续；达到上限返回 `work_remaining=true` 并调用可选 Yield，下一次 Task Cycle 不会先睡眠。等待超时才对所有已绑定 Source 做一次 `FALLBACK_SCAN`。裸机不提供 Scheduler Hook，ISR 置位后由主循环调用 `ucn_event_runtime_run()`；无中断裸机定期传 `fallback_scan=true`。
+
+`ucn_event_runtime_submit_frame_from_isr()` 只适合驱动回调已经持有小型完整帧、且产品确认 ISR 拷贝上界可接受的 Packet Bearer；UART/CAN/USB 的首选路径仍是 ISR/DMA → 各自 Ring → Owner Source。Source 不得从 ISR 调用，不能在其中打印、解密、寻路、Transfer 重组或执行业务回调。
+
+#### 5.3.2 UART/RS-485/USB CDC：公共 Stream Source
+
+V5-59 起，字节流不再要求产品自己复制一份 COBS 状态机。每个端口静态创建一套 Source 与存储：
+
+```c
+#include "ucn/adapters/ucn_stream_source.h"
+
+static ucn_stream_source_t g_uart_source;
+static ucn_stream_source_default_storage_t g_uart_storage;
+
+static ucn_result_t init_uart_source(void)
+{
+    const ucn_stream_source_config_t config = {
+        .runtime = &g_runtime,
+        .source_id = PRODUCT_SOURCE_UART0,
+        .ingress_link = &g_uart_link,
+        .ring_storage = g_uart_storage.ring,
+        .ring_capacity = sizeof(g_uart_storage.ring),
+        .frame_storage = g_uart_storage.frame,
+        .frame_capacity = sizeof(g_uart_storage.frame),
+        /* 其余 0 值选择 UCN_MAX_FRAME_BYTES 和全局默认预算。 */
+    };
+
+    return ucn_stream_source_init(&g_uart_source, &config);
+}
+
+void uart_rx_task_callback(const uint8_t *bytes, size_t length)
+{
+    (void)ucn_stream_source_write(&g_uart_source, bytes, length);
+}
+
+void uart_rx_isr(const uint8_t *bytes, size_t length)
+{
+    (void)ucn_stream_source_write_from_isr(
+        &g_uart_source, bytes, length);
+}
+```
+
+写入是“整块全收或全拒绝”；驱动要检查 `UCN_ERR_NO_SPACE` 并记过载。Source 会保留缺口前的完整 Carrier，从真实缺口开始丢弃到下一个 `0x00`，避免拼接错误。Owner 被立即唤醒并自动 COBS 解码、提交公共 RX Queue；Queue 背压时保留一个已解码帧，下一 Drain Round 重试。
+
+发送侧的 `ucn_link_t::send()` 调用 `ucn_stream_carrier_encode()`，然后把返回的完整 Carrier 有界复制到产品 TX Queue。该函数不启动 DMA，也不等待串口发送完成：
+
+```c
+uint8_t carrier[UCN_STREAM_CARRIER_MAX_WIRE_BYTES(UCN_MAX_FRAME_BYTES)];
+size_t carrier_length = 0U;
+
+result = ucn_stream_carrier_encode(
+    frame, frame_length, carrier, sizeof(carrier), &carrier_length);
+if (result == UCN_OK) {
+    result = product_uart_tx_enqueue(carrier, carrier_length);
+}
+```
+
+默认每端口调用者存储为 512 B Ring + 259 B Frame Storage（默认 256 B UCN Frame 上限）；Host x64 `ucn_stream_source_t` 为 240 B。产品可在全局头覆盖 Ring、字节预算、错误预算和读取 Chunk，也可直接传入自定义静态数组。以上数值不是目标 MCU ABI 结果。
+
+#### 5.3.3 CAN/CAN-FD：公共 Frame Source
+
+V5-60 把帧流与 Stream 分开。产品先配置控制器、引脚、位时序和硬件 Acceptance Filter，再为每个控制器静态创建一个 Source：
+
+```c
+#include "ucn/adapters/ucn_can_source.h"
+
+static ucn_can_source_t g_can_source;
+static ucn_can_source_default_storage_t g_can_storage;
+
+static ucn_result_t resolve_can_id(void *context,
+                                   uint32_t identifier,
+                                   bool extended,
+                                   ucn_link_t **link)
+{
+    (void)context;
+    if (!extended && identifier == 0x201U) {
+        *link = &g_can_peer_link;
+        return UCN_OK;
+    }
+    return UCN_ERR_NOT_FOUND;
+}
+
+static ucn_result_t init_can_source(void)
+{
+    const ucn_can_source_config_t config = {
+        .runtime = &g_runtime,
+        .source_id = PRODUCT_SOURCE_CAN0,
+        .mode = UCN_CAN_SOURCE_MIXED,
+        .ring_storage = g_can_storage.ring,
+        .ring_capacity = UCN_CAN_SOURCE_DEFAULT_RING_FRAMES,
+        .reassembly_slots = g_can_storage.slots,
+        .reassembly_slot_count = UCN_CAN_SOURCE_DEFAULT_REASSEMBLY_SLOTS,
+        .reassembly_storage = &g_can_storage.reassembly[0][0],
+        .reassembly_storage_capacity = sizeof(g_can_storage.reassembly),
+        .resolve_ingress = resolve_can_id,
+    };
+    return ucn_can_source_init(&g_can_source, &config);
+}
+```
+
+驱动把 SDK 帧归一成 `ucn_can_frame_t`，其中 `length` 是 DLC 解码后的真实字节数。Task/ISR 分别调用 `ucn_can_source_write()` / `ucn_can_source_write_from_isr()`；不要在 ISR 解码、重组或调用 Node。CAN-FD TX 调用 `ucn_can_fd_carrier_encode()`，经典 CAN TX 先取 `ucn_can_classic_carrier_segment_count()`，再逐个调用 `ucn_can_classic_carrier_encode_segment()` 并写入产品固定 TX Queue。
+
+CAN-FD Carrier 不修改 v5 Wire：只把完整 UCN 帧补到合法 DLC，尾部固定为零；Source 从 Header 取回真实长度并拒绝非零 Padding。经典 CAN 每段最多 8 B，START/CONT 使用严格递增 Segment Index；乱序、重复、丢段超时和槽满都不会拼接成业务帧。`Link.send()` 仍只负责有界入 TX Queue，不能等待全部经典 CAN 段真正发完。
+
+经典 CAN 的产品 TX Queue 应保存完整 UCN 帧或等价的固定 Carrier 状态，由单一 Worker 对同一个 CAN ID 串行发完所有段。两个 Carrier 不得交错；Transfer ID 由该 Worker 递增分配，用来拒绝迟到段，不代表同一 CAN ID 可以并发重组。Preset Resolver 只有在产品确实安装了这条 TX/RX Carrier 后才设置 `carrier_enabled=true`。
+
+控制器中断发现 Bus-Off 后调用 `ucn_can_source_set_bus_state_from_isr(..., UCN_CAN_BUS_OFF)`，同时让该 Link 的 `get_status().is_up=false`。驱动完成硬件恢复期间报告 `RECOVERING`，只有控制器和收发器确认可用后才报告 `ACTIVE`。Source 不自动清 TEC/REC 或重启硬件。可用 `ucn_can_source_get_health()` 把 Ring 千分比压力和失败累计映射进产品 `get_metrics()`；真实总线利用率、仲裁等待、TEC/REC 仍必须来自控制器驱动。
+
+默认每控制器存储为 8 个规范化物理帧、2 个重组描述符和 `2 × UCN_MAX_FRAME_BYTES` 重组区。产品可在全局头覆盖默认，或为每个实例传自定义静态数组。经典 CAN 最大可表达 Carrier 为 1278 B，但这不是推荐 MTU：帧越大，占用的仲裁帧和最坏延迟越高。
+
+#### 5.3.4 兼容入口：现有独立 Platform Port
+
+```c
+/* Task 上下文的驱动 Event 回调：入队成功后 Port 会通知 Owner。 */
+void uart_rx_event_callback(const uint8_t *data, size_t length)
+{
+    (void)ucn_freertos_port_rx_enqueue(&g_ucn_freertos_port,
+                                        &g_uart_link, data, length, false);
+}
+
+/* 真正 ISR 若直接提交完整帧，必须使用 ISR token 临界区和 FromISR 通知。 */
+void uart_rx_isr_complete(const uint8_t *data, size_t length)
 {
     (void)ucn_freertos_port_rx_enqueue(&g_ucn_freertos_port,
                                         &g_uart_link, data, length, true);
 }
 
-/* 唯一 Protocol Task / loopTask。Owner 内部只采样一次 now_ms。 */
-void protocol_task_iteration(void)
+/* 唯一 Protocol Task：事件到达立即醒；10 ms 只是维护/漏通知上限。 */
+void protocol_task(void *argument)
 {
-    size_t pumped = 0U;
-    uint8_t bridged = 0U;
+    (void)argument;
+    for (;;) {
+        size_t pumped = 0U;
+        uint8_t bridged = 0U;
 
-    (void)ucn_freertos_port_task_step(&g_ucn_freertos_port, &pumped, &bridged);
+        (void)ucn_freertos_port_task_step(&g_ucn_freertos_port,
+                                           &pumped, &bridged);
+        if (pumped == 0U && bridged == 0U) {
+            (void)ucn_freertos_port_task_wait(&g_ucn_freertos_port,
+                                               UCN_MAX_STEP_INTERVAL_MS);
+        }
+    }
 }
 ```
 
-启动时先用 `ucn_protocol_owner_config_t` 绑定 `node`、`rx_queue`、`port_ops`、`port_context`、每轮 RX 预算和可选 Bridge/Bridge 预算；再用选择的平台 Config 绑定其专属 Runtime Hook 并初始化 Port。裸机没有 wait API；RTOS Port 的等待 API 会裁剪到 `UCN_MAX_STEP_INTERVAL_MS`。`ucn_node_step()` 的空闲 `UCN_ERR_NOT_FOUND` 已在公共 Owner 内归一为 `UCN_OK`，原始值仍可从 Owner 统计读取。
+启动时先用 `ucn_protocol_owner_config_t` 绑定 `node`、`rx_queue`、`port_ops`、`port_context`、每轮 RX 预算和可选 Bridge/Bridge 预算；再用选择的平台 Config 绑定其专属 Runtime Hook 并初始化 Port。裸机没有 wait API；RTOS Port 的 `wait_for_work` 应映射为 Task Notification/Event/Semaphore，RX/TX completion 通过 `notify_protocol_task` 立即解除等待。等待 API 会裁剪到 `UCN_MAX_STEP_INTERVAL_MS`，该超时只承担协议定时器、无中断平台和漏通知兜底。`ucn_node_step()` 的空闲 `UCN_ERR_NOT_FOUND` 已在公共 Owner 内归一为 `UCN_OK`，原始值仍可从 Owner 统计读取。
 
 该循环不是“尽量快即可”，而是产品时限契约。默认 Full Profile：
 
@@ -307,6 +504,58 @@ Q1 首次发送若尚无满足 Hop/Cost/RTT 约束的路线，会在固定 Pendi
 | `UCN_ERR_NO_SPACE` | 固定表或队列满；默认是最终失败。只有产品显式选择 S15 的 Q0 有界背压策略时，才按固定次数、间隔和 Deadline 做本机提交重试；仍禁止无限重试。 |
 | `UCN_ERR_TOO_LARGE` / `UCN_ERR_ARGUMENT` | ABI 或配置错误，修正调用方。 |
 | `UCN_ERR_SECURITY` / `UCN_ERR_ACCESS` / `UCN_ERR_REPLAY` | 安全策略或认证失败；记录审计事件，不能退回明文重发。 |
+
+### 6.1 按需选择 32 B～8 KiB 逻辑消息
+
+普通 `ucn_node_send_endpoint()` 仍只发送一个 UCN 帧。需要有界大消息时，产品额外链接 `ucn_transfer` 并包含 `ucn/ucn_transfer.h`。九档上限固定为：
+
+```text
+T32 / T64 / T128 / T256 / T512 / T1K / T2K / T4K / T8K
+```
+
+T32/T64 永不分片；T128～T8K 由 Transfer 根据实际 MTU 使用一个或多个 Fragment。选择的 Class 是“本条消息允许的最大长度”，实际 `length` 可以更小，但不能超过 Class 或本产品的 `UCN_TRANSFER_MAX_MESSAGE_BYTES`。
+
+```c
+static ucn_transfer_t g_transfer;
+
+static void transfer_rx(void *ctx,
+                        ucn_node_id_t source,
+                        ucn_session_id_t session,
+                        ucn_endpoint_t endpoint,
+                        ucn_transfer_class_t transfer_class,
+                        const uint8_t *data,
+                        uint16_t length,
+                        ucn_transfer_rx_handle_t handle)
+{
+    consume_message(source, endpoint, data, length);
+    if (handle != UCN_TRANSFER_RX_HANDLE_DIRECT) {
+        (void)ucn_transfer_release_received(&g_transfer, handle);
+    }
+}
+
+ucn_transfer_config_t transfer_cfg = {0};
+transfer_cfg.node = &g_node;
+ucn_transfer_init(&g_transfer, &transfer_cfg);
+ucn_transfer_bind_endpoint(&g_transfer, 0x80U,
+                           UCN_TRANSFER_CLASS_T2K, false,
+                           transfer_rx, NULL);
+ucn_transfer_set_peer_capability(&g_transfer, remote_node_id,
+                                 UCN_TRANSFER_CLASS_T2K);
+
+/* 可选：默认双方窗口都是 1。只有已知对端支持时才显式打开流水。 */
+ucn_transfer_set_tx_window_size(&g_transfer, 4U);
+ucn_transfer_set_peer_window_capability(&g_transfer, remote_node_id, 4U);
+
+/* payload 在完成回调之前必须保持有效且不可修改。 */
+ucn_transfer_send(&g_transfer, remote_node_id, 0x80U,
+                  UCN_TRANSFER_CLASS_T512,
+                  payload, payload_length,
+                  transfer_send_complete, NULL);
+```
+
+必须在唯一 Protocol Owner 上下文调用 Send/Step。为保证 Core Q0、普通 Q1 和维护优先，先运行所选 Port/Owner Step，只有其返回 `UCN_ERR_NOT_FOUND` 时再调用一次 `ucn_transfer_step(&g_transfer, now_ms)`。每次最多推进一个新片或重传片；连续空闲 Step 可填满显式固定窗口。
+
+注意四条规则：发送端 Buffer 在 Completion 前归应用所有但必须保持只读；分片接收 Buffer 在 `release_received()` 前占用固定 RX Slot；`ucn_transfer_init()` 会占用 Node 通用 RX Handler，原有通用 Handler 要放入 `fallback_rx_handler/context`；未显式配置 Peer 窗口时有效窗口始终为 1，不能按本机能力猜测远端。窗口使用累计 ACK 和有界 Go-Back-N，不缓存乱序片、不改变 v5 Wire。完整配置、完成状态、安全/MTU 边界见[消息大小等级与有界分片重组](UCN_消息大小等级与有界分片重组建议.md)。
 
 ## 7. MCU 内多任务通信：Service Router + Bridge
 

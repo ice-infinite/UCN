@@ -108,3 +108,9 @@ static void nuttx_adapter_drain_rx_frames(void)
 ## 7. S16 Protocol Thread 时限
 
 在板级配置中冻结 `UCN_MAX_STEP_INTERVAL_MS`、pthread 优先级/调度策略、最大 poll/sem wait、RX Pump/Bridge 预算和每个设备 `send()` WCET。Protocol Thread 必须有周期超时，不能永久阻塞等待 FD。运行时导出 `max_step_gap_ms` 与 `step_interval_violations`；当前文档是接入模板，不代表已有 NuttX 板级时延证据。
+
+## 8. V5-58/59 NuttX Event Runtime 与 Stream 映射
+
+产品用 ISR-safe semaphore/event/poll wake-up 实现 `notify_owner()`，Protocol Worker 以有限超时实现 `wait_owner()`；Round 上限后只在任务上下文 Yield。`/dev/ttyS*`、CAN、USB 或无线 FD/驱动各对应一个固定 Source，不把 FD 或驱动 Handle写入 Core。若数据先进入 NuttX 驱动缓冲，Source `service()` 在 Worker 内做有界读取；当前仍需 NuttX 目标板验证 ISR 约束和调度时延。
+
+Worker 从 `/dev/ttyS*`/USB CDC 有界读取的字节交给 `ucn_stream_source_write()`；真 ISR 则使用 `write_from_isr()`。公共 Source 只保存调用者数组和 C 状态，不保存 FD/pollfd，也不替代 NuttX 驱动流控。

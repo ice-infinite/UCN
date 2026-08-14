@@ -353,8 +353,8 @@ ucn_product_endpoints.c       # Endpoint / Service ABI
 | V5-37 | 建立 Bare metal / FreeRTOS / Zephyr / NuttX 的 Port 外壳、编译模板和 Host Fake HAL 测试。 | 历史阶段：集中式 mode API 未发布，已由 V5-46 替换。 |
 | V5-46 | 平台 Port 分目录解耦。 | 已完成（软件）：公共 ucn_protocol_owner 与裸机、FreeRTOS、Zephyr、NuttX、RT-Thread、Host Fake 独立 Port 提供唯一 Owner、固定 RX/Bridge 预算、同一时钟、等待上限与 Service OFF 裁剪；真实 RTOS SDK 对象仍由产品实现。 |
 | V5-38 | 将 ESP32-S3 工程迁移到 v5，先实现 UART 与 ESP-NOW 标准 Adapter、默认 Preset 和两板实测。 | 待开始。 |
-| V5-39 | 实现 CAN-FD 与 USB CDC 标准 Adapter，并做 Host/目标构建和点对点实测。 | 待开始。 |
-| V5-40 | 单独实现经典 CAN 有界 Carrier 分段/重组、Bus-Off 与拥塞测试。 | 待开始；不与 Core 业务分片混合。 |
+| V5-39 | 实现 CAN-FD 与 USB CDC 标准 Adapter，并做 Host/目标构建和点对点实测。 | SDK 无关 Source 已由 V5-59/60 完成；真实驱动与点对点实测归 V5-61。 |
+| V5-40 | 单独实现经典 CAN 有界 Carrier 分段/重组、Bus-Off 与拥塞测试。 | 软件 Carrier/Bus State 已并入 V5-60；真实总线拥塞/Bus-Off 待 V5-61。 |
 | V5-41 | 真实多板标定：记录每种 Preset 的 RTT、失败率、队列压力、P50/P95、吞吐、功耗和切换收益；据此调整产品覆盖值。 | 待硬件条件。 |
 | V5-42 | 扩展 Bearer 路线 | 按 P0/P1/P2 依次评审并实现以太网、RS-485、BLE LE、802.15.4、NRF24/私有 2.4G、LoRa P2P/FSK、UWB、SPI/I²C 和受控 IP Tunnel；每项先通过统一准入门槛再新增 Adapter。 | 待开始；V5-35 已冻结其 `CONDITIONAL` Preset 元数据，但没有任何驱动、`ucn_link_t` 注册或自动选路。原生 Mesh/LoRaWAN 仅可作为受控 Tunnel/网关，不与 UCN 路由层双重叠加。 |
 | V5-43 | 冻结 [LC-1 Link Cost 计算规范](UCN_Link_Cost计算规范.md)，将动态计算的所有采样、取整、加减、状态门和切换规则从建议变为实现合同。 | 已完成（设计/任务）；未改代码。 |

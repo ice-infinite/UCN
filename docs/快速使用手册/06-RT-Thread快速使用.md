@@ -125,3 +125,9 @@ Adapter 将 `rt_device_read()`、UART DMA、CAN 接收或无线模块回调转�
 ## 7. S16 Protocol Thread 时限
 
 产品配置需冻结 `UCN_MAX_STEP_INTERVAL_MS`、线程优先级、最大 IPC 等待 tick、Adapter Pump/Bridge 预算和 Link `send()` WCET。Protocol Thread 应采用小于最大 Step 的周期/超时唤醒，不能永久挂在信号量上。持续负载时读取 `max_step_gap_ms`、`step_interval_violations` 并校验 Heartbeat/Probe 仍在产品上界内；当前尚无 RT-Thread 实机数据。
+
+## 8. V5-58/59 RT-Thread Event Runtime 与 Stream 映射
+
+产品用 `rt_event`/`rt_sem` 实现统一 Scheduler Hook，`notify_owner(from_isr)` 内选择可在当前上下文调用的 IPC API，`wait_owner()` 必须有有限 Tick 超时。每个 `rt_device` UART/CAN/USB/无线实例绑定一个固定 Source 和自己的 Ring；回调只 Signal，Protocol Thread 执行全部 Source `service()`。现有 `ucn_rtthread_port_*` 保留单 Queue 兼容，不与 Event Runtime 重复拥有同一 Node。
+
+RT-Thread UART/USB 的接收回调把字节交给每实例 `ucn_stream_source_write[_from_isr]()`；公共 Source 统一 COBS 与 Queue 背压，`rt_device` 打开、DMA、串口参数、TX 完成和 IPC 对象继续只在产品文件中。

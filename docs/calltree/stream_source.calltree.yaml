@@ -1,0 +1,80 @@
+module: stream_source
+description: UART、RS-485、USB CDC 共用的调用者存储 Byte Ring、COBS+0 Carrier 与 Event Runtime Source。
+entry: stream_source.ucn_stream_source_write_from_isr
+source_files:
+  - src/adapters/stream/ucn_stream_source.c
+  - include/ucn/adapters/ucn_stream_source.h
+
+nodes:
+  - id: stream_source.ucn_stream_source_init
+    symbol: ucn_stream_source_init
+    type: function
+    file: src/adapters/stream/ucn_stream_source.c
+    layer: adapter
+    role: 校验调用者 Ring/Frame Storage、预算和临界区，然后把本实例绑定到固定 Runtime Source ID。
+    called_by:
+      - external.product_adapter_startup
+    calls:
+      - target: event_runtime.ucn_event_runtime_bind_source
+        type: direct
+        reason: 注册 Owner-only Stream service 回调。
+    notes:
+      - 不打开 UART/USB、不选择引脚、不创建任务或动态分配。
+
+  - id: stream_source.ucn_stream_source_write_from_isr
+    symbol: ucn_stream_source_write_from_isr
+    type: function
+    file: src/adapters/stream/ucn_stream_source.c
+    layer: adapter
+    role: 在 ISR token 临界区把一整块原始字节复制进本 Source Ring，并立即通知 Runtime。
+    called_by:
+      - external.uart_dma_isr
+      - external.usb_rx_callback
+      - external.rs485_rx_isr
+    calls:
+      - target: event_runtime.ucn_event_runtime_signal_source_from_isr
+        type: direct
+        reason: 置位 RX_READY 并唤醒唯一 Owner。
+    notes:
+      - Ring 空间不足时整块拒绝，并记录真实 Stream Gap 位置。
+      - ISR 不 COBS Decode、不调用 Node/Transfer/业务。
+
+  - id: stream_source.stream_source_service
+    symbol: stream_source_service
+    type: callback
+    file: src/adapters/stream/ucn_stream_source.c
+    layer: adapter
+    role: Owner 上下文按 Work/Byte/Error 三重预算 Drain Ring、COBS Decode 和重同步。
+    called_by:
+      - event_runtime.ucn_event_runtime_run
+    calls:
+      - target: stream_source.stream_submit_pending
+        type: direct
+        reason: 候选通过 COBS 与最小帧长门禁后提交完整 UCN Frame。
+    notes:
+      - 缺口前已接受数据先交付，到真实 Gap 后才丢弃至下一零分隔符。
+
+  - id: stream_source.stream_submit_pending
+    symbol: stream_submit_pending
+    type: function
+    file: src/adapters/stream/ucn_stream_source.c
+    layer: adapter
+    role: 把已解码完整帧提交公共 Queue；Queue 满则保留本帧并停止消费后续 Carrier。
+    called_by:
+      - stream_source.stream_source_service
+    calls:
+      - target: event_runtime.ucn_event_runtime_submit_frame
+        type: direct
+        reason: 进入公共固定 RX Queue 和 Protocol Owner。
+
+  - id: stream_source.ucn_stream_carrier_encode
+    symbol: ucn_stream_carrier_encode
+    type: function
+    file: src/adapters/stream/ucn_stream_source.c
+    layer: adapter
+    role: 把一个完整 UCN Frame 编成 COBS 编码体并追加唯一 0x00 分隔符。
+    called_by:
+      - external.stream_link_send
+    calls: []
+    notes:
+      - 调用者必须把返回的完整 Carrier 有界复制进 TX Queue，不得等待物理发送完成。

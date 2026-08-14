@@ -7,7 +7,9 @@
 extern "C" {
 #endif
 
-/* Product glue maps these callbacks to RT-Thread event, mailbox, semaphore,
+/* Compatibility single-Queue wrapper.  New multi-Bearer products should use
+ * ucn_event_runtime_t with scheduler hooks implemented in RT-Thread glue.
+ * Product glue maps these callbacks to RT-Thread event, mailbox, semaphore,
  * or thread primitives.  This independent Port exists so RT-Thread never
  * needs to impersonate a FreeRTOS/Zephyr/NuttX mode. */
 typedef struct ucn_rtthread_port_ops {
