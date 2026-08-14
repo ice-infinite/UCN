@@ -1,5 +1,7 @@
 # UCN V5-48 ISR 队列、Scale 容量与 Path 源兼容修复报告
 
+> 当前迁移说明：V5-48 的 Task/ISR token 分离语义保持有效；V5-62 已在预发布阶段放弃旧 Port 位置初始化兼容，将 `ucn_port_ops_t` 升级为带 `struct_size/api_version` 的 API V2。当前初始化和回归以 [V5-62 修复报告](UCN_V5_62_Port_API_V2与审计缺陷修复报告.md) 为准。
+
 > 状态：已完成（Host 软件）。对应任务 V5-48 / DOC-046；不替代真实 RTOS ISR、BSP、驱动或实板验收。
 
 ## 1. 修复范围

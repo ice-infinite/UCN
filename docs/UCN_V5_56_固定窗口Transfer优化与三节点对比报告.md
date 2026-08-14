@@ -3,6 +3,7 @@
 > 日期：2026-08-14
 > 状态：代码、Host 软件回归和三块 ESP32-S3 的 3,000,000 baud UART 两跳重复实测已完成。
 > 台架：A=COM5/ESP32-S3-N16R8，B=COM34/ESP32-S3-N16R8，C=COM38/ESP32-S3-N8R8；A—B—C 两段 UART，ESP-NOW 同时在线；A→C 路由为 2 Hop/Cost 68。
+> 当前迁移说明：本文保留 V5-56 当时的源码兼容和实机数据。V5-62 已在预发布阶段为消除陈旧 Deadline 破坏性扩展 `ucn_transfer_config_t` 并修改 Step 签名；Wire、窗口和本文实测结果的历史含义不变，当前调用方式以 [V5-62 修复报告](UCN_V5_62_Port_API_V2与审计缺陷修复报告.md) 为准。
 
 ## 1. 优化目标与结论
 
@@ -32,7 +33,7 @@ ucn_transfer_set_peer_window_capability(&transfer, peer_node_id, 4U);
 
 初始化后的运行期窗口固定为 1。产品必须先用 `ucn_transfer_set_peer_capability()` 建立对端 Class 能力，再显式设置对端窗口能力。只设置本机窗口、不设置对端窗口时，有效窗口仍为 1，因此不会主动向旧 v5 Transfer 对端流水发送。
 
-`ucn_transfer_config_t` 没有插入新字段，旧位置初始化继续可编译。窗口设置在 TX Slot 空闲时才允许修改；存在活动发送时返回 `UCN_ERR_ACCESS`，避免半条消息改变可靠性语义。
+在 V5-56 当时，`ucn_transfer_config_t` 没有插入新字段，旧位置初始化可编译。V5-62 已明确废止该源码兼容：当前配置必须用具名初始化并提供权威 `now_ms` 回调。窗口设置在 TX Slot 空闲时才允许修改；存在活动发送时返回 `UCN_ERR_ACCESS`，避免半条消息改变可靠性语义。
 
 当前没有把窗口能力塞入 HELLO，也没有自动推断。这样避免改变已部署 v5 控制帧；代价是产品当前需使用静态配置、受控目录或应用层能力交换。未来若做自动协商，必须作为可选扩展单独完成旧 v5 互通测试。
 
@@ -71,7 +72,7 @@ Direct T32/T64 的三轮平均交付率分别为 99.609% 和 98.177%，仍不是
 2. 窗口 4 丢失 START Fragment：接收端无 Slot 时累计 ACK 0，发送端有界回退并最终只交付一次。
 3. 窗口 4 丢失中间 Fragment：后续乱序片不缓存，接收端回连续偏移，发送端 Go-Back-N 后恢复。
 4. 活动 TX 中修改窗口被拒绝；非法 0、超编译上限和未知 Peer 均失败关闭。
-5. 旧 `ucn_transfer_config_t` 位置初始化与新 API 公共符号均进入链接测试。
+5. V5-56 当时的旧 `ucn_transfer_config_t` 位置初始化与窗口 API 公共符号进入链接测试；该兼容门禁已由 V5-62 的权威时钟/API V2 门禁取代。
 
 验证结果：
 

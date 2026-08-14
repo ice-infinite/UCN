@@ -9,6 +9,8 @@
 
 > 后续状态（2026-08-11）：本文记录的是 `f941ae9` 基线缺陷；V5-27～V5-30 已完成代码与 Host 软件修复，V5-31～V5-33 又完成 PATH_INSTALL 兼容与非 Full API 发布修复。对上述修复实现的复审确认原 P1 已关闭，但发现 1 项公开 C 结构体的源兼容性 P2（见第 6 节）。当前结果见 [异构 Bearer、动态 MTU 与 Policy 修复报告](UCN_V5_27_异构Bearer与动态MTU修复报告.md)和 [PATH_INSTALL 兼容与 API 符号修复报告](UCN_V5_31_PATH_INSTALL兼容与API符号修复报告.md)。下文代码行号和“当前”均保留为初审发生时的证据，不再代表修复后的源码状态。
 
+> 最新状态（2026-08-14）：后续审计发现经典 CAN 连续 Carrier 覆盖、Transfer 陈旧时间基准和 Port 位置初始化三项问题。项目确认尚未对外稳定发布，V5-62 采用破坏性工程 API 升级：Port API V2、Transfer 权威时钟/新 Step 签名和 CAN 完成优先提交均已完成 Host 门禁。Wire 仍为 v5。当前结论见 [V5-62 修复报告](UCN_V5_62_Port_API_V2与审计缺陷修复报告.md)。
+
 ## 1. 结论
 
 严格按 v4 基线之后的改动，确认 2 项待修复缺陷：
@@ -324,3 +326,13 @@ Windows MinGW 14.2 本机未安装 `libasan`/`libubsan`，故 Windows Sanitizer 
 | V5-REAUD-01 | 不再向 `ucn_path_forward_config_t` 添加尾字段；恢复精确八字段，新增独立 `ucn_path_install_capable()` 写入 capability。 | 公共头保留旧八项位置初始化；WSL GCC `-Wmissing-field-initializers -Werror` 构建/CTest `14/14`。 | 这是源码兼容；若存在已编译二进制 ABI，产品仍必须整体重编译。 |
 
 最终回归：Windows MSVC Full+Scale+配置契约 `14/14`，Full+128 B/3-Link 产品头 `15/15`，Lite、Nano、Full Service OFF 各 `1/1`，WSL GCC 13.3 严格告警及 ASan+UBSan+Leak Detection 的 Full+Scale+配置契约均 `14/14`。上述结果仍只构成 Host 软件证据。
+
+## 8. V5-62 预发布破坏性升级复核（2026-08-14）
+
+| 后续问题 | 处置 | 软件证据 |
+| --- | --- | --- |
+| 经典 CAN 同 ID 连续 Carrier 覆盖已完成 Slot | Source 一旦完成 Carrier 就结束物理 Drain；下一轮先提交 Slot，只有未完成 Slot 可被新 START 重启。 | 8 个物理帧连续排入同一 Ring、两条 Carrier 同 ID，均交付且 `carrier_restarts` 不增长。 |
+| Transfer 使用未初始化/陈旧 `now_ms` 建绝对 Deadline | 配置强制提供单一单调 `now_ms` 回调；Send/RX/Step 全部采样；Step 删除外部时间参数。 | 缺回调拒绝；uptime=100000 ms 初始化后立即发送和长空闲至 500000 ms 后发送均完成。 |
+| `ucn_port_ops_t` 追加字段导致旧位置初始化严格编译失败 | 不再承诺旧源码兼容；结构前置 `struct_size/api_version`，所有消费者先做 Port API V2 失败关闭。 | 正确 V2、短结构、错误版本、公共头与全部 Profile 构建/链接已覆盖。 |
+
+当前门禁为 Windows Full 14/14、Lite 11/11、Nano 1/1、Full Service OFF 11/11、128 B 产品配置 5/5；WSL ASan+UBSan 1/1，`-fanalyzer` 构建与 1/1。所有外部产品必须全量重编译；真实 RTOS ISR 和 CAN 控制器仍未由 Host 结果替代。

@@ -160,6 +160,7 @@ nodes:
     calls: []
     notes:
       - Queue 自身持有帧副本；不依赖动态内存。
+      - V5-62 起 Port Ops 必须通过 struct_size/api_version 的 API V2 校验；旧对象失败关闭。
 
   - id: adapter.ucn_adapter_rx_enqueue
     symbol: ucn_adapter_rx_enqueue
@@ -270,3 +271,5 @@ nodes:
       - target: external.port_enter_exit_critical
         type: callback
         reason: 产品 Port 提供临界区原语。
+    notes:
+      - 所有读取任务/ISR 回调的 Owner、Runtime 与 Source 都先执行 Port API V2 大小/版本检查。

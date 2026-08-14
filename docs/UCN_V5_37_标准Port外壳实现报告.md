@@ -1,5 +1,7 @@
 # UCN V5-37 标准 Port 外壳实现报告
 
+> 当前迁移说明：集中式实现已由 V5-46 拆分，底层 Port Ops 又由 V5-62 升级为 API V2。本文只保留阶段实现证据；当前产品必须填写 `struct_size/api_version` 并全量重编译，详见 [V5-62 修复报告](UCN_V5_62_Port_API_V2与审计缺陷修复报告.md)。
+
 > 文档编号：DOC-043。
 > 状态：历史软件验证；集中式 API 未发布，当前架构请以 DOC-044 / V5-46 为准。
 > 分支：`codex/v5-adaptive-wire`；不包含真实 MCU SDK、驱动或实板测试。

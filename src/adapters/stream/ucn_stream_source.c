@@ -366,7 +366,7 @@ ucn_result_t ucn_stream_source_init(
         return UCN_ERR_CONFIG;
     }
     port_ops = config->runtime->owner.config.port_ops;
-    if (port_ops == NULL ||
+    if (!ucn_port_ops_is_compatible(port_ops) ||
         (port_ops->enter_critical == NULL) !=
             (port_ops->exit_critical == NULL) ||
         (port_ops->enter_critical_from_isr == NULL) !=

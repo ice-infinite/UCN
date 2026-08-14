@@ -7,7 +7,8 @@ ucn_result_t ucn_protocol_owner_init(
     const ucn_protocol_owner_config_t *config)
 {
     if (owner == NULL || config == NULL || config->node == NULL ||
-        config->rx_queue == NULL || config->port_ops == NULL ||
+        config->rx_queue == NULL ||
+        !ucn_port_ops_is_compatible(config->port_ops) ||
         config->port_ops->now_ms == NULL ||
         config->max_rx_frames_per_step == 0U) {
         return UCN_ERR_ARGUMENT;

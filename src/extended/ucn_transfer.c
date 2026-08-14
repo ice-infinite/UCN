@@ -4,6 +4,15 @@
 #include "ucn/ucn_time.h"
 #include "ucn/ucn_transfer.h"
 
+static uint32_t transfer_observe_now(ucn_transfer_t *transfer)
+{
+    const uint32_t now_ms = transfer->config.now_ms(
+        transfer->config.now_context);
+
+    transfer->now_ms = now_ms;
+    return now_ms;
+}
+
 static uint16_t read_u16_be(const uint8_t *input)
 {
     return (uint16_t)(((uint16_t)input[0] << 8U) | (uint16_t)input[1]);
@@ -687,6 +696,7 @@ static void transfer_node_rx_handler(void *context, const ucn_frame_t *frame)
     if (transfer == NULL || !transfer->initialized || frame == NULL) {
         return;
     }
+    (void)transfer_observe_now(transfer);
     if (frame->message_type == UCN_MSG_TRANSFER_FRAGMENT) {
         handle_fragment(transfer, frame);
     } else if (frame->message_type == UCN_MSG_TRANSFER_ACK) {
@@ -702,7 +712,8 @@ ucn_result_t ucn_transfer_init(ucn_transfer_t *transfer,
 {
     size_t available_fragment_data;
 
-    if (transfer == NULL || config == NULL || config->node == NULL) {
+    if (transfer == NULL || config == NULL || config->node == NULL ||
+        config->now_ms == NULL) {
         return UCN_ERR_ARGUMENT;
     }
     if (UCN_MAX_PAYLOAD_BYTES <= UCN_TRANSFER_FRAGMENT_HEADER_BYTES) {
@@ -744,6 +755,7 @@ ucn_result_t ucn_transfer_init(ucn_transfer_t *transfer,
     }
     transfer->next_transfer_id = 1U;
     transfer->tx_window_size = 1U;
+    (void)transfer_observe_now(transfer);
     transfer->initialized = true;
     ucn_node_set_rx_handler(config->node, transfer_node_rx_handler, transfer);
     return UCN_OK;
@@ -891,6 +903,7 @@ ucn_result_t ucn_transfer_send(
         !transfer_class_is_valid(transfer_class) || data == NULL || length == 0U) {
         return UCN_ERR_ARGUMENT;
     }
+    (void)transfer_observe_now(transfer);
     class_limit = ucn_transfer_class_max_bytes(transfer_class);
     if (length > class_limit || length > UCN_TRANSFER_MAX_MESSAGE_BYTES) {
         return UCN_ERR_TOO_LARGE;
@@ -1117,14 +1130,15 @@ static void expire_transfer_state(ucn_transfer_t *transfer)
     }
 }
 
-ucn_result_t ucn_transfer_step(ucn_transfer_t *transfer, uint32_t now_ms)
+ucn_result_t ucn_transfer_step(ucn_transfer_t *transfer)
 {
+    uint32_t now_ms;
     size_t examined;
 
     if (transfer == NULL || !transfer->initialized) {
         return UCN_ERR_ARGUMENT;
     }
-    transfer->now_ms = now_ms;
+    now_ms = transfer_observe_now(transfer);
     expire_transfer_state(transfer);
 
     for (examined = 0U; examined < UCN_TRANSFER_TX_SLOTS; ++examined) {

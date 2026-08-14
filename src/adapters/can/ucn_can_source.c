@@ -264,7 +264,8 @@ static ucn_can_reassembly_slot_t *can_find_free_slot(ucn_can_source_t *source)
 
 static ucn_result_t can_process_classic(ucn_can_source_t *source,
                                         const ucn_can_frame_t *physical,
-                                        uint32_t now_ms)
+                                        uint32_t now_ms,
+                                        bool *hold_physical)
 {
     const bool extended =
         (physical->flags & UCN_CAN_FRAME_FLAG_EXTENDED) != 0U;
@@ -273,6 +274,7 @@ static ucn_result_t can_process_classic(ucn_can_source_t *source,
     uint8_t marker;
     ucn_result_t result;
 
+    *hold_physical = false;
     if (physical->length == 0U ||
         (physical->flags & UCN_CAN_FRAME_FLAG_RTR) != 0U) {
         source->stats.physical_format_errors++;
@@ -302,6 +304,13 @@ static ucn_result_t can_process_classic(ucn_can_source_t *source,
         }
         slot = can_find_slot(source, physical->identifier, extended);
         if (slot != NULL) {
+            if (slot->complete) {
+                /* A completed Carrier owns its slot until the common Adapter
+                 * Queue accepts it.  Do not consume the next START: the
+                 * service loop will retry it after submitting this slot. */
+                *hold_physical = true;
+                return UCN_ERR_NO_SPACE;
+            }
             source->stats.carrier_restarts++;
             can_clear_slot(slot);
         } else {
@@ -470,6 +479,7 @@ static ucn_result_t can_source_service(
         const bool have_frame = can_ring_peek(source, &physical);
         bool fd;
         bool queue_backpressure = false;
+        bool hold_physical = false;
 
         if (!have_frame) {
             break;
@@ -480,13 +490,20 @@ static ucn_result_t can_source_service(
         } else if (fd) {
             (void)can_process_fd(source, &physical, &queue_backpressure);
         } else {
-            (void)can_process_classic(source, &physical, now_ms);
+            (void)can_process_classic(source, &physical, now_ms,
+                                      &hold_physical);
         }
         service_result->work_done++;
-        if (queue_backpressure) {
+        if (queue_backpressure || hold_physical) {
             break;
         }
         can_ring_pop(source);
+        if (!fd && can_has_complete_slot(source)) {
+            /* Submit a completed Classic Carrier before touching a following
+             * physical frame.  This preserves back-to-back Carriers that use
+             * the same CAN ID even when one Runtime round drains many frames. */
+            break;
+        }
     }
 
     if (can_ring_count(source) != 0U || can_has_complete_slot(source)) {
@@ -537,7 +554,8 @@ ucn_result_t ucn_can_source_init(
         return UCN_ERR_CONFIG;
     }
     port_ops = config->runtime->owner.config.port_ops;
-    if (port_ops == NULL || port_ops->now_ms == NULL ||
+    if (!ucn_port_ops_is_compatible(port_ops) ||
+        port_ops->now_ms == NULL ||
         (port_ops->enter_critical == NULL) !=
             (port_ops->exit_critical == NULL) ||
         (port_ops->enter_critical_from_isr == NULL) !=

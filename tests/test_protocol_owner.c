@@ -129,10 +129,13 @@ static const ucn_link_ops_t PROTOCOL_OWNER_LINK_OPS = {
 };
 
 static const ucn_port_ops_t PROTOCOL_OWNER_OPS = {
-    protocol_owner_now_ms, NULL, NULL, NULL,
-    protocol_owner_enter_critical, protocol_owner_exit_critical,
-    protocol_owner_enter_critical_from_isr,
-    protocol_owner_exit_critical_from_isr
+    .struct_size = (uint16_t)sizeof(ucn_port_ops_t),
+    .api_version = UCN_PORT_OPS_API_VERSION,
+    .now_ms = protocol_owner_now_ms,
+    .enter_critical = protocol_owner_enter_critical,
+    .exit_critical = protocol_owner_exit_critical,
+    .enter_critical_from_isr = protocol_owner_enter_critical_from_isr,
+    .exit_critical_from_isr = protocol_owner_exit_critical_from_isr
 };
 
 static const ucn_freertos_port_ops_t FREERTOS_OPS = {

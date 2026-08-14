@@ -211,8 +211,16 @@ ucn_result_t ucn_transfer_send(
 ```c
 static ucn_transfer_t g_transfer;
 
+static uint32_t transfer_now_ms(void *context)
+{
+    (void)context;
+    return product_monotonic_ms();
+}
+
 ucn_transfer_config_t cfg = {0};
 cfg.node = &g_node;
+cfg.now_ms = transfer_now_ms;
+cfg.now_context = NULL;
 ucn_transfer_init(&g_transfer, &cfg);
 ucn_transfer_bind_endpoint(&g_transfer, 0x80,
                            UCN_TRANSFER_CLASS_T2K, false,
@@ -231,9 +239,11 @@ ucn_transfer_send(&g_transfer, remote_node_id, 0x80,
 
 /* 唯一 Protocol Owner 循环：Core 优先，空闲时才推进一个 Fragment。 */
 if (ucn_protocol_owner_step(&g_owner, now_ms) == UCN_ERR_NOT_FOUND) {
-    (void)ucn_transfer_step(&g_transfer, now_ms);
+    (void)ucn_transfer_step(&g_transfer);
 }
 ```
+
+V5-62 起 `cfg.now_ms` 是强制的权威单调毫秒时钟；Send、RX、ACK/重试和 Step 都从它采样当前值，Step 不再接收调用方缓存时间。该项属于预发布源码/ABI 破坏，旧 Transfer 初始化和旧函数调用必须迁移并全量重编译，但 Fragment/ACK Wire 不变。
 
 `ucn_transfer_init()` 会占用 Node 的通用 RX Handler 来处理 `0x22/0x23`；已有通用 Handler 必须通过 `fallback_rx_handler/context` 传入。静态 Endpoint Handler 不受影响。完成的分片消息回调拿到非零 Handle，消费后必须调用 `ucn_transfer_release_received()`；T32/T64 的 Handle 固定为 0，只在回调期间借用原帧 Payload。
 

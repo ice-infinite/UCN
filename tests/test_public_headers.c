@@ -21,6 +21,12 @@
 /* This translation unit deliberately does not include ucn_node_storage.h.
  * It proves that pointer-only application/Adapter/Bridge declarations can use
  * the public API without seeing the Node implementation layout. */
+static uint32_t public_header_now_ms(void *context)
+{
+    (void)context;
+    return 0U;
+}
+
 int test_public_headers(void)
 {
     ucn_node_t *node = NULL;
@@ -33,9 +39,19 @@ int test_public_headers(void)
         UINT32_C(1), UINT32_C(2), UINT32_C(3), UINT32_C(4), UINT32_C(5),
         2U, &legacy_link, UINT32_C(1000)
     };
-    const ucn_transfer_config_t legacy_transfer_config = {
-        node, 0U, 3U, UINT32_C(100), UINT32_C(200), UINT32_C(300),
-        UINT32_C(400), NULL, NULL
+    const ucn_port_ops_t port_ops_v2 = {
+        .struct_size = (uint16_t)sizeof(ucn_port_ops_t),
+        .api_version = UCN_PORT_OPS_API_VERSION,
+        .now_ms = public_header_now_ms
+    };
+    const ucn_transfer_config_t transfer_config_v2 = {
+        .node = node,
+        .now_ms = public_header_now_ms,
+        .max_retries = 3U,
+        .ack_timeout_ms = UINT32_C(100),
+        .rx_timeout_ms = UINT32_C(200),
+        .completed_hold_ms = UINT32_C(300),
+        .recent_completion_ms = UINT32_C(400)
     };
     ucn_result_t (*step_fn)(ucn_node_t *, uint32_t) = ucn_node_step;
     const ucn_node_stats_t *(*stats_fn)(const ucn_node_t *) =
@@ -95,6 +111,7 @@ int test_public_headers(void)
         ucn_transfer_set_peer_window_capability;
     ucn_result_t (*transfer_local_window_fn)(ucn_transfer_t *, uint8_t) =
         ucn_transfer_set_tx_window_size;
+    ucn_result_t (*transfer_step_fn)(ucn_transfer_t *) = ucn_transfer_step;
 
     return node == NULL && step_fn != NULL && stats_fn != NULL && preset_fn != NULL &&
            isr_enqueue_fn != NULL && path_install_capable_fn != NULL &&
@@ -109,10 +126,11 @@ int test_public_headers(void)
            can_source_write_isr_fn != NULL &&
            can_fd_encode_fn != NULL &&
            transfer_peer_window_fn != NULL &&
-           transfer_local_window_fn != NULL &&
-           legacy_transfer_config.max_retries == 3U &&
-           legacy_transfer_config.ack_timeout_ms == UINT32_C(100) &&
-           legacy_transfer_config.fallback_rx_handler == NULL &&
+            transfer_local_window_fn != NULL && transfer_step_fn != NULL &&
+            ucn_port_ops_is_compatible(&port_ops_v2) &&
+            transfer_config_v2.max_retries == 3U &&
+            transfer_config_v2.ack_timeout_ms == UINT32_C(100) &&
+            transfer_config_v2.fallback_rx_handler == NULL &&
            transfer_class_size_fn(UCN_TRANSFER_CLASS_T8K) == 8192U &&
            preset_fn(UCN_STANDARD_PRESET_UART_115200_8N1, NULL) == UCN_ERR_ARGUMENT &&
            bare_metal_init_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&

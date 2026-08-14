@@ -1,5 +1,7 @@
 # UCN V5-60 CAN/CAN-FD Frame Source 与经典 CAN Carrier 设计
 
+> 当前修正：V5-62 已修复同 CAN ID 连续 Carrier 的完成槽覆盖问题。Carrier Wire 不变；当前 Source 在一条 Carrier 完成后停止消费后续物理帧，下一轮先提交完整槽。详见 [V5-62 修复报告](UCN_V5_62_Port_API_V2与审计缺陷修复报告.md)。
+
 ## 1. 目标与边界
 
 V5-60 只解决“CAN 控制器收到物理帧后，如何有界地交给 UCN”，不把任何厂商 SDK、引脚、波特率寄存器或 RTOS 对象写进 Core。每个 CAN 控制器各自创建一个 `ucn_can_source_t`，由产品层负责：
@@ -42,11 +44,12 @@ CRC、版本、Network、Security 和 Replay 仍由后续 UCN Decode/Core 校验
 - Reassembly Slot 以 `(CAN ID, Extended 标志)` 区分来源，Transfer ID 区分一次传输；
 - 新 START 可显式重启同一来源的旧传输；槽满不淘汰其他活跃传输；
 - 完整 UCN 帧在公共 RX Queue 背压时保留在 Slot 中，后续 Owner Round 重试；
+- 完成 Slot 未提交前不消费同一 CAN ID 的下一条 START；只有 `active && !complete` 的旧 Slot 可由新 START 重启；
 - 丢段只能在后续乱序段或固定超时到达时确定；超时使用 UCN 的 32 位回绕安全 Deadline。
 
 UCN 帧自身 CRC16 会覆盖重组后的完整 Header、Payload 和认证 Tag。Carrier 不再增加第二套 CRC，避免重复开销。
 
-同一个 CAN ID 的 Carrier 必须串行发送，不能把两个 UCN 帧的段交错。产品 `Link.send()` 应把完整 UCN 帧有界复制到固定 TX Frame Queue 后立即返回，由 TX Worker 为该 CAN ID 分配递增 Transfer ID 并逐段发送；新 START 在接收端会有意替换同 ID 的旧未完成传输。只有产品确认整条 Carrier 已完成、失败或被显式终止后，才能开始同 ID 的下一帧。
+同一个 CAN ID 的 Carrier 必须串行发送，不能把两个 UCN 帧的段交错。产品 `Link.send()` 应把完整 UCN 帧有界复制到固定 TX Frame Queue 后立即返回，由 TX Worker 为该 CAN ID 分配递增 Transfer ID 并逐段发送；新 START 在接收端只会替换同 ID 的旧**未完成**传输。完成一条 Carrier 后 Source 结束当前 Drain，下一轮先提交完整 UCN 帧，提交成功后才读取后续 START。只有产品确认整条 Carrier 已完成、失败或被显式终止后，才能开始同 ID 的下一帧。
 
 ## 4. Bus-Off 与恢复
 
@@ -84,6 +87,7 @@ Source 提供以下确定性指标，供产品 `Link.get_metrics()` 采样：
 - 两个独立控制器 Source/不同 CAN ID 映射；
 - CAN-FD 17..64 B、全部 DLC 边界、非零补齐、非法 Flags/长度；
 - 经典 CAN 正常重组、乱序、重复、丢段超时、重启、槽满、末段长度；
+- 两条同 CAN ID Carrier 在一个 Driver Ring 中背靠背到达，前一完成槽不得被后一 START 覆盖；
 - Ring 满和恢复、Adapter Queue 背压保留、Bus-Off 清理与显式恢复；
 - Task/ISR 临界区及缺 ISR 锁失败关闭；
 - Full/Lite/Nano、Service OFF、128 B 产品头、ASan/UBSan 和静态分析。

@@ -247,7 +247,8 @@ ucn_result_t ucn_adapter_rx_queue_init(ucn_adapter_rx_queue_t *queue,
 {
     if (queue == NULL ||
         (port_ops != NULL &&
-         (port_ops->enter_critical == NULL || port_ops->exit_critical == NULL ||
+         (!ucn_port_ops_is_compatible(port_ops) ||
+          port_ops->enter_critical == NULL || port_ops->exit_critical == NULL ||
           (port_ops->enter_critical_from_isr == NULL) !=
               (port_ops->exit_critical_from_isr == NULL)))) {
         return UCN_ERR_ARGUMENT;

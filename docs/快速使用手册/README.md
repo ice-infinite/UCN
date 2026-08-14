@@ -2,6 +2,8 @@
 
 > 适用：当前 `codex/v5-adaptive-wire` 的 UCN Core 5.0.0 / 线协议 v5。默认固定 W3；固定域、显式自动最小档、Profile-aware 控制面、动态 MTU、逻辑 Bearer Policy、标准多 Source Event Runtime、公共 Stream Source、CAN/CAN-FD Frame Source、独立兼容平台 Port 和可选 T32～T8K Transfer 已可用。本文档组以当前公开 C99 API 和 CMake 源文件选择为准；生产安全和真实 Driver/多板/多介质性能仍未由本手册替代验证。
 
+> V5-62 迁移门禁：预发布版本已允许破坏性工程 API 更新。所有 `ucn_port_ops_t` 必须具名填写 `struct_size/api_version`，所有 Transfer 配置必须提供权威 `now_ms` 回调，`ucn_transfer_step()` 不再接收时间参数。Wire 仍为 v5，但旧对象不得与新头文件混用；升级后必须清空构建产物并全量重编译。详见 [V5-62 修复报告](../UCN_V5_62_Port_API_V2与审计缺陷修复报告.md)。
+
 ## 选择你的运行环境
 
 | 环境 | 文档 | 当前仓库状态 | 适合场景 |

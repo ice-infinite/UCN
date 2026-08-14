@@ -66,7 +66,8 @@ ucn_result_t ucn_event_runtime_init(
 {
     ucn_result_t result;
 
-    if (runtime == NULL || config == NULL || config->owner.port_ops == NULL ||
+    if (runtime == NULL || config == NULL ||
+        !ucn_port_ops_is_compatible(config->owner.port_ops) ||
         (config->scheduler_ops != NULL &&
          (config->scheduler_ops->notify_owner == NULL ||
           config->scheduler_ops->wait_owner == NULL))) {

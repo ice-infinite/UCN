@@ -121,13 +121,21 @@ static ucn_result_t event_source_service(
 }
 
 static const ucn_port_ops_t EVENT_PORT_OPS = {
-    event_now_ms, NULL, NULL, NULL,
-    event_enter_task, event_exit_task, event_enter_isr, event_exit_isr
+    .struct_size = (uint16_t)sizeof(ucn_port_ops_t),
+    .api_version = UCN_PORT_OPS_API_VERSION,
+    .now_ms = event_now_ms,
+    .enter_critical = event_enter_task,
+    .exit_critical = event_exit_task,
+    .enter_critical_from_isr = event_enter_isr,
+    .exit_critical_from_isr = event_exit_isr
 };
 
 static const ucn_port_ops_t EVENT_PORT_OPS_NO_ISR = {
-    event_now_ms, NULL, NULL, NULL,
-    event_enter_task, event_exit_task, NULL, NULL
+    .struct_size = (uint16_t)sizeof(ucn_port_ops_t),
+    .api_version = UCN_PORT_OPS_API_VERSION,
+    .now_ms = event_now_ms,
+    .enter_critical = event_enter_task,
+    .exit_critical = event_exit_task
 };
 
 static const ucn_event_runtime_scheduler_ops_t EVENT_SCHEDULER_OPS = {

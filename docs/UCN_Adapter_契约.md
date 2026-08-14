@@ -29,6 +29,8 @@ Core 不读取 MAC、RSSI、CAN ID、串口号、蓝牙连接句柄或 Linux soc
 
 公共队列默认 `UCN_ADAPTER_RX_QUEUE_DEPTH=2`，占用约 `2 × UCN_MAX_FRAME_BYTES` 原始帧缓存（默认约 512 B），可在编译期设为 1。任务/Owner 生产者调用 `ucn_adapter_rx_enqueue()`，使用 `enter_critical/exit_critical`；ISR 直接提交完整帧时必须调用 `ucn_adapter_rx_enqueue_from_isr()`，并在同一个 `ucn_port_ops_t` 中提供成对的 `enter_critical_from_isr()` / `exit_critical_from_isr(token)`。ISR 入口绝不会回退成任务锁：缺少该对回调返回 `UCN_ERR_CONFIG`。FreeRTOS 产品应把 `taskENTER_CRITICAL_FROM_ISR()` 返回的 mask 作为 token 并用同一个 token 恢复。仍优先建议 ISR 写 BSP 自己的固定 ring，由 Protocol Task 解码/入队；这会减少 ISR 时间与锁顺序风险。
 
+V5-62 的当前 Port API 为 V2。`ucn_port_ops_t` 必须具名填写 `.struct_size=sizeof(ucn_port_ops_t)` 和 `.api_version=UCN_PORT_OPS_API_VERSION`；Adapter、Owner、Runtime、Stream/CAN Source 在读取任何回调前统一校验。旧六/八字段位置初始化和旧对象不再兼容，产品必须全量重编译。该变化只影响工程 API/ABI，不改变 v5 Wire。
+
 当前 `ucn_adapter_rx_pump()` 只负责“已入队帧 → `ucn_node_receive()`”，不会自动调用 `ucn_link_ops_t::poll_rx`。轮询型真实 Adapter 必须在自己的任务中执行 `poll_rx` 并调用 `ucn_adapter_rx_enqueue()`，随后再 Pump；这能保证所有介质采用同一 Core 入口。
 
 V5-58 的标准入口是 `ucn_event_runtime_t`：启动期用 `ucn_event_runtime_bind_source()` 为每个物理实例绑定固定 Source ID；Task/ISR 只置 RX/TX/STATUS Pending 位，唯一 Owner 按 Source/Round 预算调用 `ucn_event_source_service_fn`。Source 在 Owner 上下文从自己的 Ring/描述符 Drain，成功得到完整帧后调用 `ucn_event_runtime_submit_frame()`。事件只表示“可能有工作”，允许合并；通知本身绝不能承载或计数真实数据。等待超时的 `FALLBACK_SCAN` 只处理漏通知、定时维护和无中断兼容路径。
@@ -37,7 +39,7 @@ Source 返回 `pending_events` 表示 Ring 仍有工作；Runtime 在预算内�
 
 V5-59 的标准字节流入口是 `ucn_stream_source_t`。产品为每个 UART/RS-485/USB CDC 实例提供独立 `ring_storage[]` 与 `frame_storage[]`，调用 `ucn_stream_source_init()` 绑定固定 Source ID；驱动 Task/ISR 分别把收到的**整块字节**交给 `ucn_stream_source_write()` / `ucn_stream_source_write_from_isr()`。库在 Owner 上下文完成 COBS+`0x00` 定界。整块写入空间不足时全部拒绝并记录真实缺口位置：缺口前已完整入 Ring 的 Carrier 仍先交付，只有缺口后的字节才丢弃到下一个分隔符。公共 RX Queue 满时已解码帧留在 Source 内重试，不继续吃下一个 Carrier。
 
-V5-60 的标准 CAN 入口是 `ucn_can_source_t`。每个控制器使用独立固定 Frame Ring、Source ID 和静态 CAN ID→Link Resolver。CAN-FD 直接携带一个 UCN 帧，发送端向合法 DLC 向上取整并零填充，接收端从 v5 Header 恢复真实长度并拒绝非零 Padding。经典 CAN 使用 `C1/C2 + Transfer ID + Segment Index` 的 8 B Carrier，固定 Slot 严格顺序重组并由回绕安全 Deadline 回收。`BUS_OFF/RECOVERING` 会清空 Ring/重组状态并拒绝新帧，硬件恢复和 Link `is_up` 仍由产品驱动负责。
+V5-60 的标准 CAN 入口是 `ucn_can_source_t`。每个控制器使用独立固定 Frame Ring、Source ID 和静态 CAN ID→Link Resolver。CAN-FD 直接携带一个 UCN 帧，发送端向合法 DLC 向上取整并零填充，接收端从 v5 Header 恢复真实长度并拒绝非零 Padding。经典 CAN 使用 `C1/C2 + Transfer ID + Segment Index` 的 8 B Carrier，固定 Slot 严格顺序重组并由回绕安全 Deadline 回收。V5-62 冻结“完成优先提交”：一条 Carrier 完成后 Source 立即停止消费后续物理帧，下一 Owner Round 先提交完成 Slot；只有未完成 Slot 才能被新 START 重启。公共 Queue 背压时完成 Slot 和下一物理帧都保留。`BUS_OFF/RECOVERING` 会清空 Ring/重组状态并拒绝新帧，硬件恢复和 Link `is_up` 仍由产品驱动负责。
 
 ## 3. 物理地址不是设备身份
 

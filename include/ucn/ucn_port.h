@@ -12,7 +12,16 @@ extern "C" {
  * only handed back to the matching ISR exit callback. */
 typedef uintptr_t ucn_port_critical_token_t;
 
+#define UCN_PORT_OPS_API_VERSION ((uint16_t)2U)
+
 typedef struct ucn_port_ops {
+    /* Pre-release Port API v2 is intentionally source/ABI breaking.  Every
+     * product must rebuild all Port/Adapter objects with the same header.
+     * struct_size allows a future implementation to reject a too-short
+     * prefix before it reads optional tail callbacks; api_version changes
+     * only when an existing field changes meaning or layout. */
+    uint16_t struct_size;
+    uint16_t api_version;
     uint32_t (*now_ms)(void *context);
     ucn_result_t (*random_bytes)(void *context, uint8_t *output, size_t length);
     ucn_result_t (*load_counter)(void *context, uint32_t *counter);
@@ -30,6 +39,13 @@ typedef struct ucn_port_ops {
     void (*exit_critical_from_isr)(void *context,
                                    ucn_port_critical_token_t token);
 } ucn_port_ops_t;
+
+static inline bool ucn_port_ops_is_compatible(const ucn_port_ops_t *ops)
+{
+    return ops != NULL &&
+           ops->struct_size >= (uint16_t)sizeof(ucn_port_ops_t) &&
+           ops->api_version == UCN_PORT_OPS_API_VERSION;
+}
 
 #ifdef __cplusplus
 }

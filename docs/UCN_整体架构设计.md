@@ -1,6 +1,6 @@
 # UCN 整体架构设计：MCU 自组网优先
 
-> 状态：**UCN v5 的协议/软件闭环、V5-46 独立 Platform Port 与 V5-47 工程模块分层已完成（2026-08-12）**；W0～W3、全 Build Profile 四档接收、Profile-aware 控制面、32 bit Cost 与 3/3/3/4 B Wire Cost、Q1 绝对 Deadline、Candidate Profile 连续性、业务路由约束、运行期 Hop Scope、Pinned Path Remaining Hops、有界 Expanding Ring、Ingress 早拒绝和 Host 软件门禁已完成。v4 已独立冻结；生产密码库、Authorized Class 执行层、目标板资源和多介质多跳实机仍待验证。
+> 状态：**UCN v5 的协议/软件闭环、V5-46 独立 Platform Port、V5-47 工程模块分层与 V5-62 预发布 API V2 修复已完成（2026-08-14）**；W0～W3、全 Build Profile 四档接收、Profile-aware 控制面、32 bit Cost 与 3/3/3/4 B Wire Cost、Q1 绝对 Deadline、Candidate Profile 连续性、业务路由约束、运行期 Hop Scope、Pinned Path Remaining Hops、有界 Expanding Ring、Ingress 早拒绝和 Host 软件门禁已完成。v4 已独立冻结；生产密码库、Authorized Class 执行层、目标板资源和多介质多跳实机仍待验证。
 > 日期：2026-08-14
 > 目标：以 MCU 为主体完成安全自组网；Linux 仅作为兼容接入端；协议小而可裁剪；资源占用由目标硬件配置决定。
 
@@ -13,6 +13,8 @@ Linux、ROS2、PX4/MAVLink、地面站与 AI 系统可以通过 `UCN-Host` 接�
 当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 与 per-Link 接收上限、1 B RX Ceiling HELLO、Ingress Profile/真实长度 Peek、Profile-aware 控制载荷、32 bit Cost、Hop-Cost-RTT 门禁、Profile 绑定 AAD、透明密文中继、路由感知最小档、受限 AODV-Lite、Candidate Probe/Activate、LC-1 本地动态 Cost、Endpoint Q1 首包寻路、固定邻居/Path/Policy、公共多 Source Event Runtime、UART/RS-485/USB CDC Stream Source、CAN/CAN-FD Frame Source、经典 CAN 有界 Carrier，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、Authorized Class 执行层、真实 BSP/DMA/USB/CAN 控制器/RTOS、多源实机仍是后续任务，不能由软件测试替代。
 
 V5-47 进一步将仓库内部实现明确归入 `src/core`、`src/node`、`src/transport`、`src/routing`、`src/service`、`src/ports`；公开 `include/ucn/...` 路径与 Wire 行为不变。目录依赖和未来 Adapter/RTOS 扩展规则见 [工程架构索引](架构/README.md)。
+
+V5-62 在尚未对外稳定发布的前提下选择工程 API 最优而非旧源码兼容：`ucn_port_ops_t` 使用 `struct_size/api_version` 的 Port API V2，Transfer 只接受一个权威单调时钟，经典 CAN 完成 Carrier 必须先提交再消费下一 START。旧对象必须全量重编译；Wire 仍是 v5，Frame/Header/消息编号不变。迁移与验证见 [V5-62 修复报告](UCN_V5_62_Port_API_V2与审计缺陷修复报告.md)。
 
 这份架构只围绕四项约束设计：
 

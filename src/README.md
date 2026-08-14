@@ -16,4 +16,6 @@ src/ 只放 UCN 的内部实现；产品代码不应直接包含这里的私有�
 
 真实 UART、CAN、Wi-Fi、USB 等 BSP/SDK Adapter 放入产品工程。当前 `stream/` 和 `can/` 是可直接复用的 SDK 无关载体，不会自行打开外设、选择引脚、设置过滤器或创建任务；两种 Source 不共享 Ring 或 Carrier 状态。
 
+V5-62 起所有 transport/adapter/port 初始化统一要求 Port API V2 的 `struct_size/api_version`，Transfer 统一从配置回调取权威时间。该项允许预发布源码/ABI 破坏但不改变 Wire；任何产品必须清理旧对象并全量重编译。经典 CAN Source 在完成 Carrier 提交前不再消费下一条物理帧。
+
 详细规则见 [../docs/架构/02-代码模块与依赖规则.md](../docs/架构/02-代码模块与依赖规则.md)。

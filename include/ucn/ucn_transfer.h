@@ -149,8 +149,15 @@ typedef void (*ucn_transfer_completion_fn)(
     uint16_t transfer_id,
     ucn_transfer_completion_status_t status);
 
+typedef uint32_t (*ucn_transfer_now_ms_fn)(void *context);
+
 typedef struct ucn_transfer_config {
     ucn_node_t *node;
+    /* One authoritative monotonic 32-bit millisecond clock is mandatory.
+     * Send, RX callbacks, ACK/retry handling and Step all sample this source;
+     * callers must not provide a second cached timestamp. */
+    ucn_transfer_now_ms_fn now_ms;
+    void *now_context;
     /* Zero selects the largest fragment data length that fits the current
      * build.  Runtime MTU failures shrink it down to the fixed 16-byte floor. */
     uint16_t fragment_data_limit;
@@ -338,11 +345,12 @@ ucn_result_t ucn_transfer_send(
     ucn_transfer_completion_fn completion,
     void *completion_context);
 
-/* Call from the single Protocol Owner using the same monotonic now_ms as
- * ucn_node_step().  To preserve Core Q0/Q1 and maintenance priority, call the
+/* Call from the single Protocol Owner.  The Transfer samples config.now_ms on
+ * every call, so the callback must observe the same monotonic clock used by
+ * the Node/Port.  To preserve Core Q0/Q1 and maintenance priority, call the
  * selected Port/Protocol Owner step first and call this only when Core reports
  * UCN_ERR_NOT_FOUND.  At most one new/retried fragment is submitted per call. */
-ucn_result_t ucn_transfer_step(ucn_transfer_t *transfer, uint32_t now_ms);
+ucn_result_t ucn_transfer_step(ucn_transfer_t *transfer);
 
 /* A completed fragmented message remains in its fixed RX Slot until the
  * consumer releases this handle or the bounded completed-hold timeout fires.

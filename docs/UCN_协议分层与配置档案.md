@@ -1,7 +1,7 @@
 # UCN 协议分层与配置档案
 
-> 状态：**UCN v5 V5-01～V5-20、V5-22～V5-36、V5-44～V5-48 软件闭环（2026-08-12）**；V5-16 为设计冻结，V5-21 阻塞于 S02。Nano/Lite/Full 与 W0～W3 正交，三种 Build Profile 均使用四档 Decoder；当前还包含 3 B Ingress Peek、运行期 Hop Scope、3/3/3/4 B Wire Cost、Candidate Profile 连续性、Q1 绝对 Deadline、有界 Expanding Ring、动态 MTU、异构 Bearer Path 能力、PATH_INSTALL 双格式兼容和 Full LC-1 本地动态选路。真实 Adapter、生产 AEAD/身份与目标板资源仍待接入。
-> 日期：2026-08-12
+> 状态：**UCN v5 V5-01～V5-20、V5-22～V5-36、V5-44～V5-60、V5-62 软件闭环（2026-08-14）**；V5-16 为设计冻结，V5-21 阻塞于 S02。Nano/Lite/Full 与 W0～W3 正交，三种 Build Profile 均使用四档 Decoder；当前还包含 3 B Ingress Peek、运行期 Hop Scope、3/3/3/4 B Wire Cost、Candidate Profile 连续性、Q1 绝对 Deadline、有界 Expanding Ring、动态 MTU、异构 Bearer Path 能力、PATH_INSTALL 双格式兼容、Full LC-1 本地动态选路、Port API V2、权威 Transfer 时钟和经典 CAN 完成优先提交。真实 Adapter、生产 AEAD/身份与目标板资源仍待接入。
+> 日期：2026-08-14
 > 关联文档：[UCN 整体架构设计](UCN_整体架构设计.md) · [工程架构索引](架构/README.md)
 
 ## 1. 拆分目标

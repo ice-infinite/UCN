@@ -82,8 +82,12 @@ static void adapter_exit_critical_from_isr(
 }
 
 static const ucn_port_ops_t ADAPTER_PORT_OPS = {
-    NULL, NULL, NULL, NULL, adapter_enter_critical, adapter_exit_critical,
-    adapter_enter_critical_from_isr, adapter_exit_critical_from_isr
+    .struct_size = (uint16_t)sizeof(ucn_port_ops_t),
+    .api_version = UCN_PORT_OPS_API_VERSION,
+    .enter_critical = adapter_enter_critical,
+    .exit_critical = adapter_exit_critical,
+    .enter_critical_from_isr = adapter_enter_critical_from_isr,
+    .exit_critical_from_isr = adapter_exit_critical_from_isr
 };
 
 static void adapter_receive_callback(void *context, const ucn_frame_t *frame)
@@ -190,6 +194,18 @@ int test_adapter(void)
                                            &lock_state) == UCN_OK);
     invalid_port_ops = ADAPTER_PORT_OPS;
     invalid_port_ops.enter_critical_from_isr = NULL;
+    TEST_ASSERT(ucn_adapter_rx_queue_init(&overflow_queue, &invalid_port_ops,
+                                          &lock_state) == UCN_ERR_ARGUMENT);
+    invalid_port_ops = ADAPTER_PORT_OPS;
+    invalid_port_ops.struct_size =
+        (uint16_t)(sizeof(ucn_port_ops_t) - 1U);
+    TEST_ASSERT(!ucn_port_ops_is_compatible(&invalid_port_ops));
+    TEST_ASSERT(ucn_adapter_rx_queue_init(&overflow_queue, &invalid_port_ops,
+                                          &lock_state) == UCN_ERR_ARGUMENT);
+    invalid_port_ops = ADAPTER_PORT_OPS;
+    invalid_port_ops.api_version =
+        (uint16_t)(UCN_PORT_OPS_API_VERSION + 1U);
+    TEST_ASSERT(!ucn_port_ops_is_compatible(&invalid_port_ops));
     TEST_ASSERT(ucn_adapter_rx_queue_init(&overflow_queue, &invalid_port_ops,
                                           &lock_state) == UCN_ERR_ARGUMENT);
 #if UCN_FEATURE_DYNAMIC_MESH

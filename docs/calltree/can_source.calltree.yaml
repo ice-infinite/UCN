@@ -56,6 +56,8 @@ nodes:
         reason: 只提交精确长度的完整 UCN 帧；Queue 背压时保留当前物理帧或完整 Slot。
     notes:
       - BUS_OFF/RECOVERING 不处理数据；超时由 Fallback Scan 保底。
+      - 一条经典 CAN Carrier 完成后立即停止消费物理 Ring；下一轮先提交完整 Slot，再处理后续 START。
+      - complete Slot 不能被同 CAN ID 新 START 替换；公共 Queue 背压时 Slot 与下一物理帧都保留。
 
   - id: can_source.ucn_frame_peek_encoded_size
     symbol: ucn_frame_peek_encoded_size

@@ -2,6 +2,8 @@
 
 > 适用：FreeRTOS MCU。ESP32 测试工程（`E:\File\PlatformIO\ESP32_UCN\ESP32S3_N16R8_UCN_Test1`）已形成 v5 事件 Owner/多板 UART Bench 证据，可作为 Arduino-ESP32 静态对象、短临界区和通知模型的产品参考；它仍不是打包进 Core 的通用 FreeRTOS SDK glue，不能把 ESP32 的 `portMUX_TYPE`、引脚、任务栈或实测吞吐直接外推到其他芯片。
 
+> 当前 API：V5-62 Port API V2 要求所有 `ucn_port_ops_t` 具名填写 `struct_size/api_version`；旧位置初始化与旧对象不兼容。Transfer 还必须配置权威时钟并使用无时间参数的 `ucn_transfer_step()`。迁移见[总览](README.md)。
+
 构建 v5 时按[总览的 Build Profile 与源文件矩阵](README.md#先选择-build-profile)重新选择 Nano/Lite/Full 源文件，并在所有 C/C++ 编译单元保持相同的 `UCN_PROFILE` 与 `UCN_FEATURE_SERVICE`。当前 ESP32 工程的源文件选择脚本已经具备该矩阵，但应用层 `main.cpp`/UART Benchmark 仍需另行迁移掉 v4 锁定后，才能称为 v5 FreeRTOS 实机参考。
 
 ## 1. 参考实现提供了什么

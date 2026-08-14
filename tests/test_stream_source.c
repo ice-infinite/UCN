@@ -69,13 +69,21 @@ static void stream_exit_isr(void *context, ucn_port_critical_token_t token)
 }
 
 static const ucn_port_ops_t STREAM_PORT_OPS = {
-    stream_now_ms, NULL, NULL, NULL,
-    stream_enter_task, stream_exit_task, stream_enter_isr, stream_exit_isr
+    .struct_size = (uint16_t)sizeof(ucn_port_ops_t),
+    .api_version = UCN_PORT_OPS_API_VERSION,
+    .now_ms = stream_now_ms,
+    .enter_critical = stream_enter_task,
+    .exit_critical = stream_exit_task,
+    .enter_critical_from_isr = stream_enter_isr,
+    .exit_critical_from_isr = stream_exit_isr
 };
 
 static const ucn_port_ops_t STREAM_PORT_OPS_NO_ISR = {
-    stream_now_ms, NULL, NULL, NULL,
-    stream_enter_task, stream_exit_task, NULL, NULL
+    .struct_size = (uint16_t)sizeof(ucn_port_ops_t),
+    .api_version = UCN_PORT_OPS_API_VERSION,
+    .now_ms = stream_now_ms,
+    .enter_critical = stream_enter_task,
+    .exit_critical = stream_exit_task
 };
 
 static ucn_result_t stream_link_send(ucn_link_t *link,

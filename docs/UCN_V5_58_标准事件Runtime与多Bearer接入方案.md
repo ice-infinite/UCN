@@ -3,6 +3,7 @@
 > 日期：2026-08-14
 > 状态：公共 Runtime 与 Host 软件门禁已完成；真实 Carrier/SDK/实机继续 V5-59～61。
 > 目标：把 ESP32 三板已验证的“外设事件唤醒唯一 Owner”收回 UCN 主库，形成裸机、FreeRTOS、Zephyr、NuttX、RT-Thread 与任意 Bearer 共用的固定资源接口。
+> 当前迁移说明：V5-62 已在预发布阶段把底层 `ucn_port_ops_t` 破坏性升级为 Port API V2。Runtime 调度模型不变，但所有产品必须增加 `struct_size/api_version` 并全量重编译；详见 [V5-62 修复报告](UCN_V5_62_Port_API_V2与审计缺陷修复报告.md)。
 
 ## 1. 当前缺口
 
@@ -58,7 +59,7 @@ Runtime 默认最多 8 个 Source，产品可通过全局配置收窄；不动�
 | 裸机有中断 | 只设置 Runtime Pending；可选 SEV | 主循环检查，可选 WFI | 普通函数 |
 | 无中断平台 | 无通知 Hook | Super Loop 定时调用 FALLBACK | 普通函数 |
 
-现有各平台 Port API 保持兼容；新产品优先直接对接统一 Event Runtime，旧 Port 不强制迁移。
+V5-58 当时保留了各平台 Port 入口；当前这些入口和 Event Runtime 都统一要求 Port API V2。单 Queue Port 与多 Source Event Runtime 仍是两种可选 Owner 形态，但旧编译对象和旧位置初始化必须迁移，不能与当前头文件混用。
 
 ## 6. 验收
 

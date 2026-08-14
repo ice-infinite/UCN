@@ -1,6 +1,8 @@
 # UCN Zephyr 快速使用
 
-> 适用：Zephyr 应用。当前仓库没有 Zephyr 专用 Port；本页将 UCN C99 Core 放进 Zephyr 线程、驱动回调和静态内核对象中。不要把本文称作“已合入的 Zephyr 驱动”。
+> 适用：Zephyr 应用。当前仓库已有独立、SDK 无关的 `ucn_port_zephyr` C99 外壳；产品仍需把它的 Hook 映射到实际 Zephyr 线程、同步原语和驱动。不要把该外壳称作“已合入的 Zephyr 驱动”。
+
+> 当前 API：V5-62 Port API V2 要求所有 `ucn_port_ops_t` 具名填写 `struct_size/api_version`；旧位置初始化与旧对象不兼容。Transfer 还必须配置权威时钟并使用无时间参数的 `ucn_transfer_step()`。迁移见[总览](README.md)。
 
 ## 1. 加入 Zephyr 应用构建
 
@@ -116,7 +118,7 @@ Zephyr Port 需要三个静态对象：一个 `k_mutex` 保护 Router 短拷贝�
 
 将 UART、CAN、SPI 无线模块的设备树选择和 Zephyr 驱动 API 放在产品 Adapter 中。Adapter 的 `send()` 把 Core 帧提交给该设备；`get_status()` 反映驱动真实 Up/Down/运行期 MTU；`get_metrics()` 生成介质无关 Cost。一个对端可有多个 Link（如 UART + Wi-Fi），但保持一个 `peer_node_id`。静态/动态 MTU 取较小值；窄介质可在注册前设置 Link 本地接收 Wire Profile 上限。
 
-经典 CAN 小 MTU 的分段/重组 Carrier 并不由当前 UCN Core 自动提供；若选 CAN，先实现并单测自己的 Adapter 载体层，再让它向 UCN 交付完整帧。
+经典 CAN 小 MTU 的分段/重组已由 SDK 无关的 `ucn_can_source_t` 提供 C1/C2 Carrier 与固定重组状态机；产品仍必须实现 Zephyr CAN 控制器配置、Filter、ISR/Frame Ring、TX Queue、Bus-Off 恢复和 Link 状态，并完成目标板测试。
 
 ## 6. 最小验收
 

@@ -14,12 +14,16 @@ nodes:
     called_by:
       - external.protocol_owner_startup
     calls:
+      - target: external.authoritative_monotonic_clock
+        type: callback
+        reason: 初始化时建立当前时间基准；V5-62 起缺回调失败关闭。
       - target: node_runtime.ucn_node_set_rx_handler
         type: direct
         reason: Transfer 接管 Fragment/ACK，并把其它普通消息转给可选 fallback。
     notes:
       - 不创建动态内存或 RTOS 对象。
       - 同一 Node 只有一个通用 RX Handler；原 Handler 必须作为 fallback 传入。
+      - 配置必须提供与 Node/Port 同时间域的 32 bit 单调毫秒回调。
 
   - id: transfer.ucn_transfer_bind_endpoint
     symbol: ucn_transfer_bind_endpoint
@@ -82,6 +86,9 @@ nodes:
     called_by:
       - external.protocol_owner_or_service_bridge
     calls:
+      - target: external.authoritative_monotonic_clock
+        type: callback
+        reason: 接受发送前重新采样当前时间，禁止复用陈旧缓存建立 Deadline。
       - target: route.ucn_node_send_endpoint
         type: direct
         reason: T32/T64 必须保持单帧且不进入 Fragment 协议。
@@ -101,6 +108,9 @@ nodes:
     called_by:
       - external.unique_protocol_owner_when_core_idle
     calls:
+      - target: external.authoritative_monotonic_clock
+        type: callback
+        reason: 每次 Step 自行采样；公开 API 不再接收 cached now_ms 参数。
       - target: route.ucn_node_send
         type: direct
         reason: 用普通可路由消息 0x22 发送 Fragment；无路由时触发现有受限发现。
@@ -124,6 +134,9 @@ nodes:
     called_by:
       - node_runtime.ucn_node_receive
     calls:
+      - target: external.authoritative_monotonic_clock
+        type: callback
+        reason: 收到 Fragment/ACK 时重新采样，所有 RX/TX Deadline 共用同一时间源。
       - target: route.ucn_node_send
         type: direct
         reason: 回送带累计 next_expected_offset 的 0x23 ACK/NACK。

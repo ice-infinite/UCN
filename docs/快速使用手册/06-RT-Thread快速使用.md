@@ -1,6 +1,8 @@
 # UCN RT-Thread 快速使用
 
-> 适用：RT-Thread BSP 和设备框架。当前仓库没有 RT-Thread 专用 Port；本页以 RT-Thread 的静态线程、互斥量、信号量/消息队列方式描述产品接入，不修改 C99 Core。
+> 适用：RT-Thread BSP 和设备框架。当前仓库已有独立、SDK 无关的 `ucn_port_rtthread` C99 外壳；产品仍需把 Hook 映射到静态线程、互斥量、信号量/事件和真实设备驱动，不修改 C99 Core。
+
+> 当前 API：V5-62 Port API V2 要求所有 `ucn_port_ops_t` 具名填写 `struct_size/api_version`；旧位置初始化与旧对象不兼容。Transfer 还必须配置权威时钟并使用无时间参数的 `ucn_transfer_step()`。迁移见[总览](README.md)。
 
 ## 1. 工程配置
 
@@ -113,7 +115,7 @@ Adapter 将 `rt_device_read()`、UART DMA、CAN 接收或无线模块回调转�
 - `get_metrics()` 输出平滑后的通用 Cost；
 - `close()` 停止该 Adapter，不改变其他 Bearer。
 
-一个对端的 UART、CAN、无线 Link 使用同一个 `peer_node_id`，由 UCN Neighbor 聚合多 Bearer；业务线程不手选物理口。经典 CAN 分段 Carrier、无线配网和生产 AEAD 都是产品 Adapter/安全模块的工作，当前 Core 不会自动生成。
+一个对端的 UART、CAN、无线 Link 使用同一个 `peer_node_id`，由 UCN Neighbor 聚合多 Bearer；业务线程不手选物理口。经典 CAN C1/C2 Carrier 与固定重组可复用 `ucn_can_source_t`，但 RT-Thread CAN 控制器/中断/Frame Ring/TX Queue/Bus-Off 恢复仍由产品 Adapter 实现；无线配网和生产 AEAD 同样属于产品边界。
 
 ## 6. 上板验收
 

@@ -1,5 +1,7 @@
 # UCN V5-37 标准 Port 外壳实施方案
 
+> 当前迁移说明：V5-46 已把集中式外壳拆为独立平台 Port；V5-62 又将底层 `ucn_port_ops_t` 破坏性升级为带大小/版本的 Port API V2。本文保留 V5-37 的 Owner 调度历史，当前初始化以 [V5-62 修复报告](UCN_V5_62_Port_API_V2与审计缺陷修复报告.md) 为准。
+
 > 文档编号：DOC-042。
 > 状态：历史阶段记录；集中式设计已由 DOC-044 / V5-46 分目录 Port 架构替代。
 > 分支：`codex/v5-adaptive-wire`；不接入任何 MCU SDK、RTOS SDK 或物理 Bearer 驱动。

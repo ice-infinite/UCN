@@ -219,6 +219,20 @@ V5-46 起，产品不能再包含集中式 Port 头。先按运行环境选择�
 
 V5-48 将 `from_isr` 继续传入 Queue：产品若允许 ISR 直接提交完整帧，必须为 `ucn_port_ops_t` 同时提供任务临界区和可返回/恢复 mask 的 ISR token 临界区。ISR 回调缺这一对时会得到 `UCN_ERR_CONFIG`；推荐路径仍是 ISR 写 BSP ring，并用 ISR-safe Notification 唤醒 Protocol Task，由 Task 普通入队。无论哪条路径，通知成功后 Owner 都应立即运行，不等待 Heartbeat。
 
+V5-62 已在预发布阶段将 Port 破坏性升级为 API V2。每个 `ucn_port_ops_t` 都必须使用 C99 具名初始化，并首先填写 `.struct_size=(uint16_t)sizeof(ucn_port_ops_t)` 与 `.api_version=UCN_PORT_OPS_API_VERSION`；Owner、Runtime 和 Source 会在读取回调前失败关闭。旧六/八字段位置初始化和旧编译对象不再兼容，升级后必须清空构建目录并全量重编译 Core、Port、Adapter 和产品固件。
+
+```c
+static const ucn_port_ops_t g_port_ops = {
+    .struct_size = (uint16_t)sizeof(ucn_port_ops_t),
+    .api_version = UCN_PORT_OPS_API_VERSION,
+    .now_ms = product_now_ms,
+    .enter_critical = product_enter_task,
+    .exit_critical = product_exit_task,
+    .enter_critical_from_isr = product_enter_isr,
+    .exit_critical_from_isr = product_exit_isr,
+};
+```
+
 #### 5.3.1 新产品：统一多 Source Event Runtime
 
 V5-58 起，新产品优先直接包含 `ucn/ports/ucn_event_runtime.h`。一个 UART、一个 CAN 控制器、一个 USB Endpoint 或一个 Wi-Fi Adapter 各占一个固定 Source ID；Source 之间不共享 Driver Ring。RTOS 只实现下面三个 Scheduler Hook，Carrier/Bearer 不复制 RTOS 状态机：
@@ -518,6 +532,12 @@ T32/T64 永不分片；T128～T8K 由 Transfer 根据实际 MTU 使用一个或�
 ```c
 static ucn_transfer_t g_transfer;
 
+static uint32_t transfer_now_ms(void *ctx)
+{
+    (void)ctx;
+    return product_monotonic_ms();
+}
+
 static void transfer_rx(void *ctx,
                         ucn_node_id_t source,
                         ucn_session_id_t session,
@@ -535,6 +555,8 @@ static void transfer_rx(void *ctx,
 
 ucn_transfer_config_t transfer_cfg = {0};
 transfer_cfg.node = &g_node;
+transfer_cfg.now_ms = transfer_now_ms;
+transfer_cfg.now_context = NULL;
 ucn_transfer_init(&g_transfer, &transfer_cfg);
 ucn_transfer_bind_endpoint(&g_transfer, 0x80U,
                            UCN_TRANSFER_CLASS_T2K, false,
@@ -553,7 +575,7 @@ ucn_transfer_send(&g_transfer, remote_node_id, 0x80U,
                   transfer_send_complete, NULL);
 ```
 
-必须在唯一 Protocol Owner 上下文调用 Send/Step。为保证 Core Q0、普通 Q1 和维护优先，先运行所选 Port/Owner Step，只有其返回 `UCN_ERR_NOT_FOUND` 时再调用一次 `ucn_transfer_step(&g_transfer, now_ms)`。每次最多推进一个新片或重传片；连续空闲 Step 可填满显式固定窗口。
+必须在唯一 Protocol Owner 上下文调用 Send/Step。为保证 Core Q0、普通 Q1 和维护优先，先运行所选 Port/Owner Step，只有其返回 `UCN_ERR_NOT_FOUND` 时再调用一次 `ucn_transfer_step(&g_transfer)`。Transfer 的 Send、RX 与 Step 都从 `transfer_cfg.now_ms` 采样同一权威单调时钟；不得再向 Step 传缓存时间。每次最多推进一个新片或重传片；连续空闲 Step 可填满显式固定窗口。
 
 注意四条规则：发送端 Buffer 在 Completion 前归应用所有但必须保持只读；分片接收 Buffer 在 `release_received()` 前占用固定 RX Slot；`ucn_transfer_init()` 会占用 Node 通用 RX Handler，原有通用 Handler 要放入 `fallback_rx_handler/context`；未显式配置 Peer 窗口时有效窗口始终为 1，不能按本机能力猜测远端。窗口使用累计 ACK 和有界 Go-Back-N，不缓存乱序片、不改变 v5 Wire。完整配置、完成状态、安全/MTU 边界见[消息大小等级与有界分片重组](UCN_消息大小等级与有界分片重组建议.md)。
 

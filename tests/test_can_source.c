@@ -80,13 +80,21 @@ static void can_exit_isr(void *context, ucn_port_critical_token_t token)
 }
 
 static const ucn_port_ops_t CAN_PORT_OPS = {
-    can_now_ms, NULL, NULL, NULL,
-    can_enter_task, can_exit_task, can_enter_isr, can_exit_isr
+    .struct_size = (uint16_t)sizeof(ucn_port_ops_t),
+    .api_version = UCN_PORT_OPS_API_VERSION,
+    .now_ms = can_now_ms,
+    .enter_critical = can_enter_task,
+    .exit_critical = can_exit_task,
+    .enter_critical_from_isr = can_enter_isr,
+    .exit_critical_from_isr = can_exit_isr
 };
 
 static const ucn_port_ops_t CAN_PORT_OPS_NO_ISR = {
-    can_now_ms, NULL, NULL, NULL,
-    can_enter_task, can_exit_task, NULL, NULL
+    .struct_size = (uint16_t)sizeof(ucn_port_ops_t),
+    .api_version = UCN_PORT_OPS_API_VERSION,
+    .now_ms = can_now_ms,
+    .enter_critical = can_enter_task,
+    .exit_critical = can_exit_task
 };
 
 static ucn_result_t can_link_send(ucn_link_t *link,
@@ -571,6 +579,53 @@ static int test_can_classic_reassembly_and_faults(void)
         queue_stats = ucn_adapter_rx_get_stats(&fixture.queue);
         TEST_ASSERT(queue_stats != NULL);
         TEST_ASSERT(queue_stats->rejected_by_core >= 1U);
+    }
+    /* Two minimum W0 Carriers fit exactly in the default eight-frame Driver
+     * Ring.  They intentionally arrive before one Runtime drain.  Completion
+     * of the first Carrier must stop the round so the following same-ID START
+     * cannot clear the completed slot before submission. */
+    if (UCN_CAN_SOURCE_DEFAULT_RING_FRAMES >= 8U) {
+        uint8_t first_encoded[UCN_MAX_FRAME_BYTES];
+        uint8_t second_encoded[UCN_MAX_FRAME_BYTES];
+        size_t first_length = 0U;
+        size_t second_length = 0U;
+        size_t first_segments;
+        size_t second_segments;
+        uint32_t restarts_before = ucn_can_source_get_stats(
+            &fixture.source_a)->carrier_restarts;
+
+        TEST_ASSERT(can_make_encoded(CAN_REMOTE_A, 60U, 1U, 0xA6U,
+                                     first_encoded, &first_length) == UCN_OK);
+        TEST_ASSERT(can_make_encoded(CAN_REMOTE_A, 61U, 1U, 0xB7U,
+                                     second_encoded, &second_length) == UCN_OK);
+        first_segments = ucn_can_classic_carrier_segment_count(first_length);
+        second_segments = ucn_can_classic_carrier_segment_count(second_length);
+        TEST_ASSERT(first_segments + second_segments == 8U);
+        for (index = 0U; index < first_segments + second_segments; ++index) {
+            const bool second = index >= first_segments;
+            const size_t segment_index = second ? index - first_segments : index;
+            const uint8_t *carrier = second ? second_encoded : first_encoded;
+            const size_t carrier_length = second ? second_length : first_length;
+            ucn_can_frame_t physical;
+            size_t length = 0U;
+
+            (void)memset(&physical, 0, sizeof(physical));
+            physical.identifier = 0x100U;
+            TEST_ASSERT(ucn_can_classic_carrier_encode_segment(
+                            carrier, carrier_length, second ? 31U : 30U,
+                            (uint16_t)segment_index, physical.data, &length) ==
+                        UCN_OK);
+            physical.length = (uint8_t)length;
+            TEST_ASSERT(ucn_can_source_write(&fixture.source_a, &physical) ==
+                        UCN_OK);
+        }
+        TEST_ASSERT(can_drain(&fixture, 16U) == 0);
+        TEST_ASSERT(fixture.received.count == 3U);
+        TEST_ASSERT(fixture.received.last_value == 0xB7U);
+        TEST_ASSERT(ucn_can_source_get_stats(&fixture.source_a)
+                        ->carrier_restarts == restarts_before);
+        TEST_ASSERT(ucn_can_source_get_stats(&fixture.source_a)
+                        ->frames_submitted >= 3U);
     }
     return 0;
 }

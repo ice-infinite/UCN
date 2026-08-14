@@ -1,5 +1,7 @@
 # UCN V5-59 标准 Stream Carrier 与 UART/USB Source 方案
 
+> 当前迁移说明：Stream Ring/COBS/Wire 均不变；V5-62 已把其依赖的 `ucn_port_ops_t` 升级为 API V2，产品必须增加 `struct_size/api_version` 并全量重编译。详见 [V5-62 修复报告](UCN_V5_62_Port_API_V2与审计缺陷修复报告.md)。
+
 > 日期：2026-08-14
 > 状态：公共实现与 Host 软件门禁已完成；真实驱动/RTOS/实机继续 V5-61。
 > 前置：V5-58 公共 `ucn_event_runtime_t` 已完成 Host 软件门禁。
