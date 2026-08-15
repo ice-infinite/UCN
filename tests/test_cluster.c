@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "cluster_test_fixture.h"
 #include "ucn/ucn_cluster.h"
 
 #define CLUSTER_TEST_NODES ((size_t)4U)
@@ -162,6 +163,135 @@ static int cluster_test_deliver(cluster_test_network_t *network)
     return 0;
 }
 
+/* CLV2-M00-07: fault-injection knobs for the virtual network.  All of
+ * these are test-only; the production cluster code is never touched. */
+typedef struct cluster_test_fault {
+    /* drop_one_in == 0 disables; otherwise every Nth frame is dropped. */
+    uint32_t drop_one_in;
+    /* per-pair reachability: partition[a][b] == false blocks a->b. */
+    bool partition[CLUSTER_TEST_NODES][CLUSTER_TEST_NODES];
+    /* deliver at most this many frames per tick (0 = unlimited). */
+    size_t deliver_budget;
+    /* restart a node at a given tick: re-init its cluster to DETACHED
+     * with a fresh nonce counter, simulating a power cycle. */
+    uint32_t restart_node_id;
+    uint32_t restart_at_ms;
+    bool restart_done;
+} cluster_test_fault_t;
+
+static int cluster_test_sync_neighbors_faulted(
+    cluster_test_network_t *network,
+    const cluster_test_fault_t *fault)
+{
+    size_t node_index;
+
+    for (node_index = 0U; node_index < CLUSTER_TEST_NODES; ++node_index) {
+        cluster_test_node_t *node = &network->nodes[node_index];
+        ucn_neighbor_summary_t summaries[CLUSTER_TEST_NODES - 1U];
+        size_t peer_index;
+        size_t count = 0U;
+
+        if (!node->alive) {
+            continue;
+        }
+        (void)memset(summaries, 0, sizeof(summaries));
+        for (peer_index = 0U; peer_index < CLUSTER_TEST_NODES; ++peer_index) {
+            if (peer_index == node_index ||
+                !network->nodes[peer_index].alive) {
+                continue;
+            }
+            if (fault != NULL &&
+                !fault->partition[node_index][peer_index]) {
+                continue;
+            }
+            summaries[count].state = UCN_NEIGHBOR_ADMITTED;
+            summaries[count].peer_node_id = network->nodes[peer_index].node_id;
+            summaries[count].bearer_count = 1U;
+            summaries[count].primary_bearer_index = 0U;
+            summaries[count].last_seen_ms = network->now_ms;
+            ++count;
+        }
+        TEST_ASSERT(ucn_cluster_sync_neighbors(&node->cluster, summaries, count) ==
+                    UCN_OK);
+    }
+    return 0;
+}
+
+static int cluster_test_deliver_faulted(cluster_test_network_t *network,
+                                        const cluster_test_fault_t *fault)
+{
+    size_t index = 0U;
+    size_t delivered = 0U;
+    uint32_t seen = 0U;
+
+    while (index < network->queue_count) {
+        cluster_test_packet_t packet = network->queue[index++];
+        cluster_test_node_t *target =
+            cluster_test_find_node(network, packet.destination);
+        ucn_result_t result;
+
+        if (target == NULL || !target->alive) {
+            continue;
+        }
+        /* Deterministic drop: every Nth frame in the queue is dropped. */
+        seen++;
+        if (fault != NULL && fault->drop_one_in != 0U &&
+            (seen % fault->drop_one_in) == 0U) {
+            continue;
+        }
+        if (fault != NULL && fault->deliver_budget != 0U &&
+            delivered >= fault->deliver_budget) {
+            /* Preserve the un-delivered tail (including the current
+             * packet, already dequeued by index++) for the next tick. */
+            size_t remain = network->queue_count - (index - 1U);
+
+            (void)memmove(&network->queue[0], &network->queue[index - 1U],
+                          remain * sizeof(network->queue[0]));
+            network->queue_count = remain;
+            return 0;
+        }
+        delivered++;
+        result = ucn_cluster_receive(&target->cluster, packet.source, true,
+                                     packet.payload, sizeof(packet.payload));
+        TEST_ASSERT(result == UCN_OK || result == UCN_ERR_ACCESS ||
+                    result == UCN_ERR_NO_SPACE || result == UCN_ERR_REPLAY ||
+                    result == UCN_ERR_NOT_FOUND);
+    }
+    network->queue_count = 0U;
+    return 0;
+}
+
+static int cluster_test_tick_faulted(cluster_test_network_t *network,
+                                     uint32_t now_ms,
+                                     cluster_test_fault_t *fault)
+{
+    size_t index;
+
+    network->now_ms = now_ms;
+    if (fault != NULL && !fault->restart_done &&
+        fault->restart_at_ms != 0U && now_ms >= fault->restart_at_ms) {
+        for (index = 0U; index < CLUSTER_TEST_NODES; ++index) {
+            if (network->nodes[index].node_id == fault->restart_node_id) {
+                ucn_cluster_config_t config = network->nodes[index].cluster.config;
+
+                network->nodes[index].alive = true;
+                TEST_ASSERT(ucn_cluster_init(&network->nodes[index].cluster,
+                                             &config) == UCN_OK);
+                fault->restart_done = true;
+                break;
+            }
+        }
+    }
+    TEST_ASSERT(cluster_test_sync_neighbors_faulted(network, fault) == 0);
+    for (index = 0U; index < CLUSTER_TEST_NODES; ++index) {
+        if (network->nodes[index].alive) {
+            TEST_ASSERT(ucn_cluster_step(&network->nodes[index].cluster) == UCN_OK);
+        }
+    }
+    TEST_ASSERT(cluster_test_deliver_faulted(network, fault) == 0);
+    return 0;
+}
+
 static int cluster_test_tick(cluster_test_network_t *network, uint32_t now_ms)
 {
     size_t index;
@@ -175,6 +305,78 @@ static int cluster_test_tick(cluster_test_network_t *network, uint32_t now_ms)
     }
     TEST_ASSERT(cluster_test_deliver(network) == 0);
     return 0;
+}
+
+/* CLV2-M00-03 (Golden Transition Trace): test-only observation layer.
+ * Snapshots the public cluster state of every node before/after a tick and
+ * records deterministic transition lines.  The production code is NOT
+ * touched; this only proves that a later M01 refactor preserves behaviour
+ * by byte-comparing traces under the same seed. */
+typedef struct cluster_trace_snapshot {
+    uint32_t now_ms;
+    ucn_node_id_t node_id;
+    ucn_cluster_role_t role;
+    uint32_t cluster_id;
+    uint32_t term;
+    uint32_t backup_generation;
+    uint32_t membership_sequence;
+    uint8_t backup_ready;
+    uint8_t backup_syncing;
+    uint8_t backup_takeover_active;
+    uint8_t recovery_eligible;
+} cluster_trace_snapshot_t;
+
+static void cluster_trace_capture(cluster_test_network_t *network,
+                                  cluster_trace_snapshot_t *out)
+{
+    size_t index;
+
+    for (index = 0U; index < CLUSTER_TEST_NODES; ++index) {
+        cluster_trace_snapshot_t *entry = &out[index];
+        const ucn_cluster_t *c = &network->nodes[index].cluster;
+
+        entry->now_ms = network->now_ms;
+        entry->node_id = network->nodes[index].node_id;
+        entry->role = c->role;
+        entry->cluster_id = c->cluster_id;
+        entry->term = c->term;
+        entry->backup_generation = c->backup_generation;
+        entry->membership_sequence = c->membership_sequence;
+        entry->backup_ready = c->backup_ready ? 1U : 0U;
+        entry->backup_syncing = c->backup_syncing ? 1U : 0U;
+        entry->backup_takeover_active = c->backup_takeover_active ? 1U : 0U;
+        entry->recovery_eligible = c->recovery_eligible ? 1U : 0U;
+    }
+}
+
+static bool cluster_trace_snapshot_equal(const cluster_trace_snapshot_t *left,
+                                         const cluster_trace_snapshot_t *right)
+{
+    return left->role == right->role &&
+           left->cluster_id == right->cluster_id &&
+           left->term == right->term &&
+           left->backup_generation == right->backup_generation &&
+           left->membership_sequence == right->membership_sequence &&
+           left->backup_ready == right->backup_ready &&
+           left->backup_syncing == right->backup_syncing &&
+           left->backup_takeover_active == right->backup_takeover_active &&
+           left->recovery_eligible == right->recovery_eligible;
+}
+
+static void cluster_trace_write_line(FILE *stream,
+                                     const cluster_trace_snapshot_t *entry,
+                                     const char *event)
+{
+    (void)fprintf(stream,
+        "t=%lu node=%lu %s role=%d cid=%lu term=%lu gen=%lu seq=%lu "
+        "ready=%u syncing=%u takeover=%u recovery=%u\n",
+        (unsigned long)entry->now_ms, (unsigned long)entry->node_id, event,
+        (int)entry->role, (unsigned long)entry->cluster_id,
+        (unsigned long)entry->term, (unsigned long)entry->backup_generation,
+        (unsigned long)entry->membership_sequence,
+        (unsigned)entry->backup_ready, (unsigned)entry->backup_syncing,
+        (unsigned)entry->backup_takeover_active,
+        (unsigned)entry->recovery_eligible);
 }
 
 static int cluster_test_network_init(
@@ -560,12 +762,9 @@ static int cluster_test_backup_epoch_fencing(void)
     TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
     head = &network.nodes[0];
     backup = &network.nodes[1];
-    backup->cluster.role = UCN_CLUSTER_ROLE_BACKUP;
-    backup->cluster.cluster_id = 1U;
-    backup->cluster.term = 1U;
-    backup->cluster.head_node_id = head->node_id;
-    backup->cluster.backup_primary_node_id = head->node_id;
-    backup->cluster.backup_generation = 2U;
+    cluster_fixture_set_role(&backup->cluster, UCN_CLUSTER_ROLE_BACKUP);
+    cluster_fixture_set_epoch(&backup->cluster, 1U, 1U, head->node_id);
+    cluster_fixture_set_backup(&backup->cluster, head->node_id, 2U, false, false);
     backup->cluster.membership_sequence = 5U;
     network.now_ms = 0U;
 
@@ -783,6 +982,241 @@ static int cluster_test_join_txid_and_stepdown_nonce(void)
     TEST_ASSERT(ucn_cluster_receive(&node->cluster, network.nodes[0].node_id,
                                     true, encoded, sizeof(encoded)) == UCN_ERR_ACCESS);
     TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_MEMBER);
+    return 0;
+}
+
+/* CLV2-M00-03: deterministic golden trace over the canonical lifecycle
+ * (election -> join -> backup -> failover takeover).  Compares byte-wise
+ * against tests/golden/cluster_golden_trace.txt; the file is generated on
+ * first run and must be committed.  Later refactors (M01) must keep this
+ * trace identical. */
+static int cluster_test_golden_trace(void)
+{
+    cluster_test_network_t network;
+    cluster_trace_snapshot_t before[CLUSTER_TEST_NODES];
+    cluster_trace_snapshot_t after[CLUSTER_TEST_NODES];
+    char golden_path[512];
+    char trace_path[512];
+    FILE *golden = NULL;
+    FILE *trace = NULL;
+    uint32_t now_ms;
+    size_t index;
+    bool first_run = false;
+    int line = 0;
+    char expected[512];
+    char actual[512];
+
+#ifdef UCN_CLUSTER_GOLDEN_DIR
+    (void)snprintf(golden_path, sizeof(golden_path),
+                   UCN_CLUSTER_GOLDEN_DIR "/cluster_golden_trace.txt");
+    (void)snprintf(trace_path, sizeof(trace_path),
+                   UCN_CLUSTER_GOLDEN_DIR "/cluster_golden_trace_actual.txt");
+#else
+    (void)snprintf(golden_path, sizeof(golden_path),
+                   "/tmp/cluster_golden_trace.txt");
+    (void)snprintf(trace_path, sizeof(trace_path),
+                   "/tmp/cluster_golden_trace_actual.txt");
+#endif
+    golden = fopen(golden_path, "r");
+    if (golden == NULL) {
+        first_run = true;
+        golden = fopen(golden_path, "w");
+    }
+    TEST_ASSERT(golden != NULL);
+    trace = fopen(trace_path, "w");
+    TEST_ASSERT(trace != NULL);
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    for (now_ms = 0U; now_ms <= 140U; ++now_ms) {
+        cluster_trace_capture(&network, before);
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+        cluster_trace_capture(&network, after);
+        for (index = 0U; index < CLUSTER_TEST_NODES; ++index) {
+            if (!cluster_trace_snapshot_equal(&before[index], &after[index])) {
+                cluster_trace_write_line(trace, &after[index], "CHG");
+            }
+        }
+    }
+    /* Primary dies: failover takeover completes on node 1. */
+    network.nodes[0].alive = false;
+    for (now_ms = 141U; now_ms <= 300U; ++now_ms) {
+        cluster_trace_capture(&network, before);
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+        cluster_trace_capture(&network, after);
+        for (index = 0U; index < CLUSTER_TEST_NODES; ++index) {
+            if (!cluster_trace_snapshot_equal(&before[index], &after[index])) {
+                cluster_trace_write_line(trace, &after[index], "CHG");
+            }
+        }
+    }
+    (void)fclose(trace);
+
+    if (first_run) {
+        (void)fclose(golden);
+        (void)rename(trace_path, golden_path);
+        fprintf(stderr,
+                "CLV2-M00-03: golden trace generated at %s; commit it.\n",
+                golden_path);
+        return 0;
+    }
+    /* Byte-wise comparison of the actual trace against the golden file. */
+    trace = fopen(trace_path, "r");
+    TEST_ASSERT(trace != NULL);
+    while (fgets(actual, sizeof(actual), trace) != NULL) {
+        if (fgets(expected, sizeof(expected), golden) == NULL) {
+            (void)fclose(trace);
+            (void)fclose(golden);
+            fprintf(stderr, "CLV2-M00-03: trace longer than golden at line %d\n",
+                    line);
+            return -1;
+        }
+        line++;
+        if (strcmp(actual, expected) != 0) {
+            (void)fclose(trace);
+            (void)fclose(golden);
+            fprintf(stderr,
+                    "CLV2-M00-03: trace mismatch at line %d\n  actual:   %s"
+                    "  expected: %s", line, actual, expected);
+            return -1;
+        }
+    }
+    if (fgets(expected, sizeof(expected), golden) != NULL) {
+        (void)fclose(trace);
+        (void)fclose(golden);
+        fprintf(stderr, "CLV2-M00-03: golden longer than trace at line %d\n",
+                line);
+        return -1;
+    }
+    (void)fclose(trace);
+    (void)fclose(golden);
+    return 0;
+}
+
+/* CLV2-M00-07: majority-side Backup takeover under a partition.
+ * Partition {H} | {B,M1,M2}: the Backup side holds 3/4 and must
+ * complete a majority takeover; this records the current behaviour
+ * (M08 will additionally fence the isolated old Head). */
+static int cluster_test_fault_partition_takeover(void)
+{
+    cluster_test_network_t network;
+    cluster_test_fault_t fault;
+    cluster_test_node_t *backup;
+    uint32_t now_ms;
+    size_t i;
+    size_t j;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    for (now_ms = 0U; now_ms <= 140U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    TEST_ASSERT(network.nodes[0].cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    backup = NULL;
+    for (i = 1U; i < CLUSTER_TEST_NODES; ++i) {
+        if (network.nodes[i].cluster.role == UCN_CLUSTER_ROLE_BACKUP) {
+            backup = &network.nodes[i];
+            break;
+        }
+    }
+    TEST_ASSERT(backup != NULL);
+
+    (void)memset(&fault, 0, sizeof(fault));
+    for (i = 0U; i < CLUSTER_TEST_NODES; ++i) {
+        for (j = 0U; j < CLUSTER_TEST_NODES; ++j) {
+            fault.partition[i][j] = true;
+        }
+    }
+    /* Isolate node 0 (Head) from everyone else. */
+    for (j = 1U; j < CLUSTER_TEST_NODES; ++j) {
+        fault.partition[0][j] = false;
+        fault.partition[j][0] = false;
+    }
+
+    for (now_ms = 141U; now_ms <= 400U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick_faulted(&network, now_ms, &fault) == 0);
+    }
+    /* The majority side (Backup + two members) completes takeover. */
+    TEST_ASSERT(backup->cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    TEST_ASSERT(backup->cluster.cluster_id == UINT32_C(1));
+    TEST_ASSERT(backup->cluster.term >= 2U);
+    return 0;
+}
+
+/* CLV2-M00-07: a power-cycle restart resets the node to DETACHED with a
+ * fresh term (current behaviour, no persistence yet; M04 changes this). */
+static int cluster_test_fault_restart_no_old_term(void)
+{
+    cluster_test_network_t network;
+    cluster_test_fault_t fault;
+    uint32_t now_ms;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    for (now_ms = 0U; now_ms <= 80U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    TEST_ASSERT(network.nodes[0].cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    TEST_ASSERT(network.nodes[0].cluster.term == 1U);
+
+    (void)memset(&fault, 0, sizeof(fault));
+    fault.restart_node_id = network.nodes[0].node_id;
+    fault.restart_at_ms = 81U;
+    for (now_ms = 81U; now_ms <= 90U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick_faulted(&network, now_ms, &fault) == 0);
+    }
+    TEST_ASSERT(fault.restart_done == true);
+    TEST_ASSERT(network.nodes[0].cluster.role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(network.nodes[0].cluster.term == 0U);
+    TEST_ASSERT(network.nodes[0].cluster.cluster_id == 0U);
+    return 0;
+}
+
+/* CLV2-M00-07: bounded delivery (deliver_budget) simulates a slow/lossy
+ * link; the snapshot eventually completes because the Head retransmits.
+ * Then a deterministic drop_one_in on the live DELTA phase triggers a
+ * gap -> RESYNC_REQ -> full snapshot that eventually converges again. */
+static int cluster_test_fault_drop_eventually_converges(void)
+{
+    cluster_test_network_t network;
+    cluster_test_fault_t fault;
+    uint32_t now_ms;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    (void)memset(&fault, 0, sizeof(fault));
+    for (now_ms = 0U; now_ms <= 140U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    {
+        size_t i;
+        bool found_backup_ready = false;
+
+        for (i = 1U; i < CLUSTER_TEST_NODES; ++i) {
+            if (network.nodes[i].cluster.role == UCN_CLUSTER_ROLE_BACKUP &&
+                network.nodes[i].cluster.backup_ready) {
+                found_backup_ready = true;
+                break;
+            }
+        }
+        TEST_ASSERT(found_backup_ready);
+    }
+    /* Drop 1 in 7 frames: forces DELTA gaps -> RESYNC_REQ -> full
+     * snapshot rounds; the bounded retransmit must keep the system
+     * eventually consistent (backup converges back to READY). */
+    fault.drop_one_in = 7U;
+    for (now_ms = 141U; now_ms <= 800U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick_faulted(&network, now_ms, &fault) == 0);
+    }
+    {
+        size_t i;
+        bool found_backup_ready = false;
+
+        for (i = 1U; i < CLUSTER_TEST_NODES; ++i) {
+            if (network.nodes[i].cluster.role == UCN_CLUSTER_ROLE_BACKUP &&
+                network.nodes[i].cluster.backup_ready) {
+                found_backup_ready = true;
+                break;
+            }
+        }
+        TEST_ASSERT(found_backup_ready);
+    }
     return 0;
 }
 
@@ -1735,10 +2169,14 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_backup_ready_fencing() == 0);
     TEST_ASSERT(cluster_test_primary_heartbeat_fencing() == 0);
     TEST_ASSERT(cluster_test_member_nonce_32bit() == 0);
+    TEST_ASSERT(cluster_test_golden_trace() == 0);
     TEST_ASSERT(cluster_test_backup_epoch_fencing() == 0);
     TEST_ASSERT(cluster_test_delta_gap_resync() == 0);
     TEST_ASSERT(cluster_test_backup_reject_switches_candidate() == 0);
     TEST_ASSERT(cluster_test_join_txid_and_stepdown_nonce() == 0);
+    TEST_ASSERT(cluster_test_fault_partition_takeover() == 0);
+    TEST_ASSERT(cluster_test_fault_restart_no_old_term() == 0);
+    TEST_ASSERT(cluster_test_fault_drop_eventually_converges() == 0);
     TEST_ASSERT(cluster_test_takeover_guard() == 0);
     TEST_ASSERT(cluster_test_takeover_self_vote() == 0);
     TEST_ASSERT(cluster_test_takeover_vote_identity() == 0);

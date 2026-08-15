@@ -228,6 +228,7 @@ if(UCN_BUILD_TESTS)
         tests/test_transfer.c
         tests/test_cluster.c
         tests/test_cluster_federation.c
+        tests/cluster_test_fixture.c
     )
 
     if(NOT UCN_PROFILE_UPPER STREQUAL "NANO")
@@ -270,6 +271,10 @@ if(UCN_BUILD_TESTS)
             tests/test_service_bridge.c
         )
     endif()
+
+    target_compile_definitions(ucn_tests PRIVATE
+        UCN_CLUSTER_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden"
+    )
 
     target_link_libraries(ucn_tests PRIVATE
         ucn_core
