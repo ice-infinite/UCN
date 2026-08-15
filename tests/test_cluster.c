@@ -174,10 +174,13 @@ static int cluster_test_shadow_audit(cluster_test_network_t *network)
  * audit() and asserts observed SUBSET-OF CLUSTER_TRANSITION_SPEC at the
  * end of test_cluster() - the missing-direction guard (SPEC must not
  * under-cover reality). */
-/* Forward declaration: the SPEC table and its membership test are
- * defined near CLUSTER_TRANSITION_SPEC later in this file. */
-static bool cluster_transition_pair_in_spec(ucn_cluster_phase_t old_phase,
-                                            ucn_cluster_phase_t new_phase);
+/* Forward declarations: the DIRECT / OBSERVED tables and their
+ * membership tests are defined near CLUSTER_TRANSITION_DIRECT later in
+ * this file. */
+static bool cluster_transition_pair_in_direct(ucn_cluster_phase_t old_phase,
+                                              ucn_cluster_phase_t new_phase);
+static bool cluster_transition_pair_in_observed(ucn_cluster_phase_t old_phase,
+                                                ucn_cluster_phase_t new_phase);
 
 #define CLUSTER_TEST_OBSERVED_MAX ((size_t)128U)
 static ucn_cluster_phase_t cluster_observed_old[CLUSTER_TEST_OBSERVED_MAX];
@@ -216,9 +219,10 @@ static void cluster_test_observed_dump(void)
     }
 }
 
-/* T-A final gate: every observed pair must be in the FSM-real SPEC.  A
- * violation is a REAL pair the SPEC misses - it must be restored, never
- * hidden. */
+/* T-A final gate (CLV2-01-04a.1 Item 1): every observed pair must be in
+ * OBSERVED_ALLOWED (DIRECT union the compound OBSERVED_EXTRA pairs).  A
+ * violation is a REAL pair the observed set misses - it must be restored,
+ * never hidden. */
 static int cluster_test_observed_within_spec(void)
 {
     size_t index;
@@ -228,11 +232,11 @@ static int cluster_test_observed_within_spec(void)
     /* Dump the collected observations first (deliverable evidence). */
     cluster_test_observed_dump();
     for (index = 0U; index < observed_count; ++index) {
-        if (!cluster_transition_pair_in_spec(cluster_observed_old[index],
-                                             cluster_observed_new[index])) {
+        if (!cluster_transition_pair_in_observed(cluster_observed_old[index],
+                                                 cluster_observed_new[index])) {
             (void)fprintf(stderr,
                           "OBSERVED-PAIRS: VIOLATION %d -> %d observed "
-                          "but NOT in SPEC - restore this pair\n",
+                          "but NOT in OBSERVED_ALLOWED - restore this pair\n",
                           (int)cluster_observed_old[index],
                           (int)cluster_observed_new[index]);
             violations++;
@@ -3206,17 +3210,20 @@ static int cluster_test_backup_challenge(void)
     return 0;
 }
 
-/* CLV2-01-04a: the authoritative list of old->new phase pairs the Current
- * FSM actually performs (derived from the code paths in ucn_cluster.c: the
- * BEST-EFFORT reason table + lifecycle/fault transitions).  The production
- * legality matrix must accept EXACTLY this set: this is the test-side spec,
- * duplicated on purpose so a wrong production matrix cannot silently 'fix'
- * the expectation.  BACKUP_TAKEOVER stays legal even while takeover_active
- * && backup_syncing holds (CLV2-M01.0.2). */
+/* CLV2-01-04a.1 (Item 1): the DIRECT edge list - every pair a SINGLE
+ * production transition site can perform as one cluster_transition()
+ * call.  The production CLUSTER_TRANSITION_DIRECT_ALLOWED must accept
+ * EXACTLY this set (the 17x17 sweep below cross-checks both directions);
+ * the per-edge site citations live on the production table.  The four
+ * tick-granularity COMPOUND pairs are deliberately NOT here - they are
+ * in CLUSTER_TRANSITION_OBSERVED_EXTRA below and must never be passed to
+ * cluster_transition() (wiring realizes them via their DIRECT
+ * constituents in sequence).  BACKUP_TAKEOVER stays legal even while
+ * takeover_active && backup_syncing holds (CLV2-M01.0.2). */
 static const struct cluster_transition_spec_pair {
     ucn_cluster_phase_t old_phase;
     ucn_cluster_phase_t new_phase;
-} CLUSTER_TRANSITION_SPEC[] = {
+} CLUSTER_TRANSITION_DIRECT[] = {
     /* DETACHED_OBSERVE */
     { UCN_CLUSTER_PHASE_DETACHED_OBSERVE, UCN_CLUSTER_PHASE_ELECTION },
     { UCN_CLUSTER_PHASE_DETACHED_OBSERVE, UCN_CLUSTER_PHASE_JOIN_PENDING },
@@ -3243,10 +3250,9 @@ static const struct cluster_transition_spec_pair {
     { UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE, UCN_CLUSTER_PHASE_RECOVERY_OBSERVE },
     { UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE, UCN_CLUSTER_PHASE_JOIN_PENDING },
     { UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE, UCN_CLUSTER_PHASE_BACKUP_SYNCING },
-    /* HEAD_NO_BACKUP */
+    /* HEAD_NO_BACKUP (NO_BACKUP->SYNCING / ->STABLE have no single site
+     * and are never observed - dropped entirely) */
     { UCN_CLUSTER_PHASE_HEAD_NO_BACKUP, UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING },
-    { UCN_CLUSTER_PHASE_HEAD_NO_BACKUP, UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING },
-    { UCN_CLUSTER_PHASE_HEAD_NO_BACKUP, UCN_CLUSTER_PHASE_HEAD_STABLE },
     { UCN_CLUSTER_PHASE_HEAD_NO_BACKUP, UCN_CLUSTER_PHASE_STEPPING_DOWN },
     /* HEAD_BACKUP_ASSIGNING */
     { UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING, UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING },
@@ -3258,9 +3264,8 @@ static const struct cluster_transition_spec_pair {
     { UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING, UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING },
     { UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING, UCN_CLUSTER_PHASE_HEAD_NO_BACKUP },
     { UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING, UCN_CLUSTER_PHASE_STEPPING_DOWN },
-    /* HEAD_STABLE */
+    /* HEAD_STABLE (->ASSIGNING is a compound, in OBSERVED_EXTRA only) */
     { UCN_CLUSTER_PHASE_HEAD_STABLE, UCN_CLUSTER_PHASE_HEAD_NO_BACKUP },
-    { UCN_CLUSTER_PHASE_HEAD_STABLE, UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING },
     { UCN_CLUSTER_PHASE_HEAD_STABLE, UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING },
     { UCN_CLUSTER_PHASE_HEAD_STABLE, UCN_CLUSTER_PHASE_STEPPING_DOWN },
     /* BACKUP_SYNCING */
@@ -3270,27 +3275,22 @@ static const struct cluster_transition_spec_pair {
     { UCN_CLUSTER_PHASE_BACKUP_SYNCING, UCN_CLUSTER_PHASE_ELECTION },
     { UCN_CLUSTER_PHASE_BACKUP_SYNCING, UCN_CLUSTER_PHASE_JOIN_PENDING },
     { UCN_CLUSTER_PHASE_BACKUP_SYNCING, UCN_CLUSTER_PHASE_MEMBER_ACTIVE },
-    /* BACKUP_READY */
+    /* BACKUP_READY (->HEAD_NO_BACKUP is a compound, in OBSERVED_EXTRA) */
     { UCN_CLUSTER_PHASE_BACKUP_READY, UCN_CLUSTER_PHASE_BACKUP_TAKEOVER },
     { UCN_CLUSTER_PHASE_BACKUP_READY, UCN_CLUSTER_PHASE_BACKUP_SYNCING },
     { UCN_CLUSTER_PHASE_BACKUP_READY, UCN_CLUSTER_PHASE_ELECTION },
     { UCN_CLUSTER_PHASE_BACKUP_READY, UCN_CLUSTER_PHASE_JOIN_PENDING },
     { UCN_CLUSTER_PHASE_BACKUP_READY, UCN_CLUSTER_PHASE_DETACHED_OBSERVE },
     { UCN_CLUSTER_PHASE_BACKUP_READY, UCN_CLUSTER_PHASE_MEMBER_ACTIVE },
-    /* Observed tick compound: takeover started + completed in one tick. */
-    { UCN_CLUSTER_PHASE_BACKUP_READY, UCN_CLUSTER_PHASE_HEAD_NO_BACKUP },
     /* BACKUP_TAKEOVER (stays legal under takeover_active && syncing) */
     { UCN_CLUSTER_PHASE_BACKUP_TAKEOVER, UCN_CLUSTER_PHASE_HEAD_NO_BACKUP },
     { UCN_CLUSTER_PHASE_BACKUP_TAKEOVER, UCN_CLUSTER_PHASE_DETACHED_OBSERVE },
     { UCN_CLUSTER_PHASE_BACKUP_TAKEOVER, UCN_CLUSTER_PHASE_JOIN_PENDING },
     { UCN_CLUSTER_PHASE_BACKUP_TAKEOVER, UCN_CLUSTER_PHASE_MEMBER_ACTIVE },
     { UCN_CLUSTER_PHASE_BACKUP_TAKEOVER, UCN_CLUSTER_PHASE_ELECTION },
-    /* STEPPING_DOWN (JOIN_PENDING via the deadline; DETACHED_OBSERVE /
-     * MEMBER_ACTIVE are OBSERVED tick compounds of deadline + JOIN_REJECT
-     * / JOIN_ACCEPT in one tick - T-A capture) */
+    /* STEPPING_DOWN (deadline only; ->MEMBER_ACTIVE / ->DETACHED_OBSERVE
+     * are compounds, in OBSERVED_EXTRA) */
     { UCN_CLUSTER_PHASE_STEPPING_DOWN, UCN_CLUSTER_PHASE_JOIN_PENDING },
-    { UCN_CLUSTER_PHASE_STEPPING_DOWN, UCN_CLUSTER_PHASE_DETACHED_OBSERVE },
-    { UCN_CLUSTER_PHASE_STEPPING_DOWN, UCN_CLUSTER_PHASE_MEMBER_ACTIVE },
     /* RECOVERY_OBSERVE */
     { UCN_CLUSTER_PHASE_RECOVERY_OBSERVE, UCN_CLUSTER_PHASE_RECOVERY_ELECTION },
     { UCN_CLUSTER_PHASE_RECOVERY_OBSERVE, UCN_CLUSTER_PHASE_JOIN_PENDING },
@@ -3303,6 +3303,18 @@ static const struct cluster_transition_spec_pair {
     { UCN_CLUSTER_PHASE_RECOVERY_HEAD, UCN_CLUSTER_PHASE_RECOVERY_OBSERVE },
     { UCN_CLUSTER_PHASE_RECOVERY_HEAD, UCN_CLUSTER_PHASE_MEMBER_ACTIVE },
     { UCN_CLUSTER_PHASE_RECOVERY_HEAD, UCN_CLUSTER_PHASE_STEPPING_DOWN },
+};
+
+/* CLV2-01-04a.1 (Item 1): the tick-granularity COMPOUND pairs the T-A
+ * collector legitimately observes but NO single site performs as one
+ * transition.  cluster_transition() must reject them (wiring realizes
+ * them via their DIRECT constituents in sequence).  The T-A gate checks
+ * observed SUBSET-OF (DIRECT union OBSERVED_EXTRA). */
+static const struct cluster_transition_spec_pair CLUSTER_TRANSITION_OBSERVED_EXTRA[] = {
+    { UCN_CLUSTER_PHASE_HEAD_STABLE, UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING },
+    { UCN_CLUSTER_PHASE_BACKUP_READY, UCN_CLUSTER_PHASE_HEAD_NO_BACKUP },
+    { UCN_CLUSTER_PHASE_STEPPING_DOWN, UCN_CLUSTER_PHASE_MEMBER_ACTIVE },
+    { UCN_CLUSTER_PHASE_STEPPING_DOWN, UCN_CLUSTER_PHASE_DETACHED_OBSERVE },
 };
 
 /* CLV2-01-04a review A (F2): pairs the Current FSM can NEVER perform
@@ -3350,22 +3362,152 @@ static const struct cluster_transition_spec_pair CLUSTER_TRANSITION_EXCLUDED[] =
     { UCN_CLUSTER_PHASE_BACKUP_TAKEOVER, UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING },
     { UCN_CLUSTER_PHASE_BACKUP_TAKEOVER, UCN_CLUSTER_PHASE_RECOVERY_OBSERVE },
     { UCN_CLUSTER_PHASE_BACKUP_READY, UCN_CLUSTER_PHASE_RECOVERY_OBSERVE },
+    /* HEAD_NO_BACKUP -> SYNCING / -> STABLE: no single site performs them
+     * (assign_backup always enters ASSIGNING first; a READY requires an
+     * already-selected backup); parity with the production exclusion
+     * comment and never observed (T-A). */
+    { UCN_CLUSTER_PHASE_HEAD_NO_BACKUP, UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING },
+    { UCN_CLUSTER_PHASE_HEAD_NO_BACKUP, UCN_CLUSTER_PHASE_HEAD_STABLE },
 };
 
-static bool cluster_transition_pair_in_spec(ucn_cluster_phase_t old_phase,
-                                            ucn_cluster_phase_t new_phase)
+static bool cluster_transition_pair_in_direct(ucn_cluster_phase_t old_phase,
+                                               ucn_cluster_phase_t new_phase)
 {
     size_t index;
 
-    for (index = 0U; index < sizeof(CLUSTER_TRANSITION_SPEC) /
-                              sizeof(CLUSTER_TRANSITION_SPEC[0U]);
+    for (index = 0U; index < sizeof(CLUSTER_TRANSITION_DIRECT) /
+                              sizeof(CLUSTER_TRANSITION_DIRECT[0U]);
          ++index) {
-        if (CLUSTER_TRANSITION_SPEC[index].old_phase == old_phase &&
-            CLUSTER_TRANSITION_SPEC[index].new_phase == new_phase) {
+        if (CLUSTER_TRANSITION_DIRECT[index].old_phase == old_phase &&
+            CLUSTER_TRANSITION_DIRECT[index].new_phase == new_phase) {
             return true;
         }
     }
     return false;
+}
+
+/* OBSERVED_ALLOWED = DIRECT union the tick-compound OBSERVED_EXTRA. */
+static bool cluster_transition_pair_in_observed(ucn_cluster_phase_t old_phase,
+                                                ucn_cluster_phase_t new_phase)
+{
+    size_t index;
+
+    if (cluster_transition_pair_in_direct(old_phase, new_phase)) {
+        return true;
+    }
+    for (index = 0U; index < sizeof(CLUSTER_TRANSITION_OBSERVED_EXTRA) /
+                              sizeof(CLUSTER_TRANSITION_OBSERVED_EXTRA[0U]);
+         ++index) {
+        if (CLUSTER_TRANSITION_OBSERVED_EXTRA[index].old_phase == old_phase &&
+            CLUSTER_TRANSITION_OBSERVED_EXTRA[index].new_phase == new_phase) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* CLV2-01-04a.1 (Item 3): set the phase-relevant legacy fields so the
+ * phase mapping derives EXACTLY `phase` - the pre-transition discipline
+ * requires derive(cluster, now) == old_phase before every accepted call.
+ * This mirrors the canonical legacy projection of each phase (the same
+ * values the sites produce); it is a test-only duplicate of the spec. */
+static void cluster_test_seed_legacy(ucn_cluster_t *cluster,
+                                     ucn_cluster_phase_t phase,
+                                     uint32_t now_ms)
+{
+    (void)now_ms;
+    switch (phase) {
+    case UCN_CLUSTER_PHASE_DISABLED:
+        cluster->role = UCN_CLUSTER_ROLE_DISABLED;
+        break;
+    case UCN_CLUSTER_PHASE_DETACHED_OBSERVE:
+        cluster->role = UCN_CLUSTER_ROLE_DETACHED;
+        cluster->recovery_eligible = false;
+        cluster->recovery_backoff_deadline_ms = 0U;
+        cluster->recovery_cooldown_until_ms = 0U;
+        break;
+    case UCN_CLUSTER_PHASE_ELECTION:
+        cluster->role = UCN_CLUSTER_ROLE_CANDIDATE;
+        break;
+    case UCN_CLUSTER_PHASE_JOIN_PENDING:
+        cluster->role = UCN_CLUSTER_ROLE_JOIN_PENDING;
+        cluster->recovery_eligible = false;
+        cluster->recovery_backoff_deadline_ms = 0U;
+        break;
+    case UCN_CLUSTER_PHASE_MEMBER_ACTIVE:
+        cluster->role = UCN_CLUSTER_ROLE_MEMBER;
+        cluster->head_grace_deadline_ms = 0U;
+        break;
+    case UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE:
+        cluster->role = UCN_CLUSTER_ROLE_MEMBER;
+        cluster->head_grace_deadline_ms = now_ms + 100U;
+        break;
+    case UCN_CLUSTER_PHASE_HEAD_NO_BACKUP:
+        cluster->role = UCN_CLUSTER_ROLE_HEAD;
+        cluster->backup_node_id = 0U;
+        cluster->backup_ready = false;
+        cluster->backup_assign_pending = false;
+        cluster->backup_syncing = false;
+        break;
+    case UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING:
+        cluster->role = UCN_CLUSTER_ROLE_HEAD;
+        cluster->backup_node_id = 2U;
+        cluster->backup_ready = false;
+        cluster->backup_assign_pending = true;
+        cluster->backup_syncing = false;
+        break;
+    case UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING:
+        cluster->role = UCN_CLUSTER_ROLE_HEAD;
+        cluster->backup_node_id = 2U;
+        cluster->backup_ready = false;
+        cluster->backup_assign_pending = false;
+        cluster->backup_syncing = false;
+        break;
+    case UCN_CLUSTER_PHASE_HEAD_STABLE:
+        cluster->role = UCN_CLUSTER_ROLE_HEAD;
+        cluster->backup_node_id = 2U;
+        cluster->backup_ready = true;
+        cluster->backup_assign_pending = false;
+        cluster->backup_syncing = false;
+        break;
+    case UCN_CLUSTER_PHASE_BACKUP_SYNCING:
+        cluster->role = UCN_CLUSTER_ROLE_BACKUP;
+        cluster->backup_takeover_active = false;
+        cluster->backup_ready = false;
+        cluster->backup_syncing = true;
+        break;
+    case UCN_CLUSTER_PHASE_BACKUP_READY:
+        cluster->role = UCN_CLUSTER_ROLE_BACKUP;
+        cluster->backup_takeover_active = false;
+        cluster->backup_ready = true;
+        cluster->backup_syncing = false;
+        break;
+    case UCN_CLUSTER_PHASE_BACKUP_TAKEOVER:
+        cluster->role = UCN_CLUSTER_ROLE_BACKUP;
+        cluster->backup_takeover_active = true;
+        cluster->backup_ready = false;
+        break;
+    case UCN_CLUSTER_PHASE_STEPPING_DOWN:
+        cluster->role = UCN_CLUSTER_ROLE_STEPPING_DOWN;
+        break;
+    case UCN_CLUSTER_PHASE_RECOVERY_OBSERVE:
+        cluster->role = UCN_CLUSTER_ROLE_DETACHED;
+        cluster->recovery_eligible = true;
+        cluster->recovery_backoff_deadline_ms = 0U;
+        cluster->recovery_cooldown_until_ms = 0U;
+        break;
+    case UCN_CLUSTER_PHASE_RECOVERY_ELECTION:
+        cluster->role = UCN_CLUSTER_ROLE_DETACHED;
+        cluster->recovery_eligible = true;
+        cluster->recovery_backoff_deadline_ms = now_ms + 1U;
+        cluster->recovery_cooldown_until_ms = 0U;
+        break;
+    case UCN_CLUSTER_PHASE_RECOVERY_HEAD:
+        cluster->role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+        break;
+    default:
+        break;
+    }
 }
 
 /* Restore a pristine cluster and claim the given shadow phase (test-only). */
@@ -3379,11 +3521,15 @@ static void cluster_test_transition_reset(ucn_cluster_t *cluster,
     cluster->shadow_transition_count = 0U;
 }
 
-/* CLV2-01-04a: full legality sweep.  Every FSM-real pair is accepted and
+/* CLV2-01-04a.1: full legality sweep over the DIRECT single-site matrix
+ * (CLUSTER_TRANSITION_DIRECT_ALLOWED).  Every DIRECT pair is accepted and
  * leaves the shadow + legacy mirror consistent; every other pair is
  * rejected with UCN_ERR_STATE and NO state change (fail-closed).  The
  * task's examples (JOIN_PENDING -> HEAD_STABLE, DETACHED_OBSERVE ->
- * BACKUP_READY) are covered by the grid below. */
+ * BACKUP_READY) are covered by the grid below.  The observed compounds
+ * (HEAD_STABLE->HEAD_BACKUP_ASSIGNING, BACKUP_READY->HEAD_NO_BACKUP,
+ * STEPPING_DOWN->MEMBER_ACTIVE/DETACHED_OBSERVE) are gate-only: they span
+ * a whole tick and are never callable through cluster_transition(). */
 static int cluster_test_transition_matrix(void)
 {
     cluster_test_network_t network;
@@ -3411,7 +3557,11 @@ static int cluster_test_transition_matrix(void)
                 continue; /* no self-loops: nothing would change */
             }
             cluster_test_transition_reset(c, &pristine, old_phase);
-            if (cluster_transition_pair_in_spec(old_phase, new_phase)) {
+            /* CLV2-01-04a.1 (Item 3): the legacy state must derive the
+             * claimed old phase before the call (pre-transition
+             * discipline); seed it from the canonical projection. */
+            cluster_test_seed_legacy(c, old_phase, network.now_ms);
+            if (cluster_transition_pair_in_direct(old_phase, new_phase)) {
                 /* CLV2-01-04a review B (F4): pass the pair's REAL reason
                  * (from the BEST-EFFORT table) and assert verbatim
                  * passthrough - UNKNOWN is never used on accepted pairs. */
@@ -3426,14 +3576,42 @@ static int cluster_test_transition_matrix(void)
                 TEST_ASSERT(c->shadow_phase == new_phase);
                 TEST_ASSERT(c->transition_reason == expected_reason);
                 TEST_ASSERT(c->shadow_transition_count == 1U);
+                /* CLV2-01-04a.1 (Item 2): destinations whose mapping fields
+                 * are caller/site-provided get the site's post-call write
+                 * (the end-of-step shadow sync then re-aligns); apply_legacy
+                 * itself writes role only for those. */
+                switch (new_phase) {
+                case UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING:
+                    /* site: assign_backup() L2360 selects the Backup,
+                     * start_backup_assignment_cycle() L3532 arms it. */
+                    c->backup_node_id = 2U;
+                    c->backup_assign_pending = true;
+                    c->backup_ready = false;
+                    break;
+                case UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING:
+                    /* site: assignment sweep L3566 completes. */
+                    c->backup_node_id = 2U;
+                    c->backup_assign_pending = false;
+                    c->backup_ready = false;
+                    break;
+                case UCN_CLUSTER_PHASE_HEAD_STABLE:
+                    /* site: handle_backup_ready() L2467. */
+                    c->backup_node_id = 2U;
+                    c->backup_ready = true;
+                    break;
+                case UCN_CLUSTER_PHASE_RECOVERY_ELECTION:
+                    /* Item 4: caller-provided armed backoff. */
+                    c->recovery_backoff_deadline_ms = network.now_ms + 1U;
+                    break;
+                default:
+                    break;
+                }
                 TEST_ASSERT(test_derive_phase(c, network.now_ms) == new_phase);
-                /* CLV2-01-04a review A (F1): no stale takeover survives on
-                 * a non-BACKUP destination (and the destination BACKUP_
-                 * TAKEOVER is the only place takeover may be set). */
+                /* Item 2/5: the entry action never clears takeover outside
+                 * BACKUP_TAKEOVER (site-owned); the only place the entry
+                 * action SETS it is the BACKUP_TAKEOVER destination. */
                 if (new_phase == UCN_CLUSTER_PHASE_BACKUP_TAKEOVER) {
                     TEST_ASSERT(c->backup_takeover_active == true);
-                } else {
-                    TEST_ASSERT(c->backup_takeover_active == false);
                 }
             } else {
                 ucn_cluster_t before = *c;
@@ -3466,8 +3644,8 @@ static int cluster_test_transition_matrix(void)
                 CLUSTER_TRANSITION_EXCLUDED[index].new_phase;
             ucn_result_t result;
 
-            TEST_ASSERT(!cluster_transition_pair_in_spec(old_phase,
-                                                          new_phase));
+            TEST_ASSERT(!cluster_transition_pair_in_direct(old_phase,
+                                                            new_phase));
             cluster_test_transition_reset(c, &pristine, old_phase);
             result = ucn_cluster_test_transition(
                 c, old_phase, new_phase, UCN_CLUSTER_REASON_UNKNOWN, 0U);
@@ -3497,11 +3675,12 @@ static int cluster_test_transition_matrix(void)
             ucn_cluster_phase_t new_phase = fallback_new[index];
             ucn_cluster_transition_reason_t derived;
 
-            TEST_ASSERT(cluster_transition_pair_in_spec(old_phase,
-                                                        new_phase));
+            TEST_ASSERT(cluster_transition_pair_in_direct(old_phase,
+                                                          new_phase));
             derived = ucn_cluster_test_reason_from_diff(old_phase, new_phase);
             TEST_ASSERT(derived != UCN_CLUSTER_REASON_UNKNOWN);
             cluster_test_transition_reset(fc, &pristine, old_phase);
+            cluster_test_seed_legacy(fc, old_phase, network.now_ms);
             TEST_ASSERT(ucn_cluster_test_transition(
                             fc, old_phase, new_phase,
                             UCN_CLUSTER_REASON_UNKNOWN, 0U) == UCN_OK);
@@ -3548,8 +3727,9 @@ static int cluster_test_transition_apply(void)
     TEST_ASSERT(c->head_grace_deadline_ms == 0U);
     TEST_ASSERT(test_derive_phase(c, now_ms) == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
     TEST_ASSERT(c->cluster_id == 7U && c->term == 3U && c->head_node_id == 2U);
-    /* CLV2-01-04a review A (F1): a non-BACKUP destination never keeps
-     * Backup-role mirror state (handle_head_takeover clears these). */
+    /* CLV2-01-04a.1 (Item 2): apply_legacy writes role/grace/eligible
+     * only - the (all-zero) pristine Backup mirror is left untouched, and
+     * handle_join_accept() keeps known_backup_* (retained-state Test A). */
     TEST_ASSERT(c->backup_takeover_active == false);
     TEST_ASSERT(c->backup_syncing == false);
     TEST_ASSERT(c->backup_ready == false);
@@ -3646,22 +3826,28 @@ static int cluster_test_transition_apply(void)
                     UCN_CLUSTER_REASON_JOIN_INITIATED, now_ms) == UCN_OK);
     TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_JOIN_PENDING);
     TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_JOIN_PENDING);
-    /* CLV2-01-04a review A (F1): leaving the Backup role clears the
-     * mirror exactly as backup_clear_sync() + the caller's takeover
-     * clear do, so no phantom BACKUP_TAKEOVER can survive. */
-    TEST_ASSERT(c->backup_takeover_active == false);
-    TEST_ASSERT(c->backup_syncing == false);
-    TEST_ASSERT(c->backup_ready == false);
-    TEST_ASSERT(c->backup_primary_node_id == 0U);
-    TEST_ASSERT(c->backup_generation == 0U);
+    /* CLV2-01-04a.1 (Item 2): the hook does NOT wipe the Backup mirror
+     * (the M01.0.2 combo survives the exit intact; the SITE - consider_
+     * head_offer()'s newer-Term path - performs backup_clear_sync() +
+     * the takeover clear at wiring time).  Phase-level guarantee only. */
+    TEST_ASSERT(c->backup_takeover_active == true);
+    TEST_ASSERT(c->backup_syncing == true);
     TEST_ASSERT(test_derive_phase(c, now_ms) == UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(cluster_transition_pair_in_direct(
+                    UCN_CLUSTER_PHASE_BACKUP_TAKEOVER,
+                    UCN_CLUSTER_PHASE_JOIN_PENDING));
 
     /* 6b) BACKUP_TAKEOVER -> HEAD_NO_BACKUP (TAKEOVER_QUORUM):
-     *     complete_takeover() always clears node_id/ready/syncing/
-     *     takeover_active/primary, so the takeover-complete state is
-     *     always HEAD_NO_BACKUP (never a populated Head sub-phase;
-     *     review A F2).  backup_generation SURVIVES (complete_takeover
-     *     leaves it; review C G1). */
+     *     CLV2-01-04a.1 (Item 2): the hook writes role + the provably-
+     *     common Head invariants (node_id=0, ready=false) ONLY; the
+     *     Backup mirror (takeover_active/syncing/primary) SURVIVES the
+     *     call.  complete_takeover()'s exit clears stay at the SITE
+     *     during 01-04b..f (simulated below).  The takeover-complete
+     *     state is always HEAD_NO_BACKUP (never a populated Head
+     *     sub-phase; review A F2); the HEAD mapper keys on
+     *     backup_node_id, so a lingering mirror cannot mislabel it.
+     *     backup_generation SURVIVES (complete_takeover leaves it;
+     *     review C G1). */
     cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
     c->role = UCN_CLUSTER_ROLE_BACKUP;
     c->backup_takeover_active = true;
@@ -3677,18 +3863,29 @@ static int cluster_test_transition_apply(void)
     TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_HEAD);
     TEST_ASSERT(c->backup_node_id == 0U);
     TEST_ASSERT(c->backup_ready == false);
-    TEST_ASSERT(c->backup_syncing == false);
-    TEST_ASSERT(c->backup_takeover_active == false);
-    TEST_ASSERT(c->backup_primary_node_id == 0U);
+    /* Item 2: the hook did NOT touch the mirror - the site must clear it. */
+    TEST_ASSERT(c->backup_takeover_active == true);
+    TEST_ASSERT(c->backup_syncing == true);
+    TEST_ASSERT(c->backup_primary_node_id == 1U);
     /* G1: complete_takeover leaves backup_generation caller-owned. */
     TEST_ASSERT(c->backup_generation == 5U);
+    /* Phase-level guarantee holds even with the mirror still set. */
+    TEST_ASSERT(test_derive_phase(c, now_ms) == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
+    /* Simulate complete_takeover()'s exit cleanup (site, 01-04b..f). */
+    c->backup_takeover_active = false;
+    c->backup_syncing = false;
+    c->backup_primary_node_id = 0U;
+    c->backup_ready = false;
     TEST_ASSERT(test_derive_phase(c, now_ms) == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
 
-    /* 6c) CLV2-01-04a review B (T-B): F1 chain regression - BACKUP_TAKEOVER
-     *     -> MEMBER_ACTIVE must clear the mirror per handle_head_takeover()
-     *     (takeover/syncing/ready/known_backup_*), so a later re-assignment
-     *     derives BACKUP_SYNCING - never a phantom BACKUP_TAKEOVER - and no
-     *     TAKEOVER_PREPARE is ever sent. */
+    /* 6c) CLV2-01-04a.1 (Item 5, T-B chain): BACKUP_TAKEOVER -> MEMBER_ACTIVE
+     *     is a DIRECT site edge (handle_head_takeover L2917).  apply_legacy
+     *     writes role/grace/eligible only, so the M01.0.2 mirror survives
+     *     the hook call (phase mapping for MEMBER ignores it).  The SITE
+     *     clears (takeover/syncing/ready/known_backup_*) are simulated here
+     *     - exactly what 01-04 wiring must do - then re-assignment derives
+     *     BACKUP_SYNCING with no phantom BACKUP_TAKEOVER and no
+     *     TAKEOVER_PREPARE. */
     cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
     c->role = UCN_CLUSTER_ROLE_BACKUP;
     c->backup_takeover_active = true;
@@ -3701,11 +3898,14 @@ static int cluster_test_transition_apply(void)
                     UCN_CLUSTER_REASON_TAKEOVER_STARTED, now_ms) == UCN_OK);
     TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
     TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_MEMBER);
-    TEST_ASSERT(c->backup_takeover_active == false);
-    TEST_ASSERT(c->backup_syncing == false);
-    TEST_ASSERT(c->backup_ready == false);
-    TEST_ASSERT(c->known_backup_node_id == 0U);
-    TEST_ASSERT(c->known_backup_generation == 0U);
+    TEST_ASSERT(test_derive_phase(c, now_ms) == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+    /* Site-side exit clears (handle_head_takeover), simulated: without them
+     * a later BACKUP re-assignment would derive a phantom BACKUP_TAKEOVER. */
+    c->backup_takeover_active = false;
+    c->backup_syncing = false;
+    c->backup_ready = false;
+    c->known_backup_node_id = 0U;
+    c->known_backup_generation = 0U;
     /* Simulate the Head re-assigning this node as Backup. */
     TEST_ASSERT(ucn_cluster_test_transition(
                     c, UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
@@ -3748,22 +3948,29 @@ static int cluster_test_transition_apply(void)
     c->backup_assign_pending = false;
     c->backup_syncing = false;
     c->backup_generation = 5U;
-    /* SYNCING -> ASSIGNING -> SYNCING -> STABLE: generation stays 5. */
+    /* SYNCING -> ASSIGNING -> SYNCING -> STABLE: generation stays 5.
+     * The sub-phase-driving fields (assign_pending / ready) are written by
+     * the SITE after each transition (start_backup_assignment_cycle /
+     * sweep completion / handle_backup_ready), exactly the Item 2 model;
+     * without them the next pre-transition derive (Item 3) would fail. */
     TEST_ASSERT(ucn_cluster_test_transition(
                     c, UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING,
                     UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING,
                     UCN_CLUSTER_REASON_BACKUP_ASSIGNED, now_ms) == UCN_OK);
+    c->backup_assign_pending = true; /* site: start_backup_assignment_cycle L3532 */
     TEST_ASSERT(c->backup_generation == 5U);
     TEST_ASSERT(ucn_cluster_test_transition(
                     c, UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING,
                     UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING,
                     UCN_CLUSTER_REASON_BACKUP_SYNC_STARTED, now_ms) == UCN_OK);
+    c->backup_assign_pending = false; /* site: assignment sweep L3566 */
     TEST_ASSERT(c->backup_generation == 5U);
     TEST_ASSERT(ucn_cluster_test_transition(
                     c, UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING,
                     UCN_CLUSTER_PHASE_HEAD_STABLE,
                     UCN_CLUSTER_REASON_SNAPSHOT_READY, now_ms) == UCN_OK);
     TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_STABLE);
+    c->backup_ready = true; /* site: handle_backup_ready L2467 */
     TEST_ASSERT(c->backup_ready == true);
     TEST_ASSERT(c->backup_generation == 5U);
     /* STABLE -> NO_BACKUP (Backup lost) also keeps the generation. */
@@ -3807,6 +4014,61 @@ static int cluster_test_transition_apply(void)
                         UCN_CLUSTER_REASON_SNAPSHOT_READY, now_ms) == UCN_ERR_STATE);
         TEST_ASSERT(memcmp(c, &before, sizeof(*c)) == 0);
     }
+
+    /* 10) CLV2-01-04a.1 (Item 5, Test A - join retained state): a
+     *     JOIN_PENDING node that first saw BACKUP_ASSIGN for ANOTHER node
+     *     records known_backup_node_id/generation; handle_join_accept()
+     *     does NOT clear them, so JOIN_PENDING -> MEMBER_ACTIVE must keep
+     *     them (apply_legacy must not wipe known_backup_*). */
+    cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_JOIN_PENDING);
+    c->role = UCN_CLUSTER_ROLE_JOIN_PENDING;
+    c->known_backup_node_id = 3U; /* BACKUP_ASSIGN for another node */
+    c->known_backup_generation = 7U;
+    TEST_ASSERT(test_derive_phase(c, now_ms) == UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(ucn_cluster_test_transition(
+                    c, UCN_CLUSTER_PHASE_JOIN_PENDING,
+                    UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                    UCN_CLUSTER_REASON_JOIN_ACCEPTED, now_ms) == UCN_OK);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+    TEST_ASSERT(c->known_backup_node_id == 3U);    /* UNCHANGED */
+    TEST_ASSERT(c->known_backup_generation == 7U); /* UNCHANGED */
+    TEST_ASSERT(test_derive_phase(c, now_ms) == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+
+    /* 11) CLV2-01-04a.1 (Item 5, Test B - backup-challenge retained
+     *     state): backup_challenge() clears ready/syncing/deadlines/
+     *     takeover but NOT members[] or backup_generation; apply_legacy
+     *     must not wipe the mirror on BACKUP_SYNCING -> ELECTION, and
+     *     begin_join() keeps it through ELECTION -> JOIN_PENDING.  The
+     *     ready/syncing/takeover clears are SITE-side, deferred to wiring. */
+    cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    c->role = UCN_CLUSTER_ROLE_BACKUP;
+    c->backup_syncing = true;
+    c->backup_ready = false;
+    c->backup_takeover_active = false;
+    c->backup_primary_node_id = 1U;
+    c->backup_generation = 5U;
+    c->members[0].occupied = true;
+    c->members[0].node_id = 4U;
+    c->members[0].last_nonce = 9U;
+    TEST_ASSERT(test_derive_phase(c, now_ms) == UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    TEST_ASSERT(ucn_cluster_test_transition(
+                    c, UCN_CLUSTER_PHASE_BACKUP_SYNCING,
+                    UCN_CLUSTER_PHASE_ELECTION,
+                    UCN_CLUSTER_REASON_ELECTION_STARTED, now_ms) == UCN_OK);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_ELECTION);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_CANDIDATE);
+    /* members[] and backup_generation survive (no mirror wipe). */
+    TEST_ASSERT(c->members[0].occupied == true);
+    TEST_ASSERT(c->members[0].node_id == 4U);
+    TEST_ASSERT(c->backup_generation == 5U);
+    TEST_ASSERT(ucn_cluster_test_transition(
+                    c, UCN_CLUSTER_PHASE_ELECTION,
+                    UCN_CLUSTER_PHASE_JOIN_PENDING,
+                    UCN_CLUSTER_REASON_JOIN_INITIATED, now_ms) == UCN_OK);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(c->members[0].occupied == true); /* begin_join keeps it */
+    TEST_ASSERT(c->backup_generation == 5U);
+    TEST_ASSERT(test_derive_phase(c, now_ms) == UCN_CLUSTER_PHASE_JOIN_PENDING);
 
     ucn_cluster_test_transition_asserts_set(true);
     return 0;
@@ -3855,8 +4117,9 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_capacity_is_bounded() == 0);
     TEST_ASSERT(cluster_test_neighbor_summary_api() == 0);
     /* CLV2-01-04a review B (T-A): every phase pair actually OBSERVED by
-     * the scenario suite must be a member of the FSM-real SPEC.  Run
-     * LAST so the collector has seen every tick. */
+     * the scenario suite must be a member of the observed SPEC
+     * (CLUSTER_TRANSITION_OBSERVED_ALLOWED = DIRECT + tick compounds).
+     * Run LAST so the collector has seen every tick. */
     TEST_ASSERT(cluster_test_observed_within_spec() == 0);
     return 0;
 }

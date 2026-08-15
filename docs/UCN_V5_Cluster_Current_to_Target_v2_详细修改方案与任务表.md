@@ -302,6 +302,12 @@ duplicate/replay/reorder
 | `CLV2-01-09` | P0 | 01-05..08 | `ucn_cluster_step` | 把当前串行 if 链改为 `switch(phase)`；公共高优先级检查放在 switch 前，Phase handler 一次最多执行一个明确阶段，避免同一 Step 连续跨越多个状态。 | 每次 Step 最多一条非显式 chained transition；测试可精确预测状态。 |
 | `CLV2-01-10` | P1 | 01-09 | Public View/API | 保留 `ucn_cluster_get_role()` 作为粗粒度兼容映射，新增 `ucn_cluster_get_phase()` 和 phase 字符串诊断；文档明确 Role 不再是内部真实状态。 | 旧调用方源码兼容；诊断能够区分 Syncing/Ready/Takeover/Grace。 |
 
+> **CLV2-01-04a.1 ITEM 4 注**：`RECOVERY_ELECTION` 入口**必须由调用方提供** `backoff_deadline`（`start_recovery_backoff` 显式写入），`cluster_transition()` 不再自动铸币（auto-mint）backoff；`apply_legacy` 的 RECOVERY_ELECTION 分支只提交 `role=RECOVERY_ELECTION` 与 `recovery_eligible=true`，不写 backoff、不写 cooldown。
+>
+> **CLV2-01-04b 接线规则（评审 A）**：`complete_election` 接线时必须按调用方保留的 `backup_*` 状态分发目标子阶段——`backup_node_id==0` → HEAD_NO_BACKUP；否则按 `assign_pending/ready` → ASSIGNING/SYNCING/STABLE；`cluster_transition()` 不接受复合对。
+>
+> **CLV2-01-04b 注（评审 A NIT）**：接线开始时，为调用方提供字段的目标（HEAD_* 子阶段、RECOVERY_ELECTION）增加 debug-only post-commit 断言 `derive(post)==new_phase`。
+
 ## 本里程碑禁止事项
 - 禁止同时引入 Quorum/Persistence。
 - 禁止一次删除所有兼容 bool。
