@@ -114,10 +114,9 @@ static bool test_legacy_state_valid(const ucn_cluster_t *c)
         }
     }
     if (c->role == UCN_CLUSTER_ROLE_BACKUP) {
+        /* takeover_active && syncing is REACHABLE (delayed Primary
+         * Type12 during takeover); see production comment M01.0.2. */
         if (c->backup_ready && c->backup_syncing) {
-            return false;
-        }
-        if (c->backup_takeover_active && c->backup_syncing) {
             return false;
         }
     }
@@ -1960,9 +1959,15 @@ static int cluster_test_phase_mapping_static(void)
     c->backup_ready = true;
     c->backup_takeover_active = false;
     TEST_ASSERT(test_legacy_state_valid(c) == false);
+    /* M01.0.2: takeover_active && syncing is REACHABLE (delayed
+     * same-generation Type12 from the old Primary), so it is VALID and
+     * the phase is BACKUP_TAKEOVER (takeover takes precedence). */
     c->backup_ready = false;
     c->backup_takeover_active = true;
-    TEST_ASSERT(test_legacy_state_valid(c) == false);
+    c->backup_syncing = true;
+    TEST_ASSERT(test_legacy_state_valid(c) == true);
+    TEST_ASSERT(test_derive_phase(c, now) ==
+                UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
     return 0;
 }
 
@@ -2059,6 +2064,107 @@ static int cluster_test_shadow_grace_timeout(void)
     TEST_ASSERT(saw_grace);
     TEST_ASSERT(saw_expired_unconsumed_grace);
     TEST_ASSERT(member->shadow_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    return 0;
+}
+
+/* CLV2-M01.0.2: a delayed same-generation Type12 (SYNC_BEGIN) from the
+ * old Primary can re-arm backup_syncing while takeover is active.
+ * Current FSM accepts it (no takeover guard in the handler), so the
+ * shadow must express BACKUP_TAKEOVER with takeover_active+syncing and
+ * the legacy validity gate must NOT fail.  The underlying deficiency
+ * (late Primary sync mutating the takeover mirror) is deferred to
+ * M09 committed/staging mirror + M10 frozen TakeoverConfig. */
+static int cluster_test_shadow_takeover_late_sync(void)
+{
+    cluster_test_network_t network;
+    cluster_test_fault_t fault;
+    cluster_test_node_t *backup;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    uint32_t now_ms;
+    size_t i;
+    bool injected = false;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    for (now_ms = 0U; now_ms <= 140U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    TEST_ASSERT(network.nodes[0].cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    backup = NULL;
+    for (i = 1U; i < CLUSTER_TEST_NODES; ++i) {
+        if (network.nodes[i].cluster.role == UCN_CLUSTER_ROLE_BACKUP &&
+            network.nodes[i].cluster.backup_ready) {
+            backup = &network.nodes[i];
+            break;
+        }
+    }
+    TEST_ASSERT(backup != NULL);
+
+    /* Freeze the Head: it stops stepping (no heartbeat/advertise), so
+     * the Backup's primary lease lapses and takeover starts, while the
+     * Head stays alive in the peer table (RX checks still pass). */
+    cluster_test_fault_setup(&fault);
+    for (i = 0U; i < CLUSTER_TEST_NODES; ++i) {
+        size_t j;
+
+        for (j = 0U; j < CLUSTER_TEST_NODES; ++j) {
+            fault.partition[i][j] = true;
+        }
+    }
+    fault.skip_step_mask = 1U;
+
+    for (now_ms = 141U; now_ms <= 260U; ++now_ms) {
+        size_t ni;
+
+        /* Manual tick so the injection can happen BETWEEN the owner step
+         * (start_takeover) and the delivery phase (takeover completion),
+         * which is exactly when a delayed Primary frame can arrive. */
+        network.now_ms = now_ms;
+        TEST_ASSERT(cluster_test_sync_neighbors_faulted(&network, &fault) ==
+                    0);
+        for (ni = 0U; ni < CLUSTER_TEST_NODES; ++ni) {
+            if (!network.nodes[ni].alive) {
+                continue;
+            }
+            if ((fault.skip_step_mask & (UINT32_C(1) << ni)) != 0U) {
+                continue;
+            }
+            TEST_ASSERT(ucn_cluster_step(&network.nodes[ni].cluster) ==
+                        UCN_OK);
+        }
+        if (!injected && backup->cluster.backup_takeover_active) {
+            /* Delayed SYNC_BEGIN from the old Primary (same generation). */
+            (void)memset(&message, 0, sizeof(message));
+            message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+            message.role = UCN_CLUSTER_ROLE_HEAD;
+            message.flags = UCN_CLUSTER_FLAG_SYNC_BEGIN;
+            message.cluster_id = backup->cluster.cluster_id;
+            message.term = backup->cluster.term;
+            message.head_node_id = network.nodes[0].node_id;
+            message.backup_generation = backup->cluster.backup_generation;
+            TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) ==
+                        UCN_OK);
+            TEST_ASSERT(ucn_cluster_receive(
+                            &backup->cluster, network.nodes[0].node_id,
+                            true, encoded, sizeof(encoded)) == UCN_OK);
+            /* Current FSM result: takeover stays active, the mirror
+             * re-enters syncing.  Shadow must keep BACKUP_TAKEOVER and
+             * the legacy gate must not fail. */
+            TEST_ASSERT(backup->cluster.backup_takeover_active == true);
+            TEST_ASSERT(backup->cluster.backup_syncing == true);
+            TEST_ASSERT(backup->cluster.backup_ready == false);
+            TEST_ASSERT(test_legacy_state_valid(&backup->cluster) == true);
+            TEST_ASSERT(backup->cluster.shadow_phase ==
+                        UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
+            injected = true;
+        }
+        TEST_ASSERT(cluster_test_deliver_faulted(&network, &fault) == 0);
+        TEST_ASSERT(cluster_test_shadow_audit(&network) == 0);
+    }
+    TEST_ASSERT(injected);
+    /* The remaining ticks (and the final audit inside every tick) must
+     * keep the shadow consistent; the takeover then runs its own
+     * timeout path, which the Current FSM already defines. */
     return 0;
 }
 
@@ -2882,14 +2988,11 @@ static int cluster_test_recovery_conflict_resolved(void)
 
                     TEST_ASSERT(loser->role == UCN_CLUSTER_ROLE_MEMBER);
                     TEST_ASSERT(loser->head_node_id == winner);
-                    /* CLV2-M01.0.1: the LOSER's reason must never be
-                     * RECOVERY_WIN (that name belongs to the winner); it
-                     * must be RECOVERY_YIELDED (or at least a specific,
-                     * non-UNKNOWN reason on the join path). */
-                    TEST_ASSERT(loser->transition_reason !=
-                                UCN_CLUSTER_REASON_RECOVERY_WIN);
-                    TEST_ASSERT(loser->transition_reason !=
-                                UCN_CLUSTER_REASON_UNKNOWN);
+                    /* CLV2-M01.0.1/0.2: the loser joined the winner, so
+                     * its last transition reason is exactly
+                     * RECOVERY_YIELDED (never RECOVERY_WIN). */
+                    TEST_ASSERT(loser->transition_reason ==
+                                UCN_CLUSTER_REASON_RECOVERY_YIELDED);
                 }
             }
         }
@@ -3047,6 +3150,7 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_phase_mapping_static() == 0);
     TEST_ASSERT(cluster_test_shadow_lifecycle() == 0);
     TEST_ASSERT(cluster_test_shadow_grace_timeout() == 0);
+    TEST_ASSERT(cluster_test_shadow_takeover_late_sync() == 0);
     TEST_ASSERT(cluster_test_election_join_and_failover() == 0);
     TEST_ASSERT(cluster_test_capacity_is_bounded() == 0);
     TEST_ASSERT(cluster_test_neighbor_summary_api() == 0);

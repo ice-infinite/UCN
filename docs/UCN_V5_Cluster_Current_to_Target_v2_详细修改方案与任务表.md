@@ -558,6 +558,8 @@ duplicate/replay/reorder
 | `CLV2-10-10` | P0 | 10-01 | Timeout/impossible | 提前判断 quorum impossible；超时清事务并进入 RecoveryLineage，不降低 denominator 重试。 | 分区少数派永不接管旧 cluster_id。 |
 | `CLV2-10-11` | P0 | 10-01..10 | Crash/property tests | 在 vote persist、ACK、quorum reached、epoch persist、announce 前后逐点掉电；随机 packet reorder/duplicate。 | Safety-1/3/5/10 全部满足。 |
 
+> **KNOWN CURRENT DEFICIENCY（M01.0.2 记录，非 M01 修复范围）：** 当前 Backup 进入 takeover 后，迟到的旧 Primary 同 generation Type12（如 SYNC_BEGIN）仍会执行 `clear_members()` + 重设 `backup_syncing`，可修改/清空 takeover 正在使用的 mirror（`handle_backup_member_sync()` 无 takeover guard）。M01 Shadow 如实表达该组合（BACKUP_TAKEOVER + syncing 可达且合法），此缺陷由 **M09 committed/staging mirror + M10 frozen TakeoverConfig（10-01/10-08）** 最终解决；届时 `BACKUP_TAKEOVER` 进入时冻结 committed mirror，迟到 Primary Snapshot 不得触碰 takeover 输入。
+
 ## 本里程碑禁止事项
 - 禁止普通 MEMBER_ACTIVE 提前投票。
 - 禁止未持久化新 Term 就宣布 Head。

@@ -705,14 +705,17 @@ static bool cluster_legacy_state_is_valid(const ucn_cluster_t *cluster)
         }
     }
     if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
-        /* The mirror is either syncing or ready, never both; takeover
-         * starts from READY, so it can never coincide with syncing. */
+        /* The mirror is either syncing or ready, never both. */
         if (cluster->backup_ready && cluster->backup_syncing) {
             return false;
         }
-        if (cluster->backup_takeover_active && cluster->backup_syncing) {
-            return false;
-        }
+        /* NOTE (M01.0.2): takeover_active && backup_syncing is REACHABLE
+         * in the Current FSM: a delayed same-generation Type12 from the
+         * old Primary (e.g. SYNC_BEGIN) can re-arm backup_syncing while
+         * takeover is already active, because handle_backup_member_sync()
+         * has no takeover guard.  Shadow must express it, not reject it;
+         * the late-sync-can-mutate-mirror deficiency is deferred to the
+         * M09 committed/staging mirror + M10 frozen TakeoverConfig. */
     }
     return true;
 }
