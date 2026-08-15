@@ -45,6 +45,25 @@ ctest --test-dir build-c07-wsl --output-on-failure
 - CLV2-00-07：故障注入网络（partition 矩阵、deliver budget、drop_one_in、节点重启），新增 3 个故障测试（分区多数派 takeover、重启无旧 term、丢包最终收敛）。
 - CLV2-00-04：测试夹具 `tests/cluster_test_fixture.[ch]`（set_epoch/set_role/set_backup/set_vote），代表性测试已迁移。
 
+## 8. M00 完整重跑证据（审计版，2026-08-17 干净矩阵）
+
+在 WSL Ubuntu-24.04-ROS（gcc 13.3.0 / cmake 3.28.3 / ninja 1.11.1）用全新构建目录重跑完整门禁，5 路并行：
+
+| # | 构建 | 配置 | 结果 | 日志 |
+|---|------|------|------|------|
+| 1 | build-m00-full | FULL Debug, Ninja | **22/22 通过**（3.00 s） | `docs/results/m00_matrix/m00-full.log` |
+| 2 | build-m00-lite | LITE Debug, Ninja | **22/22 通过**（2.56 s） | `docs/results/m00_matrix/m00-lite.log` |
+| 3 | build-m00-nano | NANO Debug, Ninja | **12/12 通过**（2.05 s） | `docs/results/m00_matrix/m00-nano.log` |
+| 4 | build-m00-asan | FULL + `-fsanitize=address,undefined -fno-omit-frame-pointer` | **22/22 通过**（12.37 s） | `docs/results/m00_matrix/m00-asan.log` |
+| 5 | build-m00-analyzer | FULL + `-fanalyzer` | **22/22 通过**；编译 0 告警（-Werror 下告警即构建失败） | `docs/results/m00_matrix/m00-analyzer.log` |
+
+- `ucn_tests` 直跑输出：`UCN_PROFILE name=Full value=3 service=1 node_bytes=10080 link_bytes=40 event_runtime_bytes=432 stream_source_bytes=240 stream_default_storage_bytes=771 can_source_bytes=256 can_default_storage_bytes=1184 transfer_bytes=8840 transfer_rx_bytes=8192 cluster_bytes=1080 federation_bytes=3328` + `All UCN tests passed.`
+- Golden Trace 复核：`tests/golden/cluster_golden_trace.txt` 与测试运行时生成的 `cluster_golden_trace_actual.txt` 逐字节 **IDENTICAL**（各 34 行），M01 门禁就绪。
+- 测试清单（22 项）：ucn_tests（含全部 Cluster 故障注入、golden trace、夹具迁移用例）、cluster sim 64/256/1000 clean+impaired、64 head-failover/mobility/score-shift、64 fast head-failover/fast impaired、scale w0/w1/w2/w3/mixed smoke、tree capacity contract、w0/mixed address-limit reject（WILL_FAIL）。
+- 复跑脚本：`tools/m00_matrix.sh`（rm -rf 全新目录 → configure → build → ctest → 汇总），可随时重放本证据。
+
+记录时间：2026-08-17（M00 审计前完整重跑）。
+
 ---
 
-记录时间：2026-08-17。由 CLV2-M00 任务生成；每个后续里程碑增量更新。
+记录时间：2026-08-17（含审计前完整重跑）。由 CLV2-M00 任务生成；每个后续里程碑增量更新。
