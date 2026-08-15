@@ -133,7 +133,12 @@ extern "C" {
     (UCN_CLUSTER_FLAG_SYNC_BEGIN | UCN_CLUSTER_FLAG_SYNC_END | \
      UCN_CLUSTER_FLAG_SYNC_DELTA)
 #define UCN_CLUSTER_CONTROL_ENDPOINT ((ucn_endpoint_t)0xA0U)
-#define UCN_CLUSTER_MESSAGE_BYTES ((size_t)28U)
+/* C07.7 P1: BACKUP_REJECT reasons. */
+#define UCN_CLUSTER_BACKUP_REJECT_COVERAGE ((uint8_t)1U)
+#define UCN_CLUSTER_BACKUP_REJECT_NO_SPACE ((uint8_t)2U)
+#define UCN_CLUSTER_BACKUP_REJECT_UNSUPPORTED ((uint8_t)3U)
+#define UCN_CLUSTER_BACKUP_REJECT_EPOCH_CONFLICT ((uint8_t)4U)
+#define UCN_CLUSTER_MESSAGE_BYTES ((size_t)32U)
 #define UCN_CLUSTER_SCORE_MAX ((uint16_t)10000U)
 
 typedef char ucn_cluster_peers_must_be_1_to_255[
@@ -184,7 +189,13 @@ typedef enum ucn_cluster_message_type {
     UCN_CLUSTER_MSG_TAKEOVER_PREPARE = 14,
     UCN_CLUSTER_MSG_TAKEOVER_ACK = 15,
     UCN_CLUSTER_MSG_RECOVERY_DECLARE = 16,
-    UCN_CLUSTER_MSG_RECOVERY_ACK = 17
+    UCN_CLUSTER_MSG_RECOVERY_ACK = 17,
+    /* C07.7 P1: Backup -> Head, requests a full resync after a DELTA gap. */
+    UCN_CLUSTER_MSG_BACKUP_RESYNC_REQ = 18,
+    /* C07.7 P1: Backup -> Head, rejects the assignment (coverage / no
+     * space / unsupported) so the Head can immediately pick the next
+     * candidate instead of waiting for the member lease to expire. */
+    UCN_CLUSTER_MSG_BACKUP_REJECT = 19
 } ucn_cluster_message_type_t;
 
 /* Fixed 28 B wire format v3.  The first 16 B are shared; the trailing
@@ -215,6 +226,9 @@ typedef struct ucn_cluster_message {
     uint32_t recovery_nonce;
     uint32_t recovery_ttl_ms;
     uint32_t sync_token;
+    /* C07.7 P1: BACKUP_REJECT reason (COVERAGE_FAILED / NO_SPACE /
+     * UNSUPPORTED / EPOCH_CONFLICT). */
+    uint8_t reject_reason;
 } ucn_cluster_message_t;
 
 /* C07.5 control-plane Token Bucket state.  The Snapshot is sequence-
@@ -393,6 +407,17 @@ typedef struct ucn_cluster {
     bool backup_takeover_announce_active;
     ucn_node_id_t known_backup_node_id;
     uint32_t known_backup_generation;
+    /* C07.7 P1: the nonce of the JOIN_REQUEST this node last sent;
+     * JOIN_ACCEPT/JOIN_REJECT must echo it back as the join transaction
+     * id so a stale reject of an earlier attempt cannot abort a new one. */
+    uint32_t pending_join_nonce;
+    /* C07.7 P1: last accepted HEAD_STEPDOWN nonce (member side) so a
+     * replayed stepdown of the same epoch is ignored. */
+    uint32_t last_stepdown_nonce;
+    /* C07.7 P1: Head-side cooldown for a Backup candidate that rejected
+     * the assignment; skip it while cooling down. */
+    uint32_t backup_candidate_cooldown_until_ms;
+    ucn_node_id_t backup_rejected_node_id;
     /* C07.7 P1: the member's takeover vote is keyed on
      * (cluster_id, term, backup_generation), not term alone, so a vote in
      * one Cluster cannot block a legitimate takeover in another Cluster

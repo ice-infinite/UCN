@@ -6,14 +6,24 @@
 
 static void assign_backup(ucn_cluster_t *cluster, uint32_t now_ms);
 static void backup_resync(ucn_cluster_t *cluster);
+static ucn_result_t send_join_reply(ucn_cluster_t *cluster,
+                                    ucn_node_id_t destination,
+                                    ucn_cluster_message_type_t type,
+                                    uint32_t join_nonce);
 static void backup_clear_sync(ucn_cluster_t *cluster, uint32_t now_ms);
 static void start_backup_assignment_cycle(ucn_cluster_t *cluster,
                                           uint32_t now_ms);
 static void queue_backup_assignment_for_member(ucn_cluster_t *cluster,
                                                ucn_node_id_t member_node_id,
                                                uint32_t now_ms);
+static ucn_result_t send_cluster_message(ucn_cluster_t *cluster,
+                                         ucn_node_id_t destination,
+                                         const ucn_cluster_message_t *message);
 static ucn_result_t send_backup_assign(ucn_cluster_t *cluster,
                                        ucn_node_id_t destination);
+static ucn_result_t send_backup_resync_req(ucn_cluster_t *cluster);
+static ucn_result_t send_backup_reject(ucn_cluster_t *cluster,
+                                       uint8_t reason);
 
 #define CLUSTER_VERSION_OFFSET ((size_t)0U)
 #define CLUSTER_TYPE_OFFSET ((size_t)1U)
@@ -61,7 +71,7 @@ static bool role_is_valid(ucn_cluster_role_t role)
 static bool message_type_is_valid(ucn_cluster_message_type_t type)
 {
     return type >= UCN_CLUSTER_MSG_ADVERTISE &&
-           type <= UCN_CLUSTER_MSG_RECOVERY_ACK;
+           type <= UCN_CLUSTER_MSG_BACKUP_REJECT;
 }
 
 static bool node_id_field_is_valid(ucn_node_id_t node_id)
@@ -71,16 +81,22 @@ static bool node_id_field_is_valid(ucn_node_id_t node_id)
 
 static bool flags_are_valid(const ucn_cluster_message_t *message)
 {
+    /* C07.7 P1: strict whitelist.  Only the single marker values are legal
+     * for Type 12; any combination (BEGIN|END, BEGIN|DELTA, END|DELTA)
+     * is malformed so the handler can never mis-classify a frame. */
+    if (message->type == UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC) {
+        switch (message->flags) {
+        case 0U:
+        case UCN_CLUSTER_FLAG_SYNC_BEGIN:
+        case UCN_CLUSTER_FLAG_SYNC_END:
+        case UCN_CLUSTER_FLAG_SYNC_DELTA:
+            return true;
+        default:
+            return false;
+        }
+    }
     if ((message->flags & (uint8_t)~UCN_CLUSTER_KNOWN_FLAGS) != 0U) {
         return false;
-    }
-    if (message->type == UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC) {
-        /* C07.7 P2: BEGIN and END are mutually exclusive markers; a frame
-         * carrying both is malformed and would otherwise let the handler
-         * swallow the END after processing BEGIN. */
-        return (message->flags &
-                (UCN_CLUSTER_FLAG_SYNC_BEGIN | UCN_CLUSTER_FLAG_SYNC_END)) !=
-               (UCN_CLUSTER_FLAG_SYNC_BEGIN | UCN_CLUSTER_FLAG_SYNC_END);
     }
     return message->flags == 0U;
 }
@@ -117,13 +133,19 @@ static bool message_is_valid(const ucn_cluster_message_t *message)
     case UCN_CLUSTER_MSG_PRIMARY_HEARTBEAT:
         return message->role == UCN_CLUSTER_ROLE_HEAD;
     case UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC:
-        /* BEGIN/END markers carry no member record. */
+        /* C07.7 P1: Type 12 must come from the Head and must carry the
+         * exact Backup generation.  Marker frames carry no member record
+         * (member_node_id must be zero); data frames require a valid
+         * member id and full 32-bit nonce.  The member lease is
+         * implicit (config.lease_ms). */
+        if (message->role != UCN_CLUSTER_ROLE_HEAD ||
+            message->backup_generation == 0U) {
+            return false;
+        }
         if ((message->flags & (UCN_CLUSTER_FLAG_SYNC_BEGIN |
                                UCN_CLUSTER_FLAG_SYNC_END)) != 0U) {
-            return true;
+            return message->member_node_id == 0U;
         }
-        /* C07.7 P1: the member lease is implicit (config.lease_ms); only
-         * the node id and the full 32-bit nonce travel on the wire. */
         return node_id_field_is_valid(message->member_node_id) &&
                message->member_nonce != 0U;
     case UCN_CLUSTER_MSG_TAKEOVER_PREPARE:
@@ -132,6 +154,10 @@ static bool message_is_valid(const ucn_cluster_message_t *message)
     case UCN_CLUSTER_MSG_TAKEOVER_ACK:
         return message->backup_generation != 0U &&
                message->role == UCN_CLUSTER_ROLE_MEMBER;
+    case UCN_CLUSTER_MSG_BACKUP_RESYNC_REQ:
+    case UCN_CLUSTER_MSG_BACKUP_REJECT:
+        return message->backup_generation != 0U &&
+               message->role == UCN_CLUSTER_ROLE_BACKUP;
     case UCN_CLUSTER_MSG_RECOVERY_DECLARE:
         return message->recovery_nonce != 0U &&
                ucn_duration_is_valid(message->recovery_ttl_ms);
@@ -180,12 +206,22 @@ static void encode_trailing_12b(const ucn_cluster_message_t *message,
         write_u32_be(output + 8U, 0U);
         break;
     case UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC:
-        /* C07.7 P1: 32-bit membership_sequence + member_nonce on the wire.
-         * The member lease is implicit (config.lease_ms) so both counters
-         * fit the trailing 12 B. */
-        write_u32_be(output + 0U, message->member_node_id);
+        /* C07.7 P1: 16 B trailing (frame is 32 B): the Backup generation
+         * binds every snapshot/delta frame to the exact BackupEpoch, then
+         * member id + 32-bit sequence + 32-bit nonce.  The member lease
+         * is implicit (config.lease_ms). */
+        write_u32_be(output + 0U, message->backup_generation);
+        write_u32_be(output + 4U, message->member_node_id);
+        write_u32_be(output + 8U, message->membership_sequence);
+        write_u32_be(output + 12U, message->member_nonce);
+        break;
+    case UCN_CLUSTER_MSG_BACKUP_RESYNC_REQ:
+    case UCN_CLUSTER_MSG_BACKUP_REJECT:
+        /* generation + sequence (resync) or reason (reject) bind the
+         * request to the exact BackupEpoch. */
+        write_u32_be(output + 0U, message->backup_generation);
         write_u32_be(output + 4U, message->membership_sequence);
-        write_u32_be(output + 8U, message->member_nonce);
+        output[8U] = message->reject_reason;
         break;
     case UCN_CLUSTER_MSG_TAKEOVER_PREPARE:
     case UCN_CLUSTER_MSG_TAKEOVER_ACK:
@@ -262,9 +298,16 @@ static void decode_trailing_12b(ucn_cluster_message_t *message,
         message->membership_sequence = read_u32_be(input + 4U);
         break;
     case UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC:
-        message->member_node_id = read_u32_be(input + 0U);
+        message->backup_generation = read_u32_be(input + 0U);
+        message->member_node_id = read_u32_be(input + 4U);
+        message->membership_sequence = read_u32_be(input + 8U);
+        message->member_nonce = read_u32_be(input + 12U);
+        break;
+    case UCN_CLUSTER_MSG_BACKUP_RESYNC_REQ:
+    case UCN_CLUSTER_MSG_BACKUP_REJECT:
+        message->backup_generation = read_u32_be(input + 0U);
         message->membership_sequence = read_u32_be(input + 4U);
-        message->member_nonce = read_u32_be(input + 8U);
+        message->reject_reason = input[8U];
         break;
     case UCN_CLUSTER_MSG_TAKEOVER_PREPARE:
     case UCN_CLUSTER_MSG_TAKEOVER_ACK:
@@ -918,10 +961,8 @@ static ucn_result_t handle_join_request(
     member = allocate_member(cluster, source);
     if (member == NULL) {
         cluster->stats.joins_rejected++;
-        (void)send_message(cluster, source, UCN_CLUSTER_MSG_JOIN_REJECT,
-                           UCN_CLUSTER_ROLE_HEAD, cluster->cluster_id,
-                           cluster->term, cluster->config.local_node_id,
-                           cluster->config.head_score, available_capacity(cluster));
+        (void)send_join_reply(cluster, source, UCN_CLUSTER_MSG_JOIN_REJECT,
+                              message->nonce);
         return UCN_ERR_NO_SPACE;
     }
     member_was_present = member->last_nonce != 0U;
@@ -938,10 +979,31 @@ static ucn_result_t handle_join_request(
         backup_resync(cluster);
         queue_backup_assignment_for_member(cluster, source, now_ms);
     }
-    return send_message(cluster, source, UCN_CLUSTER_MSG_JOIN_ACCEPT,
-                        UCN_CLUSTER_ROLE_HEAD, cluster->cluster_id,
-                        cluster->term, cluster->config.local_node_id,
-                        cluster->config.head_score, available_capacity(cluster));
+    /* C07.7 P1: echo the request nonce (join txid). */
+    return send_join_reply(cluster, source, UCN_CLUSTER_MSG_JOIN_ACCEPT,
+                           message->nonce);
+}
+
+/* C07.7 P1: JOIN_ACCEPT/JOIN_REJECT carry the join transaction id by
+ * echoing the request nonce, so a stale reply cannot match a newer join. */
+static ucn_result_t send_join_reply(ucn_cluster_t *cluster,
+                                    ucn_node_id_t destination,
+                                    ucn_cluster_message_type_t type,
+                                    uint32_t join_nonce)
+{
+    ucn_cluster_message_t message;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = type;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = cluster->cluster_id;
+    message.term = cluster->term;
+    message.head_node_id = cluster->config.local_node_id;
+    message.head_score = cluster->config.head_score;
+    message.available_capacity = available_capacity(cluster);
+    message.lease_ms = cluster->config.lease_ms;
+    message.nonce = join_nonce;
+    return send_cluster_message(cluster, destination, &message);
 }
 
 static ucn_result_t handle_join_accept(
@@ -961,7 +1023,9 @@ static ucn_result_t handle_join_accept(
         if (source != cluster->pending_head_node_id ||
             message->head_node_id != source ||
             message->cluster_id != cluster->pending_cluster_id ||
-            message->term != cluster->pending_term) {
+            message->term != cluster->pending_term ||
+            /* C07.7 P1: the accept must echo the exact join txid. */
+            message->nonce != cluster->pending_join_nonce) {
             return UCN_ERR_ACCESS;
         }
     }
@@ -1116,10 +1180,14 @@ static void consider_head_offer(
                                      cluster->config.head_min_tenure_ms)) {
                 backup_challenge(cluster, now_ms);
             }
-        } else if (candidate->term > cluster->term) {
-            /* C07.7 P1: a legitimately newer-generation Head must
-             * interrupt any pending takeover; the Backup abandons it and
-             * joins the newer Head instead of risking split brain. */
+        } else if (candidate->cluster_id == cluster->cluster_id &&
+                   candidate->term > cluster->term) {
+            /* C07.7 P1: only a same-Cluster, legitimately newer-Term Head
+             * interrupts a pending takeover; the Backup abandons it and
+             * joins the newer Head instead of risking split brain.  A
+             * different Cluster's term is NOT comparable (Target §8.3):
+             * cross-Cluster convergence is owned by Head-to-Head Merge,
+             * never by a Backup jumping at a foreign term. */
             cluster->backup_takeover_active = false;
             backup_clear_sync(cluster, now_ms);
             begin_join(cluster, candidate, now_ms);
@@ -1326,9 +1394,15 @@ static void assign_backup(ucn_cluster_t *cluster, uint32_t now_ms)
             const ucn_cluster_candidate_t *candidate;
 
             /* Only a head-capable member (one that advertised as a candidate)
-             * may become Backup; skip otherwise. */
+             * may become Backup; skip otherwise.  A candidate that recently
+             * rejected the assignment cools down before it is retried. */
             candidate = find_candidate(cluster, cluster->members[index].node_id);
-            if (candidate == NULL) {
+            if (candidate == NULL ||
+                (cluster->backup_candidate_cooldown_until_ms != 0U &&
+                 !ucn_deadline_expired(now_ms,
+                                       cluster->backup_candidate_cooldown_until_ms) &&
+                 cluster->members[index].node_id ==
+                     cluster->backup_rejected_node_id)) {
                 continue;
             }
             if (best == NULL || candidate->head_score > best->head_score ||
@@ -1465,13 +1539,28 @@ static ucn_result_t handle_backup_member_sync(ucn_cluster_t *cluster,
         source != cluster->backup_primary_node_id) {
         return UCN_ERR_ACCESS;
     }
+    /* C07.7 P1: every Type 12 frame (BEGIN / member / END / DELTA) must
+     * belong to the exact current Backup generation; a delayed frame of
+     * an older generation is replayed and cannot poison the mirror. */
+    if (message->backup_generation != cluster->backup_generation) {
+        cluster->stats.stale_messages++;
+        return UCN_ERR_REPLAY;
+    }
     if ((message->flags & UCN_CLUSTER_FLAG_SYNC_DELTA) != 0U) {
         /* C07.7 P1: live incremental refresh: update the member's nonce
          * without touching syncing/ready so a periodic refresh can never
          * strand a ready Backup during a Primary failure.  A stale DELTA
-         * (already applied sequence) is ignored. */
+         * (already applied sequence) is ignored.  A sequence gap means a
+         * DELTA was lost: the mirror may be missing a member nonce, so
+         * request a full resync instead of silently continuing. */
         if (message->membership_sequence <= cluster->membership_sequence) {
             return UCN_OK;
+        }
+        if (message->membership_sequence != cluster->membership_sequence + 1U) {
+            cluster->backup_ready = false;
+            cluster->backup_syncing = true;
+            (void)send_backup_resync_req(cluster);
+            return UCN_ERR_REPLAY;
         }
         member = backup_allocate_mirror(cluster, message->member_node_id);
         if (member == NULL) {
@@ -1486,7 +1575,8 @@ static ucn_result_t handle_backup_member_sync(ucn_cluster_t *cluster,
         return UCN_OK;
     }
     if ((message->flags & UCN_CLUSTER_FLAG_SYNC_BEGIN) != 0U) {
-        /* A fresh snapshot re-enters SYNCING and drops any stale mirror. */
+        /* A fresh snapshot re-enters SYNCING and drops any stale mirror.
+         * The new snapshot restarts its own membership_sequence. */
         (void)clear_members(cluster);
         cluster->membership_sequence = message->membership_sequence;
         cluster->backup_syncing = true;
@@ -1519,11 +1609,17 @@ static ucn_result_t handle_backup_member_sync(ucn_cluster_t *cluster,
             return send_backup_ready(cluster);
         }
         cluster->stats.joins_rejected++;
+        /* C07.7 P1: tell the Head immediately so it can pick the next
+         * candidate instead of waiting for the member lease to expire. */
+        (void)send_backup_reject(cluster,
+                                  UCN_CLUSTER_BACKUP_REJECT_COVERAGE);
         backup_clear_sync(cluster, now_ms);
         return UCN_OK;
     }
     member = backup_allocate_mirror(cluster, message->member_node_id);
     if (member == NULL) {
+        (void)send_backup_reject(cluster,
+                                  UCN_CLUSTER_BACKUP_REJECT_NO_SPACE);
         backup_clear_sync(cluster, now_ms);
         return UCN_ERR_NO_SPACE;
     }
@@ -1547,19 +1643,102 @@ static ucn_result_t handle_primary_heartbeat(ucn_cluster_t *cluster,
         return UCN_ERR_ACCESS;
     }
     /* C07.7 P1: only heartbeats of the exact Backup epoch refresh this
-     * Backup's liveness; a replayed heartbeat from an older generation or
-     * a different term cannot mask a genuinely dead Primary. */
+     * Backup's liveness; a replayed heartbeat from an older generation,
+     * a different term, or a stale membership_sequence of the same
+     * generation cannot mask a genuinely dead Primary. */
     if (message->cluster_id != cluster->cluster_id ||
         message->term != cluster->term ||
-        message->backup_generation != cluster->backup_generation) {
+        message->backup_generation != cluster->backup_generation ||
+        message->membership_sequence < cluster->membership_sequence) {
         cluster->stats.stale_messages++;
         return UCN_ERR_REPLAY;
     }
+    /* A heartbeat may carry a newer sequence if a DELTA was lost and the
+     * mirror later resynced; adopt it so liveness and epoch state stay
+     * in lockstep. */
+    cluster->membership_sequence = message->membership_sequence;
     cluster->backup_primary_deadline_ms =
         ucn_deadline_from_now(now_ms, cluster->config.keepalive_interval_ms);
     cluster->backup_primary_lease_deadline_ms =
         ucn_deadline_from_now(now_ms, cluster->config.lease_ms);
     cluster->backup_missed_heartbeats = 0U;
+    return UCN_OK;
+}
+
+/* C07.7 P1: Backup -> Head, request a full resync after a DELTA gap. */
+static ucn_result_t send_backup_resync_req(ucn_cluster_t *cluster)
+{
+    ucn_cluster_message_t message;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_RESYNC_REQ;
+    message.role = UCN_CLUSTER_ROLE_BACKUP;
+    message.cluster_id = cluster->cluster_id;
+    message.term = cluster->term;
+    message.head_node_id = cluster->backup_primary_node_id;
+    message.backup_generation = cluster->backup_generation;
+    message.membership_sequence = cluster->membership_sequence;
+    return send_cluster_message(cluster, cluster->backup_primary_node_id,
+                                 &message);
+}
+
+/* C07.7 P1: Backup -> Head, reject the assignment so the Head can
+ * immediately pick the next candidate. */
+static ucn_result_t send_backup_reject(ucn_cluster_t *cluster,
+                                       uint8_t reason)
+{
+    ucn_cluster_message_t message;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_REJECT;
+    message.role = UCN_CLUSTER_ROLE_BACKUP;
+    message.cluster_id = cluster->cluster_id;
+    message.term = cluster->term;
+    message.head_node_id = cluster->backup_primary_node_id;
+    message.backup_generation = cluster->backup_generation;
+    message.reject_reason = reason;
+    return send_cluster_message(cluster, cluster->backup_primary_node_id,
+                                 &message);
+}
+
+/* C07.7 P1: Head-side handler for BACKUP_RESYNC_REQ: restart the
+ * snapshot so the Backup converges again after a lost DELTA. */
+static ucn_result_t handle_backup_resync_req(ucn_cluster_t *cluster,
+                                              ucn_node_id_t source,
+                                              const ucn_cluster_message_t *message)
+{
+    if (cluster->role != UCN_CLUSTER_ROLE_HEAD ||
+        source != cluster->backup_node_id ||
+        message->cluster_id != cluster->cluster_id ||
+        message->term != cluster->term ||
+        message->backup_generation != cluster->backup_generation) {
+        return UCN_ERR_ACCESS;
+    }
+    backup_resync(cluster);
+    return UCN_OK;
+}
+
+/* C07.7 P1: Head-side handler for BACKUP_REJECT: cool the candidate down
+ * and immediately select the next one instead of waiting for the member
+ * lease to expire. */
+static ucn_result_t handle_backup_reject(ucn_cluster_t *cluster,
+                                          ucn_node_id_t source,
+                                          const ucn_cluster_message_t *message,
+                                          uint32_t now_ms)
+{
+    if (cluster->role != UCN_CLUSTER_ROLE_HEAD ||
+        source != cluster->backup_node_id ||
+        message->cluster_id != cluster->cluster_id ||
+        message->term != cluster->term ||
+        message->backup_generation != cluster->backup_generation) {
+        return UCN_ERR_ACCESS;
+    }
+    cluster->backup_candidate_cooldown_until_ms = ucn_deadline_from_now(
+        now_ms, cluster->config.keepalive_interval_ms);
+    cluster->backup_rejected_node_id = source;
+    cluster->backup_node_id = 0U;
+    cluster->backup_ready = false;
+    assign_backup(cluster, now_ms);
     return UCN_OK;
 }
 
@@ -2142,7 +2321,9 @@ ucn_result_t ucn_cluster_receive(
         message.type != UCN_CLUSTER_MSG_BACKUP_READY &&
         message.type != UCN_CLUSTER_MSG_TAKEOVER_PREPARE &&
         message.type != UCN_CLUSTER_MSG_TAKEOVER_ACK &&
-        message.type != UCN_CLUSTER_MSG_RECOVERY_ACK) {
+        message.type != UCN_CLUSTER_MSG_RECOVERY_ACK &&
+        message.type != UCN_CLUSTER_MSG_BACKUP_RESYNC_REQ &&
+        message.type != UCN_CLUSTER_MSG_BACKUP_REJECT) {
         cluster->stats.malformed_messages++;
         return UCN_ERR_MALFORMED;
     }
@@ -2182,7 +2363,10 @@ ucn_result_t ucn_cluster_receive(
             if (cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING &&
                 source == cluster->pending_head_node_id &&
                 message.cluster_id == cluster->pending_cluster_id &&
-                message.term == cluster->pending_term) {
+                message.term == cluster->pending_term &&
+                /* C07.7 P1: only a reject of the exact join txid ends the
+                 * attempt; a stale reject of an earlier join is ignored. */
+                message.nonce == cluster->pending_join_nonce) {
                 cluster->stats.joins_rejected++;
                 set_detached(cluster, now_ms,
                              cluster->config.observation_ms);
@@ -2222,7 +2406,11 @@ ucn_result_t ucn_cluster_receive(
                  cluster->role == UCN_CLUSTER_ROLE_BACKUP) &&
                 source == cluster->head_node_id &&
                 message.cluster_id == cluster->cluster_id &&
-                message.term == cluster->term) {
+                message.term == cluster->term &&
+                /* C07.7 P1: a replayed STEPDOWN of the same epoch is
+                 * ignored via the strictly increasing stepdown nonce. */
+                message.nonce > cluster->last_stepdown_nonce) {
+                cluster->last_stepdown_nonce = message.nonce;
                 if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
                     backup_clear_sync(cluster, now_ms);
                 } else {
@@ -2240,6 +2428,10 @@ ucn_result_t ucn_cluster_receive(
             return handle_backup_member_sync(cluster, source, &message, now_ms);
         case UCN_CLUSTER_MSG_PRIMARY_HEARTBEAT:
             return handle_primary_heartbeat(cluster, source, &message, now_ms);
+        case UCN_CLUSTER_MSG_BACKUP_RESYNC_REQ:
+            return handle_backup_resync_req(cluster, source, &message);
+        case UCN_CLUSTER_MSG_BACKUP_REJECT:
+            return handle_backup_reject(cluster, source, &message, now_ms);
         case UCN_CLUSTER_MSG_TAKEOVER_PREPARE:
             return handle_takeover_prepare(cluster, source, &message, now_ms);
         case UCN_CLUSTER_MSG_TAKEOVER_ACK:
@@ -2485,6 +2677,7 @@ static void send_backup_delta_step(ucn_cluster_t *cluster)
     message.cluster_id = cluster->cluster_id;
     message.term = cluster->term;
     message.head_node_id = cluster->config.local_node_id;
+    message.backup_generation = cluster->backup_generation;
     message.flags = UCN_CLUSTER_FLAG_SYNC_DELTA;
     next_sequence = cluster->membership_sequence == UINT32_MAX ?
                     1U : cluster->membership_sequence + 1U;
@@ -2558,6 +2751,7 @@ static void send_backup_snapshot_step(ucn_cluster_t *cluster)
     message.cluster_id = cluster->cluster_id;
     message.term = cluster->term;
     message.head_node_id = cluster->config.local_node_id;
+    message.backup_generation = cluster->backup_generation;
     /* Build the next frame without committing sequence/cursor yet. */
     next_sequence = cluster->membership_sequence == UINT32_MAX ?
                     1U : cluster->membership_sequence + 1U;
@@ -2687,11 +2881,24 @@ static void expire_members(ucn_cluster_t *cluster, uint32_t now_ms)
 
 static void send_join_request(ucn_cluster_t *cluster, uint32_t now_ms)
 {
-    ucn_result_t result = send_message(
-        cluster, cluster->pending_head_node_id, UCN_CLUSTER_MSG_JOIN_REQUEST,
-        UCN_CLUSTER_ROLE_JOIN_PENDING, cluster->pending_cluster_id,
-        cluster->pending_term, cluster->pending_head_node_id,
-        cluster->pending_head_score, 0U);
+    ucn_cluster_message_t message;
+    ucn_result_t result;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_JOIN_REQUEST;
+    message.role = UCN_CLUSTER_ROLE_JOIN_PENDING;
+    message.cluster_id = cluster->pending_cluster_id;
+    message.term = cluster->pending_term;
+    message.head_node_id = cluster->pending_head_node_id;
+    message.head_score = cluster->pending_head_score;
+    message.lease_ms = cluster->config.lease_ms;
+    /* C07.7 P1: the request nonce is the join transaction id;
+     * JOIN_ACCEPT/JOIN_REJECT must echo it so a stale reject of an
+     * earlier attempt cannot abort a newer one. */
+    message.nonce = next_nonce(cluster);
+    cluster->pending_join_nonce = message.nonce;
+    result = send_cluster_message(cluster, cluster->pending_head_node_id,
+                                   &message);
 
     if (result == UCN_OK) {
         cluster->stats.joins_requested++;
