@@ -228,6 +228,302 @@ static int cluster_test_network_init(
     return 0;
 }
 
+/* C07.7 P1: a replayed BACKUP_READY from an older epoch (stale
+ * membership_sequence or generation) must be rejected so the Head never
+ * marks a stale mirror as ready. */
+static int cluster_test_backup_ready_fencing(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    head = &network.nodes[0];
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.backup_node_id = network.nodes[1].node_id;
+    head->cluster.backup_generation = 1U;
+    head->cluster.membership_sequence = 3U;
+    head->cluster.backup_ready = false;
+
+    /* Current epoch READY: accepted. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_READY;
+    message.role = UCN_CLUSTER_ROLE_BACKUP;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.backup_generation = 1U;
+    message.membership_sequence = 3U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&head->cluster, network.nodes[1].node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(head->cluster.backup_ready == true);
+
+    /* Stale sequence of the same generation: rejected as replay. */
+    message.membership_sequence = 2U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&head->cluster, network.nodes[1].node_id,
+                                    true, encoded, sizeof(encoded)) ==
+                UCN_ERR_REPLAY);
+
+    /* Stale generation: rejected. */
+    head->cluster.backup_ready = false;
+    message.membership_sequence = 3U;
+    message.backup_generation = 0U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&head->cluster, network.nodes[1].node_id,
+                                    true, encoded, sizeof(encoded)) ==
+                UCN_ERR_REPLAY);
+    TEST_ASSERT(head->cluster.backup_ready == false);
+    return 0;
+}
+
+/* C07.7 P1: a replayed PRIMARY_HEARTBEAT from an older generation must
+ * not refresh the Backup's liveness. */
+static int cluster_test_primary_heartbeat_fencing(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    cluster_test_node_t *backup;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    head = &network.nodes[0];
+    backup = &network.nodes[1];
+    backup->cluster.role = UCN_CLUSTER_ROLE_BACKUP;
+    backup->cluster.cluster_id = 1U;
+    backup->cluster.term = 1U;
+    backup->cluster.head_node_id = head->node_id;
+    backup->cluster.backup_primary_node_id = head->node_id;
+    backup->cluster.backup_generation = 2U;
+    backup->cluster.backup_missed_heartbeats = 3U;
+    backup->cluster.backup_primary_deadline_ms = 1U;
+    backup->cluster.backup_primary_lease_deadline_ms = 1U;
+    network.now_ms = 100U;
+
+    /* Stale generation heartbeat: rejected, liveness untouched. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_PRIMARY_HEARTBEAT;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.backup_generation = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) ==
+                UCN_ERR_REPLAY);
+    TEST_ASSERT(backup->cluster.backup_missed_heartbeats == 3U);
+
+    /* Current generation heartbeat: accepted and refreshes liveness. */
+    message.backup_generation = 2U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.backup_missed_heartbeats == 0U);
+    return 0;
+}
+
+/* C07.7 P1: the Type 12 member nonce and membership sequence round-trip
+ * as full 32-bit values (no 16-bit truncation). */
+static int cluster_test_member_nonce_32bit(void)
+{
+    ucn_cluster_message_t input;
+    ucn_cluster_message_t output;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    (void)memset(&input, 0, sizeof(input));
+    input.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    input.role = UCN_CLUSTER_ROLE_HEAD;
+    input.cluster_id = 10U;
+    input.term = 2U;
+    input.head_node_id = 4U;
+    input.member_node_id = 55U;
+    input.membership_sequence = UINT32_C(0x00010003);
+    input.member_nonce = UINT32_C(0x00010010);
+    TEST_ASSERT(ucn_cluster_message_encode(&input, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_OK);
+    TEST_ASSERT(output.membership_sequence == UINT32_C(0x00010003));
+    TEST_ASSERT(output.member_nonce == UINT32_C(0x00010010));
+    return 0;
+}
+
+/* C07.7 P1: the Backup's own vote counts toward the takeover majority.
+ * Mirror = Backup + one member => active=2, majority=2; the Backup
+ * self-vote plus the single member ACK must complete the takeover. */
+static int cluster_test_takeover_self_vote(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *backup;
+    cluster_test_node_t *member;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    backup = &network.nodes[1];
+    member = &network.nodes[2];
+    backup->cluster.role = UCN_CLUSTER_ROLE_BACKUP;
+    backup->cluster.cluster_id = 1U;
+    backup->cluster.term = 1U;
+    backup->cluster.head_node_id = network.nodes[0].node_id;
+    backup->cluster.backup_primary_node_id = network.nodes[0].node_id;
+    backup->cluster.backup_generation = 1U;
+    backup->cluster.backup_ready = true;
+    /* Mirror: Backup itself + one member. */
+    backup->cluster.members[0].occupied = true;
+    backup->cluster.members[0].node_id = backup->node_id;
+    backup->cluster.members[1].occupied = true;
+    backup->cluster.members[1].node_id = member->node_id;
+    backup->cluster.backup_primary_deadline_ms = 1U;
+    backup->cluster.backup_missed_heartbeats = UCN_CLUSTER_BACKUP_MISS_LIMIT;
+    backup->cluster.backup_primary_lease_deadline_ms = 1U;
+    network.now_ms = 100U;
+
+    /* Start takeover from step(). */
+    TEST_ASSERT(ucn_cluster_step(&backup->cluster) == UCN_OK);
+    TEST_ASSERT(backup->cluster.backup_takeover_active == true);
+
+    /* The one member ACKs; the Backup's own vote is already counted. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_TAKEOVER_ACK;
+    message.role = UCN_CLUSTER_ROLE_MEMBER;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = network.nodes[0].node_id;
+    message.backup_generation = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, member->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    TEST_ASSERT(backup->cluster.term == 2U);
+    return 0;
+}
+
+/* C07.7 P1: the member's takeover vote is keyed on
+ * (cluster_id, term, backup_generation), so a vote cast in Cluster A at
+ * term 10 does not block a legitimate takeover in Cluster B at term 10. */
+static int cluster_test_takeover_vote_identity(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *member;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    member = &network.nodes[2];
+    member->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    member->cluster.cluster_id = 2U; /* Cluster B */
+    member->cluster.term = 10U;
+    member->cluster.head_node_id = network.nodes[0].node_id;
+    member->cluster.known_backup_node_id = network.nodes[1].node_id;
+    member->cluster.known_backup_generation = 4U;
+    /* Simulate an old vote in Cluster A term 10, generation 2. */
+    member->cluster.member_voted_term = 10U;
+    member->cluster.member_voted_cluster_id = 1U;
+    member->cluster.member_voted_generation = 2U;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_TAKEOVER_PREPARE;
+    message.role = UCN_CLUSTER_ROLE_BACKUP;
+    message.cluster_id = 2U;
+    message.term = 10U;
+    message.head_node_id = network.nodes[0].node_id;
+    message.backup_generation = 4U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&member->cluster, network.nodes[1].node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(member->cluster.member_voted_cluster_id == 2U);
+    TEST_ASSERT(member->cluster.member_voted_generation == 4U);
+    /* A second PREPARE for the same identity is deduplicated. */
+    TEST_ASSERT(ucn_cluster_receive(&member->cluster, network.nodes[1].node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
+    return 0;
+}
+
+/* C07.7 P1: a Backup that observes a legitimately higher-Term Head during
+ * its takeover window must abandon the takeover and join that Head. */
+static int cluster_test_takeover_interrupted_by_newer_head(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *backup;
+    cluster_test_node_t *newer_head;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    backup = &network.nodes[1];
+    newer_head = &network.nodes[0];
+    backup->cluster.role = UCN_CLUSTER_ROLE_BACKUP;
+    backup->cluster.cluster_id = 1U;
+    backup->cluster.term = 1U;
+    backup->cluster.head_node_id = newer_head->node_id;
+    backup->cluster.backup_primary_node_id = newer_head->node_id;
+    backup->cluster.backup_generation = 1U;
+    backup->cluster.backup_takeover_active = true;
+    backup->cluster.backup_primary_lease_deadline_ms = 1U;
+    network.now_ms = 50U;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_ADVERTISE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 2U; /* different, newer Cluster */
+    message.term = 3U;       /* higher than the Backup's term 1 */
+    message.head_node_id = newer_head->node_id;
+    message.head_score = 9000U;
+    message.available_capacity = 2U;
+    message.lease_ms = 8000U;
+    message.nonce = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, newer_head->node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.backup_takeover_active == false);
+    TEST_ASSERT(backup->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    return 0;
+}
+
+/* C07.7 P1: available_capacity == 0 only gates new JOINs; it must not
+ * block a higher-Term Head from converging a full Head onto it. */
+static int cluster_test_full_head_term_convergence(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    head = &network.nodes[0];
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.config.head_score = 7000U;
+    head->cluster.current_head_score = 7000U;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_ADVERTISE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 2U;
+    message.term = 2U; /* newer generation */
+    message.head_node_id = network.nodes[1].node_id;
+    message.head_score = 6000U; /* lower score but newer term */
+    message.available_capacity = 0U; /* full */
+    message.lease_ms = 8000U;
+    message.nonce = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    network.now_ms = 60U;
+    TEST_ASSERT(ucn_cluster_receive(&head->cluster, network.nodes[1].node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(head->cluster.role == UCN_CLUSTER_ROLE_STEPPING_DOWN);
+    TEST_ASSERT(head->cluster.pending_head_node_id == network.nodes[1].node_id);
+    return 0;
+}
+
 static int cluster_test_timing_profiles(void)
 {
     ucn_cluster_config_t config;
@@ -385,15 +681,14 @@ static int cluster_test_v3_codec(void)
     input.term = 2U;
     input.head_node_id = 4U;
     input.member_node_id = 55U;
-    input.member_lease_ms = 8000U;
-    input.membership_sequence = 3U;
-    input.member_nonce = 42U;
+    input.membership_sequence = UINT32_C(0x10003);
+    input.member_nonce = UINT32_C(0x1000002A);
     TEST_ASSERT(ucn_cluster_message_encode(&input, encoded) == UCN_OK);
     TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
                 UCN_OK);
     TEST_ASSERT(output.member_node_id == 55U &&
-                output.member_lease_ms == 8000U &&
-                output.membership_sequence == 3U && output.member_nonce == 42U);
+                output.membership_sequence == UINT32_C(0x10003) &&
+                output.member_nonce == UINT32_C(0x1000002A));
 
     /* Type 13 PRIMARY_HEARTBEAT. */
     (void)memset(&input, 0, sizeof(input));
@@ -587,6 +882,9 @@ static int cluster_test_backup_sync(void)
     TEST_ASSERT(backup->cluster.backup_syncing == false);
     TEST_ASSERT(network.queue_count == 1U); /* BACKUP_READY pending. */
 
+    /* The Head's own snapshot sequence reached 3 (END sent); the READY
+     * must match this exact epoch (generation 1, sequence 3). */
+    head->cluster.membership_sequence = 3U;
     /* Deliver BACKUP_READY to head. */
     TEST_ASSERT(cluster_test_deliver(&network) == 0);
     TEST_ASSERT(head->cluster.backup_ready == true);
@@ -872,6 +1170,156 @@ static int cluster_test_recovery_head(void)
     return 0;
 }
 
+/* C07.7 P0-1: RECOVERY_DECLARE must actually re-form a working cluster.
+ * The surviving headless member must switch to MEMBER of the recovery
+ * Cluster (cluster_id/head_node_id = declaring node) and the Recovery
+ * Head must track it as a member. */
+static int cluster_test_recovery_forms_cluster(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *candidate;
+    cluster_test_node_t *peer;
+    uint32_t now_ms;
+    size_t index;
+    bool found = false;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.nodes[0].alive = false; /* Primary gone */
+    network.nodes[1].alive = false; /* Backup gone */
+    candidate = &network.nodes[2];
+    peer = &network.nodes[3];
+    candidate->cluster.config.head_capable = true;
+    candidate->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    candidate->cluster.cluster_id = 1U;
+    candidate->cluster.term = 1U;
+    candidate->cluster.head_node_id = UINT32_C(1);
+    candidate->cluster.head_lease_expires_at_ms = 1U;
+    peer->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    peer->cluster.cluster_id = 1U;
+    peer->cluster.term = 1U;
+    peer->cluster.head_node_id = UINT32_C(1);
+    peer->cluster.head_lease_expires_at_ms = 1U;
+
+    for (now_ms = 0U; now_ms <= 40U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    TEST_ASSERT(candidate->cluster.role == UCN_CLUSTER_ROLE_RECOVERY_HEAD);
+    /* The surviving member joins the recovery Cluster. */
+    TEST_ASSERT(peer->cluster.role == UCN_CLUSTER_ROLE_MEMBER);
+    TEST_ASSERT(peer->cluster.cluster_id == candidate->node_id);
+    TEST_ASSERT(peer->cluster.head_node_id == candidate->node_id);
+    TEST_ASSERT(peer->cluster.term == 1U);
+    /* The Recovery Head tracks the member. */
+    for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+        if (candidate->cluster.members[index].occupied &&
+            candidate->cluster.members[index].node_id == peer->node_id) {
+            found = true;
+            break;
+        }
+    }
+    TEST_ASSERT(found);
+    /* Lease keeps the member attached across the Recovery Head's
+     * periodic advertisement. */
+    for (now_ms = 41U; now_ms <= 80U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    TEST_ASSERT(peer->cluster.role == UCN_CLUSTER_ROLE_MEMBER);
+    TEST_ASSERT(peer->cluster.head_node_id == candidate->node_id);
+    return 0;
+}
+
+/* C07.7 P0-2: a completely isolated node (zero visible ADMITTED peers)
+ * must NOT self-declare a Recovery Head. */
+static int cluster_test_recovery_requires_peers(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *solo;
+    uint32_t now_ms;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.nodes[1].alive = false;
+    network.nodes[2].alive = false;
+    network.nodes[3].alive = false;
+    solo = &network.nodes[0];
+    solo->cluster.config.head_capable = true;
+    solo->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    solo->cluster.cluster_id = 1U;
+    solo->cluster.term = 1U;
+    /* A dead foreign Head (not this node): the Member must never send a
+     * Keepalive to its own node ID. */
+    solo->cluster.head_node_id = UINT32_C(2);
+    solo->cluster.head_lease_expires_at_ms = 1U;
+
+    for (now_ms = 0U; now_ms <= 300U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+        TEST_ASSERT(solo->cluster.role != UCN_CLUSTER_ROLE_RECOVERY_HEAD);
+    }
+    return 0;
+}
+
+/* C07.7 P0-3: two recovery candidates converge to exactly one Recovery
+ * Head via deterministic (recovery_nonce, node-id) arbitration; the loser
+ * joins the winner instead of declaring a second Head, and must not
+ * clobber its own recovery_nonce with the remote value. */
+static int cluster_test_recovery_conflict_resolved(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *a;
+    cluster_test_node_t *b;
+    uint32_t now_ms;
+    size_t index;
+    unsigned recovery_heads = 0U;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.nodes[0].alive = false;
+    network.nodes[1].alive = false;
+    a = &network.nodes[2];
+    b = &network.nodes[3];
+    a->cluster.config.head_capable = true;
+    b->cluster.config.head_capable = true;
+    a->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    a->cluster.cluster_id = 1U;
+    a->cluster.term = 1U;
+    a->cluster.head_node_id = UINT32_C(1);
+    a->cluster.head_lease_expires_at_ms = 1U;
+    b->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    b->cluster.cluster_id = 1U;
+    b->cluster.term = 1U;
+    b->cluster.head_node_id = UINT32_C(1);
+    b->cluster.head_lease_expires_at_ms = 1U;
+
+    for (now_ms = 0U; now_ms <= 120U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    for (index = 0U; index < CLUSTER_TEST_NODES; ++index) {
+        if (network.nodes[index].cluster.role ==
+            UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+            recovery_heads++;
+        }
+    }
+    TEST_ASSERT(recovery_heads == 1U);
+    /* The loser joined the winner. */
+    for (index = 0U; index < CLUSTER_TEST_NODES; ++index) {
+        if (network.nodes[index].cluster.role ==
+            UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+            const ucn_node_id_t winner = network.nodes[index].node_id;
+            size_t other;
+
+            for (other = 0U; other < CLUSTER_TEST_NODES; ++other) {
+                if (other != index && network.nodes[other].alive) {
+                    TEST_ASSERT(network.nodes[other].cluster.role ==
+                                UCN_CLUSTER_ROLE_MEMBER);
+                    TEST_ASSERT(network.nodes[other].cluster.head_node_id ==
+                                winner);
+                }
+            }
+        }
+    }
+    (void)a;
+    (void)b;
+    return 0;
+}
+
 static int cluster_test_stable_switchback(void)
 {
     cluster_test_network_t network;
@@ -989,8 +1437,18 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_codec_and_security() == 0);
     TEST_ASSERT(cluster_test_v3_codec() == 0);
     TEST_ASSERT(cluster_test_backup_sync() == 0);
+    TEST_ASSERT(cluster_test_backup_ready_fencing() == 0);
+    TEST_ASSERT(cluster_test_primary_heartbeat_fencing() == 0);
+    TEST_ASSERT(cluster_test_member_nonce_32bit() == 0);
     TEST_ASSERT(cluster_test_takeover_guard() == 0);
+    TEST_ASSERT(cluster_test_takeover_self_vote() == 0);
+    TEST_ASSERT(cluster_test_takeover_vote_identity() == 0);
+    TEST_ASSERT(cluster_test_takeover_interrupted_by_newer_head() == 0);
+    TEST_ASSERT(cluster_test_full_head_term_convergence() == 0);
     TEST_ASSERT(cluster_test_recovery_head() == 0);
+    TEST_ASSERT(cluster_test_recovery_forms_cluster() == 0);
+    TEST_ASSERT(cluster_test_recovery_requires_peers() == 0);
+    TEST_ASSERT(cluster_test_recovery_conflict_resolved() == 0);
     TEST_ASSERT(cluster_test_stable_switchback() == 0);
     TEST_ASSERT(cluster_test_backup_challenge() == 0);
     TEST_ASSERT(cluster_test_timing_profiles() == 0);

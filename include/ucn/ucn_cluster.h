@@ -125,8 +125,13 @@ extern "C" {
 /* Flags valid only on BACKUP_MEMBER_SYNC (Format v3). */
 #define UCN_CLUSTER_FLAG_SYNC_BEGIN ((uint8_t)0x01U)
 #define UCN_CLUSTER_FLAG_SYNC_END ((uint8_t)0x02U)
+/* C07.7 P1: a live (post-READY) incremental refresh frame: carries one
+ * member's current nonce/lease without resetting the Backup's syncing
+ * state, so a periodic refresh can never strand a ready Backup. */
+#define UCN_CLUSTER_FLAG_SYNC_DELTA ((uint8_t)0x04U)
 #define UCN_CLUSTER_KNOWN_FLAGS \
-    (UCN_CLUSTER_FLAG_SYNC_BEGIN | UCN_CLUSTER_FLAG_SYNC_END)
+    (UCN_CLUSTER_FLAG_SYNC_BEGIN | UCN_CLUSTER_FLAG_SYNC_END | \
+     UCN_CLUSTER_FLAG_SYNC_DELTA)
 #define UCN_CLUSTER_CONTROL_ENDPOINT ((ucn_endpoint_t)0xA0U)
 #define UCN_CLUSTER_MESSAGE_BYTES ((size_t)28U)
 #define UCN_CLUSTER_SCORE_MAX ((uint16_t)10000U)
@@ -203,7 +208,10 @@ typedef struct ucn_cluster_message {
     uint32_t membership_sequence;
     ucn_node_id_t member_node_id;
     uint32_t member_lease_ms;
-    uint16_t member_nonce;
+    /* C07.7 P1: full 32-bit member nonce on the wire; a 16-bit field
+     * truncated the member counter so a takeover could re-accept stale
+     * nonces after wrap (anti-replay hole). */
+    uint32_t member_nonce;
     uint32_t recovery_nonce;
     uint32_t recovery_ttl_ms;
     uint32_t sync_token;
@@ -367,6 +375,9 @@ typedef struct ucn_cluster {
     uint32_t backup_sync_cursor;
     uint32_t next_backup_heartbeat_ms;
     uint32_t next_backup_sync_ms;
+    /* C07.7 P1: post-READY incremental refresh state (round-robin DELTA). */
+    uint8_t backup_delta_cursor;
+    uint32_t next_backup_delta_ms;
     uint32_t backup_resync_deadline_ms;
     uint32_t backup_primary_deadline_ms;
     uint32_t backup_primary_lease_deadline_ms;
@@ -382,7 +393,13 @@ typedef struct ucn_cluster {
     bool backup_takeover_announce_active;
     ucn_node_id_t known_backup_node_id;
     uint32_t known_backup_generation;
+    /* C07.7 P1: the member's takeover vote is keyed on
+     * (cluster_id, term, backup_generation), not term alone, so a vote in
+     * one Cluster cannot block a legitimate takeover in another Cluster
+     * that happens to share the same term number. */
     uint32_t member_voted_term;
+    uint32_t member_voted_cluster_id;
+    uint32_t member_voted_generation;
     /* C07.5 control-plane token bucket. */
     ucn_cluster_token_bucket_t token_bucket;
     /* C07.5 RECOVERY_HEAD state. */
@@ -393,6 +410,10 @@ typedef struct ucn_cluster {
     uint32_t recovery_cooldown_until_ms;
     uint32_t recovery_backoff_deadline_ms;
     uint32_t recovery_nonce;
+    /* C07.7 P0-3: the remote recovery nonce this node accepted, kept
+     * separate from the local election nonce so a remote RECOVERY_DECLARE
+     * can never clobber our own candidacy nonce. */
+    uint32_t accepted_recovery_nonce;
     ucn_node_id_t known_recovery_source;
     uint8_t recovery_ack_count;
     uint32_t recovery_acked;

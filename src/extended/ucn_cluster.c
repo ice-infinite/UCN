@@ -6,6 +6,7 @@
 
 static void assign_backup(ucn_cluster_t *cluster, uint32_t now_ms);
 static void backup_resync(ucn_cluster_t *cluster);
+static void backup_clear_sync(ucn_cluster_t *cluster, uint32_t now_ms);
 static void start_backup_assignment_cycle(ucn_cluster_t *cluster,
                                           uint32_t now_ms);
 static void queue_backup_assignment_for_member(ucn_cluster_t *cluster,
@@ -73,8 +74,15 @@ static bool flags_are_valid(const ucn_cluster_message_t *message)
     if ((message->flags & (uint8_t)~UCN_CLUSTER_KNOWN_FLAGS) != 0U) {
         return false;
     }
-    return message->type == UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC ||
-           message->flags == 0U;
+    if (message->type == UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC) {
+        /* C07.7 P2: BEGIN and END are mutually exclusive markers; a frame
+         * carrying both is malformed and would otherwise let the handler
+         * swallow the END after processing BEGIN. */
+        return (message->flags &
+                (UCN_CLUSTER_FLAG_SYNC_BEGIN | UCN_CLUSTER_FLAG_SYNC_END)) !=
+               (UCN_CLUSTER_FLAG_SYNC_BEGIN | UCN_CLUSTER_FLAG_SYNC_END);
+    }
+    return message->flags == 0U;
 }
 
 static bool message_is_valid(const ucn_cluster_message_t *message)
@@ -102,22 +110,28 @@ static bool message_is_valid(const ucn_cluster_message_t *message)
                message->head_score <= UCN_CLUSTER_SCORE_MAX &&
                ucn_duration_is_valid(message->lease_ms);
     case UCN_CLUSTER_MSG_BACKUP_ASSIGN:
-        return message->backup_generation != 0U;
+        return message->backup_generation != 0U &&
+               message->role == UCN_CLUSTER_ROLE_HEAD;
     case UCN_CLUSTER_MSG_BACKUP_READY:
+        return message->role == UCN_CLUSTER_ROLE_BACKUP;
     case UCN_CLUSTER_MSG_PRIMARY_HEARTBEAT:
-        return true;
+        return message->role == UCN_CLUSTER_ROLE_HEAD;
     case UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC:
         /* BEGIN/END markers carry no member record. */
         if ((message->flags & (UCN_CLUSTER_FLAG_SYNC_BEGIN |
                                UCN_CLUSTER_FLAG_SYNC_END)) != 0U) {
             return true;
         }
+        /* C07.7 P1: the member lease is implicit (config.lease_ms); only
+         * the node id and the full 32-bit nonce travel on the wire. */
         return node_id_field_is_valid(message->member_node_id) &&
-               ucn_duration_is_valid(message->member_lease_ms) &&
                message->member_nonce != 0U;
     case UCN_CLUSTER_MSG_TAKEOVER_PREPARE:
+        return message->backup_generation != 0U &&
+               message->role == UCN_CLUSTER_ROLE_BACKUP;
     case UCN_CLUSTER_MSG_TAKEOVER_ACK:
-        return message->backup_generation != 0U;
+        return message->backup_generation != 0U &&
+               message->role == UCN_CLUSTER_ROLE_MEMBER;
     case UCN_CLUSTER_MSG_RECOVERY_DECLARE:
         return message->recovery_nonce != 0U &&
                ucn_duration_is_valid(message->recovery_ttl_ms);
@@ -159,15 +173,19 @@ static void encode_trailing_12b(const ucn_cluster_message_t *message,
         break;
     case UCN_CLUSTER_MSG_BACKUP_READY:
     case UCN_CLUSTER_MSG_PRIMARY_HEARTBEAT:
-        write_u32_be(output + 0U, message->membership_sequence);
-        write_u32_be(output + 4U, 0U);
+        /* C07.7 P1: generation + membership_sequence bind these messages
+         * to the exact Backup epoch (replay fencing). */
+        write_u32_be(output + 0U, message->backup_generation);
+        write_u32_be(output + 4U, message->membership_sequence);
         write_u32_be(output + 8U, 0U);
         break;
     case UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC:
+        /* C07.7 P1: 32-bit membership_sequence + member_nonce on the wire.
+         * The member lease is implicit (config.lease_ms) so both counters
+         * fit the trailing 12 B. */
         write_u32_be(output + 0U, message->member_node_id);
-        write_u32_be(output + 4U, message->member_lease_ms);
-        write_u16_be(output + 8U, message->membership_sequence);
-        write_u16_be(output + 10U, message->member_nonce);
+        write_u32_be(output + 4U, message->membership_sequence);
+        write_u32_be(output + 8U, message->member_nonce);
         break;
     case UCN_CLUSTER_MSG_TAKEOVER_PREPARE:
     case UCN_CLUSTER_MSG_TAKEOVER_ACK:
@@ -240,13 +258,13 @@ static void decode_trailing_12b(ucn_cluster_message_t *message,
         break;
     case UCN_CLUSTER_MSG_BACKUP_READY:
     case UCN_CLUSTER_MSG_PRIMARY_HEARTBEAT:
-        message->membership_sequence = read_u32_be(input + 0U);
+        message->backup_generation = read_u32_be(input + 0U);
+        message->membership_sequence = read_u32_be(input + 4U);
         break;
     case UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC:
         message->member_node_id = read_u32_be(input + 0U);
-        message->member_lease_ms = read_u32_be(input + 4U);
-        message->membership_sequence = read_u16_be(input + 8U);
-        message->member_nonce = read_u16_be(input + 10U);
+        message->membership_sequence = read_u32_be(input + 4U);
+        message->member_nonce = read_u32_be(input + 8U);
         break;
     case UCN_CLUSTER_MSG_TAKEOVER_PREPARE:
     case UCN_CLUSTER_MSG_TAKEOVER_ACK:
@@ -333,7 +351,9 @@ static void token_bucket_refill(ucn_cluster_token_bucket_t *bucket,
     uint32_t added;
 
     if (bucket->last_refill_ms == 0U) {
-        bucket->tokens = burst;
+        /* C07.7 P2: cold start already carries a full burst; only stamp the
+         * clock here so t=0 consumption cannot be followed by a second,
+         * spurious full-burst refill at t=1. */
         bucket->last_refill_ms = now_ms;
         return;
     }
@@ -621,23 +641,32 @@ ucn_result_t ucn_cluster_sync_neighbors(
     if (cluster == NULL || (neighbors == NULL && neighbor_count != 0U)) {
         return UCN_ERR_ARGUMENT;
     }
-    (void)memset(cluster->peers, 0, sizeof(cluster->peers));
-    for (input_index = 0U; input_index < neighbor_count; ++input_index) {
-        if (neighbors[input_index].state != UCN_NEIGHBOR_ADMITTED &&
-            neighbors[input_index].state != UCN_NEIGHBOR_SUSPECT) {
-            continue;
+    {
+        /* C07.7 P2: stage the new peer table and commit only on success so
+         * an overflow can never leave a half-written table behind. */
+        ucn_cluster_peer_t staged[UCN_CLUSTER_MAX_PEERS];
+        size_t staged_count = 0U;
+
+        (void)memset(staged, 0, sizeof(staged));
+        for (input_index = 0U; input_index < neighbor_count; ++input_index) {
+            if (neighbors[input_index].state != UCN_NEIGHBOR_ADMITTED &&
+                neighbors[input_index].state != UCN_NEIGHBOR_SUSPECT) {
+                continue;
+            }
+            if (staged_count >= UCN_CLUSTER_MAX_PEERS) {
+                return UCN_ERR_NO_SPACE;
+            }
+            staged[staged_count].occupied = true;
+            staged[staged_count].node_id =
+                neighbors[input_index].peer_node_id;
+            staged[staged_count].neighbor_state =
+                neighbors[input_index].state;
+            staged[staged_count].last_seen_ms =
+                neighbors[input_index].last_seen_ms;
+            ++staged_count;
         }
-        if (output_index >= UCN_CLUSTER_MAX_PEERS) {
-            return UCN_ERR_NO_SPACE;
-        }
-        cluster->peers[output_index].occupied = true;
-        cluster->peers[output_index].node_id =
-            neighbors[input_index].peer_node_id;
-        cluster->peers[output_index].neighbor_state =
-            neighbors[input_index].state;
-        cluster->peers[output_index].last_seen_ms =
-            neighbors[input_index].last_seen_ms;
-        ++output_index;
+        (void)memcpy(cluster->peers, staged, sizeof(staged));
+        output_index = staged_count;
     }
     if (cluster->advertise_cursor >= output_index) {
         cluster->advertise_cursor = 0U;
@@ -781,6 +810,11 @@ static void set_detached(
     cluster->pending_head_score = 0U;
     cluster->known_backup_node_id = 0U;
     cluster->known_backup_generation = 0U;
+    /* C07.7 P1: detaching resets the takeover vote identity so a later
+     * Cluster at the same term number is not suppressed by an old vote. */
+    cluster->member_voted_term = 0U;
+    cluster->member_voted_cluster_id = 0U;
+    cluster->member_voted_generation = 0U;
     cluster->head_lease_expires_at_ms = 0U;
     cluster->head_grace_deadline_ms = 0U;
     cluster->election_deadline_ms = 0U;
@@ -1082,10 +1116,14 @@ static void consider_head_offer(
                                      cluster->config.head_min_tenure_ms)) {
                 backup_challenge(cluster, now_ms);
             }
+        } else if (candidate->term > cluster->term) {
+            /* C07.7 P1: a legitimately newer-generation Head must
+             * interrupt any pending takeover; the Backup abandons it and
+             * joins the newer Head instead of risking split brain. */
+            cluster->backup_takeover_active = false;
+            backup_clear_sync(cluster, now_ms);
+            begin_join(cluster, candidate, now_ms);
         }
-        return;
-    }
-    if (candidate->available_capacity == 0U) {
         return;
     }
     /* Packet loss can let two candidates finish the same local election.  A
@@ -1132,6 +1170,12 @@ static void consider_head_offer(
     }
     if (cluster->role == UCN_CLUSTER_ROLE_DETACHED ||
         cluster->role == UCN_CLUSTER_ROLE_CANDIDATE) {
+        /* C07.7 P1: available_capacity == 0 gates new JOINs only; it must
+         * never block epoch convergence between existing Heads (handled
+         * above), so the capacity check lives here at the join point. */
+        if (candidate->available_capacity == 0U) {
+            return;
+        }
         begin_join(cluster, candidate, now_ms);
         return;
     }
@@ -1221,8 +1265,16 @@ static bool backup_covers_all_members(const ucn_cluster_t *cluster)
         if (cluster->members[index].node_id == cluster->config.local_node_id) {
             continue; /* The Backup reaches itself trivially. */
         }
-        if (find_peer(cluster, cluster->members[index].node_id) == NULL) {
-            return false;
+        {
+            /* C07.7 P2: a SUSPECT neighbour does not count as coverage;
+             * only a healthy ADMITTED one-hop link does. */
+            const ucn_cluster_peer_t *peer =
+                find_peer(cluster, cluster->members[index].node_id);
+
+            if (peer == NULL ||
+                peer->neighbor_state != UCN_NEIGHBOR_ADMITTED) {
+                return false;
+            }
         }
     }
     return true;
@@ -1371,6 +1423,9 @@ static ucn_result_t send_backup_ready(ucn_cluster_t *cluster)
     message.cluster_id = cluster->cluster_id;
     message.term = cluster->term;
     message.head_node_id = cluster->backup_primary_node_id;
+    /* C07.7 P1: bind the readiness proof to the exact snapshot epoch so
+     * a delayed/replayed old READY cannot mark a stale mirror as ready. */
+    message.backup_generation = cluster->backup_generation;
     message.membership_sequence = cluster->membership_sequence;
     return send_cluster_message(cluster, cluster->backup_primary_node_id,
                                   &message);
@@ -1380,10 +1435,20 @@ static ucn_result_t handle_backup_ready(ucn_cluster_t *cluster,
                                           ucn_node_id_t source,
                                           const ucn_cluster_message_t *message)
 {
-    (void)message;
     if (cluster->role != UCN_CLUSTER_ROLE_HEAD ||
         source != cluster->backup_node_id) {
         return UCN_ERR_ACCESS;
+    }
+    /* C07.7 P1: only a READY for the exact (cluster, term, generation,
+     * membership_sequence) of the current snapshot counts; a delayed or
+     * replayed READY from an older epoch is discarded so the Backup is
+     * never marked ready against a stale mirror. */
+    if (message->cluster_id != cluster->cluster_id ||
+        message->term != cluster->term ||
+        message->backup_generation != cluster->backup_generation ||
+        message->membership_sequence != cluster->membership_sequence) {
+        cluster->stats.stale_messages++;
+        return UCN_ERR_REPLAY;
     }
     cluster->backup_ready = true;
     return UCN_OK;
@@ -1399,6 +1464,26 @@ static ucn_result_t handle_backup_member_sync(ucn_cluster_t *cluster,
     if (cluster->role != UCN_CLUSTER_ROLE_BACKUP ||
         source != cluster->backup_primary_node_id) {
         return UCN_ERR_ACCESS;
+    }
+    if ((message->flags & UCN_CLUSTER_FLAG_SYNC_DELTA) != 0U) {
+        /* C07.7 P1: live incremental refresh: update the member's nonce
+         * without touching syncing/ready so a periodic refresh can never
+         * strand a ready Backup during a Primary failure.  A stale DELTA
+         * (already applied sequence) is ignored. */
+        if (message->membership_sequence <= cluster->membership_sequence) {
+            return UCN_OK;
+        }
+        member = backup_allocate_mirror(cluster, message->member_node_id);
+        if (member == NULL) {
+            return UCN_ERR_NO_SPACE;
+        }
+        member->last_nonce = message->member_nonce;
+        member->lease_expires_at_ms =
+            ucn_deadline_from_now(now_ms, cluster->config.lease_ms);
+        cluster->membership_sequence = message->membership_sequence;
+        cluster->backup_primary_deadline_ms = ucn_deadline_from_now(
+            now_ms, cluster->config.keepalive_interval_ms);
+        return UCN_OK;
     }
     if ((message->flags & UCN_CLUSTER_FLAG_SYNC_BEGIN) != 0U) {
         /* A fresh snapshot re-enters SYNCING and drops any stale mirror. */
@@ -1443,7 +1528,7 @@ static ucn_result_t handle_backup_member_sync(ucn_cluster_t *cluster,
         return UCN_ERR_NO_SPACE;
     }
     member->lease_expires_at_ms =
-        ucn_deadline_from_now(now_ms, message->member_lease_ms);
+        ucn_deadline_from_now(now_ms, cluster->config.lease_ms);
     member->last_nonce = message->member_nonce;
     cluster->backup_primary_deadline_ms =
         ucn_deadline_from_now(now_ms, cluster->config.keepalive_interval_ms);
@@ -1457,10 +1542,18 @@ static ucn_result_t handle_primary_heartbeat(ucn_cluster_t *cluster,
                                                const ucn_cluster_message_t *message,
                                                uint32_t now_ms)
 {
-    (void)message;
     if (cluster->role != UCN_CLUSTER_ROLE_BACKUP ||
         source != cluster->backup_primary_node_id) {
         return UCN_ERR_ACCESS;
+    }
+    /* C07.7 P1: only heartbeats of the exact Backup epoch refresh this
+     * Backup's liveness; a replayed heartbeat from an older generation or
+     * a different term cannot mask a genuinely dead Primary. */
+    if (message->cluster_id != cluster->cluster_id ||
+        message->term != cluster->term ||
+        message->backup_generation != cluster->backup_generation) {
+        cluster->stats.stale_messages++;
+        return UCN_ERR_REPLAY;
     }
     cluster->backup_primary_deadline_ms =
         ucn_deadline_from_now(now_ms, cluster->config.keepalive_interval_ms);
@@ -1517,12 +1610,29 @@ static void complete_takeover(ucn_cluster_t *cluster, uint32_t now_ms)
 
 static void start_takeover(ucn_cluster_t *cluster, uint32_t now_ms)
 {
+    size_t index;
+    bool self_in_mirror = false;
+
     cluster->backup_takeover_active = true;
     cluster->backup_takeover_ack_count = 0U;
     cluster->backup_takeover_acked = 0U;
     cluster->backup_takeover_prepare_cursor = 0U;
     cluster->backup_takeover_deadline_ms =
         ucn_deadline_from_now(now_ms, UCN_CLUSTER_TAKEOVER_WINDOW_MS);
+    /* C07.7 P1: the Backup is a member of its own mirror, so majority
+     * (active/2+1 with active including the Backup) is only reachable if
+     * the Backup's own vote counts.  Guard on the mirror actually
+     * containing the Backup. */
+    for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+        if (cluster->members[index].occupied &&
+            cluster->members[index].node_id == cluster->config.local_node_id) {
+            self_in_mirror = true;
+            break;
+        }
+    }
+    if (self_in_mirror) {
+        cluster->backup_takeover_ack_count = 1U;
+    }
 }
 
 static void send_takeover_prepare_step(ucn_cluster_t *cluster)
@@ -1617,8 +1727,13 @@ static ucn_result_t handle_takeover_prepare(ucn_cluster_t *cluster,
         message->backup_generation != cluster->known_backup_generation) {
         return UCN_ERR_ACCESS;
     }
-    if (cluster->member_voted_term == cluster->term) {
-        return UCN_OK; /* already acknowledged this term */
+    /* C07.7 P1: the vote identity is (cluster_id, term, generation), so a
+     * vote cast in one Cluster cannot suppress a legitimate takeover in a
+     * different Cluster that shares the same term number. */
+    if (cluster->member_voted_term == cluster->term &&
+        cluster->member_voted_cluster_id == cluster->cluster_id &&
+        cluster->member_voted_generation == message->backup_generation) {
+        return UCN_OK; /* already acknowledged this epoch */
     }
     (void)memset(&ack, 0, sizeof(ack));
     ack.type = UCN_CLUSTER_MSG_TAKEOVER_ACK;
@@ -1634,6 +1749,8 @@ static ucn_result_t handle_takeover_prepare(ucn_cluster_t *cluster,
             return result;
         }
         cluster->member_voted_term = cluster->term;
+        cluster->member_voted_cluster_id = cluster->cluster_id;
+        cluster->member_voted_generation = message->backup_generation;
         return UCN_OK;
     }
 }
@@ -1732,15 +1849,70 @@ static ucn_result_t handle_head_takeover(ucn_cluster_t *cluster,
 
 static uint32_t compute_recovery_backoff(const ucn_cluster_t *cluster)
 {
-    /* Lower Node ID declares first in the same visibility domain. */
+    /* Lower Node ID declares first in the same visibility domain.  The
+     * recovery nonce participates in the conflict arbitration below
+     * (handlers compare (nonce, node_id) lexicographically), so the
+     * backoff only needs to break the initial tie. */
     return cluster->config.local_node_id %
            cluster->config.recovery_backoff_max_ms;
+}
+
+/* C07.7 P0-2: a Recovery Head may only be declared when this node can see
+ * a meaningful part of the headless domain.  A Backup that still holds a
+ * membership mirror requires a visible majority of that mirror; a plain
+ * member requires at least one visible ADMITTED peer so a completely
+ * isolated node can never self-declare. */
+static bool recovery_quorum_met(const ucn_cluster_t *cluster)
+{
+    size_t index;
+    size_t member_index;
+    uint16_t mirror_count = member_count_u16(cluster);
+    uint16_t visible_mirror = 0U;
+    uint16_t required;
+
+    for (index = 0U; index < UCN_CLUSTER_MAX_PEERS; ++index) {
+        bool in_mirror = false;
+
+        if (!cluster->peers[index].occupied ||
+            cluster->peers[index].neighbor_state != UCN_NEIGHBOR_ADMITTED) {
+            continue;
+        }
+        for (member_index = 0U; member_index < UCN_CLUSTER_MAX_MEMBERS;
+             ++member_index) {
+            if (cluster->members[member_index].occupied &&
+                cluster->members[member_index].node_id ==
+                    cluster->peers[index].node_id) {
+                in_mirror = true;
+                break;
+            }
+        }
+        if (in_mirror) {
+            visible_mirror++;
+        }
+    }
+    if (mirror_count == 0U) {
+        size_t visible_any = 0U;
+
+        /* No membership mirror (plain member): any visible ADMITTED peer
+         * proves this node is not fully isolated. */
+        for (index = 0U; index < UCN_CLUSTER_MAX_PEERS; ++index) {
+            if (cluster->peers[index].occupied &&
+                cluster->peers[index].neighbor_state ==
+                    UCN_NEIGHBOR_ADMITTED) {
+                visible_any++;
+            }
+        }
+        return visible_any >= 1U;
+    }
+    required = (uint16_t)(mirror_count / 2U + 1U);
+    return visible_mirror >= required;
 }
 
 static void send_recovery_declare(ucn_cluster_t *cluster)
 {
     ucn_cluster_message_t message;
     size_t index;
+
 
     (void)memset(&message, 0, sizeof(message));
     message.type = UCN_CLUSTER_MSG_RECOVERY_DECLARE;
@@ -1798,6 +1970,8 @@ static void stepdown_recovery_head(ucn_cluster_t *cluster, uint32_t now_ms)
     cluster->recovery_backoff_deadline_ms = 0U;
     cluster->recovery_ack_count = 0U;
     cluster->recovery_acked = 0U;
+    cluster->accepted_recovery_nonce = 0U;
+    cluster->known_recovery_source = 0U;
     /* Keep recovery_eligible so a still-headless domain re-backs off with
      * bounded retries instead of silently giving up (§7.2). */
     set_detached(cluster, now_ms, cluster->config.recovery_observation_ms);
@@ -1810,29 +1984,75 @@ static ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
 {
     ucn_cluster_message_t ack;
 
-    (void)now_ms;
     if (message->role != UCN_CLUSTER_ROLE_RECOVERY_HEAD ||
         message->head_node_id != source ||
         message->term == 0U) {
         return UCN_ERR_MALFORMED;
     }
     /* Only a headless Member/Backup/DETACHED node acknowledges a recovery
-     * declaration; a node already under a live Head stays put. */
+     * declaration; a node already under a live Head stays put.  A
+     * RECOVERY_HEAD also participates so two contenders can converge on
+     * the deterministic winner (see the arbitration below). */
     if (cluster->role != UCN_CLUSTER_ROLE_MEMBER &&
         cluster->role != UCN_CLUSTER_ROLE_BACKUP &&
-        cluster->role != UCN_CLUSTER_ROLE_DETACHED) {
+        cluster->role != UCN_CLUSTER_ROLE_DETACHED &&
+        cluster->role != UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
         return UCN_ERR_ACCESS;
     }
     if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+        cluster->recovery_cluster_id == 0U &&
         !ucn_deadline_expired(now_ms, cluster->head_lease_expires_at_ms)) {
         return UCN_ERR_ACCESS;
     }
-    if (cluster->recovery_nonce == message->recovery_nonce &&
-        cluster->known_recovery_source == source) {
-        return UCN_OK; /* already acknowledged this nonce */
+    /* C07.7 P0-3: deterministic (recovery_nonce, node-id) arbitration.
+     * A node that already started its own recovery backoff only defers to
+     * a strictly smaller (nonce, node_id) contender; a node that has not
+     * started backoff yet (recovery_nonce == 0) always accepts.  The
+     * comparison is anti-symmetric so two contenders can never both join
+     * each other and never both keep declaring.  A RECOVERY_HEAD that sees
+     * a strictly smaller contender yields the role and joins it. */
+    if (cluster->recovery_nonce != 0U &&
+        !(message->recovery_nonce < cluster->recovery_nonce ||
+          (message->recovery_nonce == cluster->recovery_nonce &&
+           source < cluster->config.local_node_id))) {
+        return UCN_OK; /* we keep contending; ignore this candidate */
     }
-    cluster->recovery_nonce = message->recovery_nonce;
+    if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+        /* Yield the temporary Head role before joining the winner. */
+        stepdown_recovery_head(cluster, now_ms);
+    }
+    /* Re-declaration of the same recovery Head refreshes the member
+     * lease (the Recovery Head re-advertises periodically). */
+    if (cluster->accepted_recovery_nonce == message->recovery_nonce &&
+        cluster->known_recovery_source == source) {
+        cluster->head_lease_expires_at_ms =
+            ucn_deadline_from_now(now_ms, message->recovery_ttl_ms);
+        cluster->head_grace_deadline_ms = 0U;
+        return UCN_OK;
+    }
+    cluster->accepted_recovery_nonce = message->recovery_nonce;
     cluster->known_recovery_source = source;
+    /* C07.7 P0-1: actually join the recovery Cluster.  The recovery
+     * Cluster ID is the declaring node ID; it never impersonates the
+     * lost Cluster.  The member keeps its role_since/lease so the
+     * recovery domain has a live membership. */
+    if (cluster->role != UCN_CLUSTER_ROLE_MEMBER ||
+        cluster->recovery_cluster_id != message->cluster_id) {
+        cluster->recovery_cluster_id = message->cluster_id;
+        cluster->cluster_id = message->cluster_id;
+        cluster->term = message->term;
+        cluster->head_node_id = source;
+        cluster->current_head_score = cluster->config.head_score;
+        cluster->role = UCN_CLUSTER_ROLE_MEMBER;
+        cluster->role_since_ms = now_ms;
+        cluster->election_deadline_ms = 0U;
+    }
+    cluster->head_lease_expires_at_ms =
+        ucn_deadline_from_now(now_ms, message->recovery_ttl_ms);
+    cluster->head_grace_deadline_ms = 0U;
+    /* Joining a recovery Head abandons our own recovery candidacy. */
+    cluster->recovery_eligible = false;
+    cluster->recovery_backoff_deadline_ms = 0U;
     (void)memset(&ack, 0, sizeof(ack));
     ack.type = UCN_CLUSTER_MSG_RECOVERY_ACK;
     ack.role = UCN_CLUSTER_ROLE_MEMBER;
@@ -1844,19 +2064,45 @@ static ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
 
 static ucn_result_t handle_recovery_ack(ucn_cluster_t *cluster,
                                           ucn_node_id_t source,
-                                          const ucn_cluster_message_t *message)
+                                          const ucn_cluster_message_t *message,
+                                          uint32_t now_ms)
 {
+    ucn_cluster_member_t *member;
+
     if (cluster->role != UCN_CLUSTER_ROLE_RECOVERY_HEAD ||
         message->cluster_id != cluster->recovery_cluster_id ||
         message->head_node_id != cluster->config.local_node_id) {
         return UCN_ERR_ACCESS;
     }
-    (void)source;
-    /* Informational only: the declaration already established the
-     * recovery Head; the ACK is bounded and does not gate it. */
-    cluster->recovery_ack_count =
-        cluster->recovery_ack_count == UINT8_MAX ?
-        UINT8_MAX : cluster->recovery_ack_count + 1U;
+    /* C07.7 P0-1: track the acknowledged member so the recovery Cluster
+     * has an actual membership to maintain and to hand to a future
+     * takeover/stepdown.  A repeated ACK only refreshes the lease.
+     * Recovery uses every member slot directly: the declaring node was
+     * likely a plain member with member_capacity 0, so the normal
+     * capacity-gated allocate_member() would always refuse survivors. */
+    member = find_member(cluster, source);
+    if (member == NULL) {
+        size_t index;
+
+        for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+            if (!cluster->members[index].occupied) {
+                (void)memset(&cluster->members[index], 0,
+                             sizeof(cluster->members[index]));
+                cluster->members[index].occupied = true;
+                cluster->members[index].node_id = source;
+                member = &cluster->members[index];
+                break;
+            }
+        }
+        if (member == NULL) {
+            return UCN_ERR_NO_SPACE;
+        }
+        if (cluster->recovery_ack_count != UINT8_MAX) {
+            cluster->recovery_ack_count++;
+        }
+    }
+    member->lease_expires_at_ms = ucn_deadline_from_now(
+        now_ms, cluster->config.recovery_head_ttl_ms);
     return UCN_OK;
 }
 
@@ -1931,8 +2177,12 @@ ucn_result_t ucn_cluster_receive(
         case UCN_CLUSTER_MSG_JOIN_ACCEPT:
             return handle_join_accept(cluster, source, &message, now_ms);
         case UCN_CLUSTER_MSG_JOIN_REJECT:
+            /* C07.7 P1: only a REJECT of the exact pending Head epoch
+             * ends the join attempt; a stale REJECT is ignored. */
             if (cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING &&
-                source == cluster->pending_head_node_id) {
+                source == cluster->pending_head_node_id &&
+                message.cluster_id == cluster->pending_cluster_id &&
+                message.term == cluster->pending_term) {
                 cluster->stats.joins_rejected++;
                 set_detached(cluster, now_ms,
                              cluster->config.observation_ms);
@@ -1947,14 +2197,38 @@ ucn_result_t ucn_cluster_receive(
                 message.term != cluster->term) {
                 return UCN_ERR_ACCESS;
             }
+            /* C07.7 P1: a replayed LEAVE with an old nonce must not evict
+             * a member that has since re-joined and advanced its nonce. */
+            {
+                ucn_cluster_member_t *member = find_member(cluster, source);
+
+                if (member == NULL) {
+                    return UCN_ERR_NOT_FOUND;
+                }
+                if (message.nonce <= member->last_nonce) {
+                    cluster->stats.stale_messages++;
+                    return UCN_ERR_REPLAY;
+                }
+            }
             remove_member(cluster, source);
             return UCN_OK;
         case UCN_CLUSTER_MSG_HEAD_STEPDOWN:
+            /* C07.7 P1: the Backup must also leave with the members on an
+             * ordered stepdown (it cannot ACK its own takeover against a
+             * Head that is deliberately switching away).  The epoch must
+             * match to fence stale STEPDOWN frames. */
             if ((cluster->role == UCN_CLUSTER_ROLE_MEMBER ||
-                 cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING) &&
-                source == cluster->head_node_id) {
-                set_detached(cluster, now_ms,
-                             cluster->config.observation_ms);
+                 cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING ||
+                 cluster->role == UCN_CLUSTER_ROLE_BACKUP) &&
+                source == cluster->head_node_id &&
+                message.cluster_id == cluster->cluster_id &&
+                message.term == cluster->term) {
+                if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
+                    backup_clear_sync(cluster, now_ms);
+                } else {
+                    set_detached(cluster, now_ms,
+                                 cluster->config.observation_ms);
+                }
                 return UCN_OK;
             }
             return UCN_ERR_ACCESS;
@@ -1973,7 +2247,7 @@ ucn_result_t ucn_cluster_receive(
         case UCN_CLUSTER_MSG_RECOVERY_DECLARE:
             return handle_recovery_declare(cluster, source, &message, now_ms);
         case UCN_CLUSTER_MSG_RECOVERY_ACK:
-            return handle_recovery_ack(cluster, source, &message);
+            return handle_recovery_ack(cluster, source, &message, now_ms);
         default:
             return UCN_ERR_UNSUPPORTED;
     }
@@ -2165,10 +2439,82 @@ static void send_backup_heartbeat(ucn_cluster_t *cluster, uint32_t now_ms)
     message.cluster_id = cluster->cluster_id;
     message.term = cluster->term;
     message.head_node_id = cluster->config.local_node_id;
+    /* C07.7 P1: carry the backup generation so a stale heartbeat from a
+     * previous Backup generation cannot refresh this one's liveness. */
+    message.backup_generation = cluster->backup_generation;
     message.membership_sequence = cluster->membership_sequence;
     (void)send_cluster_message(cluster, cluster->backup_node_id, &message);
     cluster->next_backup_heartbeat_ms =
         ucn_deadline_from_now(now_ms, cluster->config.keepalive_interval_ms);
+}
+
+/* C07.7 P1: after the Backup is READY, refresh one member's current nonce
+ * per keepalive interval (round-robin) so the mirror tracks
+ * KEEPALIVE-driven nonce advancement without resetting the ready Backup
+ * into a full resync (which would strand it mid-takeover if the Primary
+ * died during the refresh). */
+static void send_backup_delta_step(ucn_cluster_t *cluster)
+{
+    size_t member_count;
+    ucn_cluster_message_t message;
+    ucn_result_t result;
+    uint32_t next_sequence;
+    uint32_t now_ms;
+    size_t index;
+    size_t ordinal = 0U;
+
+    if (cluster->backup_node_id == 0U || !cluster->backup_ready ||
+        cluster->backup_assign_pending) {
+        return;
+    }
+    member_count = member_count_u16(cluster);
+    if (member_count == 0U) {
+        return;
+    }
+    now_ms = cluster_now(cluster);
+    if (cluster->next_backup_delta_ms == 0U) {
+        cluster->next_backup_delta_ms = now_ms;
+        return;
+    }
+    if (!ucn_deadline_expired(now_ms, cluster->next_backup_delta_ms)) {
+        return;
+    }
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = cluster->cluster_id;
+    message.term = cluster->term;
+    message.head_node_id = cluster->config.local_node_id;
+    message.flags = UCN_CLUSTER_FLAG_SYNC_DELTA;
+    next_sequence = cluster->membership_sequence == UINT32_MAX ?
+                    1U : cluster->membership_sequence + 1U;
+    message.membership_sequence = next_sequence;
+    if (cluster->backup_delta_cursor >= member_count) {
+        cluster->backup_delta_cursor = 0U;
+    }
+    for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+        if (!cluster->members[index].occupied) {
+            continue;
+        }
+        if (ordinal == cluster->backup_delta_cursor) {
+            message.member_node_id = cluster->members[index].node_id;
+            message.member_nonce = cluster->members[index].last_nonce;
+            break;
+        }
+        ordinal++;
+    }
+    result = send_cluster_message(cluster, cluster->backup_node_id,
+                                   &message);
+    if (result == UCN_OK) {
+        cluster->membership_sequence = next_sequence;
+        cluster->backup_delta_cursor =
+            (uint8_t)((cluster->backup_delta_cursor + 1U) % member_count);
+        cluster->next_backup_delta_ms = ucn_deadline_from_now(
+            now_ms, cluster->config.keepalive_interval_ms);
+    } else {
+        cluster->next_backup_delta_ms = ucn_deadline_from_now(
+            now_ms, cluster->config.token_bucket.refill_ms);
+    }
 }
 
 static uint32_t backup_sync_spacing_ms(const ucn_cluster_t *cluster,
@@ -2215,7 +2561,7 @@ static void send_backup_snapshot_step(ucn_cluster_t *cluster)
     /* Build the next frame without committing sequence/cursor yet. */
     next_sequence = cluster->membership_sequence == UINT32_MAX ?
                     1U : cluster->membership_sequence + 1U;
-    message.membership_sequence = (uint16_t)next_sequence;
+    message.membership_sequence = next_sequence;
     if (cluster->backup_sync_cursor == 0U) {
         message.flags = UCN_CLUSTER_FLAG_SYNC_BEGIN;
     } else if (cluster->backup_sync_cursor <= member_count) {
@@ -2400,12 +2746,19 @@ ucn_result_t ucn_cluster_step(ucn_cluster_t *cluster)
              * own control budget before pending JOINs are observed. */
             send_next_advertisement(cluster, now_ms);
         }
+        if (cluster->backup_node_id == 0U) {
+            /* C07.7 P1: automatically re-select a Backup when the previous
+             * one left or expired, even without a new JOIN; the selection
+             * itself stays candidate/score ordered and idempotent. */
+            assign_backup(cluster, now_ms);
+        }
         if (cluster->backup_node_id != 0U && !cluster->backup_assign_pending &&
             (cluster->next_backup_assign_ms == 0U ||
              ucn_deadline_expired(now_ms,
                                   cluster->next_backup_assign_ms))) {
             start_backup_assignment_cycle(cluster, now_ms);
         }
+        send_backup_delta_step(cluster);
         send_backup_heartbeat(cluster, now_ms);
         send_takeover_announce_step(cluster);
         send_backup_assignment_step(cluster, now_ms);
@@ -2469,7 +2822,16 @@ ucn_result_t ucn_cluster_step(ucn_cluster_t *cluster)
                 start_recovery_backoff(cluster, now_ms);
             } else if (ucn_deadline_expired(
                            now_ms, cluster->recovery_backoff_deadline_ms)) {
-                declare_recovery_head(cluster, now_ms);
+                if (recovery_quorum_met(cluster)) {
+                    declare_recovery_head(cluster, now_ms);
+                } else {
+                    /* C07.7 P0-2: no visible quorum (fully isolated node):
+                     * do NOT self-declare; retry after another bounded
+                     * backoff so the domain converges when peers return. */
+                    cluster->recovery_backoff_deadline_ms =
+                        ucn_deadline_from_now(
+                            now_ms, cluster->config.recovery_backoff_max_ms);
+                }
             }
         } else {
             start_election(cluster, now_ms);
@@ -2479,10 +2841,21 @@ ucn_result_t ucn_cluster_step(ucn_cluster_t *cluster)
         ucn_deadline_expired(now_ms, cluster->election_deadline_ms)) {
         complete_election(cluster, now_ms);
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD &&
-        ucn_deadline_expired(now_ms, cluster->recovery_deadline_ms)) {
-        stepdown_recovery_head(cluster, now_ms);
-        return UCN_OK;
+    if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+        /* C07.7 P0-1: the recovery Cluster is a real (short-lived) Cluster:
+         * expire members and periodically re-advertise the declaration so
+         * surviving members keep their leases and late survivors can join. */
+        expire_members(cluster, now_ms);
+        if (cluster->next_advertise_ms == 0U ||
+            ucn_deadline_expired(now_ms, cluster->next_advertise_ms)) {
+            cluster->next_advertise_ms = ucn_deadline_from_now(
+                now_ms, cluster->config.advertise_interval_ms);
+            (void)send_recovery_declare(cluster);
+        }
+        if (ucn_deadline_expired(now_ms, cluster->recovery_deadline_ms)) {
+            stepdown_recovery_head(cluster, now_ms);
+            return UCN_OK;
+        }
     }
     if (cluster->role == UCN_CLUSTER_ROLE_STEPPING_DOWN &&
         ucn_deadline_expired(now_ms, cluster->stepdown_deadline_ms)) {
