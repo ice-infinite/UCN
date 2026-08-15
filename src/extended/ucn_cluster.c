@@ -352,6 +352,347 @@ static uint32_t cluster_now(const ucn_cluster_t *cluster)
     return cluster->config.now_ms(cluster->config.now_context);
 }
 
+/* ================= CLV2-01-01..03: M01 shadow phase ===================
+ *
+ * During M01 the legacy role+bool+deadline fields still drive the FSM.
+ * cluster_phase_from_legacy_state() derives the explicit phase name for
+ * every implicit combination, and cluster_shadow_sync() keeps the
+ * shadow mirror aligned after each Step/RX.  Production logic MUST NOT
+ * read shadow_phase to make decisions until CLV2-01-04+; the mirror only
+ * exists so tests can prove the mapping is total, unique and consistent
+ * under the fault model. */
+
+static ucn_cluster_phase_t cluster_phase_from_legacy_state(
+    const ucn_cluster_t *cluster, uint32_t now_ms)
+{
+    if (!cluster->config.enabled) {
+        return UCN_CLUSTER_PHASE_DISABLED;
+    }
+    switch (cluster->role) {
+    case UCN_CLUSTER_ROLE_DISABLED:
+        return UCN_CLUSTER_PHASE_DISABLED;
+    case UCN_CLUSTER_ROLE_DETACHED:
+        if (cluster->recovery_eligible) {
+            /* Cooling down after a Recovery stepdown still observes;
+             * once the backoff timer is armed the node is walking the
+             * recovery election path. */
+            if (cluster->recovery_backoff_deadline_ms != 0U &&
+                (cluster->recovery_cooldown_until_ms == 0U ||
+                 ucn_deadline_expired(now_ms,
+                                      cluster->recovery_cooldown_until_ms))) {
+                return UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
+            }
+            return UCN_CLUSTER_PHASE_RECOVERY_OBSERVE;
+        }
+        return UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
+    case UCN_CLUSTER_ROLE_CANDIDATE:
+        return UCN_CLUSTER_PHASE_ELECTION;
+    case UCN_CLUSTER_ROLE_JOIN_PENDING:
+        return UCN_CLUSTER_PHASE_JOIN_PENDING;
+    case UCN_CLUSTER_ROLE_MEMBER:
+        if (cluster->head_grace_deadline_ms != 0U &&
+            !ucn_deadline_expired(now_ms, cluster->head_grace_deadline_ms)) {
+            return UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE;
+        }
+        return UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    case UCN_CLUSTER_ROLE_HEAD:
+        if (cluster->backup_ready) {
+            return UCN_CLUSTER_PHASE_HEAD_STABLE;
+        }
+        if (cluster->backup_node_id != 0U) {
+            /* The Head-side syncing flag stays false in the current FSM
+             * (only the Backup mirrors sync); keep the SYNCING phase
+             * reachable anyway so a future mirror-visible assignment can
+             * map without an enum change. */
+            if (cluster->backup_syncing) {
+                return UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
+            }
+            return UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING;
+        }
+        return UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+    case UCN_CLUSTER_ROLE_BACKUP:
+        if (cluster->backup_takeover_active) {
+            return UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
+        }
+        if (cluster->backup_ready) {
+            return UCN_CLUSTER_PHASE_BACKUP_READY;
+        }
+        return UCN_CLUSTER_PHASE_BACKUP_SYNCING;
+    case UCN_CLUSTER_ROLE_STEPPING_DOWN:
+        return UCN_CLUSTER_PHASE_STEPPING_DOWN;
+    case UCN_CLUSTER_ROLE_RECOVERY_HEAD:
+        return UCN_CLUSTER_PHASE_RECOVERY_HEAD;
+    default:
+        return UCN_CLUSTER_PHASE_DISABLED;
+    }
+}
+
+/* Best-effort reason for a legacy transition, from the phase pair alone.
+ * The table covers every transition the current FSM actually performs;
+ * an UNKNOWN result means the table must be extended (the shadow
+ * consistency tests fail on it). */
+static ucn_cluster_transition_reason_t cluster_reason_from_diff(
+    ucn_cluster_phase_t old_phase, ucn_cluster_phase_t new_phase)
+{
+    switch (old_phase) {
+    case UCN_CLUSTER_PHASE_JOIN_PENDING:
+        return new_phase == UCN_CLUSTER_PHASE_MEMBER_ACTIVE
+                   ? UCN_CLUSTER_REASON_JOIN_ACCEPTED
+                   : (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE
+                          ? UCN_CLUSTER_REASON_JOIN_REJECTED
+                          : UCN_CLUSTER_REASON_UNKNOWN);
+    case UCN_CLUSTER_PHASE_DETACHED_OBSERVE:
+        if (new_phase == UCN_CLUSTER_PHASE_ELECTION) {
+            return UCN_CLUSTER_REASON_ELECTION_STARTED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_JOIN_PENDING) {
+            return UCN_CLUSTER_REASON_JOIN_INITIATED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) {
+            return UCN_CLUSTER_REASON_RECOVERY_ELIGIBLE;
+        }
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    case UCN_CLUSTER_PHASE_ELECTION:
+        /* Winning an election lands on HEAD_*; which backup sub-phase
+         * depends on whether a backup assignment survived the election
+         * (restart/recovery paths can keep one). */
+        if (new_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP ||
+            new_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING ||
+            new_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING ||
+            new_phase == UCN_CLUSTER_PHASE_HEAD_STABLE) {
+            return UCN_CLUSTER_REASON_ELECTION_WON;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_JOIN_PENDING) {
+            return UCN_CLUSTER_REASON_JOIN_INITIATED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE) {
+            return UCN_CLUSTER_REASON_ELECTION_LOST;
+        }
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    case UCN_CLUSTER_PHASE_MEMBER_ACTIVE:
+        if (new_phase == UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE) {
+            return UCN_CLUSTER_REASON_HEAD_LEASE_EXPIRED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_BACKUP_SYNCING) {
+            return UCN_CLUSTER_REASON_BACKUP_ASSIGNED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE) {
+            return UCN_CLUSTER_REASON_RESET;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_JOIN_PENDING) {
+            return UCN_CLUSTER_REASON_JOIN_INITIATED;
+        }
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    case UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE:
+        if (new_phase == UCN_CLUSTER_PHASE_MEMBER_ACTIVE) {
+            return UCN_CLUSTER_REASON_HEAD_LEASE_RENEWED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE ||
+            new_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) {
+            return UCN_CLUSTER_REASON_GRACE_TIMEOUT;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_JOIN_PENDING) {
+            return UCN_CLUSTER_REASON_JOIN_INITIATED;
+        }
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    case UCN_CLUSTER_PHASE_HEAD_NO_BACKUP:
+    case UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING:
+    case UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING:
+        if (new_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING) {
+            return UCN_CLUSTER_REASON_BACKUP_ASSIGNED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING) {
+            return UCN_CLUSTER_REASON_BACKUP_SYNC_STARTED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_HEAD_STABLE) {
+            return UCN_CLUSTER_REASON_SNAPSHOT_READY;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) {
+            return UCN_CLUSTER_REASON_BACKUP_LOST;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_STEPPING_DOWN) {
+            return UCN_CLUSTER_REASON_STEPDOWN_ORDERED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_ELECTION) {
+            return UCN_CLUSTER_REASON_ELECTION_STARTED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE) {
+            return UCN_CLUSTER_REASON_RESET;
+        }
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    case UCN_CLUSTER_PHASE_HEAD_STABLE:
+        if (new_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) {
+            return UCN_CLUSTER_REASON_BACKUP_LOST;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING) {
+            return UCN_CLUSTER_REASON_RESYNC_STARTED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_STEPPING_DOWN) {
+            return UCN_CLUSTER_REASON_STEPDOWN_ORDERED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE) {
+            return UCN_CLUSTER_REASON_RESET;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_ELECTION) {
+            return UCN_CLUSTER_REASON_ELECTION_STARTED;
+        }
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    case UCN_CLUSTER_PHASE_BACKUP_SYNCING:
+        if (new_phase == UCN_CLUSTER_PHASE_BACKUP_READY) {
+            return UCN_CLUSTER_REASON_SNAPSHOT_READY;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE ||
+            new_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) {
+            return UCN_CLUSTER_REASON_PRIMARY_LOST;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_ELECTION) {
+            return UCN_CLUSTER_REASON_ELECTION_STARTED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_JOIN_PENDING) {
+            return UCN_CLUSTER_REASON_JOIN_INITIATED;
+        }
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    case UCN_CLUSTER_PHASE_BACKUP_READY:
+        if (new_phase == UCN_CLUSTER_PHASE_BACKUP_TAKEOVER) {
+            return UCN_CLUSTER_REASON_TAKEOVER_STARTED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_BACKUP_SYNCING) {
+            return UCN_CLUSTER_REASON_RESYNC_STARTED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_ELECTION) {
+            return UCN_CLUSTER_REASON_ELECTION_STARTED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_JOIN_PENDING) {
+            return UCN_CLUSTER_REASON_JOIN_INITIATED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE ||
+            new_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) {
+            return UCN_CLUSTER_REASON_PRIMARY_LOST;
+        }
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    case UCN_CLUSTER_PHASE_BACKUP_TAKEOVER:
+        if (new_phase == UCN_CLUSTER_PHASE_HEAD_STABLE ||
+            new_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP ||
+            new_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING) {
+            return UCN_CLUSTER_REASON_TAKEOVER_QUORUM;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE ||
+            new_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) {
+            return UCN_CLUSTER_REASON_TAKEOVER_TIMEOUT;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_JOIN_PENDING) {
+            return UCN_CLUSTER_REASON_JOIN_INITIATED;
+        }
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    case UCN_CLUSTER_PHASE_STEPPING_DOWN:
+        if (new_phase == UCN_CLUSTER_PHASE_JOIN_PENDING) {
+            return UCN_CLUSTER_REASON_STEPDOWN_COMPLETE;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE) {
+            return UCN_CLUSTER_REASON_STEPDOWN_COMPLETE;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_ELECTION) {
+            return UCN_CLUSTER_REASON_ELECTION_STARTED;
+        }
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    case UCN_CLUSTER_PHASE_RECOVERY_OBSERVE:
+        if (new_phase == UCN_CLUSTER_PHASE_RECOVERY_ELECTION) {
+            return UCN_CLUSTER_REASON_RECOVERY_BACKOFF;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE) {
+            return UCN_CLUSTER_REASON_RESET;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_JOIN_PENDING) {
+            return UCN_CLUSTER_REASON_JOIN_INITIATED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_ELECTION) {
+            return UCN_CLUSTER_REASON_ELECTION_STARTED;
+        }
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    case UCN_CLUSTER_PHASE_RECOVERY_ELECTION:
+        if (new_phase == UCN_CLUSTER_PHASE_RECOVERY_HEAD) {
+            return UCN_CLUSTER_REASON_RECOVERY_WIN;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE) {
+            return UCN_CLUSTER_REASON_RESET;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_JOIN_PENDING) {
+            return UCN_CLUSTER_REASON_JOIN_INITIATED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) {
+            return UCN_CLUSTER_REASON_RESET;
+        }
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    case UCN_CLUSTER_PHASE_RECOVERY_HEAD:
+        if (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE ||
+            new_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) {
+            return UCN_CLUSTER_REASON_RECOVERY_TTL_EXPIRED;
+        }
+        if (new_phase == UCN_CLUSTER_PHASE_JOIN_PENDING) {
+            return UCN_CLUSTER_REASON_JOIN_INITIATED;
+        }
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    case UCN_CLUSTER_PHASE_DISABLED:
+        return UCN_CLUSTER_REASON_INIT;
+    default:
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    }
+}
+
+/* RX hint: the most typical reason a message of this type would change
+ * the phase.  It is only consulted when the diff table above has no
+ * entry, so a wrong hint can never overwrite an exact match. */
+static ucn_cluster_transition_reason_t cluster_rx_reason_from_type(
+    ucn_cluster_message_type_t type)
+{
+    switch (type) {
+    case UCN_CLUSTER_MSG_JOIN_ACCEPT:
+        return UCN_CLUSTER_REASON_JOIN_ACCEPTED;
+    case UCN_CLUSTER_MSG_JOIN_REJECT:
+        return UCN_CLUSTER_REASON_JOIN_REJECTED;
+    case UCN_CLUSTER_MSG_BACKUP_ASSIGN:
+        return UCN_CLUSTER_REASON_BACKUP_ASSIGNED;
+    case UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC:
+        return UCN_CLUSTER_REASON_SNAPSHOT_READY;
+    case UCN_CLUSTER_MSG_HEAD_TAKEOVER:
+        return UCN_CLUSTER_REASON_TAKEOVER_STARTED;
+    case UCN_CLUSTER_MSG_TAKEOVER_ACK:
+        return UCN_CLUSTER_REASON_TAKEOVER_QUORUM;
+    case UCN_CLUSTER_MSG_HEAD_STEPDOWN:
+        return UCN_CLUSTER_REASON_STEPDOWN_ORDERED;
+    case UCN_CLUSTER_MSG_PRIMARY_HEARTBEAT:
+        return UCN_CLUSTER_REASON_PRIMARY_RENEWED;
+    case UCN_CLUSTER_MSG_KEEPALIVE:
+        return UCN_CLUSTER_REASON_HEAD_LEASE_RENEWED;
+    case UCN_CLUSTER_MSG_RECOVERY_DECLARE:
+        return UCN_CLUSTER_REASON_RECOVERY_WIN;
+    case UCN_CLUSTER_MSG_LEAVE:
+        return UCN_CLUSTER_REASON_LEAVE;
+    default:
+        return UCN_CLUSTER_REASON_UNKNOWN;
+    }
+}
+
+static void cluster_shadow_sync(ucn_cluster_t *cluster,
+                                ucn_cluster_transition_reason_t hint)
+{
+    uint32_t now_ms = cluster_now(cluster);
+    ucn_cluster_phase_t derived =
+        cluster_phase_from_legacy_state(cluster, now_ms);
+    ucn_cluster_transition_reason_t reason;
+
+    if (derived == cluster->shadow_phase) {
+        return;
+    }
+    reason = cluster_reason_from_diff(cluster->shadow_phase, derived);
+    if (reason == UCN_CLUSTER_REASON_UNKNOWN) {
+        reason = hint;
+    }
+    cluster->shadow_phase = derived;
+    cluster->transition_reason = reason;
+    cluster->shadow_transition_count++;
+}
+
 static uint16_t member_count_u16(const ucn_cluster_t *cluster)
 {
     size_t index;
@@ -654,6 +995,11 @@ ucn_result_t ucn_cluster_init(
     /* Start the Token Bucket full so cold-start election is not throttled
      * below its already-bounded advertise budget. */
     cluster->token_bucket.tokens = cluster->config.token_bucket.burst;
+    /* CLV2-01-02: seed the shadow phase mirror from the initial legacy
+     * state (DETACHED_OBSERVE or DISABLED). */
+    cluster->shadow_phase = cluster_phase_from_legacy_state(cluster, now_ms);
+    cluster->transition_reason = UCN_CLUSTER_REASON_INIT;
+    cluster->shadow_transition_count = 0U;
     return UCN_OK;
 }
 
@@ -2285,7 +2631,7 @@ static ucn_result_t handle_recovery_ack(ucn_cluster_t *cluster,
     return UCN_OK;
 }
 
-ucn_result_t ucn_cluster_receive(
+static ucn_result_t ucn_cluster_receive_inner(
     ucn_cluster_t *cluster,
     ucn_node_id_t source,
     bool protected_control,
@@ -2443,6 +2789,35 @@ ucn_result_t ucn_cluster_receive(
         default:
             return UCN_ERR_UNSUPPORTED;
     }
+}
+
+ucn_result_t ucn_cluster_receive(
+    ucn_cluster_t *cluster,
+    ucn_node_id_t source,
+    bool protected_control,
+    const uint8_t *payload,
+    size_t payload_length)
+{
+    ucn_cluster_transition_reason_t hint = UCN_CLUSTER_REASON_UNKNOWN;
+    ucn_result_t result;
+
+    /* Peek the wire type (payload byte 1) for a best-effort reason hint;
+     * the hint is only used when the exact diff table has no entry. */
+    if (cluster != NULL && payload != NULL && payload_length >= 2U &&
+        cluster->config.enabled) {
+        hint = cluster_rx_reason_from_type(
+            (ucn_cluster_message_type_t)payload[1U]);
+    }
+    result = ucn_cluster_receive_inner(cluster, source, protected_control,
+                                       payload, payload_length);
+    /* CLV2-01-02: keep the shadow mirror aligned after every RX that could
+     * have changed state (rejections like ERR_REPLAY may still have moved
+     * backup sync flags, so sync on everything except ARGUMENT). */
+    if (cluster != NULL && cluster->config.enabled &&
+        result != UCN_ERR_ARGUMENT) {
+        cluster_shadow_sync(cluster, hint);
+    }
+    return result;
 }
 
 static void start_election(ucn_cluster_t *cluster, uint32_t now_ms)
@@ -2917,7 +3292,7 @@ static void send_keepalive(ucn_cluster_t *cluster, uint32_t now_ms)
         ucn_deadline_from_now(now_ms, cluster->config.keepalive_interval_ms);
 }
 
-ucn_result_t ucn_cluster_step(ucn_cluster_t *cluster)
+static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
 {
     uint32_t now_ms;
 
@@ -3091,6 +3466,19 @@ ucn_result_t ucn_cluster_step(ucn_cluster_t *cluster)
         send_keepalive(cluster, now_ms);
     }
     return UCN_OK;
+}
+
+ucn_result_t ucn_cluster_step(ucn_cluster_t *cluster)
+{
+    ucn_result_t result = ucn_cluster_step_inner(cluster);
+
+    /* CLV2-01-02: keep the shadow phase mirror aligned after every
+     * Step.  The mirror never drives behaviour; it only exists for the
+     * consistency gate. */
+    if (result == UCN_OK && cluster != NULL && cluster->config.enabled) {
+        cluster_shadow_sync(cluster, UCN_CLUSTER_REASON_UNKNOWN);
+    }
+    return result;
 }
 
 ucn_cluster_role_t ucn_cluster_get_role(const ucn_cluster_t *cluster)

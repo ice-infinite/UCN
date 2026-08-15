@@ -172,6 +172,70 @@ typedef enum ucn_cluster_timing_profile {
     UCN_CLUSTER_TIMING_PROFILE_FAST_FIXED = 1
 } ucn_cluster_timing_profile_t;
 
+/* CLV2-01-01 (M01 shadow phase): explicit phase names for every implicit
+ * role+bool+deadline combination the current FSM can be in.  During M01
+ * this enum is a SHADOW mirror derived from the legacy fields after each
+ * Step/RX; it must never drive protocol behaviour until the M01
+ * transition entry point (CLV2-01-04+) replaces the direct writes.
+ * Quorum/Fence/Config/Rekey phases are deliberately absent (M08/M13). */
+typedef enum ucn_cluster_phase {
+    UCN_CLUSTER_PHASE_DISABLED = 0,
+    UCN_CLUSTER_PHASE_DETACHED_OBSERVE = 1,
+    UCN_CLUSTER_PHASE_ELECTION = 2,
+    UCN_CLUSTER_PHASE_JOIN_PENDING = 3,
+    UCN_CLUSTER_PHASE_MEMBER_ACTIVE = 4,
+    UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE = 5,
+    UCN_CLUSTER_PHASE_HEAD_NO_BACKUP = 6,
+    UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING = 7,
+    UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING = 8,
+    UCN_CLUSTER_PHASE_HEAD_STABLE = 9,
+    UCN_CLUSTER_PHASE_BACKUP_SYNCING = 10,
+    UCN_CLUSTER_PHASE_BACKUP_READY = 11,
+    UCN_CLUSTER_PHASE_BACKUP_TAKEOVER = 12,
+    UCN_CLUSTER_PHASE_STEPPING_DOWN = 13,
+    UCN_CLUSTER_PHASE_RECOVERY_OBSERVE = 14,
+    UCN_CLUSTER_PHASE_RECOVERY_ELECTION = 15,
+    UCN_CLUSTER_PHASE_RECOVERY_HEAD = 16,
+    UCN_CLUSTER_PHASE_COUNT = 17
+} ucn_cluster_phase_t;
+
+/* CLV2-01-03 (M01 shadow phase): why the last shadow phase transition
+ * happened.  During the shadow stage the reason is inferred from the
+ * message type / legacy field delta; after CLV2-01-04 it will be set
+ * explicitly by the single transition entry point. */
+typedef enum ucn_cluster_transition_reason {
+    UCN_CLUSTER_REASON_UNKNOWN = 0,
+    UCN_CLUSTER_REASON_INIT = 1,
+    UCN_CLUSTER_REASON_ELECTION_STARTED = 2,
+    UCN_CLUSTER_REASON_ELECTION_WON = 3,
+    UCN_CLUSTER_REASON_ELECTION_LOST = 4,
+    UCN_CLUSTER_REASON_JOIN_INITIATED = 5,
+    UCN_CLUSTER_REASON_JOIN_ACCEPTED = 6,
+    UCN_CLUSTER_REASON_JOIN_REJECTED = 7,
+    UCN_CLUSTER_REASON_HEAD_LEASE_EXPIRED = 8,
+    UCN_CLUSTER_REASON_HEAD_LEASE_RENEWED = 9,
+    UCN_CLUSTER_REASON_GRACE_TIMEOUT = 10,
+    UCN_CLUSTER_REASON_BACKUP_ASSIGNED = 11,
+    UCN_CLUSTER_REASON_BACKUP_SYNC_STARTED = 12,
+    UCN_CLUSTER_REASON_SNAPSHOT_READY = 13,
+    UCN_CLUSTER_REASON_BACKUP_LOST = 14,
+    UCN_CLUSTER_REASON_RESYNC_STARTED = 15,
+    UCN_CLUSTER_REASON_TAKEOVER_STARTED = 16,
+    UCN_CLUSTER_REASON_TAKEOVER_QUORUM = 17,
+    UCN_CLUSTER_REASON_TAKEOVER_TIMEOUT = 18,
+    UCN_CLUSTER_REASON_STEPDOWN_ORDERED = 19,
+    UCN_CLUSTER_REASON_STEPDOWN_COMPLETE = 20,
+    UCN_CLUSTER_REASON_RECOVERY_ELIGIBLE = 21,
+    UCN_CLUSTER_REASON_RECOVERY_BACKOFF = 22,
+    UCN_CLUSTER_REASON_RECOVERY_WIN = 23,
+    UCN_CLUSTER_REASON_RECOVERY_TTL_EXPIRED = 24,
+    UCN_CLUSTER_REASON_PRIMARY_LOST = 25,
+    UCN_CLUSTER_REASON_PRIMARY_RENEWED = 26,
+    UCN_CLUSTER_REASON_LEAVE = 27,
+    UCN_CLUSTER_REASON_RESET = 28,
+    UCN_CLUSTER_REASON_COUNT = 29
+} ucn_cluster_transition_reason_t;
+
 typedef enum ucn_cluster_message_type {
     UCN_CLUSTER_MSG_ADVERTISE = 1,
     UCN_CLUSTER_MSG_JOIN_REQUEST = 2,
@@ -445,6 +509,14 @@ typedef struct ucn_cluster {
     uint8_t recovery_ack_count;
     uint32_t recovery_acked;
     ucn_cluster_stats_t stats;
+    /* CLV2-01-01..03 (M01 shadow): derived-only mirror of the legacy
+     * role+bool+deadline state.  Production logic MUST NOT read these
+     * fields to make decisions during M01; they exist so the shadow
+     * consistency gate can prove the phase mapping before CLV2-01-04
+     * makes Phase the real driver. */
+    ucn_cluster_phase_t shadow_phase;
+    ucn_cluster_transition_reason_t transition_reason;
+    uint32_t shadow_transition_count;
 } ucn_cluster_t;
 
 ucn_result_t ucn_cluster_message_encode(

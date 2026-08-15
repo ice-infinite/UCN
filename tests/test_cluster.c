@@ -16,6 +16,9 @@ typedef struct cluster_test_node {
     ucn_node_id_t node_id;
     bool alive;
     ucn_cluster_t cluster;
+    /* CLV2-01-02 shadow audit bookkeeping (test-only). */
+    ucn_cluster_phase_t last_audit_phase;
+    bool audit_seen;
 } cluster_test_node_t;
 
 typedef struct cluster_test_packet {
@@ -33,6 +36,100 @@ struct cluster_test_network {
     cluster_test_packet_t queue[CLUSTER_TEST_QUEUE];
     size_t queue_count;
 };
+
+/* CLV2-01-02: test-side mirror of cluster_phase_from_legacy_state().  This
+ * is the SPEC of the mapping (written from the role+bool+deadline combos),
+ * duplicated on purpose so a wrong production mapping cannot also silently
+ * 'fix' the expectation. */
+static ucn_cluster_phase_t test_derive_phase(const ucn_cluster_t *c,
+                                             uint32_t now_ms)
+{
+    if (!c->config.enabled) {
+        return UCN_CLUSTER_PHASE_DISABLED;
+    }
+    switch (c->role) {
+    case UCN_CLUSTER_ROLE_DISABLED:
+        return UCN_CLUSTER_PHASE_DISABLED;
+    case UCN_CLUSTER_ROLE_DETACHED:
+        if (c->recovery_eligible) {
+            if (c->recovery_backoff_deadline_ms != 0U &&
+                (c->recovery_cooldown_until_ms == 0U ||
+                 ucn_deadline_expired(now_ms, c->recovery_cooldown_until_ms))) {
+                return UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
+            }
+            return UCN_CLUSTER_PHASE_RECOVERY_OBSERVE;
+        }
+        return UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
+    case UCN_CLUSTER_ROLE_CANDIDATE:
+        return UCN_CLUSTER_PHASE_ELECTION;
+    case UCN_CLUSTER_ROLE_JOIN_PENDING:
+        return UCN_CLUSTER_PHASE_JOIN_PENDING;
+    case UCN_CLUSTER_ROLE_MEMBER:
+        if (c->head_grace_deadline_ms != 0U &&
+            !ucn_deadline_expired(now_ms, c->head_grace_deadline_ms)) {
+            return UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE;
+        }
+        return UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    case UCN_CLUSTER_ROLE_HEAD:
+        if (c->backup_ready) {
+            return UCN_CLUSTER_PHASE_HEAD_STABLE;
+        }
+        if (c->backup_node_id != 0U) {
+            if (c->backup_syncing) {
+                return UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
+            }
+            return UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING;
+        }
+        return UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+    case UCN_CLUSTER_ROLE_BACKUP:
+        if (c->backup_takeover_active) {
+            return UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
+        }
+        if (c->backup_ready) {
+            return UCN_CLUSTER_PHASE_BACKUP_READY;
+        }
+        return UCN_CLUSTER_PHASE_BACKUP_SYNCING;
+    case UCN_CLUSTER_ROLE_STEPPING_DOWN:
+        return UCN_CLUSTER_PHASE_STEPPING_DOWN;
+    case UCN_CLUSTER_ROLE_RECOVERY_HEAD:
+        return UCN_CLUSTER_PHASE_RECOVERY_HEAD;
+    default:
+        return UCN_CLUSTER_PHASE_DISABLED;
+    }
+}
+
+/* CLV2-01-02/03: every tick ends with the shadow mirror equal to the spec
+ * derivation, and every OBSERVED phase change carries a non-UNKNOWN reason. */
+static int cluster_test_shadow_audit(cluster_test_network_t *network)
+{
+    size_t index;
+
+    for (index = 0U; index < CLUSTER_TEST_NODES; ++index) {
+        cluster_test_node_t *node = &network->nodes[index];
+        ucn_cluster_t *c = &node->cluster;
+        ucn_cluster_phase_t derived;
+
+        if (!node->alive) {
+            continue;
+        }
+        derived = test_derive_phase(c, network->now_ms);
+        TEST_ASSERT(c->shadow_phase == derived);
+        if (node->audit_seen && c->shadow_phase != node->last_audit_phase) {
+            if (c->transition_reason == UCN_CLUSTER_REASON_UNKNOWN) {
+                (void)fprintf(stderr,
+                              "SHADOW-AUDIT: UNKNOWN reason node=%lu "
+                              "old=%d new=%d t=%lu\n",
+                              (unsigned long)node->node_id,
+                              (int)node->last_audit_phase, (int)c->shadow_phase,
+                              (unsigned long)network->now_ms);
+            }
+            TEST_ASSERT(c->transition_reason != UCN_CLUSTER_REASON_UNKNOWN);
+        }
+        node->last_audit_phase = c->shadow_phase;
+        node->audit_seen = true;
+    }
+    return 0;
+}
 
 #if UCN_FEATURE_DYNAMIC_MESH
 static ucn_result_t cluster_summary_link_send(
@@ -440,6 +537,7 @@ static int cluster_test_tick_faulted(cluster_test_network_t *network,
         TEST_ASSERT(ucn_cluster_step(&network->nodes[index].cluster) == UCN_OK);
     }
     TEST_ASSERT(cluster_test_deliver_faulted(network, fault) == 0);
+    TEST_ASSERT(cluster_test_shadow_audit(network) == 0);
     return 0;
 }
 
@@ -455,6 +553,7 @@ static int cluster_test_tick(cluster_test_network_t *network, uint32_t now_ms)
         }
     }
     TEST_ASSERT(cluster_test_deliver(network) == 0);
+    TEST_ASSERT(cluster_test_shadow_audit(network) == 0);
     return 0;
 }
 
@@ -1715,6 +1814,136 @@ static int cluster_test_fault_partition_heal(void)
     return 0;
 }
 
+/* CLV2-01-01: static legality of the phase enum and the total, unique
+ * legacy->phase mapping.  Every implicit combination is checked against
+ * its expected phase name. */
+static int cluster_test_phase_mapping_static(void)
+{
+    cluster_test_network_t network;
+    ucn_cluster_t *c;
+    ucn_cluster_config_t config;
+    const uint32_t now = 1000U;
+
+    TEST_ASSERT(UCN_CLUSTER_PHASE_COUNT == 17);
+    TEST_ASSERT(UCN_CLUSTER_REASON_COUNT == 29);
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    c = &network.nodes[0].cluster;
+    config = c->config;
+
+    /* Fresh init: DETACHED_OBSERVE, seeded by the production mapping. */
+    TEST_ASSERT(ucn_cluster_init(c, &config) == UCN_OK);
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_INIT);
+
+    /* Disabled. */
+    config.enabled = false;
+    TEST_ASSERT(ucn_cluster_init(c, &config) == UCN_OK);
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_DISABLED);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_DISABLED);
+    config.enabled = true;
+
+    /* Detached + recovery combos. */
+    TEST_ASSERT(ucn_cluster_init(c, &config) == UCN_OK);
+    c->recovery_eligible = true;
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    c->recovery_backoff_deadline_ms = 1200U;
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+    c->recovery_cooldown_until_ms = 1200U;
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    c->recovery_eligible = false;
+    c->recovery_backoff_deadline_ms = 0U;
+    c->recovery_cooldown_until_ms = 0U;
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+
+    /* Simple role mappings. */
+    cluster_fixture_set_role(c, UCN_CLUSTER_ROLE_CANDIDATE);
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_ELECTION);
+    cluster_fixture_set_role(c, UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_JOIN_PENDING);
+    cluster_fixture_set_role(c, UCN_CLUSTER_ROLE_STEPPING_DOWN);
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_STEPPING_DOWN);
+    cluster_fixture_set_role(c, UCN_CLUSTER_ROLE_RECOVERY_HEAD);
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_RECOVERY_HEAD);
+
+    /* Member grace combos. */
+    cluster_fixture_set_role(c, UCN_CLUSTER_ROLE_MEMBER);
+    c->head_grace_deadline_ms = 0U;
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+    c->head_grace_deadline_ms = now + 500U;
+    TEST_ASSERT(test_derive_phase(c, now) ==
+                UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE);
+    c->head_grace_deadline_ms = now - 1U;
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+    c->head_grace_deadline_ms = 0U;
+
+    /* Head backup-progress combos. */
+    cluster_fixture_set_role(c, UCN_CLUSTER_ROLE_HEAD);
+    c->backup_node_id = 0U;
+    c->backup_ready = false;
+    c->backup_syncing = false;
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
+    c->backup_node_id = 2U;
+    TEST_ASSERT(test_derive_phase(c, now) ==
+                UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING);
+    c->backup_syncing = true;
+    TEST_ASSERT(test_derive_phase(c, now) ==
+                UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
+    c->backup_syncing = false;
+    c->backup_ready = true;
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_HEAD_STABLE);
+
+    /* Backup mirror combos. */
+    cluster_fixture_set_role(c, UCN_CLUSTER_ROLE_BACKUP);
+    c->backup_syncing = true;
+    c->backup_ready = false;
+    c->backup_takeover_active = false;
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    c->backup_syncing = false;
+    c->backup_ready = true;
+    TEST_ASSERT(test_derive_phase(c, now) == UCN_CLUSTER_PHASE_BACKUP_READY);
+    c->backup_takeover_active = true;
+    TEST_ASSERT(test_derive_phase(c, now) ==
+                UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
+    return 0;
+}
+
+/* CLV2-01-02/03: the canonical lifecycle must (a) keep the shadow mirror
+ * aligned at every tick (audit inside cluster_test_tick already checks
+ * this), (b) produce phase names with real semantics at the end, and
+ * (c) never record an UNKNOWN transition reason on a phase change. */
+static int cluster_test_shadow_lifecycle(void)
+{
+    cluster_test_network_t network;
+    uint32_t now_ms;
+    size_t i;
+    bool saw_head_stable = false;
+    bool saw_backup_ready = false;
+    bool saw_member_active = false;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    for (now_ms = 0U; now_ms <= 300U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    for (i = 0U; i < CLUSTER_TEST_NODES; ++i) {
+        const ucn_cluster_t *c = &network.nodes[i].cluster;
+
+        TEST_ASSERT(c->shadow_phase == test_derive_phase(c, network.now_ms));
+        TEST_ASSERT(c->shadow_transition_count > 0U);
+        if (c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_STABLE) {
+            saw_head_stable = true;
+        } else if (c->shadow_phase == UCN_CLUSTER_PHASE_BACKUP_READY) {
+            saw_backup_ready = true;
+        } else if (c->shadow_phase == UCN_CLUSTER_PHASE_MEMBER_ACTIVE) {
+            saw_member_active = true;
+        }
+    }
+    TEST_ASSERT(saw_head_stable);
+    TEST_ASSERT(saw_backup_ready);
+    TEST_ASSERT(saw_member_active);
+    return 0;
+}
+
 static int cluster_test_timing_profiles(void)
 {
     ucn_cluster_config_t config;
@@ -2689,6 +2918,8 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_stable_switchback() == 0);
     TEST_ASSERT(cluster_test_backup_challenge() == 0);
     TEST_ASSERT(cluster_test_timing_profiles() == 0);
+    TEST_ASSERT(cluster_test_phase_mapping_static() == 0);
+    TEST_ASSERT(cluster_test_shadow_lifecycle() == 0);
     TEST_ASSERT(cluster_test_election_join_and_failover() == 0);
     TEST_ASSERT(cluster_test_capacity_is_bounded() == 0);
     TEST_ASSERT(cluster_test_neighbor_summary_api() == 0);
