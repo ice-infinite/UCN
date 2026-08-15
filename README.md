@@ -1,6 +1,16 @@
-# UCN
+# UniLink
 
-UCN（Unified Communication Network）是一个面向 MCU 自组网的 C99 通信核心库。它让应用通过统一 Node/Link 接口通信，而不把 WiFi、UART、CAN、BLE、LoRa 等具体承载方式带入路由核心。
+> **UniLink**（念作「优尼-Link」）是协议品牌名；**UCN — Unified Communication Network** 是正式协议名/架构缩写。代码符号保持 `ucn_*` 前缀不变。
+
+```text
+UniLink Protocol
+├── UCN Core        (Node / Link / Endpoint / Route)
+├── UCN Extended    (Cluster / Transfer)
+├── UCN Adapter     (UART / CAN / Wi-Fi / USB / RS-485 / LoRa ...)
+└── UCN Host        (Linux / ROS 2 / MAVLink / Ground Station)
+```
+
+UniLink（UCN — Unified Communication Network）是一个面向 MCU 自组网的 C99 通信核心库。它让应用通过统一 Node/Link 接口通信，而不把 WiFi、UART、CAN、BLE、LoRa 等具体承载方式带入路由核心。
 
 Linux、ROS 2、MAVLink 或地面站可以作为普通 Host/Adapter 接入，但不是组网、路由或设备准入的前提；没有 Linux 时，MCU 节点仍可独立发现、转发和恢复通信。
 

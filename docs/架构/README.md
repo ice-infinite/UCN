@@ -1,4 +1,6 @@
-# UCN 工程架构
+# UniLink 工程架构
+
+> **UniLink**（品牌名）即 **UCN — Unified Communication Network**（正式协议名）。代码符号保持 `ucn_*` 前缀。
 
 本目录描述当前仓库如何组织，而不是重复协议字段或产品业务 ABI。UCN 保持 MCU-first：Core 能在没有 Linux 时独立运行；Linux/ROS2/PX4 只在未来以可选 Host/Adapter 方式接入。
 
