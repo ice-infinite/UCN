@@ -198,10 +198,12 @@ typedef enum ucn_cluster_message_type {
     UCN_CLUSTER_MSG_BACKUP_REJECT = 19
 } ucn_cluster_message_type_t;
 
-/* Fixed 28 B wire format v3.  The first 16 B are shared; the trailing
- * 12 B are reinterpreted per Message Type.  Types 1-7/9 retain the legacy
+/* Fixed 32 B wire format v3.  The first 16 B are shared; the trailing
+ * 16 B are reinterpreted per Message Type.  Types 1-7/9 retain the legacy
  * layout.  HEAD_TAKEOVER carries the Backup generation in v3, so a Member can
- * verify that a promotion came from its Head-announced Backup. */
+ * verify that a promotion came from its Head-announced Backup.  Type 12 uses
+ * the full 16 B trailing for backup_generation + member_node_id +
+ * membership_sequence + member_nonce (all 32-bit). */
 typedef struct ucn_cluster_message {
     ucn_cluster_message_type_t type;
     ucn_cluster_role_t role;
