@@ -6,22 +6,22 @@
 -- Detecting C compile features
 -- Detecting C compile features - done
 -- UCN profile: FULL; Service: OFF
--- Configuring done (5.2s)
--- Generating done (0.3s)
+-- Configuring done (5.4s)
+-- Generating done (0.4s)
 -- Build files have been written to: /mnt/e/File/MESH/UCN/build-m00-core_only
 ==== [core_only] build ====
-[1/14] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_core.c.o
-[2/14] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_endpoint.c.o
+[1/14] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_endpoint.c.o
+[2/14] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_core.c.o
 [3/14] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_frame.c.o
 [4/14] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_link_cost.c.o
-[5/14] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_standard_adapter.c.o
-[6/14] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_protocol_owner.c.o
-[7/14] Building C object CMakeFiles/ucn_core.dir/src/routing/ucn_path.c.o
-[8/14] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_adapter.c.o
-[9/14] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_event_runtime.c.o
-[10/14] Building C object CMakeFiles/ucn_core.dir/src/adapters/stream/ucn_stream_source.c.o
-[11/14] Building C object CMakeFiles/ucn_core.dir/src/routing/ucn_policy.c.o
-[12/14] Building C object CMakeFiles/ucn_core.dir/src/adapters/can/ucn_can_source.c.o
+[5/14] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_adapter.c.o
+[6/14] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_event_runtime.c.o
+[7/14] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_standard_adapter.c.o
+[8/14] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_protocol_owner.c.o
+[9/14] Building C object CMakeFiles/ucn_core.dir/src/routing/ucn_path.c.o
+[10/14] Building C object CMakeFiles/ucn_core.dir/src/adapters/can/ucn_can_source.c.o
+[11/14] Building C object CMakeFiles/ucn_core.dir/src/adapters/stream/ucn_stream_source.c.o
+[12/14] Building C object CMakeFiles/ucn_core.dir/src/routing/ucn_policy.c.o
 [13/14] Building C object CMakeFiles/ucn_core.dir/src/node/ucn_node.c.o
 [14/14] Linking C static library libucn_core.a
 ==== [core_only] assert cluster not linked ====

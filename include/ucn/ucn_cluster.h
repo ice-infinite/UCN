@@ -233,8 +233,19 @@ typedef enum ucn_cluster_transition_reason {
     UCN_CLUSTER_REASON_PRIMARY_RENEWED = 26,
     UCN_CLUSTER_REASON_LEAVE = 27,
     UCN_CLUSTER_REASON_RESET = 28,
-    UCN_CLUSTER_REASON_COUNT = 29
+    /* CLV2-M01.0.1: a Recovery contender that LOST the arbitration and
+     * joined the winner.  Deliberately distinct from RECOVERY_WIN, which
+     * only names the node that won. */
+    UCN_CLUSTER_REASON_RECOVERY_YIELDED = 29,
+    UCN_CLUSTER_REASON_COUNT = 30
 } ucn_cluster_transition_reason_t;
+
+/* CLV2-01-01: compile-time fences so an accidental enum extension is
+ * caught at build time, not in a test run (C99-compatible assertion). */
+typedef char ucn_cluster_phase_count_must_be_17[
+    UCN_CLUSTER_PHASE_COUNT == 17 ? 1 : -1];
+typedef char ucn_cluster_reason_count_must_be_30[
+    UCN_CLUSTER_REASON_COUNT == 30 ? 1 : -1];
 
 typedef enum ucn_cluster_message_type {
     UCN_CLUSTER_MSG_ADVERTISE = 1,

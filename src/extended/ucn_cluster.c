@@ -390,26 +390,31 @@ static ucn_cluster_phase_t cluster_phase_from_legacy_state(
     case UCN_CLUSTER_ROLE_JOIN_PENDING:
         return UCN_CLUSTER_PHASE_JOIN_PENDING;
     case UCN_CLUSTER_ROLE_MEMBER:
-        if (cluster->head_grace_deadline_ms != 0U &&
-            !ucn_deadline_expired(now_ms, cluster->head_grace_deadline_ms)) {
+        /* CLV2-M01.0.1: arming the grace deadline IS the phase change.
+         * Timer expiry is an event the FSM owner consumes (timeout
+         * action -> DETACHED/RECOVERY); it must never silently derive
+         * the phase back to MEMBER_ACTIVE. */
+        if (cluster->head_grace_deadline_ms != 0U) {
             return UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE;
         }
         return UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     case UCN_CLUSTER_ROLE_HEAD:
+        /* CLV2-M01.0.1: the Head-side phase ladder follows the REAL
+         * assignment/snapshot fields: no Backup yet -> NO_BACKUP;
+         * assignment cycle armed -> ASSIGNING; assignment done but no
+         * READY yet -> SYNCING (snapshot in flight); READY -> STABLE.
+         * The mirror flag backup_syncing is Backup-side state and must
+         * never drive the Head phase. */
+        if (cluster->backup_node_id == 0U) {
+            return UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+        }
         if (cluster->backup_ready) {
             return UCN_CLUSTER_PHASE_HEAD_STABLE;
         }
-        if (cluster->backup_node_id != 0U) {
-            /* The Head-side syncing flag stays false in the current FSM
-             * (only the Backup mirrors sync); keep the SYNCING phase
-             * reachable anyway so a future mirror-visible assignment can
-             * map without an enum change. */
-            if (cluster->backup_syncing) {
-                return UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
-            }
+        if (cluster->backup_assign_pending) {
             return UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING;
         }
-        return UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+        return UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
     case UCN_CLUSTER_ROLE_BACKUP:
         if (cluster->backup_takeover_active) {
             return UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
@@ -427,10 +432,13 @@ static ucn_cluster_phase_t cluster_phase_from_legacy_state(
     }
 }
 
-/* Best-effort reason for a legacy transition, from the phase pair alone.
- * The table covers every transition the current FSM actually performs;
- * an UNKNOWN result means the table must be extended (the shadow
- * consistency tests fail on it). */
+/* BEST-EFFORT ONLY reason inference for a legacy transition, from the
+ * phase pair alone.  NOT AUTHORITATIVE: the same old/new pair can be
+ * reached by different events, so this table can mislabel individual
+ * cases (e.g. a member detached by HEAD_STEPDOWN vs. by lease expiry).
+ * It MUST NOT drive the FSM; the single transition entry point
+ * (CLV2-01-04) will replace it with explicit per-event reasons.  The
+ * shadow tests only require 'phase changed => reason != UNKNOWN'. */
 static ucn_cluster_transition_reason_t cluster_reason_from_diff(
     ucn_cluster_phase_t old_phase, ucn_cluster_phase_t new_phase)
 {
@@ -524,7 +532,8 @@ static ucn_cluster_transition_reason_t cluster_reason_from_diff(
         if (new_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) {
             return UCN_CLUSTER_REASON_BACKUP_LOST;
         }
-        if (new_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING) {
+        if (new_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING ||
+            new_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING) {
             return UCN_CLUSTER_REASON_RESYNC_STARTED;
         }
         if (new_phase == UCN_CLUSTER_PHASE_STEPPING_DOWN) {
@@ -631,6 +640,12 @@ static ucn_cluster_transition_reason_t cluster_reason_from_diff(
         if (new_phase == UCN_CLUSTER_PHASE_JOIN_PENDING) {
             return UCN_CLUSTER_REASON_JOIN_INITIATED;
         }
+        /* CLV2-M01.0.1: lost the Recovery arbitration and joined the
+         * winner's Cluster.  RECOVERY_WIN is reserved for the node that
+         * actually won. */
+        if (new_phase == UCN_CLUSTER_PHASE_MEMBER_ACTIVE) {
+            return UCN_CLUSTER_REASON_RECOVERY_YIELDED;
+        }
         return UCN_CLUSTER_REASON_UNKNOWN;
     case UCN_CLUSTER_PHASE_DISABLED:
         return UCN_CLUSTER_REASON_INIT;
@@ -673,14 +688,48 @@ static ucn_cluster_transition_reason_t cluster_rx_reason_from_type(
     }
 }
 
+/* CLV2-M01.0.1: contradictory legacy combinations the current FSM must
+ * never produce.  The shadow gate refuses to mint a transition from an
+ * invalid combination instead of silently naming it. */
+static bool cluster_legacy_state_is_valid(const ucn_cluster_t *cluster)
+{
+    if (cluster->role == UCN_CLUSTER_ROLE_HEAD) {
+        /* READY without a selected Backup is contradictory. */
+        if (cluster->backup_ready && cluster->backup_node_id == 0U) {
+            return false;
+        }
+        /* backup_syncing is Backup-side mirror state; a Head must never
+         * carry it. */
+        if (cluster->backup_syncing) {
+            return false;
+        }
+    }
+    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
+        /* The mirror is either syncing or ready, never both; takeover
+         * starts from READY, so it can never coincide with syncing. */
+        if (cluster->backup_ready && cluster->backup_syncing) {
+            return false;
+        }
+        if (cluster->backup_takeover_active && cluster->backup_syncing) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void cluster_shadow_sync(ucn_cluster_t *cluster,
                                 ucn_cluster_transition_reason_t hint)
 {
     uint32_t now_ms = cluster_now(cluster);
-    ucn_cluster_phase_t derived =
-        cluster_phase_from_legacy_state(cluster, now_ms);
+    ucn_cluster_phase_t derived;
     ucn_cluster_transition_reason_t reason;
 
+    if (!cluster_legacy_state_is_valid(cluster)) {
+        /* Fail closed: never mint a shadow transition from a
+         * contradictory legacy combination. */
+        return;
+    }
+    derived = cluster_phase_from_legacy_state(cluster, now_ms);
     if (derived == cluster->shadow_phase) {
         return;
     }
