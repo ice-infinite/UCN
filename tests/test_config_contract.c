@@ -1,4 +1,6 @@
 #include "ucn/ucn_adapter.h"
+#include "ucn/ucn_cluster.h"
+#include "ucn/ucn_cluster_federation.h"
 #include "ucn/ucn_node_storage.h"
 #include "ucn/ucn_service_bridge.h"
 #include "ucn/ucn_transfer.h"
@@ -46,6 +48,17 @@ CONFIG_ASSERT(config_override_links, UCN_MAX_LINKS == 3U);
 CONFIG_ASSERT(config_override_q0, UCN_TX_Q0_DEPTH == 2U);
 CONFIG_ASSERT(config_override_neighbors, UCN_MAX_NEIGHBORS == 4U);
 CONFIG_ASSERT(config_override_bearers, UCN_MAX_BEARERS_PER_NEIGHBOR == 1U);
+CONFIG_ASSERT(config_override_cluster_peers, UCN_CLUSTER_MAX_PEERS == 4U);
+CONFIG_ASSERT(config_override_cluster_candidates,
+              UCN_CLUSTER_MAX_CANDIDATES == 3U);
+CONFIG_ASSERT(config_override_cluster_members, UCN_CLUSTER_MAX_MEMBERS == 6U);
+CONFIG_ASSERT(config_override_cluster_lease, UCN_CLUSTER_LEASE_MS == 6000U);
+CONFIG_ASSERT(config_override_cluster_recovery_observation,
+              UCN_CLUSTER_RECOVERY_OBSERVATION_MS == 4000U);
+CONFIG_ASSERT(config_override_federation_records,
+              UCN_CLUSTER_FED_MAX_DIRECTORY_RECORDS == 9U);
+CONFIG_ASSERT(config_override_federation_cache,
+              UCN_CLUSTER_FED_MAX_LOCATOR_CACHE == 5U);
 CONFIG_ASSERT(config_override_bindings, UCN_SERVICE_MAX_BINDINGS == 4U);
 CONFIG_ASSERT(config_override_q0_bindings, UCN_SERVICE_MAX_Q0_BINDINGS == 1U);
 CONFIG_ASSERT(config_override_q1_bindings, UCN_SERVICE_MAX_Q1_BINDINGS == 3U);
@@ -141,6 +154,40 @@ CONFIG_ASSERT(config_default_service_q1, UCN_SERVICE_REMOTE_TX_Q1_DEPTH == 4U);
 CONFIG_ASSERT(config_default_validators,
               UCN_SERVICE_BRIDGE_MAX_VALIDATORS == 2U);
 CONFIG_ASSERT(config_default_replay, UCN_SERVICE_BRIDGE_REPLAY_DEPTH == 4U);
+CONFIG_ASSERT(config_default_cluster_peers, UCN_CLUSTER_MAX_PEERS == 8U);
+CONFIG_ASSERT(config_default_cluster_candidates,
+              UCN_CLUSTER_MAX_CANDIDATES == 8U);
+CONFIG_ASSERT(config_default_cluster_members, UCN_CLUSTER_MAX_MEMBERS == 16U);
+CONFIG_ASSERT(config_default_cluster_observation,
+              UCN_CLUSTER_OBSERVATION_MS == 5000U);
+CONFIG_ASSERT(config_default_cluster_recovery_observation,
+              UCN_CLUSTER_RECOVERY_OBSERVATION_MS == 5000U);
+CONFIG_ASSERT(config_default_cluster_election,
+              UCN_CLUSTER_ELECTION_WINDOW_MS == 3000U);
+CONFIG_ASSERT(config_default_cluster_lease,
+              UCN_CLUSTER_LEASE_MS == 8000U);
+CONFIG_ASSERT(config_default_federation_authorities,
+              UCN_CLUSTER_FED_MAX_DIRECTORY_AUTHORITIES == 2U);
+CONFIG_ASSERT(config_default_federation_local_locators,
+              UCN_CLUSTER_FED_MAX_LOCAL_LOCATORS == 17U);
+CONFIG_ASSERT(config_default_federation_records,
+              UCN_CLUSTER_FED_MAX_DIRECTORY_RECORDS == 32U);
+CONFIG_ASSERT(config_default_federation_cache,
+              UCN_CLUSTER_FED_MAX_LOCATOR_CACHE == 16U);
+CONFIG_ASSERT(config_default_federation_next_clusters,
+              UCN_CLUSTER_FED_MAX_NEXT_CLUSTERS == 8U);
+CONFIG_ASSERT(config_default_federation_pending,
+              UCN_CLUSTER_FED_MAX_PENDING == 2U);
+CONFIG_ASSERT(config_default_federation_seen,
+              UCN_CLUSTER_FED_MAX_SEEN_TRANSACTIONS == 8U);
+CONFIG_ASSERT(config_default_federation_lease,
+              UCN_CLUSTER_FED_DIRECTORY_LEASE_MS == 8000U);
+CONFIG_ASSERT(config_default_federation_refresh,
+              UCN_CLUSTER_FED_LOCATOR_REFRESH_MS == 2000U);
+CONFIG_ASSERT(config_default_federation_query_timeout,
+              UCN_CLUSTER_FED_QUERY_TIMEOUT_MS == 1000U);
+CONFIG_ASSERT(config_default_federation_transaction_lease,
+              UCN_CLUSTER_FED_TRANSACTION_LEASE_MS == 3000U);
 #endif
 
 int main(void)

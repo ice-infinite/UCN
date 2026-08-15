@@ -1,0 +1,187 @@
+module: cluster_federation
+description: C06.3 可选簇间 Federation；已实现 Head Locator Directory、单帧 Submit/Data/Deliver Tunnel、固定 Seen 去重与内层安全 Provider 门禁，不包含跨簇 Transfer 或自动 Gateway。
+entry: cluster_federation.ucn_cluster_federation_step
+source_files:
+  - src/extended/ucn_cluster_federation.c
+  - src/extended/ucn_cluster.c
+
+nodes:
+  - id: cluster_federation.ucn_cluster_federation_message_encode
+    symbol: ucn_cluster_federation_message_encode
+    type: function
+    file: src/extended/ucn_cluster_federation.c
+    layer: extended
+    role: 将 Format 1 的 Locator、Query、Reply、Submit/Data/Deliver 或 Error 写为严格大端 Endpoint Payload。
+    called_by:
+      - cluster_federation.ucn_cluster_federation_step
+      - cluster_federation.ucn_cluster_federation_query_locator
+      - cluster_federation.ucn_cluster_federation_receive
+      - external.product_preflight_or_test
+    calls:
+      - target: cluster_federation.ucn_cluster_federation_message_encoded_size
+        type: direct
+        reason: 先执行完整语义和精确长度门禁。
+    notes:
+      - 不为预留 Kind 9/10 生成帧。
+      - Deliver 固定头为 28 B，保留 Origin/Destination Cluster ID。
+      - 预留 Kind 9/10 不生成帧。
+
+  - id: cluster_federation.ucn_cluster_federation_message_decode
+    symbol: ucn_cluster_federation_message_decode
+    type: function
+    file: src/extended/ucn_cluster_federation.c
+    layer: extended
+    role: 精确解析 Endpoint 0xA1 并拒绝坏版本、Flags、长度、保留 Kind 和字段。
+    called_by:
+      - cluster_federation.ucn_cluster_federation_receive
+      - external.product_preflight_or_test
+    calls: []
+    notes:
+      - 已编号但未实现的 Next-Cluster Kind 9/10 返回 UCN_ERR_UNSUPPORTED。
+      - enable_tunnel=false 时 Receive 对 Tunnel Submit/Data/Deliver 返回 UCN_ERR_UNSUPPORTED。
+
+  - id: cluster_federation.ucn_cluster_federation_init
+    symbol: ucn_cluster_federation_init
+    type: function
+    file: src/extended/ucn_cluster_federation.c
+    layer: extended
+    role: 复制固定目录副本 ID，校验时钟、发送回调、租约、刷新间隔和 Authority 契约；Tunnel 显式启用时再校验 Head ACL、内层 Provider 与最终 Deliver 回调。
+    called_by:
+      - external.product_protocol_owner_setup
+    calls: []
+    notes:
+      - Directory Authority 必须同时出现在固定 Authority 列表并提供 authorize_head 回调。
+      - enable_tunnel 默认 false，保持 Directory-only 兼容；启用后默认要求 seal_inner/open_inner/deliver。
+      - 对象和所有表由调用者静态分配；不使用 malloc 或后台线程。
+
+  - id: cluster_federation.ucn_cluster_federation_step
+    symbol: ucn_cluster_federation_step
+    type: function
+    file: src/extended/ucn_cluster_federation.c
+    layer: extended
+    role: 清理过期租约/缓存/查询/Seen，观察当前 Cluster Head 与成员，并逐个向固定 Directory 副本发布或撤销 Locator。
+    called_by:
+      - external.product_protocol_owner_cycle
+    calls:
+      - target: cluster_federation.ucn_cluster_get_view
+        type: direct
+        reason: 只允许当前本机 Head 发布 Locator。
+      - target: cluster_federation.ucn_cluster_get_member_summary_at
+        type: direct
+        reason: 逐槽读取当前成员，避免动态复制或访问私有布局。
+      - target: cluster_federation.ucn_cluster_federation_message_encode
+        type: direct
+        reason: 编码 Register 或 Withdraw 后交给产品发送回调。
+    notes:
+      - 成员离开或 Term/Cluster 身份改变时先向所有副本尝试 Withdraw；下一轮才可注册新身份。
+      - 单个副本不可达不会饿死后续 Locator；本刷新周期继续尝试其他固定副本。
+      - 本函数和 Receive 必须在同一个 Protocol Owner 串行调用，ISR 不可直接操作表。
+
+  - id: cluster_federation.ucn_cluster_federation_receive
+    symbol: ucn_cluster_federation_receive
+    type: function
+    file: src/extended/ucn_cluster_federation.c
+    layer: extended
+    role: 分发 Locator 控制与可选 Submit/Data/Deliver/Error；维护权威目录、Head Cache、Seen 去重和受限错误回送。
+    called_by:
+      - external.endpoint_a1_handler
+    calls:
+      - target: cluster_federation.ucn_cluster_federation_message_decode
+        type: direct
+        reason: 先完成严格格式检查。
+      - target: cluster_federation.ucn_cluster_federation_message_encode
+        type: direct
+        reason: Authority 返回 Locator Reply 或有界 Directory Not Found。
+    notes:
+      - require_protected_control 启用时，未保护的 Federation 外层帧失败关闭。
+      - Authority 还必须验证外层 Source 等于声明 Head 且经产品 authorize_head 接受。
+      - 同一 Locator 只接受 Term/Nonce 前进；不同活跃 Cluster/Head 不得覆盖旧租约。
+      - H1 只接受当前 Member 的 Submit；H2 只接受产品 ACL 承认的 Head Data，最终 Member 只接受当前 Head Deliver。
+
+  - id: cluster_federation.ucn_cluster_federation_query_locator
+    symbol: ucn_cluster_federation_query_locator
+    type: function
+    file: src/extended/ucn_cluster_federation.c
+    layer: extended
+    role: 由当前 Head 查询目标 Node Locator；命中有限 Cache 立即返回，未命中则占用一个固定 Pending 并轮询目录副本。
+    called_by:
+      - external.future_c06_3_tunnel_submit
+      - external.product_diagnostic
+    calls:
+      - target: cluster_federation.ucn_cluster_get_view
+        type: direct
+        reason: 拒绝非 Head 发起远端解析。
+      - target: cluster_federation.ucn_cluster_federation_message_encode
+        type: direct
+        reason: 发送 Locator Query。
+    notes:
+      - Query 成功仅表示已命中缓存或查询已发出；通过 find_locator 读取异步结果。
+      - 一个副本发送失败会同次轮询下一个；已发送但无回复则在 Query Timeout 后由 step 尝试尚未查询的副本。
+      - 没有业务数据暂存；Cache 未命中时应用收到 DIRECTORY_NOT_FOUND 后在 Locator 到达时以新 Transaction 重试。
+
+  - id: cluster_federation.ucn_cluster_federation_find_locator
+    symbol: ucn_cluster_federation_find_locator
+    type: function
+    file: src/extended/ucn_cluster_federation.c
+    layer: extended
+    role: 只读返回未过期 Node Locator Cache。
+    called_by:
+      - external.future_c06_3_tunnel_submit
+      - external.product_diagnostic
+    calls: []
+    notes:
+      - 过期或未解析时返回 NULL，不回落为对最终远端成员的普通寻路。
+
+  - id: cluster_federation.ucn_cluster_federation_find_next_cluster
+    symbol: ucn_cluster_federation_find_next_cluster
+    type: function
+    file: src/extended/ucn_cluster_federation.c
+    layer: extended
+    role: 只读返回未过期的 Cluster ID 到目标 Head 的直达锚点。
+    called_by:
+      - external.future_c06_3_tunnel_data
+      - external.product_diagnostic
+    calls: []
+    notes:
+      - C06.3 只使用直达 Head 锚点；多 Gateway/逐簇链和自动邻接仍归 C07。
+
+  - id: cluster_federation.ucn_cluster_federation_send
+    symbol: ucn_cluster_federation_send
+    type: function
+    file: src/extended/ucn_cluster_federation.c
+    layer: extended
+    role: 显式把一帧业务从当前 Member/Head 提交给本簇 Head；绝不劫持普通 Core Send API。
+    called_by:
+      - external.application_task_or_service
+    calls:
+      - target: cluster_federation.ucn_cluster_federation_message_encode
+        type: indirect
+        reason: 通过产品 Send 回调形成 Submit；保留原始 Q0/Q1。
+      - target: cluster_federation.ucn_cluster_get_view
+        type: direct
+        reason: 只允许当前 Member/Head 发起。
+    notes:
+      - enable_tunnel=false 时返回配置错误；默认 inner security Provider 缺失时初始化即失败。
+      - A 先 seal_inner，H1/H2 不打开内层；C 的 open_inner 成功才调用 deliver。
+      - 单帧仅；Inner 上限为 UCN_MAX_PAYLOAD_BYTES-28，跨簇 Transfer 留待 C06.4。
+
+  - id: cluster_federation.ucn_cluster_get_view
+    symbol: ucn_cluster_get_view
+    type: function
+    file: src/extended/ucn_cluster.c
+    layer: extended
+    role: 从唯一 Owner 中读取 Cluster 身份、Term、Head 与当前角色，不暴露可写状态。
+    called_by:
+      - cluster_federation.ucn_cluster_federation_step
+      - cluster_federation.ucn_cluster_federation_query_locator
+    calls: []
+
+  - id: cluster_federation.ucn_cluster_get_member_summary_at
+    symbol: ucn_cluster_get_member_summary_at
+    type: function
+    file: src/extended/ucn_cluster.c
+    layer: extended
+    role: 按固定 Member 槽读取当前成员摘要，供 Federation 无动态内存地同步发布集。
+    called_by:
+      - cluster_federation.ucn_cluster_federation_step
+    calls: []

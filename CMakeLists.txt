@@ -8,6 +8,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 option(UCN_BUILD_TESTS "Build UCN unit and simulation tests" ON)
 option(UCN_BUILD_SCALE_SIM "Build the host-only UCN scale simulator" ON)
+option(UCN_BUILD_CLUSTER_SIM "Build the host-only UCN Cluster simulator" ON)
 option(UCN_BUILD_CONFIG_CONTRACT_TESTS
     "Build standalone global/default/fallback configuration contract tests" OFF)
 set(UCN_PROFILE "FULL" CACHE STRING "UCN feature profile: NANO, LITE, or FULL")
@@ -135,6 +136,36 @@ target_compile_options(ucn_transfer PRIVATE
     $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
 )
 
+# Automatic single-level clustering is also opt-in.  Election, membership and
+# lease tables remain outside ucn_node_t so Core-only/Nano products retain the
+# original footprint.
+add_library(ucn_cluster STATIC EXCLUDE_FROM_ALL
+    src/extended/ucn_cluster.c
+)
+target_link_libraries(ucn_cluster PUBLIC ucn_core)
+target_compile_options(ucn_cluster PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+
+# C06 federation format/state remains an opt-in Extended archive.  C06.1 only
+# freezes the Endpoint codec and read-only Cluster boundary; no Core object
+# or Wire v5 field changes are introduced here.
+add_library(ucn_cluster_federation STATIC EXCLUDE_FROM_ALL
+    src/extended/ucn_cluster_federation.c
+)
+target_link_libraries(ucn_cluster_federation PUBLIC ucn_cluster)
+target_compile_options(ucn_cluster_federation PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+
+if(UCN_BUILD_CLUSTER_SIM)
+    add_executable(ucn_cluster_sim tools/ucn_cluster_sim.c)
+    target_link_libraries(ucn_cluster_sim PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_sim PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+endif()
+
 # Platform Ports deliberately remain separate link targets.  A product links
 # exactly one selected target (for example ucn_port_freertos); ucn_core itself
 # contains no RTOS-specific wrapper or runtime hook.  EXCLUDE_FROM_ALL keeps
@@ -195,6 +226,8 @@ if(UCN_BUILD_TESTS)
         tests/test_public_headers.c
         tests/test_node_storage_header.c
         tests/test_transfer.c
+        tests/test_cluster.c
+        tests/test_cluster_federation.c
     )
 
     if(NOT UCN_PROFILE_UPPER STREQUAL "NANO")
@@ -241,6 +274,8 @@ if(UCN_BUILD_TESTS)
     target_link_libraries(ucn_tests PRIVATE
         ucn_core
         ucn_transfer
+        ucn_cluster
+        ucn_cluster_federation
         ucn_port_bare_metal
         ucn_port_freertos
         ucn_port_zephyr
@@ -254,6 +289,47 @@ if(UCN_BUILD_TESTS)
     )
 
     add_test(NAME ucn_tests COMMAND ucn_tests)
+
+    if(TARGET ucn_cluster_sim)
+        foreach(UCN_CLUSTER_SIM_NODES 64 256 1000)
+            add_test(NAME ucn_cluster_${UCN_CLUSTER_SIM_NODES}_convergence
+                COMMAND ucn_cluster_sim --nodes ${UCN_CLUSTER_SIM_NODES}
+                    --scenario clean)
+            set_tests_properties(ucn_cluster_${UCN_CLUSTER_SIM_NODES}_convergence
+                PROPERTIES PASS_REGULAR_EXPRESSION
+                    "CLUSTER_SIM nodes=${UCN_CLUSTER_SIM_NODES} scenario=clean.*converged_ms=[1-9]")
+
+            add_test(NAME ucn_cluster_${UCN_CLUSTER_SIM_NODES}_impaired
+                COMMAND ucn_cluster_sim --nodes ${UCN_CLUSTER_SIM_NODES}
+                    --scenario impaired --seed 1592594996)
+            set_tests_properties(ucn_cluster_${UCN_CLUSTER_SIM_NODES}_impaired
+                PROPERTIES PASS_REGULAR_EXPRESSION
+                    "CLUSTER_SIM nodes=${UCN_CLUSTER_SIM_NODES} scenario=impaired.*converged_ms=[1-9].*dropped=[1-9].*delayed=[1-9].*duplicated=[1-9].*asymmetric=[1-9]")
+        endforeach()
+
+        foreach(UCN_CLUSTER_SIM_SCENARIO head-failover mobility score-shift)
+            add_test(NAME ucn_cluster_64_${UCN_CLUSTER_SIM_SCENARIO}
+                COMMAND ucn_cluster_sim --nodes 64
+                    --scenario ${UCN_CLUSTER_SIM_SCENARIO})
+            set_tests_properties(ucn_cluster_64_${UCN_CLUSTER_SIM_SCENARIO}
+                PROPERTIES PASS_REGULAR_EXPRESSION
+                    "CLUSTER_SIM nodes=64 scenario=${UCN_CLUSTER_SIM_SCENARIO}.*converged_ms=[1-9]")
+        endforeach()
+
+        add_test(NAME ucn_cluster_64_fast_head_failover
+            COMMAND ucn_cluster_sim --nodes 64 --scenario head-failover
+                --profile fast-fixed)
+        set_tests_properties(ucn_cluster_64_fast_head_failover
+            PROPERTIES PASS_REGULAR_EXPRESSION
+                "CLUSTER_SIM nodes=64 scenario=head-failover profile=fast-fixed.*recovery_ms=[1-3][0-9][0-9][0-9]")
+
+        add_test(NAME ucn_cluster_64_fast_impaired
+            COMMAND ucn_cluster_sim --nodes 64 --scenario impaired
+                --profile fast-fixed --seed 1592594996)
+        set_tests_properties(ucn_cluster_64_fast_impaired
+            PROPERTIES PASS_REGULAR_EXPRESSION
+                "CLUSTER_SIM nodes=64 scenario=impaired profile=fast-fixed.*converged_ms=[1-9].*dropped=[1-9].*delayed=[1-9].*duplicated=[1-9].*asymmetric=[1-9]")
+    endif()
 
     # This focused executable gives the preset resolver a direct product-header
     # entry point.  The complete ucn_tests target also supports the same

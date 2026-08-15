@@ -61,5 +61,7 @@ int test_profile(void);
 int test_public_headers(void);
 int test_node_storage_header(void);
 int test_transfer(void);
+int test_cluster(void);
+int test_cluster_federation(void);
 
 #endif

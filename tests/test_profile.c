@@ -2,6 +2,8 @@
 #include <string.h>
 
 #include "ucn/ucn.h"
+#include "ucn/ucn_cluster.h"
+#include "ucn/ucn_cluster_federation.h"
 #include "ucn/ucn_node.h"
 #include "ucn/ucn_transfer.h"
 #include "ucn/ports/ucn_event_runtime.h"
@@ -283,7 +285,7 @@ int test_profile(void)
            "link_bytes=%zu event_runtime_bytes=%zu stream_source_bytes=%zu "
            "stream_default_storage_bytes=%zu can_source_bytes=%zu "
            "can_default_storage_bytes=%zu transfer_bytes=%zu "
-           "transfer_rx_bytes=%zu\n",
+           "transfer_rx_bytes=%zu cluster_bytes=%zu federation_bytes=%zu\n",
            UCN_PROFILE_NAME, UCN_PROFILE, UCN_FEATURE_SERVICE,
            sizeof(ucn_node_t), sizeof(ucn_link_t),
            sizeof(ucn_event_runtime_t), sizeof(ucn_stream_source_t),
@@ -291,6 +293,7 @@ int test_profile(void)
            sizeof(ucn_can_source_t),
            sizeof(ucn_can_source_default_storage_t),
            sizeof(ucn_transfer_t),
-           UCN_TRANSFER_RX_SLOTS * UCN_TRANSFER_MAX_MESSAGE_BYTES);
+           UCN_TRANSFER_RX_SLOTS * UCN_TRANSFER_MAX_MESSAGE_BYTES,
+           sizeof(ucn_cluster_t), sizeof(ucn_cluster_federation_t));
     return 0;
 }

@@ -6662,6 +6662,52 @@ size_t ucn_node_neighbor_count(const ucn_node_t *node,
     return count;
 }
 
+size_t ucn_node_copy_neighbor_summaries(
+    const ucn_node_t *node,
+    ucn_neighbor_summary_t *output,
+    size_t capacity)
+{
+    size_t index;
+    size_t count = 0U;
+
+    if (node == NULL || (output == NULL && capacity != 0U)) {
+        return 0U;
+    }
+    for (index = 0U; index < UCN_MAX_NEIGHBORS; ++index) {
+        const ucn_neighbor_entry_t *entry = &node->neighbors[index];
+        size_t bearer_index;
+        uint32_t freshest = 0U;
+
+        if (entry->state == UCN_NEIGHBOR_EMPTY) {
+            continue;
+        }
+        if (output == NULL) {
+            ++count;
+            continue;
+        }
+        if (count >= capacity) {
+            break;
+        }
+        for (bearer_index = 0U; bearer_index < UCN_MAX_BEARERS_PER_NEIGHBOR;
+             ++bearer_index) {
+            const ucn_neighbor_bearer_t *bearer = &entry->bearers[bearer_index];
+
+            if (bearer->state != UCN_NEIGHBOR_BEARER_EMPTY &&
+                (freshest == 0U ||
+                 (int32_t)(bearer->last_seen_ms - freshest) > 0)) {
+                freshest = bearer->last_seen_ms;
+            }
+        }
+        output[count].state = entry->state;
+        output[count].peer_node_id = entry->peer_node_id;
+        output[count].bearer_count = entry->bearer_count;
+        output[count].primary_bearer_index = entry->primary_bearer_index;
+        output[count].last_seen_ms = freshest;
+        ++count;
+    }
+    return count;
+}
+
 ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
 {
     size_t index;

@@ -276,11 +276,14 @@ Core 本身不做跨 Link 分片/重组；可选 `ucn_transfer` 在 Core 之上�
 | Group / Multicast | 面向编队或同类传感器的受权限组消息。 | 使用受限广播或多次单播。 |
 | Q2 Reliable | 参数写入、配置、普通确认。 | Core 不承担可靠参数服务。 |
 | Fragmentation | `ucn_transfer` 已实现九档、固定槽、CRC32、ACK/重试和显式 release；仅目标端重组。 | 未链接 Transfer 时仍直接拒绝超 Core 负载；不提供无限消息或隐式文件传输。 |
+| Single-level Cluster | `ucn_cluster` 首阶段使用一跳已准入邻居完成评分选举、加入/容量、租约和 Head 失效重选。 | 未链接时所有节点继续使用原有 HELLO/Route/Path；Core 不依赖 Cluster。 |
 | Q3 Bulk | 日志、OTA、文件等限速流量。 | 不在普通 MCU Mesh 上进行大数据传输。 |
 | Time Sync | 编队、传感器融合和日志关联。 | 使用本地单调时间完成 Core 超时与防重放。 |
 | Diagnostics | 详细统计、抓包镜像、长期质量历史。 | 仅保留必要故障计数。 |
 
 只有 Coordinator、MCU 网关或 RAM/Flash 充足的控制节点才需要开启其中一部分。即使开启，也必须拥有独立的缓冲、队列和上限，绝不能占用 Q0/Q1 或路由表资源。
+
+Cluster 当前只解决“本地谁属于哪个单层簇、谁是 Head”。它不改变 Core Wire v5，也尚未实现簇间 Locator/Directory/Tunnel、备用/拆并或多级簇；因此不能把首阶段选举等同于万级路由已经完成。详细边界见 [V5 自动分簇详细设计](UCN_V5_67_自动分簇详细设计与首阶段实现.md)。
 
 ## 6. UCN-Host：兼容 Linux，但不替代 Linux
 

@@ -61,6 +61,8 @@ Linux、ROS 2、地面站可以通过一个 Link/Adapter 作为普通 Node 接�
 | `ucn/ports/ucn_protocol_owner.h` + `ucn/ports/ucn_port_<platform>.h` | 公共唯一 Owner 与独立平台 RX 通知、等待、固定预算、统一时钟 | 只包含当前产品所选的裸机/FreeRTOS/Zephyr/NuttX/RT-Thread Port | 以为包含一个头就会创建真实 Task/Queue/Semaphore 或实现介质驱动。 |
 | `ucn_service.h` | Node 内任务通信：本机直投、远端请求、Q0/Q1 Inbox | Service/Port，短临界区保护 | 直接访问 Link 或 `ucn_node_t`。 |
 | `ucn_service_bridge.h` | Router 和 Node 的唯一桥接 | **唯一 Protocol Task** | 创建 RTOS Task、动态队列或重试伪 ACK。 |
+| `ucn_cluster.h` | 可选单层簇选举、成员租约和只读 Cluster View | **唯一 Protocol Task** | 由业务/ISR 修改 Head、Member 或 Term。 |
+| `ucn_cluster_federation.h` | 可选 C06 Locator 发布/撤销、固定 Directory、有限 Query Cache、Cluster→Head 锚点和显式单帧 Tunnel | **唯一 Protocol Task** + 产品 Endpoint `0xA1` 绑定 | 以为普通 `ucn_node_send*()` 会自动跨簇，或以为它已支持跨簇 Transfer/自动 Gateway。 |
 | `ucn_policy.h`、`ucn_path.h` | 指定路径、主备、Q1 流亲和均衡 | 产品的受控配置/管理层 + Protocol Task | 对 Q0 使用逐帧均衡，或未授权安装路径。 |
 | `ucn_security.h` | 端到端保护/ACL/计数器 Provider 契约 | 产品安全模块 + Protocol Task 初始化 | 把 CRC 当认证，或认为 Core 内置了生产 AEAD。 |
 
@@ -82,6 +84,7 @@ Linux、ROS 2、地面站可以通过一个 Link/Adapter 作为普通 Node 接�
 | 诊断控制面 | `ucn_node_request_path_trace()`、`ucn_node_request_node_snapshot()`、`ucn_node_request_policy_diagnostic()` | 低频、显式用户/管理触发。 |
 | Protocol Task 主循环 | 选择一个独立 Port 的 `ucn_<platform>_port_rx_enqueue()`、`ucn_<platform>_port_*_step()`；底层为公共 Owner、`ucn_adapter_rx_pump()`、可选 Bridge、`ucn_node_step()` | Owner 在同一个 `now_ms` 下按预算执行；不包含其它 RTOS Port。 |
 | 任务通信 | `ucn_service_send()`、`ucn_service_inbox_take()`；ESP32 用 `UcnServiceFreeRtosPort::send()` / `inbox_take()` | 业务 Task 可调用；Port 负责短临界区，不把 Node 暴露给 Task。 |
+| C06.2 目录解析 | `ucn_cluster_federation_init()`、Endpoint `0xA1`→`receive()`、Owner 中 `step()`、Head 的 `query_locator()` 与 `find_locator()` | 仅当产品显式链接 Federation 且由同一 Owner 串行调用；`query_locator()==UCN_OK` 后仍需轮询/下一轮读取结果。 |
 
 ## 4. QoS 与 Endpoint：先选对语义
 
@@ -866,6 +869,80 @@ if (ucn_node_get_route_quality(&g_node, remote_node, &quality) == UCN_OK &&
 
 自动发现采用有界 Expanding Ring：默认按 2→4→8→16 Hop 扩展，单轮 250 ms、总预算 1000 ms。业务发送不会每帧寻路，也不会在 Pending 期间反复重启当前 Ring；已有可用缓存路线时直接发送。
 
+### 8.1 可选：启用单层自动分簇
+
+需要 MCU 在一跳邻居中自动选 Head 时，产品额外链接 `ucn_cluster`、包含 `ucn/ucn_cluster.h`，并创建一个静态 `ucn_cluster_t`。配置 `local_node_id/head_capable/head_score/member_capacity`、权威单调 `now_ms` 和 Send 回调；Send 回调应继续调用正常的 `ucn_node_send_endpoint()`，不能绕开 Core。
+
+产品把静态 Endpoint `UCN_CLUSTER_CONTROL_ENDPOINT`（`0xA0`）绑定到一个 Handler：Handler 将来源 Node ID、保护状态和 Payload 交给 `ucn_cluster_receive()`。产品重新计算并滤波 Head 能力后，可在唯一 Owner 调用 `ucn_cluster_set_head_score()`；它只更新评分和后续广告，不会因一次瞬时变化强迫现任 Head 退位。唯一 Protocol Owner 周期调用：
+
+```c
+ucn_cluster_sync_node_neighbors(&cluster, &node);
+ucn_cluster_step(&cluster);
+```
+
+生产部署应给 `0xA0` 配 Endpoint Security Policy，并设置 `require_protected_control=true`。普通任务和 ISR 不得直接推进 Cluster 对象。默认时序为稳定优先；固定低丢包有线介质若需要缩短 Head 故障恢复，可在 `ucn_cluster_init()` 前调用 `ucn_cluster_config_apply_timing_profile(&config, UCN_CLUSTER_TIMING_PROFILE_FAST_FIXED)`。当前 C07 已在 Cluster Control v3 上提供有界 Backup 指派、快照、主备多数接管与 `RECOVERY_HEAD`：成员只接受已由 Head 宣布的 Backup ID/Generation，不能自行相信来源节点。它仍是单层、一跳控制域；若产品需要远端成员定位或 Directory Handover，必须另行接入下面的 C06 Federation，并在受保护模式提供 Handover proof Builder 和 Authorizer。完整边界见 [C07 主备簇头方案](UCN_V5_C07_主备簇头与快速代理恢复整体方案.md)。
+
+### 8.2 可选：接入 C06.3 Locator Directory 与单帧跨簇 Tunnel
+
+产品显式链接 `ucn_cluster_federation` 后，创建一个静态 `ucn_cluster_federation_t`，把它绑定到 `0xA1`。它和 `ucn_cluster_t` 必须由**同一个** Protocol Owner 串行推进。发送回调只负责把已编码的 Locator 控制载荷交回正常 Core Endpoint；目录副本、Head 授权和安全策略由产品提供：
+
+```c
+static const ucn_node_id_t g_directory_authorities[] = {
+    UINT32_C(0x00000011),
+    UINT32_C(0x00000012),
+};
+
+static ucn_result_t federation_send(void *context,
+                                    ucn_node_id_t destination,
+                                    ucn_endpoint_t endpoint,
+                                    ucn_traffic_class_t traffic_class,
+                                    const uint8_t *payload,
+                                    uint16_t length)
+{
+    ucn_node_t *node = (ucn_node_t *)context;
+    return ucn_node_send_endpoint(node, destination, endpoint,
+                                  traffic_class, payload, length);
+}
+
+static bool federation_authorize_head(void *context, ucn_node_id_t source)
+{
+    (void)context;
+    return product_head_is_authorized(source); /* 产品 ACL/身份策略 */
+}
+
+static void federation_rx(void *context, const ucn_frame_t *frame)
+{
+    ucn_cluster_federation_t *federation = context;
+    bool protected_outer =
+        (frame->flags & UCN_FRAME_FLAG_E2E_PROTECTED) != 0U;
+
+    (void)ucn_cluster_federation_receive(federation, frame->source,
+                                         protected_outer, frame->payload,
+                                         frame->payload_length);
+}
+```
+
+初始化时填入 `local_node_id`、`cluster=&g_cluster`、权威 `now_ms`、上述 Send 回调和固定 `directory_authorities`。充当 Directory Authority 的节点还必须设置 `directory_authority=true`，提供 `authorize_head`，并让自己的 Node ID 出现在副本数组中；否则初始化失败关闭。每轮 Owner 顺序是：
+
+```c
+ucn_cluster_sync_node_neighbors(&g_cluster, &g_node);
+ucn_cluster_step(&g_cluster);
+ucn_cluster_federation_step(&g_federation);
+ucn_node_step(&g_node, now_ms);
+```
+
+默认 `enable_tunnel=false` 时，行为仍是 C06.2：只有当前 Head 可以调用 `ucn_cluster_federation_query_locator(&g_federation, target_node)`，`UCN_OK` 仅表示 Cache 命中或 Query 已发出，随后通过 `find_locator()` / `find_next_cluster()` 读取异步结果。
+
+需要单帧跨簇业务时，产品显式设置 `enable_tunnel=true`。默认模式要求 `seal_inner`、`open_inner` 和 `deliver` 三个回调；缺任一个 `ucn_cluster_federation_init()` 都返回 `UCN_ERR_CONFIG`。台架诊断若只能依赖外层保护，必须显式设为 `UCN_CLUSTER_FED_INNER_SECURITY_PROTECTED_OUTER_ONLY`，不得标为端到端安全。业务发起方只调用新 API：
+
+```c
+ucn_result_t result = ucn_cluster_federation_send(
+    &g_federation, remote_member, 0x50U,
+    UCN_TRAFFIC_Q1_REALTIME, sensor_payload, sensor_length);
+```
+
+它只走 `A -> 本簇 Head H1 -> 目标 Head H2 -> C`；中继只学习 H2，不学习 C。Q0/Q1 与 Endpoint 原样传递。若 H1 暂无 C 的 Locator，它会发起有限 Query 并通过 `on_error(DIRECTORY_NOT_FOUND)` 通知 A；应用等待 `find_locator()` 出现结果后使用**新的调用/Transaction**重试，Federation 不会在 Head 中缓存用户 Payload。最终 C 的 `open_inner()` 成功后才会执行 `deliver()`。`T32～T8K Transfer`、大包分片和自动 Gateway 尚未穿过 Tunnel，仍待 C06.4。Endpoint `0xA1` 应配置为必须端到端保护，`require_protected_control=true` 时任何明文 Federation 帧被拒绝。详见 [C06 详细设计](UCN_V5_C06_簇间寻址目录与隧道详细设计.md)。
+
 ## 9. 指定路径、主备与 Q1 负载均衡
 
 ### 9.1 默认自动路径
@@ -1042,6 +1119,7 @@ UCN 的表和队列均是编译期数组。产品根据 MCU RAM 调整上限后�
 | 两块 ESP32-S3 的 UART Primary + ESP-NOW Backup、R1 Q0/Q1 Service 基础双向通信 | 已有实板基础验证。 |
 | 固定路径、主备、Q1 流亲和均衡、Path/Policy 诊断 | Core/虚拟拓扑已验证；真实多板 Path/负载/故障性能仍待实测。 |
 | 路径追踪、节点快照 | Core/虚拟拓扑已验证；真实介质覆盖率与时延待实测。 |
+| 单层自动分簇与 C06 Directory | Cluster 已有选举、成员租约、Backup 同步、多数接管、`RECOVERY_HEAD` 与稳定回切；C06 已有固定 Directory、Query/Cache、Cluster→Head Lease 和受 proof 保护的 Handover。Host 已覆盖至 1000 节点受损模拟；独立 Bearer、小时级长稳、功耗、生产密钥/ACL、跨簇 Transfer 与多级簇仍待。 |
 | 生产密码、身份、密钥管理、AES/ChaCha AEAD 选型 | 未内置；必须由产品 Security Provider 落地和审计。 |
 | CAN 小 MTU 分段重组、BLE/LoRa/真实 Linux Adapter | 取决于具体产品 Adapter，未因 Core 存在而自动获得。 |
 
@@ -1053,5 +1131,8 @@ UCN 的表和队列均是编译期数组。产品根据 MCU RAM 调整上限后�
 - [T25 首版 Endpoint 与 Service 契约](UCN_T25_首版Endpoint与Service契约.md)：R1 业务 ABI 和 Payload 规则。
 - [T25 节点内任务通信详细执行方案](UCN_T25_节点内任务通信详细执行方案.md)：Router/Bridge/RTOS 边界。
 - [UCN 调用关系树](calltree/README.md)：按真实函数调用、回调和固定队列关系追踪运行路径。
+- [V5 自动分簇详细设计](UCN_V5_67_自动分簇详细设计与首阶段实现.md)：Cluster 接口、固定资源、控制 Schema、Owner 接入与未完成边界。
+- [C05.1 快速簇恢复档](UCN_V5_C05_1_快速簇恢复档设计与验证.md)：默认/快速时序、API、租约安全关系与验证边界。
+- [C06 簇间寻址、目录与隧道详细设计](UCN_V5_C06_簇间寻址目录与隧道详细设计.md)：当前 Locator Directory 与 C06.3 单帧 Tunnel，以及 C06.4 Transfer/自动 Gateway 的严格未完成边界。
 - [快速使用手册](快速使用手册/README.md)：裸机、通用 RTOS、FreeRTOS、Zephyr、NuttX、RT-Thread 的最小接入步骤与平台边界。
 - `include/ucn/`：最终以公开 API 声明和编译期配置为准；若本文与源码不一致，以源码为准并同步修订本文。

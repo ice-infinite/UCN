@@ -94,6 +94,20 @@ modules:
     entry: transfer.ucn_transfer_send
     source_files: [src/extended/ucn_transfer.c]
 
+  - id: cluster
+    file: cluster.calltree.yaml
+    status: current_host_software_verified_single_level
+    role: 可选单层簇头选举、成员加入/容量、租约和失效重选
+    entry: cluster.ucn_cluster_step
+    source_files: [src/extended/ucn_cluster.c, src/node/ucn_node.c]
+
+  - id: cluster_federation
+    file: cluster_federation.calltree.yaml
+    status: c06_3_single_frame_tunnel_host_software_verified
+    role: C06 Head Locator 发布/撤销、固定 Directory、有限期 Query Cache、Cluster->Head 锚点和显式单帧 Tunnel；不含跨簇 Transfer 或自动 Gateway
+    entry: cluster_federation.ucn_cluster_federation_send
+    source_files: [src/extended/ucn_cluster_federation.c, src/extended/ucn_cluster.c]
+
   - id: diagnostic
     file: diagnostic.calltree.yaml
     status: current_core_virtual_verified

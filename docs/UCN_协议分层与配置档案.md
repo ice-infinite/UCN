@@ -155,11 +155,12 @@ Adapter 不把 MAC、CAN ID 或蓝牙地址当作 UCN 身份。其统一接口�
 | Group / Multicast | 面向编队或同类传感器的受权限组消息。 | 使用受限广播或多次单播。 |
 | Q2 Reliable | 参数写入、配置和需确认的普通服务。 | Core 仅提供 Q0/Q1，参数通过本地工具或专用节点维护。 |
 | Fragmentation | 在小 MTU Link 上传输较大消息。 | 超过 Core 最大载荷直接拒绝，不隐式切片。 |
+| Single-level Cluster | 一跳邻居范围内选 Head、受容量加入、租约保活和失效重选。 | 节点继续使用 Core 的扁平按需 Route/Path，不产生簇级语义。 |
 | Q3 Bulk | 日志、OTA、文件与低优先级限速。 | 不在 MCU Mesh 中传大文件。 |
 | Time Sync | 日志关联、编队与传感融合时间基准。 | 使用本地单调时间，不提供跨节点精密时间。 |
 | Diagnostics | 详细统计、抓包镜像、长期质量历史。 | Core 只保留必要的错误计数和健康状态。 |
 
-`Extended` 节点仍必须服从 Core 的固定内存原则。当前 `ucn_transfer` 已使用独立、可裁剪的 TX/RX/Endpoint/Peer 固定表，并作为 `EXCLUDE_FROM_ALL` Target；没有链接/创建该对象的节点不支付大消息 RAM。未来 Q3 仍必须另设配额，绝不能吞掉 Q0/Q1 的队列、会话或路由内存。
+`Extended` 节点仍必须服从 Core 的固定内存原则。当前 `ucn_transfer` 使用独立、可裁剪的 TX/RX/Endpoint/Peer 固定表；`ucn_cluster` 使用独立 Peer/Candidate/Member 固定表；两者均为 `EXCLUDE_FROM_ALL` Target，没有链接/创建对象的节点不支付对应 RAM。Cluster 首阶段不含簇间 Locator/Directory/Tunnel，不能把单层收敛测试当作万级数据面。未来 Q3 仍必须另设配额，绝不能吞掉 Q0/Q1 的队列、会话或路由内存。
 
 ## 5. UCN-Host：兼容层，不是协议中心
 

@@ -12,7 +12,7 @@ src/ 只放 UCN 的内部实现；产品代码不应直接包含这里的私有�
 | routing/ | AODV 路径、Candidate、Policy/负载均衡 | Node/Frame 公共语义 | Port、SDK/OS |
 | service/ | 本机 Service Router 与跨 MCU Service Bridge | Node/Endpoint/Frame 公共语义 | Port、SDK/OS |
 | ports/ | 裸机、各 RTOS、Host Fake 的独立运行外壳 | include/ucn/... 公共 API | 其它 Port 私有实现 |
-| extended/ | 按需链接的 T32～T8K Transfer、固定分片/重组与 ACK | Node/Frame/Endpoint 公共 API | 动态内存、Port、SDK/OS、在中继重组 |
+| extended/ | 按需链接的 T32～T8K Transfer，以及单层 Cluster 选举/租约首阶段 | Node/Frame/Endpoint/只读 Neighbor Summary | 动态内存、Port、SDK/OS、簇间 Locator/Tunnel、多级簇 |
 
 真实 UART、CAN、Wi-Fi、USB 等 BSP/SDK Adapter 放入产品工程。当前 `stream/` 和 `can/` 是可直接复用的 SDK 无关载体，不会自行打开外设、选择引脚、设置过滤器或创建任务；两种 Source 不共享 Ring 或 Carrier 状态。
 

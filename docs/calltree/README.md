@@ -56,6 +56,21 @@
   → transfer.transfer_node_rx_handler → CRC32/固定 RX Slot/ACK
   → external.transfer_receive_callback
   → transfer.ucn_transfer_release_received
+
+可选单层分簇（仅链接 `ucn_cluster` 的节点）
+  → cluster.ucn_cluster_sync_node_neighbors（只读一跳已准入邻居）
+  → cluster.ucn_cluster_set_head_score（产品滤波后的动态评分）
+  → cluster.ucn_cluster_receive（Endpoint 0xA0 控制消息）
+  → cluster.ucn_cluster_step（观察/选举/加入/租约/失效重选）
+  → external.cluster_send_callback
+  → route.ucn_node_send_endpoint（正常 Core 路由、安全和队列）
+
+C06.3 簇间 Federation（Locator Directory + 显式单帧 Tunnel）
+  → cluster_federation.ucn_cluster_federation_send / receive / step / query_locator
+  → cluster_federation.ucn_cluster_federation_message_encode/decode
+  → cluster_federation.ucn_cluster_get_view / get_member_summary_at
+  → A(Member) → H1 → H2 → C(Member)；Q0/Q1 不改写，Seen/TTL/Head ACL/内层 Provider 均在 Owner 门禁
+  → 仅单帧；跨簇 Transfer、自动 Gateway 与多 Head 链留待 C06.4/C07
 ```
 
 “唯一 Protocol Task”是最重要的并发边界：业务 Task、驱动回调和 ISR 不直接并发访问 `ucn_node_t`。业务 Task 只调用 Service/Port；驱动 RX 回调优先只写各 Source 固定 Ring 并通知 Event Runtime，Source 再在 Owner 上下文提交 Adapter 固定队列。现有 Platform Port 仍是单 Queue 兼容链。
@@ -98,6 +113,8 @@ docs/calltree/
 ├── security.calltree.yaml            Provider、ACL、端到端保护/透明转发
 ├── service.calltree.yaml             Router、Bridge、任务 Inbox/Remote TX
 ├── transfer.calltree.yaml            九档消息、固定分片/重组、ACK 与 Handle
+├── cluster.calltree.yaml             单层选举、加入/容量、租约与失效重选
+├── cluster_federation.calltree.yaml  C06.2 Endpoint 0xA1 Locator Directory、Cache/Head 锚点（无数据面）
 └── diagnostic.calltree.yaml          Path Trace、Node Snapshot、Policy Diagnostic
 ```
 

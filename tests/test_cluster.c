@@ -1,0 +1,1001 @@
+#include "test_support.h"
+
+#include <string.h>
+
+#include "ucn/ucn_cluster.h"
+
+#define CLUSTER_TEST_NODES ((size_t)4U)
+#define CLUSTER_TEST_QUEUE ((size_t)512U)
+
+typedef struct cluster_test_network cluster_test_network_t;
+
+typedef struct cluster_test_node {
+    cluster_test_network_t *network;
+    ucn_node_id_t node_id;
+    bool alive;
+    ucn_cluster_t cluster;
+} cluster_test_node_t;
+
+typedef struct cluster_test_packet {
+    ucn_node_id_t source;
+    ucn_node_id_t destination;
+    uint8_t payload[UCN_CLUSTER_MESSAGE_BYTES];
+} cluster_test_packet_t;
+
+struct cluster_test_network {
+    uint32_t now_ms;
+    cluster_test_node_t nodes[CLUSTER_TEST_NODES];
+    cluster_test_packet_t queue[CLUSTER_TEST_QUEUE];
+    size_t queue_count;
+};
+
+#if UCN_FEATURE_DYNAMIC_MESH
+static ucn_result_t cluster_summary_link_send(
+    ucn_link_t *link,
+    const uint8_t *frame,
+    size_t length)
+{
+    (void)link;
+    (void)frame;
+    (void)length;
+    return UCN_OK;
+}
+
+static ucn_result_t cluster_summary_link_status(
+    const ucn_link_t *link,
+    ucn_link_status_t *status)
+{
+    status->is_up = true;
+    status->mtu = link->mtu;
+    status->tx_errors = 0U;
+    status->rx_errors = 0U;
+    return UCN_OK;
+}
+
+static const ucn_link_ops_t CLUSTER_SUMMARY_LINK_OPS = {
+    NULL, cluster_summary_link_send, NULL, cluster_summary_link_status,
+    NULL, NULL
+};
+#endif
+
+static uint32_t cluster_test_now(void *context)
+{
+    cluster_test_node_t *node = (cluster_test_node_t *)context;
+
+    return node->network->now_ms;
+}
+
+static cluster_test_node_t *cluster_test_find_node(
+    cluster_test_network_t *network,
+    ucn_node_id_t node_id)
+{
+    size_t index;
+
+    for (index = 0U; index < CLUSTER_TEST_NODES; ++index) {
+        if (network->nodes[index].node_id == node_id) {
+            return &network->nodes[index];
+        }
+    }
+    return NULL;
+}
+
+static ucn_result_t cluster_test_send(
+    void *context,
+    ucn_node_id_t destination,
+    ucn_endpoint_t endpoint,
+    const uint8_t *payload,
+    uint16_t payload_length)
+{
+    cluster_test_node_t *source = (cluster_test_node_t *)context;
+    cluster_test_network_t *network = source->network;
+    cluster_test_node_t *target = cluster_test_find_node(network, destination);
+    cluster_test_packet_t *packet;
+
+    if (!source->alive || target == NULL || !target->alive) {
+        return UCN_ERR_LINK_DOWN;
+    }
+    if (endpoint != UCN_CLUSTER_CONTROL_ENDPOINT ||
+        payload == NULL || payload_length != UCN_CLUSTER_MESSAGE_BYTES) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (network->queue_count >= CLUSTER_TEST_QUEUE) {
+        return UCN_ERR_NO_SPACE;
+    }
+    packet = &network->queue[network->queue_count++];
+    packet->source = source->node_id;
+    packet->destination = destination;
+    (void)memcpy(packet->payload, payload, sizeof(packet->payload));
+    return UCN_OK;
+}
+
+static int cluster_test_sync_neighbors(cluster_test_network_t *network)
+{
+    size_t node_index;
+
+    for (node_index = 0U; node_index < CLUSTER_TEST_NODES; ++node_index) {
+        cluster_test_node_t *node = &network->nodes[node_index];
+        ucn_neighbor_summary_t summaries[CLUSTER_TEST_NODES - 1U];
+        size_t peer_index;
+        size_t count = 0U;
+
+        if (!node->alive) {
+            continue;
+        }
+        (void)memset(summaries, 0, sizeof(summaries));
+        for (peer_index = 0U; peer_index < CLUSTER_TEST_NODES; ++peer_index) {
+            if (peer_index == node_index || !network->nodes[peer_index].alive) {
+                continue;
+            }
+            summaries[count].state = UCN_NEIGHBOR_ADMITTED;
+            summaries[count].peer_node_id = network->nodes[peer_index].node_id;
+            summaries[count].bearer_count = 1U;
+            summaries[count].primary_bearer_index = 0U;
+            summaries[count].last_seen_ms = network->now_ms;
+            ++count;
+        }
+        TEST_ASSERT(ucn_cluster_sync_neighbors(&node->cluster, summaries, count) ==
+                    UCN_OK);
+    }
+    return 0;
+}
+
+static int cluster_test_deliver(cluster_test_network_t *network)
+{
+    size_t index = 0U;
+
+    while (index < network->queue_count) {
+        cluster_test_packet_t packet = network->queue[index++];
+        cluster_test_node_t *target =
+            cluster_test_find_node(network, packet.destination);
+        ucn_result_t result;
+
+        if (target == NULL || !target->alive) {
+            continue;
+        }
+        result = ucn_cluster_receive(&target->cluster, packet.source, true,
+                                     packet.payload, sizeof(packet.payload));
+        TEST_ASSERT(result == UCN_OK || result == UCN_ERR_ACCESS ||
+                    result == UCN_ERR_NO_SPACE || result == UCN_ERR_REPLAY ||
+                    result == UCN_ERR_NOT_FOUND);
+    }
+    network->queue_count = 0U;
+    return 0;
+}
+
+static int cluster_test_tick(cluster_test_network_t *network, uint32_t now_ms)
+{
+    size_t index;
+
+    network->now_ms = now_ms;
+    TEST_ASSERT(cluster_test_sync_neighbors(network) == 0);
+    for (index = 0U; index < CLUSTER_TEST_NODES; ++index) {
+        if (network->nodes[index].alive) {
+            TEST_ASSERT(ucn_cluster_step(&network->nodes[index].cluster) == UCN_OK);
+        }
+    }
+    TEST_ASSERT(cluster_test_deliver(network) == 0);
+    return 0;
+}
+
+static int cluster_test_network_init(
+    cluster_test_network_t *network,
+    uint16_t head_capacity)
+{
+    static const uint16_t scores[CLUSTER_TEST_NODES] = {
+        9000U, 7000U, 3000U, 2000U
+    };
+    size_t index;
+
+    (void)memset(network, 0, sizeof(*network));
+    for (index = 0U; index < CLUSTER_TEST_NODES; ++index) {
+        cluster_test_node_t *node = &network->nodes[index];
+        ucn_cluster_config_t config;
+
+        node->network = network;
+        node->node_id = (ucn_node_id_t)(index + 1U);
+        node->alive = true;
+        (void)memset(&config, 0, sizeof(config));
+        config.local_node_id = node->node_id;
+        config.enabled = true;
+        config.head_capable = index < 2U;
+        config.require_protected_control = true;
+        config.head_score = scores[index];
+        config.member_capacity = config.head_capable ? head_capacity : 0U;
+        config.observation_ms = 10U;
+        config.recovery_observation_ms = 10U;
+        config.election_window_ms = 20U;
+        config.advertise_interval_ms = 9U;
+        config.join_retry_ms = 5U;
+        config.keepalive_interval_ms = 10U;
+        config.lease_ms = 40U;
+        config.head_min_tenure_ms = 50U;
+        config.switch_improvement_percent = 20U;
+        config.switch_required_samples = 3U;
+        /* Disable control-plane throttling: these fixtures compress real
+         * time (ms-scale lease/advertise), so §9.1 budgets would starve
+         * the deterministic state transitions under test. */
+        config.token_bucket.burst = UINT16_MAX;
+        config.token_bucket.refill_ms = 1U;
+        config.recovery_head_ttl_ms = 30U;
+        config.recovery_backoff_max_ms = 5U;
+        config.now_ms = cluster_test_now;
+        config.now_context = node;
+        config.send = cluster_test_send;
+        config.send_context = node;
+        TEST_ASSERT(ucn_cluster_init(&node->cluster, &config) == UCN_OK);
+    }
+    TEST_ASSERT(cluster_test_sync_neighbors(network) == 0);
+    return 0;
+}
+
+static int cluster_test_timing_profiles(void)
+{
+    ucn_cluster_config_t config;
+    cluster_test_network_t network;
+    cluster_test_node_t node;
+
+    (void)memset(&config, 0, sizeof(config));
+    TEST_ASSERT(ucn_cluster_config_apply_timing_profile(
+                    &config, UCN_CLUSTER_TIMING_PROFILE_DEFAULT) == UCN_OK);
+    TEST_ASSERT(config.observation_ms == UCN_CLUSTER_OBSERVATION_MS &&
+                config.recovery_observation_ms ==
+                    UCN_CLUSTER_RECOVERY_OBSERVATION_MS &&
+                config.election_window_ms == UCN_CLUSTER_ELECTION_WINDOW_MS &&
+                config.advertise_interval_ms ==
+                    UCN_CLUSTER_ADVERTISE_INTERVAL_MS &&
+                config.join_retry_ms == UCN_CLUSTER_JOIN_RETRY_MS &&
+                config.keepalive_interval_ms ==
+                    UCN_CLUSTER_KEEPALIVE_INTERVAL_MS &&
+                config.lease_ms == UCN_CLUSTER_LEASE_MS &&
+                config.head_min_tenure_ms == UCN_CLUSTER_HEAD_MIN_TENURE_MS);
+    TEST_ASSERT(ucn_cluster_config_apply_timing_profile(
+                    &config, UCN_CLUSTER_TIMING_PROFILE_FAST_FIXED) == UCN_OK);
+    TEST_ASSERT(config.observation_ms == UCN_CLUSTER_FAST_OBSERVATION_MS &&
+                config.recovery_observation_ms ==
+                    UCN_CLUSTER_FAST_RECOVERY_OBSERVATION_MS &&
+                config.election_window_ms ==
+                    UCN_CLUSTER_FAST_ELECTION_WINDOW_MS &&
+                config.advertise_interval_ms ==
+                    UCN_CLUSTER_FAST_ADVERTISE_INTERVAL_MS &&
+                config.join_retry_ms == UCN_CLUSTER_FAST_JOIN_RETRY_MS &&
+                config.keepalive_interval_ms ==
+                    UCN_CLUSTER_FAST_KEEPALIVE_INTERVAL_MS &&
+                config.lease_ms == UCN_CLUSTER_FAST_LEASE_MS &&
+                config.head_min_tenure_ms ==
+                    UCN_CLUSTER_FAST_HEAD_MIN_TENURE_MS);
+    TEST_ASSERT(ucn_cluster_config_apply_timing_profile(
+                    NULL, UCN_CLUSTER_TIMING_PROFILE_DEFAULT) ==
+                UCN_ERR_ARGUMENT);
+    TEST_ASSERT(ucn_cluster_config_apply_timing_profile(
+                    &config, (ucn_cluster_timing_profile_t)99) ==
+                UCN_ERR_ARGUMENT);
+
+    (void)memset(&network, 0, sizeof(network));
+    (void)memset(&node, 0, sizeof(node));
+    node.network = &network;
+    node.node_id = UINT32_C(1);
+    node.alive = true;
+    (void)memset(&config, 0, sizeof(config));
+    config.local_node_id = node.node_id;
+    config.enabled = true;
+    config.head_capable = true;
+    config.head_score = 9000U;
+    config.member_capacity = 1U;
+    config.now_ms = cluster_test_now;
+    config.now_context = &node;
+    config.send = cluster_test_send;
+    config.send_context = &node;
+    TEST_ASSERT(ucn_cluster_config_apply_timing_profile(
+                    &config, UCN_CLUSTER_TIMING_PROFILE_FAST_FIXED) == UCN_OK);
+    /* A Head cannot mirror/vote for more live members than its admitted
+     * peer table can represent, even when the fixed member array is larger. */
+    config.member_capacity = (uint16_t)(UCN_CLUSTER_MAX_PEERS + 1U);
+    TEST_ASSERT(ucn_cluster_init(&node.cluster, &config) == UCN_ERR_ARGUMENT);
+    config.member_capacity = 1U;
+    config.keepalive_interval_ms = config.lease_ms;
+    TEST_ASSERT(ucn_cluster_init(&node.cluster, &config) == UCN_ERR_CONFIG);
+    return 0;
+}
+
+static int cluster_test_codec_and_security(void)
+{
+    ucn_cluster_message_t input;
+    ucn_cluster_message_t output;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    cluster_test_network_t network;
+
+    (void)memset(&input, 0, sizeof(input));
+    input.type = UCN_CLUSTER_MSG_ADVERTISE;
+    input.role = UCN_CLUSTER_ROLE_HEAD;
+    input.cluster_id = UINT32_C(0x10203040);
+    input.term = UINT32_C(7);
+    input.head_node_id = UINT32_C(3);
+    input.head_score = 8123U;
+    input.available_capacity = 12U;
+    input.lease_ms = 8000U;
+    input.nonce = UINT32_C(99);
+    TEST_ASSERT(ucn_cluster_message_encode(&input, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_OK);
+    TEST_ASSERT(output.type == input.type && output.role == input.role &&
+                output.cluster_id == input.cluster_id && output.term == input.term &&
+                output.head_node_id == input.head_node_id &&
+                output.head_score == input.head_score &&
+                output.available_capacity == input.available_capacity &&
+                output.lease_ms == input.lease_ms && output.nonce == input.nonce);
+    encoded[0] = 0U;
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_ERR_MALFORMED);
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    TEST_ASSERT(ucn_cluster_message_encode(&input, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&network.nodes[0].cluster, UINT32_C(3), false,
+                                    encoded, sizeof(encoded)) == UCN_ERR_SECURITY);
+    TEST_ASSERT(network.nodes[0].cluster.stats.security_rejected == 1U);
+    TEST_ASSERT(ucn_cluster_set_head_score(&network.nodes[0].cluster,
+                                           UCN_CLUSTER_SCORE_MAX + 1U) ==
+                UCN_ERR_ARGUMENT);
+    TEST_ASSERT(ucn_cluster_set_head_score(&network.nodes[0].cluster, 8500U) ==
+                UCN_OK);
+    TEST_ASSERT(network.nodes[0].cluster.config.head_score == 8500U);
+    return 0;
+}
+
+static int cluster_test_v3_codec(void)
+{
+    ucn_cluster_message_t input;
+    ucn_cluster_message_t output;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    /* Type 10 BACKUP_ASSIGN: backup_generation + sync_token. */
+    (void)memset(&input, 0, sizeof(input));
+    input.type = UCN_CLUSTER_MSG_BACKUP_ASSIGN;
+    input.role = UCN_CLUSTER_ROLE_HEAD;
+    input.cluster_id = UINT32_C(0xA1B2C3D4);
+    input.term = 5U;
+    input.head_node_id = 7U;
+    input.backup_generation = 3U;
+    input.sync_token = UINT32_C(0xDEADBEEF);
+    TEST_ASSERT(ucn_cluster_message_encode(&input, encoded) == UCN_OK);
+    TEST_ASSERT(encoded[0] == UCN_CLUSTER_FORMAT_VERSION);
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_OK);
+    TEST_ASSERT(output.type == UCN_CLUSTER_MSG_BACKUP_ASSIGN &&
+                output.backup_generation == 3U &&
+                output.sync_token == UINT32_C(0xDEADBEEF));
+
+    /* Type 11 BACKUP_READY: membership_sequence. */
+    (void)memset(&input, 0, sizeof(input));
+    input.type = UCN_CLUSTER_MSG_BACKUP_READY;
+    input.role = UCN_CLUSTER_ROLE_BACKUP;
+    input.cluster_id = 9U;
+    input.term = 2U;
+    input.head_node_id = 4U;
+    input.membership_sequence = 17U;
+    TEST_ASSERT(ucn_cluster_message_encode(&input, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_OK);
+    TEST_ASSERT(output.membership_sequence == 17U);
+
+    /* Type 12 BACKUP_MEMBER_SYNC: member fields + sequence/nonce. */
+    (void)memset(&input, 0, sizeof(input));
+    input.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    input.role = UCN_CLUSTER_ROLE_HEAD;
+    input.cluster_id = 10U;
+    input.term = 2U;
+    input.head_node_id = 4U;
+    input.member_node_id = 55U;
+    input.member_lease_ms = 8000U;
+    input.membership_sequence = 3U;
+    input.member_nonce = 42U;
+    TEST_ASSERT(ucn_cluster_message_encode(&input, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_OK);
+    TEST_ASSERT(output.member_node_id == 55U &&
+                output.member_lease_ms == 8000U &&
+                output.membership_sequence == 3U && output.member_nonce == 42U);
+
+    /* Type 13 PRIMARY_HEARTBEAT. */
+    (void)memset(&input, 0, sizeof(input));
+    input.type = UCN_CLUSTER_MSG_PRIMARY_HEARTBEAT;
+    input.role = UCN_CLUSTER_ROLE_HEAD;
+    input.cluster_id = 11U;
+    input.term = 2U;
+    input.head_node_id = 4U;
+    input.membership_sequence = 99U;
+    TEST_ASSERT(ucn_cluster_message_encode(&input, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_OK);
+    TEST_ASSERT(output.membership_sequence == 99U);
+
+    /* Type 14 TAKEOVER_PREPARE / Type 15 TAKEOVER_ACK. */
+    (void)memset(&input, 0, sizeof(input));
+    input.type = UCN_CLUSTER_MSG_TAKEOVER_PREPARE;
+    input.role = UCN_CLUSTER_ROLE_BACKUP;
+    input.cluster_id = 12U;
+    input.term = 2U;
+    input.head_node_id = 4U;
+    input.backup_generation = 7U;
+    TEST_ASSERT(ucn_cluster_message_encode(&input, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_OK);
+    TEST_ASSERT(output.backup_generation == 7U);
+    input.type = UCN_CLUSTER_MSG_TAKEOVER_ACK;
+    input.role = UCN_CLUSTER_ROLE_MEMBER;
+    input.head_node_id = 4U;
+    TEST_ASSERT(ucn_cluster_message_encode(&input, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_OK);
+    TEST_ASSERT(output.type == UCN_CLUSTER_MSG_TAKEOVER_ACK &&
+                output.backup_generation == 7U);
+
+    /* Type 16 RECOVERY_DECLARE: recovery_nonce + recovery_ttl_ms. */
+    (void)memset(&input, 0, sizeof(input));
+    input.type = UCN_CLUSTER_MSG_RECOVERY_DECLARE;
+    input.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    input.cluster_id = 13U;
+    input.term = 2U;
+    input.head_node_id = 4U;
+    input.recovery_nonce = 12345U;
+    input.recovery_ttl_ms = 30000U;
+    TEST_ASSERT(ucn_cluster_message_encode(&input, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_OK);
+    TEST_ASSERT(output.recovery_nonce == 12345U &&
+                output.recovery_ttl_ms == 30000U);
+
+    /* Type 17 RECOVERY_ACK: all-zero trailing body. */
+    (void)memset(&input, 0, sizeof(input));
+    input.type = UCN_CLUSTER_MSG_RECOVERY_ACK;
+    input.role = UCN_CLUSTER_ROLE_MEMBER;
+    input.cluster_id = 13U;
+    input.term = 2U;
+    input.head_node_id = 4U;
+    TEST_ASSERT(ucn_cluster_message_encode(&input, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_OK);
+    TEST_ASSERT(output.type == UCN_CLUSTER_MSG_RECOVERY_ACK);
+
+    /* v1/v2 frames are rejected under Format v3. */
+    (void)memset(&input, 0, sizeof(input));
+    input.type = UCN_CLUSTER_MSG_ADVERTISE;
+    input.role = UCN_CLUSTER_ROLE_HEAD;
+    input.cluster_id = 1U;
+    input.term = 1U;
+    input.head_node_id = 2U;
+    input.head_score = 100U;
+    input.lease_ms = 8000U;
+    input.nonce = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&input, encoded) == UCN_OK);
+    encoded[0] = 1U; /* Format v1 byte. */
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_ERR_MALFORMED);
+    encoded[0] = 2U; /* Format v2 byte. */
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_ERR_MALFORMED);
+
+    /* Unknown message type and invalid role are rejected. */
+    encoded[0] = UCN_CLUSTER_FORMAT_VERSION;
+    encoded[1] = 18U; /* beyond RECOVERY_ACK */
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_ERR_MALFORMED);
+    encoded[1] = (uint8_t)UCN_CLUSTER_MSG_ADVERTISE;
+    encoded[2] = 9U; /* beyond RECOVERY_HEAD */
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded), &output) ==
+                UCN_ERR_MALFORMED);
+
+    /* Wrong length is rejected. */
+    encoded[0] = UCN_CLUSTER_FORMAT_VERSION;
+    encoded[1] = (uint8_t)UCN_CLUSTER_MSG_ADVERTISE;
+    TEST_ASSERT(ucn_cluster_message_decode(encoded, sizeof(encoded) - 1U,
+                                           &output) == UCN_ERR_MALFORMED);
+    return 0;
+}
+
+static int cluster_test_backup_sync(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    cluster_test_node_t *backup;
+    cluster_test_node_t *third;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    head = &network.nodes[0];
+    backup = &network.nodes[1];
+    third = &network.nodes[2];
+
+    /* Manually stage roles: head=HEAD, others=MEMBER, fully-connected. */
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.backup_node_id = backup->node_id;
+    head->cluster.backup_generation = 1U;
+    head->cluster.backup_ready = false;
+    head->cluster.backup_sync_cursor = 0U;
+    backup->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    backup->cluster.cluster_id = 1U;
+    backup->cluster.term = 1U;
+    backup->cluster.head_node_id = head->node_id;
+    backup->cluster.config.head_capable = true;
+    third->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    third->cluster.cluster_id = 1U;
+    third->cluster.term = 1U;
+    third->cluster.head_node_id = head->node_id;
+    third->cluster.config.head_capable = false;
+
+    /* BACKUP_ASSIGN: member -> BACKUP syncing. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_ASSIGN;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.backup_generation = 1U;
+    message.sync_token = backup->node_id;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    network.now_ms = 0U;
+    TEST_ASSERT(cluster_test_sync_neighbors(&network) == 0);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(backup->cluster.backup_syncing == true);
+
+    /* Snapshot BEGIN. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.flags = UCN_CLUSTER_FLAG_SYNC_BEGIN;
+    message.membership_sequence = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+
+    /* Member record: third (reached by backup in fully-connected topology). */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.membership_sequence = 2U;
+    message.member_node_id = third->node_id;
+    message.member_lease_ms = 8000U;
+    message.member_nonce = 7U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+
+    /* Snapshot END: coverage passes -> READY -> BACKUP_READY sent to head. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.flags = UCN_CLUSTER_FLAG_SYNC_END;
+    message.membership_sequence = 3U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.backup_ready == true);
+    TEST_ASSERT(backup->cluster.backup_syncing == false);
+    TEST_ASSERT(network.queue_count == 1U); /* BACKUP_READY pending. */
+
+    /* Deliver BACKUP_READY to head. */
+    TEST_ASSERT(cluster_test_deliver(&network) == 0);
+    TEST_ASSERT(head->cluster.backup_ready == true);
+
+    /* Missing sequence -> replay -> backup stays syncing and awaits the
+     * bounded snapshot retransmit (no detach on a dropped frame). */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.membership_sequence = 9U; /* gap: expected 4 */
+    message.member_node_id = third->node_id;
+    message.member_lease_ms = 8000U;
+    message.member_nonce = 8U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) ==
+                UCN_ERR_REPLAY);
+    TEST_ASSERT(backup->cluster.role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(backup->cluster.backup_syncing == true);
+    TEST_ASSERT(backup->cluster.backup_ready == false);
+    return 0;
+}
+
+
+static int cluster_test_takeover_guard(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *member;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    member = &network.nodes[2];
+    member->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    member->cluster.cluster_id = 1U;
+    member->cluster.term = 5U;
+    member->cluster.head_node_id = UINT32_C(1);
+    member->cluster.known_backup_node_id = UINT32_C(2);
+    member->cluster.known_backup_generation = 7U;
+    network.now_ms = 0U;
+    TEST_ASSERT(cluster_test_sync_neighbors(&network) == 0);
+
+    /* A stale (same-or-lower term) HEAD_TAKEOVER is rejected. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_HEAD_TAKEOVER;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 5U;
+    message.head_node_id = UINT32_C(2);
+    message.head_score = 5000U;
+    message.lease_ms = 8000U;
+    message.backup_generation = 7U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&member->cluster, UINT32_C(2), true,
+                                    encoded, sizeof(encoded)) ==
+                UCN_ERR_REPLAY);
+    TEST_ASSERT(member->cluster.head_node_id == UINT32_C(1));
+
+    /* A protected but non-Backup member may not solicit a vote or promotion. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_TAKEOVER_PREPARE;
+    message.role = UCN_CLUSTER_ROLE_BACKUP;
+    message.cluster_id = 1U;
+    message.term = 5U;
+    message.head_node_id = UINT32_C(1);
+    message.backup_generation = 7U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&member->cluster, UINT32_C(1), true,
+                                    encoded, sizeof(encoded)) == UCN_ERR_ACCESS);
+    TEST_ASSERT(member->cluster.member_voted_term == 0U);
+
+    /* A higher-term takeover switches the member without rejoin. */
+    message.type = UCN_CLUSTER_MSG_HEAD_TAKEOVER;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.term = 6U;
+    message.head_node_id = UINT32_C(2);
+    message.head_score = 5000U;
+    message.lease_ms = 8000U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&member->cluster, UINT32_C(2), true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(member->cluster.role == UCN_CLUSTER_ROLE_MEMBER);
+    TEST_ASSERT(member->cluster.head_node_id == UINT32_C(2));
+    TEST_ASSERT(member->cluster.term == 6U);
+    return 0;
+}
+
+static int cluster_test_election_join_and_failover(void)
+{
+    cluster_test_network_t network;
+    uint32_t now_ms;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    for (now_ms = 0U; now_ms <= 140U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    if (ucn_cluster_member_count(&network.nodes[0].cluster) != 3U) {
+        printf("CLUSTER_DEBUG head_role=%u members=%zu roles=%u/%u/%u/%u "
+               "accepted=%lu rejected=%lu sent=%lu received=%lu\n",
+               (unsigned)network.nodes[0].cluster.role,
+               ucn_cluster_member_count(&network.nodes[0].cluster),
+               (unsigned)network.nodes[0].cluster.role,
+               (unsigned)network.nodes[1].cluster.role,
+               (unsigned)network.nodes[2].cluster.role,
+               (unsigned)network.nodes[3].cluster.role,
+               (unsigned long)network.nodes[0].cluster.stats.joins_accepted,
+               (unsigned long)network.nodes[0].cluster.stats.joins_rejected,
+               (unsigned long)network.nodes[0].cluster.stats.messages_sent,
+               (unsigned long)network.nodes[0].cluster.stats.messages_received);
+    }
+    TEST_ASSERT(network.nodes[0].cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    TEST_ASSERT(network.nodes[0].cluster.cluster_id == UINT32_C(1));
+    TEST_ASSERT(ucn_cluster_member_count(&network.nodes[0].cluster) == 3U);
+    TEST_ASSERT((network.nodes[1].cluster.role == UCN_CLUSTER_ROLE_MEMBER ||
+                 network.nodes[1].cluster.role == UCN_CLUSTER_ROLE_BACKUP) &&
+                network.nodes[1].cluster.head_node_id == UINT32_C(1));
+    TEST_ASSERT(network.nodes[2].cluster.role == UCN_CLUSTER_ROLE_MEMBER &&
+                network.nodes[3].cluster.role == UCN_CLUSTER_ROLE_MEMBER);
+
+    network.nodes[0].alive = false;
+    for (now_ms = 141U; now_ms <= 300U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    TEST_ASSERT(network.nodes[1].cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    /* Takeover keeps the cluster identity; only the Term advances. */
+    TEST_ASSERT(network.nodes[1].cluster.cluster_id == UINT32_C(1));
+    TEST_ASSERT(network.nodes[1].cluster.term == 2U);
+    TEST_ASSERT(ucn_cluster_member_count(&network.nodes[1].cluster) == 2U);
+    TEST_ASSERT(network.nodes[2].cluster.role == UCN_CLUSTER_ROLE_MEMBER &&
+                network.nodes[2].cluster.head_node_id == UINT32_C(2));
+    TEST_ASSERT(network.nodes[3].cluster.role == UCN_CLUSTER_ROLE_MEMBER &&
+                network.nodes[3].cluster.head_node_id == UINT32_C(2));
+    TEST_ASSERT(network.nodes[1].cluster.stats.elections_won == 1U);
+    return 0;
+}
+
+static int cluster_test_capacity_is_bounded(void)
+{
+    cluster_test_network_t network;
+    ucn_cluster_message_t request;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    uint32_t now_ms;
+    size_t joined = 0U;
+    size_t nonmember_index = 0U;
+    size_t index;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 1U) == 0);
+    for (now_ms = 0U; now_ms <= 140U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    TEST_ASSERT(network.nodes[0].cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    TEST_ASSERT(ucn_cluster_member_count(&network.nodes[0].cluster) == 1U);
+    for (index = 1U; index < CLUSTER_TEST_NODES; ++index) {
+        if (network.nodes[index].cluster.role == UCN_CLUSTER_ROLE_MEMBER &&
+            network.nodes[index].cluster.head_node_id == UINT32_C(1)) {
+            ++joined;
+        } else {
+            nonmember_index = index;
+        }
+    }
+    TEST_ASSERT(joined == 1U);
+    TEST_ASSERT(nonmember_index != 0U);
+    (void)memset(&request, 0, sizeof(request));
+    request.type = UCN_CLUSTER_MSG_JOIN_REQUEST;
+    request.role = UCN_CLUSTER_ROLE_JOIN_PENDING;
+    request.cluster_id = network.nodes[0].cluster.cluster_id;
+    request.term = network.nodes[0].cluster.term;
+    request.head_node_id = network.nodes[0].node_id;
+    request.head_score = network.nodes[0].cluster.config.head_score;
+    request.lease_ms = network.nodes[0].cluster.config.lease_ms;
+    request.nonce = UINT32_C(50000);
+    TEST_ASSERT(ucn_cluster_message_encode(&request, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(
+                    &network.nodes[0].cluster,
+                    network.nodes[nonmember_index].node_id, true,
+                    encoded, sizeof(encoded)) == UCN_ERR_NO_SPACE);
+    TEST_ASSERT(network.nodes[0].cluster.stats.joins_rejected > 0U);
+    return 0;
+}
+
+static int cluster_test_neighbor_summary_api(void)
+{
+#if UCN_FEATURE_DYNAMIC_MESH
+    ucn_node_t node;
+    ucn_config_t config = { UINT32_C(1), UINT32_C(1), 4U };
+    ucn_link_t link;
+    ucn_neighbor_summary_t summary;
+
+    (void)memset(&link, 0, sizeof(link));
+    link.ops = &CLUSTER_SUMMARY_LINK_OPS;
+    link.link_id = 1U;
+    link.mtu = UCN_MAX_FRAME_BYTES;
+    link.peer_node_id = UINT32_C(2);
+    TEST_ASSERT(ucn_node_init(&node, &config) == UCN_OK);
+    TEST_ASSERT(ucn_node_observe_neighbor(&node, &link, UINT32_C(123)) == UCN_OK);
+    TEST_ASSERT(ucn_node_admit_neighbor(&node, UINT32_C(2)) == UCN_OK);
+    TEST_ASSERT(ucn_node_copy_neighbor_summaries(&node, NULL, 0U) == 1U);
+    TEST_ASSERT(ucn_node_copy_neighbor_summaries(&node, &summary, 1U) == 1U);
+    TEST_ASSERT(summary.state == UCN_NEIGHBOR_ADMITTED &&
+                summary.peer_node_id == UINT32_C(2) &&
+                summary.bearer_count == 1U && summary.last_seen_ms == 123U);
+#else
+    ucn_node_t node;
+    ucn_neighbor_summary_t summary;
+
+    (void)memset(&node, 0, sizeof(node));
+    TEST_ASSERT(ucn_node_copy_neighbor_summaries(&node, &summary, 1U) == 0U);
+#endif
+    return 0;
+}
+
+static int cluster_test_recovery_head(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *candidate;
+    cluster_test_node_t *peer;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    uint32_t now_ms;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    /* Primary and Backup are both gone; only the head-capable node 3 and
+     * member node 4 survive as a headless domain. */
+    network.nodes[0].alive = false;
+    network.nodes[1].alive = false;
+    candidate = &network.nodes[2];
+    peer = &network.nodes[3];
+    candidate->cluster.config.head_capable = true;
+    candidate->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    candidate->cluster.cluster_id = 1U;
+    candidate->cluster.term = 1U;
+    candidate->cluster.head_node_id = UINT32_C(1);
+    candidate->cluster.head_lease_expires_at_ms = 1U;
+    peer->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    peer->cluster.cluster_id = 1U;
+    peer->cluster.term = 1U;
+    peer->cluster.head_node_id = UINT32_C(1);
+    peer->cluster.head_lease_expires_at_ms = 1U;
+
+    /* Headless: lease grace (1 keepalive) + detach observation + backoff
+     * precede the Recovery Head declaration. */
+    for (now_ms = 0U; now_ms <= 40U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    TEST_ASSERT(candidate->cluster.role == UCN_CLUSTER_ROLE_RECOVERY_HEAD);
+    TEST_ASSERT(candidate->cluster.cluster_id == candidate->node_id);
+    TEST_ASSERT(candidate->cluster.term == 1U);
+    TEST_ASSERT(candidate->cluster.head_node_id == candidate->node_id);
+    TEST_ASSERT(candidate->cluster.recovery_ack_count >= 1U);
+
+    /* TTL expiry steps the Recovery Head down immediately. */
+    candidate->cluster.recovery_deadline_ms = 1U;
+    now_ms = 41U;
+    TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    TEST_ASSERT(candidate->cluster.role == UCN_CLUSTER_ROLE_DETACHED);
+
+    /* The still-headless domain re-backs off, then a stable higher-Term
+     * HEAD_TAKEOVER makes the re-declared Recovery Head defer. */
+    candidate->cluster.recovery_cooldown_until_ms = 0U;
+    for (now_ms = 42U; now_ms <= 160U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    TEST_ASSERT(candidate->cluster.role == UCN_CLUSTER_ROLE_RECOVERY_HEAD);
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_HEAD_TAKEOVER;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 2U;
+    message.head_node_id = peer->node_id;
+    message.head_score = 9000U;
+    message.lease_ms = 8000U;
+    message.backup_generation = 1U;
+    candidate->cluster.known_backup_node_id = peer->node_id;
+    candidate->cluster.known_backup_generation = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&candidate->cluster, peer->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(candidate->cluster.role == UCN_CLUSTER_ROLE_MEMBER &&
+                candidate->cluster.head_node_id == peer->node_id);
+    return 0;
+}
+
+static int cluster_test_stable_switchback(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    uint32_t now_ms;
+    uint32_t nonce = 0U;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    head = &network.nodes[0];
+
+    /* node 0: an established low-score Head with tenure already elapsed. */
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.config.head_score = 6000U;
+    head->cluster.current_head_score = 6000U;
+    head->cluster.role_since_ms = 0U;
+    head->cluster.stepdown_deadline_ms = 0U;
+
+    /* node 1 advertises as a much better Head (split-brain challenger). */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_ADVERTISE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = network.nodes[1].node_id;
+    message.head_score = 9500U;
+    message.available_capacity = 3U;
+    message.lease_ms = 8000U;
+
+    /* Cross switch_required_samples + head_min_tenure_ms (50 ms). */
+    for (now_ms = 0U; now_ms <= 60U; ++now_ms) {
+        network.now_ms = now_ms;
+        message.nonce = ++nonce;
+        TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+        TEST_ASSERT(ucn_cluster_receive(&head->cluster,
+                                        network.nodes[1].node_id, true,
+                                        encoded, sizeof(encoded)) == UCN_OK);
+        TEST_ASSERT(ucn_cluster_step(&head->cluster) == UCN_OK);
+        if (head->cluster.role == UCN_CLUSTER_ROLE_STEPPING_DOWN) {
+            break;
+        }
+    }
+    TEST_ASSERT(head->cluster.role == UCN_CLUSTER_ROLE_STEPPING_DOWN);
+    TEST_ASSERT(head->cluster.pending_head_node_id ==
+                network.nodes[1].node_id);
+
+    /* After the stepdown deadline the Head joins the better Head. */
+    for (++now_ms; now_ms <= 80U; ++now_ms) {
+        network.now_ms = now_ms;
+        TEST_ASSERT(ucn_cluster_step(&head->cluster) == UCN_OK);
+        if (head->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING) {
+            break;
+        }
+    }
+    TEST_ASSERT(head->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(head->cluster.pending_head_node_id ==
+                network.nodes[1].node_id);
+    return 0;
+}
+
+static int cluster_test_backup_challenge(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    cluster_test_node_t *backup;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    head = &network.nodes[0];
+    backup = &network.nodes[1];
+
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.config.head_score = 6000U;
+    head->cluster.current_head_score = 6000U;
+
+    backup->cluster.role = UCN_CLUSTER_ROLE_BACKUP;
+    backup->cluster.cluster_id = 1U;
+    backup->cluster.term = 1U;
+    backup->cluster.head_node_id = head->node_id;
+    backup->cluster.backup_primary_node_id = head->node_id;
+    backup->cluster.config.head_score = 9500U;
+    backup->cluster.role_since_ms = 0U;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_ADVERTISE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.head_score = 6000U;
+    message.available_capacity = 0U; /* full Head: challenge must still run */
+    message.lease_ms = 8000U;
+    message.nonce = 1U;
+    network.now_ms = 60U; /* past head_min_tenure_ms=50 */
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.role == UCN_CLUSTER_ROLE_CANDIDATE);
+    TEST_ASSERT(backup->cluster.cluster_id == 1U); /* same Cluster */
+    TEST_ASSERT(backup->cluster.term == 2U); /* Term bumped */
+    TEST_ASSERT(backup->cluster.head_node_id == backup->node_id);
+    return 0;
+}
+
+int test_cluster(void)
+{
+    TEST_ASSERT(cluster_test_codec_and_security() == 0);
+    TEST_ASSERT(cluster_test_v3_codec() == 0);
+    TEST_ASSERT(cluster_test_backup_sync() == 0);
+    TEST_ASSERT(cluster_test_takeover_guard() == 0);
+    TEST_ASSERT(cluster_test_recovery_head() == 0);
+    TEST_ASSERT(cluster_test_stable_switchback() == 0);
+    TEST_ASSERT(cluster_test_backup_challenge() == 0);
+    TEST_ASSERT(cluster_test_timing_profiles() == 0);
+    TEST_ASSERT(cluster_test_election_join_and_failover() == 0);
+    TEST_ASSERT(cluster_test_capacity_is_bounded() == 0);
+    TEST_ASSERT(cluster_test_neighbor_summary_api() == 0);
+    return 0;
+}

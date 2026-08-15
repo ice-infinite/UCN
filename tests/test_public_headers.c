@@ -1,6 +1,8 @@
 #include <stddef.h>
 
 #include "ucn/ucn_adapter.h"
+#include "ucn/ucn_cluster.h"
+#include "ucn/ucn_cluster_federation.h"
 #include "ucn/ucn_node.h"
 #include "ucn/ucn_path.h"
 #include "ucn/ucn_standard_adapter.h"
@@ -115,6 +117,52 @@ int test_public_headers(void)
     ucn_result_t (*transfer_local_window_fn)(ucn_transfer_t *, uint8_t) =
         ucn_transfer_set_tx_window_size;
     ucn_result_t (*transfer_step_fn)(ucn_transfer_t *) = ucn_transfer_step;
+    size_t (*neighbor_summary_fn)(const ucn_node_t *,
+                                  ucn_neighbor_summary_t *, size_t) =
+        ucn_node_copy_neighbor_summaries;
+    ucn_result_t (*cluster_init_fn)(ucn_cluster_t *,
+                                    const ucn_cluster_config_t *) =
+        ucn_cluster_init;
+    ucn_result_t (*cluster_step_fn)(ucn_cluster_t *) = ucn_cluster_step;
+    ucn_result_t (*cluster_score_fn)(ucn_cluster_t *, uint16_t) =
+        ucn_cluster_set_head_score;
+    ucn_result_t (*cluster_view_fn)(const ucn_cluster_t *, ucn_cluster_view_t *) =
+        ucn_cluster_get_view;
+    size_t (*cluster_members_fn)(const ucn_cluster_t *,
+                                 ucn_cluster_member_summary_t *, size_t) =
+        ucn_cluster_copy_member_summaries;
+    ucn_result_t (*cluster_member_at_fn)(const ucn_cluster_t *, size_t,
+                                         ucn_cluster_member_summary_t *) =
+        ucn_cluster_get_member_summary_at;
+    size_t (*federation_size_fn)(const ucn_cluster_federation_message_t *) =
+        ucn_cluster_federation_message_encoded_size;
+    ucn_result_t (*federation_decode_fn)(
+        const uint8_t *, size_t, ucn_cluster_federation_message_t *) =
+        ucn_cluster_federation_message_decode;
+    ucn_result_t (*federation_init_fn)(
+        ucn_cluster_federation_t *, const ucn_cluster_federation_config_t *) =
+        ucn_cluster_federation_init;
+    ucn_result_t (*federation_receive_fn)(ucn_cluster_federation_t *,
+                                           ucn_node_id_t, bool,
+                                           const uint8_t *, size_t) =
+        ucn_cluster_federation_receive;
+    ucn_result_t (*federation_step_fn)(ucn_cluster_federation_t *) =
+        ucn_cluster_federation_step;
+    ucn_result_t (*federation_query_fn)(ucn_cluster_federation_t *,
+                                         ucn_node_id_t) =
+        ucn_cluster_federation_query_locator;
+    ucn_result_t (*federation_send_fn)(
+        ucn_cluster_federation_t *, ucn_node_id_t, ucn_endpoint_t,
+        ucn_traffic_class_t, const uint8_t *, uint16_t) =
+        ucn_cluster_federation_send;
+    const ucn_cluster_locator_t *(*federation_find_fn)(
+        const ucn_cluster_federation_t *, ucn_node_id_t) =
+        ucn_cluster_federation_find_locator;
+    const ucn_cluster_federation_next_cluster_entry_t *(*federation_next_fn)(
+        const ucn_cluster_federation_t *, uint32_t) =
+        ucn_cluster_federation_find_next_cluster;
+    const ucn_cluster_federation_stats_t *(*federation_stats_fn)(
+        const ucn_cluster_federation_t *) = ucn_cluster_federation_get_stats;
 
     return node == NULL && step_fn != NULL && stats_fn != NULL && preset_fn != NULL &&
            isr_enqueue_fn != NULL && path_install_capable_fn != NULL &&
@@ -131,6 +179,15 @@ int test_public_headers(void)
            transfer_peer_window_fn != NULL &&
            transfer_peer_concurrency_fn != NULL &&
             transfer_local_window_fn != NULL && transfer_step_fn != NULL &&
+            neighbor_summary_fn != NULL && cluster_init_fn != NULL &&
+            cluster_step_fn != NULL && cluster_score_fn != NULL &&
+             cluster_view_fn != NULL && cluster_members_fn != NULL &&
+             cluster_member_at_fn != NULL && federation_size_fn != NULL &&
+             federation_decode_fn != NULL && federation_init_fn != NULL &&
+             federation_receive_fn != NULL && federation_step_fn != NULL &&
+             federation_query_fn != NULL && federation_send_fn != NULL &&
+             federation_find_fn != NULL &&
+             federation_next_fn != NULL && federation_stats_fn != NULL &&
             ucn_port_ops_is_compatible(&port_ops_v2) &&
             transfer_config_v2.max_retries == 3U &&
             transfer_config_v2.ack_timeout_ms == UINT32_C(100) &&
@@ -145,10 +202,20 @@ int test_public_headers(void)
            host_fake_init_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&
            event_runtime_init_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&
            stream_source_init_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&
-           legacy_path.egress_link == &legacy_link &&
-           legacy_path.expires_at_ms == UINT32_C(1000) &&
-           path_install_capable_fn(NULL, NULL, &capability) == UCN_ERR_ARGUMENT &&
-           ucn_node_install_local_path_capable(
+            legacy_path.egress_link == &legacy_link &&
+            legacy_path.expires_at_ms == UINT32_C(1000) &&
+            path_install_capable_fn(NULL, NULL, &capability) == UCN_ERR_ARGUMENT &&
+            cluster_member_at_fn(NULL, 0U, NULL) == UCN_ERR_ARGUMENT &&
+            federation_init_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&
+            federation_receive_fn(NULL, 1U, false, NULL, 0U) == UCN_ERR_ARGUMENT &&
+            federation_step_fn(NULL) == UCN_ERR_ARGUMENT &&
+            federation_query_fn(NULL, 1U) == UCN_ERR_ARGUMENT &&
+            federation_send_fn(NULL, 1U, 0x40U, UCN_TRAFFIC_Q1_REALTIME,
+                               NULL, 0U) == UCN_ERR_ARGUMENT &&
+            federation_find_fn(NULL, 1U) == NULL &&
+            federation_next_fn(NULL, 1U) == NULL &&
+            federation_stats_fn(NULL) == NULL &&
+            ucn_node_install_local_path_capable(
                node, 1U, 2U, 2U, 1U, 1000U, &capability) == UCN_ERR_ARGUMENT &&
            ucn_node_send_path_install_capable(
                node, 2U, 1U, 2U, 0U, 0U, 1000U,

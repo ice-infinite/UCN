@@ -638,6 +638,17 @@ typedef struct ucn_node ucn_node_t;
 typedef void (*ucn_rx_handler_t)(void *context, const ucn_frame_t *frame);
 typedef void (*ucn_endpoint_rx_handler_t)(void *context, const ucn_frame_t *frame);
 
+/* Owner-context, read-only view used by optional control-plane extensions such
+ * as ucn_cluster.  It deliberately exposes no mutable Neighbor/Link storage.
+ * last_seen_ms is the freshest Bearer observation retained for this identity. */
+typedef struct ucn_neighbor_summary {
+    ucn_neighbor_state_t state;
+    ucn_node_id_t peer_node_id;
+    uint8_t bearer_count;
+    uint8_t primary_bearer_index;
+    uint32_t last_seen_ms;
+} ucn_neighbor_summary_t;
+
 typedef struct ucn_send_request {
     ucn_node_id_t destination;
     uint8_t message_type;
@@ -1020,6 +1031,13 @@ ucn_result_t ucn_node_reject_neighbor(ucn_node_t *node,
                                       ucn_node_id_t peer_node_id);
 size_t ucn_node_neighbor_count(const ucn_node_t *node,
                                ucn_neighbor_state_t state);
+/* With output == NULL and capacity == 0 this returns the number of non-empty
+ * Neighbor entries.  Otherwise it copies at most capacity entries and returns
+ * the number copied.  Call only from the unique Protocol Owner context. */
+size_t ucn_node_copy_neighbor_summaries(
+    const ucn_node_t *node,
+    ucn_neighbor_summary_t *output,
+    size_t capacity);
 ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link);
 ucn_result_t ucn_node_add_route(ucn_node_t *node,
                                 ucn_node_id_t destination,

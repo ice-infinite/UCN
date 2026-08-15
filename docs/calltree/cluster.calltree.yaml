@@ -1,0 +1,94 @@
+module: cluster
+description: 可选单层分簇 Extended；只读邻居输入、确定性评分选举、加入/容量、租约和 Head 失效重选。
+entry: cluster.ucn_cluster_step
+source_files:
+  - src/extended/ucn_cluster.c
+
+nodes:
+  - id: cluster.ucn_node_copy_neighbor_summaries
+    symbol: ucn_node_copy_neighbor_summaries
+    type: function
+    file: src/node/ucn_node.c
+    layer: core
+    role: 在唯一 Owner 上下文复制非空 Neighbor 的只读摘要，隔离 Extended 与 Node 私有存储。
+    called_by:
+      - cluster.ucn_cluster_sync_node_neighbors
+    calls: []
+    notes:
+      - Full/Lite 返回动态邻居；Nano 没有动态 Neighbor，返回 0。
+
+  - id: cluster.ucn_cluster_sync_node_neighbors
+    symbol: ucn_cluster_sync_node_neighbors
+    type: function
+    file: src/extended/ucn_cluster.c
+    layer: extended
+    role: 把 ADMITTED/SUSPECT 一跳邻居同步到固定 Peer 表。
+    called_by:
+      - external.unique_protocol_owner
+    calls:
+      - target: cluster.ucn_node_copy_neighbor_summaries
+        type: direct
+        reason: 获取只读、固定容量的选举输入。
+    notes:
+      - 不使用 Node Snapshot，不进行全网诊断泛洪。
+
+  - id: cluster.ucn_cluster_set_head_score
+    symbol: ucn_cluster_set_head_score
+    type: function
+    file: src/extended/ucn_cluster.c
+    layer: extended
+    role: 在唯一 Owner 上下文更新产品计算并滤波后的 Head Score。
+    called_by:
+      - external.unique_protocol_owner_quality_update
+    calls: []
+    notes:
+      - 更新后续 Candidate/Head 广告；不会仅凭一次变化强迫既有 Head 退位。
+      - 完整运行期迁移、拆并与备用策略属于 C07。
+
+  - id: cluster.ucn_cluster_receive
+    symbol: ucn_cluster_receive
+    type: callback
+    file: src/extended/ucn_cluster.c
+    layer: extended
+    role: 解码 Endpoint 0xA0 的 28 B 控制载荷，执行来源、安全、Term/Nonce 和角色门禁。
+    called_by:
+      - external.cluster_endpoint_handler
+    calls:
+      - target: cluster.ucn_cluster_message_decode
+        type: direct
+        reason: 校验 Cluster Format v1 与固定 Schema。
+      - target: external.cluster_send_callback
+        type: callback
+        reason: 发送 Join 响应或状态控制消息。
+    notes:
+      - 产品可要求 E2E protected；生产 Provider 仍在 Core Security 边界。
+
+  - id: cluster.ucn_cluster_message_decode
+    symbol: ucn_cluster_message_decode
+    type: function
+    file: src/extended/ucn_cluster.c
+    layer: extended
+    role: 解码并校验固定大端 Cluster Payload。
+    called_by:
+      - cluster.ucn_cluster_receive
+    calls: []
+
+  - id: cluster.ucn_cluster_step
+    symbol: ucn_cluster_step
+    type: scheduler
+    file: src/extended/ucn_cluster.c
+    layer: extended
+    role: 推进观察、候选、Head/Member 租约、Join 重试、Keepalive 和轮转广告。
+    called_by:
+      - external.unique_protocol_owner
+    calls:
+      - target: external.authoritative_monotonic_clock
+        type: callback
+        reason: 所有选举窗口和租约使用同一权威单调时钟。
+      - target: external.cluster_send_callback
+        type: callback
+        reason: 每次 Step 最多向一个轮转 Peer 广告，或发送一次到期 Join/Keepalive。
+    notes:
+      - Cluster 对象、Peer/Candidate/Member 表均为静态容量。
+      - 丢包造成重复 Head 时，确定性更差者在连续样本和最小任期后加入更优 Head；旧成员靠租约恢复。
+      - 完整 BACKUP、协同拆分/合并、Locator/Tunnel 和多级簇未闭环。

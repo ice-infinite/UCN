@@ -63,6 +63,8 @@ int main(void)
     result |= test_public_headers();
     result |= test_node_storage_header();
     result |= test_transfer();
+    result |= test_cluster();
+    result |= test_cluster_federation();
 
     if (result == 0) {
         printf("All UCN tests passed.\n");

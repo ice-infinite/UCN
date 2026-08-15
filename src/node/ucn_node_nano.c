@@ -459,6 +459,17 @@ size_t ucn_node_neighbor_count(const ucn_node_t *node,
     return 0U;
 }
 
+size_t ucn_node_copy_neighbor_summaries(
+    const ucn_node_t *node,
+    ucn_neighbor_summary_t *output,
+    size_t capacity)
+{
+    (void)node;
+    (void)output;
+    (void)capacity;
+    return 0U;
+}
+
 ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
 {
     size_t index;
