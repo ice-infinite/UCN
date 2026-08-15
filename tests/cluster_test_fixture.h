@@ -40,6 +40,29 @@ void cluster_fixture_set_vote(ucn_cluster_t *cluster,
                               uint32_t term,
                               uint32_t generation);
 
+#if defined(UCN_CLUSTER_ENABLE_TEST_HOOKS)
+/* CLV2-01-04a: test-only access to the static single transition entry
+ * point.  The hooks are compiled only into the ucn_tests copy of
+ * ucn_cluster.c (see CMakeLists.txt); production archives never export
+ * them. */
+ucn_result_t ucn_cluster_test_transition(
+    ucn_cluster_t *cluster,
+    ucn_cluster_phase_t old_phase,
+    ucn_cluster_phase_t new_phase,
+    ucn_cluster_transition_reason_t reason,
+    uint32_t now_ms);
+
+/* Toggle the debug assert on illegal transitions so rejection tests can
+ * exercise the fail-closed release path (UCN_ERR_STATE) without
+ * aborting. */
+void ucn_cluster_test_transition_asserts_set(bool enabled);
+
+/* Test-only view of the BEST-EFFORT pair->reason table (F4 fallback). */
+ucn_cluster_transition_reason_t ucn_cluster_test_reason_from_diff(
+    ucn_cluster_phase_t old_phase,
+    ucn_cluster_phase_t new_phase);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

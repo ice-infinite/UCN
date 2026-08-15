@@ -6,127 +6,128 @@
 -- Detecting C compile features
 -- Detecting C compile features - done
 -- UCN profile: FULL; Service: ON
--- Configuring done (4.9s)
--- Generating done (0.9s)
+-- Configuring done (4.8s)
+-- Generating done (0.8s)
 -- Build files have been written to: /mnt/e/File/MESH/UCN/build-m00-full
 ==== [full] build (clean tree) ====
-[1/90] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_endpoint.c.o
-[2/90] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_core.c.o
-[3/90] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_frame.c.o
-[4/90] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_link_cost.c.o
-[5/90] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_adapter.c.o
-[6/90] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_event_runtime.c.o
-[7/90] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_standard_adapter.c.o
-[8/90] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_protocol_owner.c.o
-[9/90] Building C object CMakeFiles/ucn_core.dir/src/routing/ucn_path.c.o
-[10/90] Building C object CMakeFiles/ucn_core.dir/src/routing/ucn_policy.c.o
-[11/90] Building C object CMakeFiles/ucn_core.dir/src/service/ucn_service.c.o
-[12/90] Building C object CMakeFiles/ucn_core.dir/src/service/ucn_service_bridge.c.o
-[13/90] Building C object CMakeFiles/ucn_core.dir/src/adapters/can/ucn_can_source.c.o
-[14/90] Building C object CMakeFiles/ucn_core.dir/src/adapters/stream/ucn_stream_source.c.o
-[15/90] Building C object CMakeFiles/ucn_core.dir/src/node/ucn_node.c.o
-[16/90] Building C object CMakeFiles/ucn_transfer.dir/src/extended/ucn_transfer.c.o
-[17/90] Building C object CMakeFiles/ucn_cluster.dir/src/extended/ucn_cluster.c.o
-[18/90] Building C object CMakeFiles/ucn_cluster_federation.dir/src/extended/ucn_cluster_federation.c.o
-[19/90] Building C object CMakeFiles/ucn_cluster_sim.dir/tools/ucn_cluster_sim.c.o
-[20/90] Building C object CMakeFiles/ucn_port_bare_metal.dir/src/ports/ucn_port_bare_metal.c.o
-[21/90] Building C object CMakeFiles/ucn_port_freertos.dir/src/ports/ucn_port_freertos.c.o
-[22/90] Building C object CMakeFiles/ucn_port_zephyr.dir/src/ports/ucn_port_zephyr.c.o
-[23/90] Building C object CMakeFiles/ucn_port_nuttx.dir/src/ports/ucn_port_nuttx.c.o
-[24/90] Building C object CMakeFiles/ucn_port_rtthread.dir/src/ports/ucn_port_rtthread.c.o
-[25/90] Building C object CMakeFiles/ucn_port_host_fake.dir/src/ports/ucn_port_host_fake.c.o
-[26/90] Building C object CMakeFiles/ucn_scale_sim.dir/tools/ucn_scale_sim.c.o
-[27/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_main.c.o
-[28/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_core.c.o
-[29/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_frame.c.o
-[30/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_wire_profile.c.o
-[31/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_node_wire_profile.c.o
-[32/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_node.c.o
-[33/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_virtual_link.c.o
-[34/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_qos.c.o
-[35/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_route.c.o
-[36/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_duplicate_window.c.o
-[37/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_host_boundary.c.o
-[38/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_endpoint.c.o
-[39/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_adapter.c.o
-[40/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_standard_adapter.c.o
-[41/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_link_cost.c.o
-[42/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_event_runtime.c.o
-[43/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_stream_source.c.o
-[44/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_can_source.c.o
-[45/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_protocol_owner.c.o
-[46/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_profile.c.o
-[47/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_public_headers.c.o
-[48/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_node_storage_header.c.o
-[49/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_transfer.c.o
-[50/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_cluster_fuzz.c.o
-[51/90] Building C object CMakeFiles/ucn_tests.dir/tests/cluster_test_fixture.c.o
-[52/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_cluster.c.o
-[53/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_cluster_federation.c.o
-[54/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_aodv_lite.c.o
-[55/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_security.c.o
-[56/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_integration.c.o
-[57/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_link_metrics.c.o
-[58/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_neighbor_lifecycle.c.o
-[59/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_hello_join.c.o
-[60/90] Linking C static library libucn_core.a
-[61/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_neighbor_heartbeat.c.o
-[62/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_neighbor_bearer.c.o
-[63/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_adapter_hello.c.o
-[64/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_control_budget.c.o
-[65/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_time.c.o
-[66/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_link_contract.c.o
-[67/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_stress.c.o
-[68/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_candidate_route.c.o
-[69/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_v3.c.o
-[70/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_path_trace.c.o
-[71/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_node_snapshot.c.o
-[72/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_path_control.c.o
-[73/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_path_management_budget.c.o
-[74/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_policy.c.o
-[75/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_policy_diagnostic.c.o
-[76/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_dynamic_stress.c.o
-[77/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_service.c.o
-[78/90] Linking C static library libucn_transfer.a
-[79/90] Linking C static library libucn_cluster.a
-[80/90] Linking C static library libucn_port_bare_metal.a
-[81/90] Linking C static library libucn_port_freertos.a
-[82/90] Linking C static library libucn_port_zephyr.a
-[83/90] Linking C static library libucn_port_nuttx.a
-[84/90] Linking C static library libucn_port_rtthread.a
-[85/90] Linking C static library libucn_port_host_fake.a
-[86/90] Building C object CMakeFiles/ucn_tests.dir/tests/test_service_bridge.c.o
-[87/90] Linking C static library libucn_cluster_federation.a
-[88/90] Linking C executable ucn_scale_sim
-[89/90] Linking C executable ucn_cluster_sim
-[90/90] Linking C executable ucn_tests
+[1/91] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_core.c.o
+[2/91] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_endpoint.c.o
+[3/91] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_frame.c.o
+[4/91] Building C object CMakeFiles/ucn_core.dir/src/core/ucn_link_cost.c.o
+[5/91] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_adapter.c.o
+[6/91] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_event_runtime.c.o
+[7/91] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_standard_adapter.c.o
+[8/91] Building C object CMakeFiles/ucn_core.dir/src/transport/ucn_protocol_owner.c.o
+[9/91] Building C object CMakeFiles/ucn_core.dir/src/routing/ucn_path.c.o
+[10/91] Building C object CMakeFiles/ucn_core.dir/src/service/ucn_service.c.o
+[11/91] Building C object CMakeFiles/ucn_core.dir/src/adapters/can/ucn_can_source.c.o
+[12/91] Building C object CMakeFiles/ucn_core.dir/src/adapters/stream/ucn_stream_source.c.o
+[13/91] Building C object CMakeFiles/ucn_core.dir/src/routing/ucn_policy.c.o
+[14/91] Building C object CMakeFiles/ucn_core.dir/src/service/ucn_service_bridge.c.o
+[15/91] Building C object CMakeFiles/ucn_transfer.dir/src/extended/ucn_transfer.c.o
+[16/91] Building C object CMakeFiles/ucn_cluster.dir/src/extended/ucn_cluster.c.o
+[17/91] Building C object CMakeFiles/ucn_cluster_federation.dir/src/extended/ucn_cluster_federation.c.o
+[18/91] Building C object CMakeFiles/ucn_cluster_sim.dir/tools/ucn_cluster_sim.c.o
+[19/91] Building C object CMakeFiles/ucn_port_bare_metal.dir/src/ports/ucn_port_bare_metal.c.o
+[20/91] Building C object CMakeFiles/ucn_port_freertos.dir/src/ports/ucn_port_freertos.c.o
+[21/91] Building C object CMakeFiles/ucn_core.dir/src/node/ucn_node.c.o
+[22/91] Building C object CMakeFiles/ucn_port_zephyr.dir/src/ports/ucn_port_zephyr.c.o
+[23/91] Building C object CMakeFiles/ucn_port_nuttx.dir/src/ports/ucn_port_nuttx.c.o
+[24/91] Building C object CMakeFiles/ucn_port_rtthread.dir/src/ports/ucn_port_rtthread.c.o
+[25/91] Building C object CMakeFiles/ucn_port_host_fake.dir/src/ports/ucn_port_host_fake.c.o
+[26/91] Building C object CMakeFiles/ucn_scale_sim.dir/tools/ucn_scale_sim.c.o
+[27/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_main.c.o
+[28/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_core.c.o
+[29/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_frame.c.o
+[30/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_wire_profile.c.o
+[31/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_node_wire_profile.c.o
+[32/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_node.c.o
+[33/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_virtual_link.c.o
+[34/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_qos.c.o
+[35/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_route.c.o
+[36/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_duplicate_window.c.o
+[37/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_host_boundary.c.o
+[38/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_endpoint.c.o
+[39/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_adapter.c.o
+[40/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_standard_adapter.c.o
+[41/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_link_cost.c.o
+[42/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_event_runtime.c.o
+[43/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_stream_source.c.o
+[44/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_can_source.c.o
+[45/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_protocol_owner.c.o
+[46/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_profile.c.o
+[47/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_public_headers.c.o
+[48/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_node_storage_header.c.o
+[49/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_transfer.c.o
+[50/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_cluster.c.o
+[51/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_cluster_fuzz.c.o
+[52/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_cluster_federation.c.o
+[53/91] Building C object CMakeFiles/ucn_tests.dir/tests/cluster_test_fixture.c.o
+[54/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_aodv_lite.c.o
+[55/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_security.c.o
+[56/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_integration.c.o
+[57/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_link_metrics.c.o
+[58/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_neighbor_lifecycle.c.o
+[59/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_hello_join.c.o
+[60/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_neighbor_heartbeat.c.o
+[61/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_neighbor_bearer.c.o
+[62/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_adapter_hello.c.o
+[63/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_control_budget.c.o
+[64/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_time.c.o
+[65/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_link_contract.c.o
+[66/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_stress.c.o
+[67/91] Linking C static library libucn_core.a
+[68/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_candidate_route.c.o
+[69/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_v3.c.o
+[70/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_path_trace.c.o
+[71/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_node_snapshot.c.o
+[72/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_path_control.c.o
+[73/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_path_management_budget.c.o
+[74/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_policy.c.o
+[75/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_policy_diagnostic.c.o
+[76/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_dynamic_stress.c.o
+[77/91] Building C object CMakeFiles/ucn_tests.dir/src/extended/ucn_cluster.c.o
+[78/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_service.c.o
+[79/91] Building C object CMakeFiles/ucn_tests.dir/tests/test_service_bridge.c.o
+[80/91] Linking C static library libucn_transfer.a
+[81/91] Linking C static library libucn_cluster.a
+[82/91] Linking C static library libucn_port_bare_metal.a
+[83/91] Linking C static library libucn_port_freertos.a
+[84/91] Linking C static library libucn_port_zephyr.a
+[85/91] Linking C static library libucn_port_nuttx.a
+[86/91] Linking C static library libucn_port_rtthread.a
+[87/91] Linking C static library libucn_port_host_fake.a
+[88/91] Linking C static library libucn_cluster_federation.a
+[89/91] Linking C executable ucn_scale_sim
+[90/91] Linking C executable ucn_cluster_sim
+[91/91] Linking C executable ucn_tests
 ==== [full] ctest ====
 Internal ctest changing into directory: /mnt/e/File/MESH/UCN/build-m00-full
 Test project /mnt/e/File/MESH/UCN/build-m00-full
       Start  1: ucn_tests
- 1/22 Test  #1: ucn_tests ..............................   Passed    1.30 sec
+ 1/22 Test  #1: ucn_tests ..............................   Passed    1.04 sec
       Start  2: ucn_cluster_64_convergence
- 2/22 Test  #2: ucn_cluster_64_convergence .............   Passed    0.03 sec
+ 2/22 Test  #2: ucn_cluster_64_convergence .............   Passed    0.02 sec
       Start  3: ucn_cluster_64_impaired
- 3/22 Test  #3: ucn_cluster_64_impaired ................   Passed    0.10 sec
+ 3/22 Test  #3: ucn_cluster_64_impaired ................   Passed    0.07 sec
       Start  4: ucn_cluster_256_convergence
- 4/22 Test  #4: ucn_cluster_256_convergence ............   Passed    0.06 sec
+ 4/22 Test  #4: ucn_cluster_256_convergence ............   Passed    0.07 sec
       Start  5: ucn_cluster_256_impaired
- 5/22 Test  #5: ucn_cluster_256_impaired ...............   Passed    0.28 sec
+ 5/22 Test  #5: ucn_cluster_256_impaired ...............   Passed    0.23 sec
       Start  6: ucn_cluster_1000_convergence
- 6/22 Test  #6: ucn_cluster_1000_convergence ...........   Passed    0.24 sec
+ 6/22 Test  #6: ucn_cluster_1000_convergence ...........   Passed    0.23 sec
       Start  7: ucn_cluster_1000_impaired
- 7/22 Test  #7: ucn_cluster_1000_impaired ..............   Passed    0.96 sec
+ 7/22 Test  #7: ucn_cluster_1000_impaired ..............   Passed    0.97 sec
       Start  8: ucn_cluster_64_head-failover
- 8/22 Test  #8: ucn_cluster_64_head-failover ...........   Passed    0.03 sec
+ 8/22 Test  #8: ucn_cluster_64_head-failover ...........   Passed    0.04 sec
       Start  9: ucn_cluster_64_mobility
  9/22 Test  #9: ucn_cluster_64_mobility ................   Passed    0.04 sec
       Start 10: ucn_cluster_64_score-shift
-10/22 Test #10: ucn_cluster_64_score-shift .............   Passed    0.02 sec
+10/22 Test #10: ucn_cluster_64_score-shift .............   Passed    0.03 sec
       Start 11: ucn_cluster_64_fast_head_failover
-11/22 Test #11: ucn_cluster_64_fast_head_failover ......   Passed    0.04 sec
+11/22 Test #11: ucn_cluster_64_fast_head_failover ......   Passed    0.05 sec
       Start 12: ucn_cluster_64_fast_impaired
-12/22 Test #12: ucn_cluster_64_fast_impaired ...........   Passed    0.08 sec
+12/22 Test #12: ucn_cluster_64_fast_impaired ...........   Passed    0.07 sec
       Start 13: ucn_scale_w0_smoke
 13/22 Test #13: ucn_scale_w0_smoke .....................   Passed    0.02 sec
       Start 14: ucn_scale_w1_smoke
@@ -150,4 +151,4 @@ Test project /mnt/e/File/MESH/UCN/build-m00-full
 
 100% tests passed, 0 tests failed out of 22
 
-Total Test time (real) =   3.58 sec
+Total Test time (real) =   3.20 sec

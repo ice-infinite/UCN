@@ -120,7 +120,11 @@ typedef enum ucn_result {
     UCN_ERR_NOT_FOUND = -12,
     UCN_ERR_SECURITY = -13,
     UCN_ERR_REPLAY = -14,
-    UCN_ERR_ACCESS = -15
+    UCN_ERR_ACCESS = -15,
+    /* CLV2-01-04: fail-closed rejection of an illegal FSM transition.
+     * Added for the single cluster_transition() entry point; the caller
+     * may not assume any state changed. */
+    UCN_ERR_STATE = -16
 } ucn_result_t;
 
 typedef enum ucn_traffic_class {

@@ -266,6 +266,14 @@ if(UCN_BUILD_TESTS)
 
     add_executable(ucn_tests ${UCN_TEST_SOURCES})
 
+    # CLV2-01-04a: the test binary compiles its own copy of ucn_cluster.c
+    # with the test-hook macro so the unit tests can reach the static
+    # cluster_transition() entry point.  The executable's definitions take
+    # precedence over the linked ucn_cluster archive, so the production
+    # archive stays free of test hooks.  Static-library members are only
+    # pulled for symbols the objects do not already define.
+    target_sources(ucn_tests PRIVATE src/extended/ucn_cluster.c)
+
     if(UCN_FEATURE_SERVICE)
         target_sources(ucn_tests PRIVATE
             tests/test_service.c
@@ -279,6 +287,8 @@ if(UCN_BUILD_TESTS)
     target_compile_definitions(ucn_tests PRIVATE
         UCN_CLUSTER_GOLDEN_REFERENCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden"
         UCN_CLUSTER_GOLDEN_ACTUAL_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+        # CLV2-01-04a: expose the test-only cluster_transition() hooks.
+        UCN_CLUSTER_ENABLE_TEST_HOOKS=1
     )
 
     target_link_libraries(ucn_tests PRIVATE
