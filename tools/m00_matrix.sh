@@ -1,30 +1,59 @@
 #!/bin/bash
 # CLV2-M00 gate matrix: 6 independent fresh builds, fail-closed.
 #
-# Usage: bash tools/m00_matrix.sh
+# Usage:
+#   bash tools/m00_matrix.sh                # canonical CLEAN run: every
+#                                          # build dir is rm -rf'ed and
+#                                          # rebuilt from zero
+#   bash tools/m00_matrix.sh --incremental # developer mode: reuse trees
+#                                          # (its logs are NOT valid
+#                                          # audit evidence)
+#
 # Exit 0 only if EVERY route configured, built and passed ctest.
 # Any configure/build/ctest failure (or a missing core-only assertion)
 # makes the whole script exit non-zero.
 #
 # Routes: full, lite, nano, asan, analyzer, core_only.
-# Logs land in docs/results/m00_matrix/<name>.log (overwritten per run).
+# Logs land in docs/results/m00_matrix/m00-<name>.log (overwritten per run).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$ROOT/docs/results/m00_matrix"
 mkdir -p "$OUT"
+cd "$ROOT"
+
+INCREMENTAL=0
+if [[ "${1:-}" == "--incremental" ]]; then
+  INCREMENTAL=1
+fi
 
 GEN="-G Ninja -DCMAKE_BUILD_TYPE=Debug"
+
+prepare_dir() {
+  local dir="$1"
+  if [[ "$INCREMENTAL" -eq 0 ]]; then
+    rm -rf "$dir"
+  fi
+}
 
 run_one() {
   local name="$1"
   shift
   local dir="build-m00-$name"
   local log="$OUT/m00-$name.log"
+  prepare_dir "$dir"
   {
-    echo "==== [$name] configure ===="
+    if [[ "$INCREMENTAL" -eq 0 ]]; then
+      echo "==== [$name] configure (clean tree) ===="
+    else
+      echo "==== [$name] configure (incremental) ===="
+    fi
     cmake -S . -B "$dir" $GEN "$@"
-    echo "==== [$name] build ===="
+    if [[ "$INCREMENTAL" -eq 0 ]]; then
+      echo "==== [$name] build (clean tree) ===="
+    else
+      echo "==== [$name] build (incremental) ===="
+    fi
     cmake --build "$dir" --parallel
     echo "==== [$name] ctest ===="
     ctest --test-dir "$dir" --output-on-failure
@@ -35,6 +64,7 @@ run_one() {
 run_core_only() {
   local dir="build-m00-core_only"
   local log="$OUT/m00-core_only.log"
+  prepare_dir "$dir"
   {
     echo "==== [core_only] configure ===="
     cmake -S . -B "$dir" $GEN \
@@ -67,7 +97,7 @@ for i in "${!pids[@]}"; do
   if wait "${pids[$i]}"; then
     echo "[${names[$i]}] PASS"
   else
-    echo "[${names[$i]}] FAIL (see $OUT/${names[$i]}.log)"
+    echo "[${names[$i]}] FAIL (see $OUT/m00-${names[$i]}.log)"
     status=1
   fi
 done

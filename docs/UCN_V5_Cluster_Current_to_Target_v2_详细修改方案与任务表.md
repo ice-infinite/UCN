@@ -11,7 +11,7 @@
 >
 > | 里程碑 | 状态 | 完成提交 | 审计 |
 > |---|---|---|---|
-> | M00 冻结基线 | AUDIT HOLD | 6bea852（M00.1 closure 收尾中） | 用户审计：基线/结果/语义 PASS，门禁基建 CONDITIONAL，6 项收尾后复签 |
+> | M00 冻结基线 | DONE | 6bea852 + M00.1(6206ce2) + M00.2 closure | 两轮审计闭环比交付：M00.1 门禁 fail-closed/Golden/Fuzz/Fault，M00.2 clean-build + per-profile stack；待用户最终复签 PASS 后进 M01 |
 > | M01 显式 Phase | TODO | — | — |
 > | M02 模块拆分 | TODO | — | — |
 > | M03 Epoch 分类 | TODO | — | — |

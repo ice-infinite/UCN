@@ -58,14 +58,20 @@ ctest --test-dir build-c07-wsl --output-on-failure
 | 3 | build-m00-nano | NANO Debug, Ninja | **12/12 通过** | `docs/results/m00_matrix/m00-nano.log` |
 | 4 | build-m00-asan | FULL + `-fsanitize=address,undefined -fno-omit-frame-pointer` | **22/22 通过** | `docs/results/m00_matrix/m00-asan.log` |
 | 5 | build-m00-analyzer | FULL + `-fanalyzer` | **22/22 通过**；编译 0 告警（-Werror 下告警即构建失败） | `docs/results/m00_matrix/m00-analyzer.log` |
-| 6 | build-m00-core_only | Core-only（TESTS/SCALE/CLUSTER_SIM/SERVICE 全 OFF，仅 ucn_core） | **通过**：`libucn_cluster.a` 不存在（Cluster OFF 不付 RAM/Flash） | `docs/results/m00_matrix/core_only.log` |
+| 6 | build-m00-core_only | Core-only（TESTS/SCALE/CLUSTER_SIM/SERVICE 全 OFF，仅 ucn_core） | **通过**：`libucn_cluster.a` 不存在（Cluster OFF 不付 RAM/Flash） | `docs/results/m00_matrix/m00-core_only.log` |
 
-- 门禁脚本 `tools/m00_matrix.sh` 已 fail-closed：6 路逐 PID `wait` 收集状态，任何一路 configure/build/ctest 失败或 core-only 断言失败 → 整体退出非 0；负向验证（人为注入 `-DUCN_PROFILE=BOGUS` 使 nano 路失败）→ 脚本非 0 退出、`MATRIX: FAILURE`（见 `tools/m00_negative_gate_check.sh`）。
+- 门禁脚本 `tools/m00_matrix.sh` 已 fail-closed 且 **clean-by-default**：每次 canonical 运行先 `rm -rf` 六个 build 目录再从零 configure/compile/ctest（`--incremental` 仅供开发，其日志不作为审计证据）；6 路逐 PID `wait` 收集状态，任何一路失败或 core-only 断言失败 → 整体退出非 0；负向验证（人为注入 `-DUCN_PROFILE=BOGUS` 使 nano 路失败）→ 脚本非 0 退出、`MATRIX: FAILURE`（见 `tools/m00_negative_gate_check.sh`，含 trap 清理）。
 - `ucn_tests` 直跑输出：`cluster_bytes=1080 federation_bytes=3328 node_bytes=10080 ...` + `All UCN tests passed.`
 - Golden Gate（M00.1 后）：reference 只读（源树 `tests/golden/`）、actual 写各自 build 目录（5 路并行无文件竞争）；**reference 缺失 = 测试 FAIL**，仅 `UCN_UPDATE_CLUSTER_GOLDEN=1` 允许显式重生成并提交；负向验证（临时移走 golden）→ 测试失败、进程非 0 退出。
 - Trace 升级为 `old/event/new` 三态行（SYNC / STEP / RX:<type> 事件），37 行覆盖选举→入簇→Backup 指派→主断接管完整生命周期。
 
-记录时间：2026-08-15（M00.1 审计闭环比；早期记录曾因 WSL 时钟漂移误写 08-17，已更正）。
+### 8.1 M00.2 Clean Reproducibility Closure（最终审计证据）
+
+- **Clean-by-default**：`tools/m00_matrix.sh` 每次 canonical 运行先 `rm -rf` 六个 build 目录再从零构建（`--incremental` 仅供开发，其日志不作为审计证据）。本次六路日志全部为 clean 证据：compile/link 行数 full=90、lite=80、nano=65、asan=90、analyzer=90、core_only=14，**无任何 `ninja: no work to do`**。
+- **Per-profile stack 实测**：`tools/cluster_size_report.sh` 为 FULL/LITE/NANO 各建一个 clean `-fstack-usage` 树（`build-m00-stack-{full,lite,nano}`，每次 rm -rf 重建）分别测量 ucn_cluster.c 最大静态栈帧，不再复制 FULL 值：实测 full=208、lite=208、nano=208（三者恰好一致，但均为独立测量）。
+- 负向门禁复验（均带 trap 清理，中断安全）：golden missing → ucn_tests rc=1；matrix 人为注入 BOGUS → rc=1、`MATRIX: FAILURE`；恢复后 canonical 矩阵 6/6 PASS。
+
+记录时间：2026-08-15（M00.2 Clean Reproducibility Closure；早期记录曾因 WSL 时钟漂移误写 08-17，已更正）。
 
 
 ## 9. M00 任务逐项审计表（CLV2-00-01 ~ 08，M00.1 闭环比）
@@ -73,10 +79,10 @@ ctest --test-dir build-c07-wsl --output-on-failure
 | 任务 | 状态 | 证据位置 |
 |---|---|---|
 | CLV2-00-01 基线冻结 | ✅ PASS | 语义基线 `a5718534…`（本文件 §1）；`6bea852` 测试基建；生产 `src/extended/ucn_cluster.c` 在 M00/M00.1 零语义改动（diff 仅注释，见提交序列） |
-| CLV2-00-02 构建矩阵 | ✅ PASS | §8 六路表：FULL/LITE 22/22、NANO 12/12、ASan/UBSan 22/22、fanalyzer 0 告警、CORE_ONLY cluster-absent 断言 |
+| CLV2-00-02 构建矩阵 | ✅ PASS（M00.2 clean 证据） | §8 + §8.1：clean-by-default 从零构建六路，FULL/LITE 22/22、NANO 12/12、ASan/UBSan 22/22、fanalyzer 0 告警、CORE_ONLY cluster-absent；日志含真实编译输出（无 `no work to do`）；负向 BOGUS → 脚本非 0 |
 | CLV2-00-03 Golden Trace | ✅ PASS（M00.1 封死 fail-open） | 37 行 old/event/new；reference/actual 目录分离（无并行写竞争）；missing→FAIL；`UCN_UPDATE_CLUSTER_GOLDEN=1` 显式重生成 |
 | CLV2-00-04 Test Fixture | ✅ PASS | `tests/cluster_test_fixture.[ch]`；代表性测试已迁移（任务为逐步迁移，不要求一次清空） |
-| CLV2-00-05 资源基线 | ✅ PASS（M00.1 补齐） | `docs/results/m00_matrix/size_report.md`：FULL/LITE/NANO sizeof=1080、.text=30780、.rodata=320、max static stack=208；CORE_ONLY ucn_core .text=137360、cluster 未链接 |
+| CLV2-00-05 资源基线 | ✅ PASS（M00.2 per-profile 实测） | `docs/results/m00_matrix/size_report.md`：FULL/LITE/NANO sizeof=1080、.text=30780、.rodata=320、.data=0、.bss=0；max static stack 三档各自 clean `-fstack-usage` 树独立测量 = 208/208/208；CORE_ONLY ucn_core .text=137360、cluster 未链接 |
 | CLV2-00-06 Sanitizer/Analyzer/Fuzz | ✅ PASS（M00.1 补 fuzz smoke） | ASan/UBSan 22/22；-Werror 严格告警；-fanalyzer 0 告警；Type1-19 codec fuzz smoke 20000 cases（`tests/test_cluster_fuzz.c`）在 ASan/UBSan 下运行 |
 | CLV2-00-07 Fault Model | ✅ PASS（M00.1 补齐注入面） | §7：partition/heal、drop/dup/delay/reorder、restart、skip-step、neighbor override、xorshift32 seed、storage placeholder（M04 连接）；8 个故障测试含 deterministic replay |
 | CLV2-00-08 任务跟踪 | ✅ PASS（M00.1 逐项绑定） | 本表 + 方案文档里程碑状态表（AUDIT HOLD→用户复签）+ OP-185/186 操作记录 |
