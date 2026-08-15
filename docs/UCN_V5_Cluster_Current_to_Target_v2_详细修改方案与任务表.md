@@ -11,7 +11,7 @@
 >
 > | 里程碑 | 状态 | 完成提交 | 审计 |
 > |---|---|---|---|
-> | M00 冻结基线 | DONE | 6bea852 | 待用户审计 |
+> | M00 冻结基线 | AUDIT HOLD | 6bea852（M00.1 closure 收尾中） | 用户审计：基线/结果/语义 PASS，门禁基建 CONDITIONAL，6 项收尾后复签 |
 > | M01 显式 Phase | TODO | — | — |
 > | M02 模块拆分 | TODO | — | — |
 > | M03 Epoch 分类 | TODO | — | — |
@@ -27,7 +27,7 @@
 > | M13 Rekey/No-wrap | TODO | — | — |
 > | M14 收敛/发布 | TODO | — | — |
 >
-> 状态取值：TODO / IN_PROGRESS / BLOCKED / DONE（审计后由人更新）。每个任务完成时在 `docs/01-项目操作记录.md` 记录提交、测试证据与操作编号。
+> 状态取值：TODO / IN_PROGRESS / BLOCKED / AUDIT HOLD / DONE（DONE 须审计后由人更新）。每个任务完成时在 `docs/01-项目操作记录.md` 记录提交、测试证据与操作编号。
 >
 > 本文是后续 Cluster 重构的执行计划，不是新的理想状态机说明。它回答：
 >

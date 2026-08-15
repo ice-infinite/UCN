@@ -227,6 +227,7 @@ if(UCN_BUILD_TESTS)
         tests/test_node_storage_header.c
         tests/test_transfer.c
         tests/test_cluster.c
+        tests/test_cluster_fuzz.c
         tests/test_cluster_federation.c
         tests/cluster_test_fixture.c
     )
@@ -272,8 +273,12 @@ if(UCN_BUILD_TESTS)
         )
     endif()
 
+    # CLV2-M00.1: the golden REFERENCE lives in the source tree (read-only
+    # in tests) while the ACTUAL trace is written to each build directory, so
+    # parallel matrix routes never race on one shared file.
     target_compile_definitions(ucn_tests PRIVATE
-        UCN_CLUSTER_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden"
+        UCN_CLUSTER_GOLDEN_REFERENCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden"
+        UCN_CLUSTER_GOLDEN_ACTUAL_DIR="${CMAKE_CURRENT_BINARY_DIR}"
     )
 
     target_link_libraries(ucn_tests PRIVATE

@@ -1,0 +1,9 @@
+==== [core_only] configure ====
+-- UCN profile: FULL; Service: OFF
+-- Configuring done (0.1s)
+-- Generating done (0.4s)
+-- Build files have been written to: /mnt/e/File/MESH/UCN/build-m00-core_only
+==== [core_only] build ====
+ninja: no work to do.
+==== [core_only] assert cluster not linked ====
+[core_only] OK: libucn_cluster.a absent (Cluster OFF pays nothing)

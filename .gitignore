@@ -11,9 +11,6 @@ Testing/
 # Local Codex review artifacts.
 /.codex_docx_review/
 
-# Test runtime artifacts (regenerated on every run).
-tests/golden/cluster_golden_trace_actual.txt
-
 # Compiler, linker and firmware outputs.
 *.o
 *.obj

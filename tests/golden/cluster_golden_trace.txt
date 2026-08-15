@@ -1,34 +1,37 @@
-t=10 node=1 CHG role=4 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0
-t=10 node=2 CHG role=4 cid=2 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0
-t=30 node=1 CHG role=5 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0
-t=30 node=2 CHG role=1 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0
-t=31 node=3 CHG role=2 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0
-t=32 node=3 CHG role=3 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0
-t=34 node=4 CHG role=2 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0
-t=35 node=4 CHG role=3 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0
-t=37 node=2 CHG role=2 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0
-t=38 node=1 CHG role=5 cid=1 term=1 gen=1 seq=0 ready=0 syncing=0 takeover=0 recovery=0
-t=38 node=2 CHG role=3 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0
-t=39 node=1 CHG role=5 cid=1 term=1 gen=1 seq=1 ready=0 syncing=0 takeover=0 recovery=0
-t=39 node=2 CHG role=6 cid=1 term=1 gen=1 seq=1 ready=0 syncing=1 takeover=0 recovery=0
-t=47 node=1 CHG role=5 cid=1 term=1 gen=1 seq=2 ready=0 syncing=0 takeover=0 recovery=0
-t=47 node=2 CHG role=6 cid=1 term=1 gen=1 seq=2 ready=0 syncing=1 takeover=0 recovery=0
-t=55 node=1 CHG role=5 cid=1 term=1 gen=1 seq=3 ready=0 syncing=0 takeover=0 recovery=0
-t=55 node=2 CHG role=6 cid=1 term=1 gen=1 seq=3 ready=0 syncing=1 takeover=0 recovery=0
-t=63 node=1 CHG role=5 cid=1 term=1 gen=1 seq=4 ready=0 syncing=0 takeover=0 recovery=0
-t=63 node=2 CHG role=6 cid=1 term=1 gen=1 seq=4 ready=0 syncing=1 takeover=0 recovery=0
-t=71 node=1 CHG role=5 cid=1 term=1 gen=1 seq=5 ready=1 syncing=0 takeover=0 recovery=0
-t=71 node=2 CHG role=6 cid=1 term=1 gen=1 seq=5 ready=1 syncing=0 takeover=0 recovery=0
-t=73 node=1 CHG role=5 cid=1 term=1 gen=1 seq=6 ready=1 syncing=0 takeover=0 recovery=0
-t=73 node=2 CHG role=6 cid=1 term=1 gen=1 seq=6 ready=1 syncing=0 takeover=0 recovery=0
-t=106 node=1 CHG role=5 cid=1 term=1 gen=1 seq=7 ready=1 syncing=0 takeover=0 recovery=0
-t=106 node=2 CHG role=6 cid=1 term=1 gen=1 seq=7 ready=1 syncing=0 takeover=0 recovery=0
-t=116 node=1 CHG role=5 cid=1 term=1 gen=1 seq=8 ready=1 syncing=0 takeover=0 recovery=0
-t=116 node=2 CHG role=6 cid=1 term=1 gen=1 seq=8 ready=1 syncing=0 takeover=0 recovery=0
-t=126 node=1 CHG role=5 cid=1 term=1 gen=1 seq=9 ready=1 syncing=0 takeover=0 recovery=0
-t=126 node=2 CHG role=6 cid=1 term=1 gen=1 seq=9 ready=1 syncing=0 takeover=0 recovery=0
-t=136 node=1 CHG role=5 cid=1 term=1 gen=1 seq=10 ready=1 syncing=0 takeover=0 recovery=0
-t=136 node=2 CHG role=6 cid=1 term=1 gen=1 seq=10 ready=1 syncing=0 takeover=0 recovery=0
-t=179 node=2 CHG role=5 cid=1 term=2 gen=1 seq=10 ready=0 syncing=0 takeover=0 recovery=0
-t=180 node=3 CHG role=3 cid=1 term=2 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0
-t=181 node=4 CHG role=3 cid=1 term=2 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0
+t=10 node=1 event=STEP old={role=1 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=4 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
+t=10 node=2 event=STEP old={role=1 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=4 cid=2 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
+t=30 node=1 event=STEP old={role=4 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
+t=30 node=2 event=STEP old={role=4 cid=2 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=1 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
+t=31 node=3 event=RX:1 old={role=1 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=2 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
+t=32 node=3 event=RX:3 old={role=2 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=3 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
+t=34 node=4 event=RX:1 old={role=1 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=2 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
+t=35 node=4 event=RX:3 old={role=2 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=3 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
+t=37 node=2 event=RX:1 old={role=1 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=2 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
+t=38 node=1 event=RX:2 old={role=5 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=1 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
+t=38 node=2 event=RX:3 old={role=2 cid=0 term=0 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=3 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
+t=39 node=1 event=STEP old={role=5 cid=1 term=1 gen=1 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=1 seq=1 ready=0 syncing=0 takeover=0 recovery=0}
+t=39 node=2 event=RX:10 old={role=3 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=0 ready=0 syncing=1 takeover=0 recovery=0}
+t=39 node=2 event=RX:12 old={role=6 cid=1 term=1 gen=1 seq=0 ready=0 syncing=1 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=1 ready=0 syncing=1 takeover=0 recovery=0}
+t=47 node=1 event=STEP old={role=5 cid=1 term=1 gen=1 seq=1 ready=0 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=1 seq=2 ready=0 syncing=0 takeover=0 recovery=0}
+t=47 node=2 event=RX:12 old={role=6 cid=1 term=1 gen=1 seq=1 ready=0 syncing=1 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=2 ready=0 syncing=1 takeover=0 recovery=0}
+t=55 node=1 event=STEP old={role=5 cid=1 term=1 gen=1 seq=2 ready=0 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=1 seq=3 ready=0 syncing=0 takeover=0 recovery=0}
+t=55 node=2 event=RX:12 old={role=6 cid=1 term=1 gen=1 seq=2 ready=0 syncing=1 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=3 ready=0 syncing=1 takeover=0 recovery=0}
+t=63 node=1 event=STEP old={role=5 cid=1 term=1 gen=1 seq=3 ready=0 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=1 seq=4 ready=0 syncing=0 takeover=0 recovery=0}
+t=63 node=2 event=RX:12 old={role=6 cid=1 term=1 gen=1 seq=3 ready=0 syncing=1 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=4 ready=0 syncing=1 takeover=0 recovery=0}
+t=71 node=1 event=STEP old={role=5 cid=1 term=1 gen=1 seq=4 ready=0 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=1 seq=5 ready=0 syncing=0 takeover=0 recovery=0}
+t=71 node=2 event=RX:12 old={role=6 cid=1 term=1 gen=1 seq=4 ready=0 syncing=1 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=5 ready=1 syncing=0 takeover=0 recovery=0}
+t=71 node=1 event=RX:11 old={role=5 cid=1 term=1 gen=1 seq=5 ready=0 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=1 seq=5 ready=1 syncing=0 takeover=0 recovery=0}
+t=73 node=1 event=STEP old={role=5 cid=1 term=1 gen=1 seq=5 ready=1 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=1 seq=6 ready=1 syncing=0 takeover=0 recovery=0}
+t=73 node=2 event=RX:12 old={role=6 cid=1 term=1 gen=1 seq=5 ready=1 syncing=0 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=6 ready=1 syncing=0 takeover=0 recovery=0}
+t=106 node=1 event=STEP old={role=5 cid=1 term=1 gen=1 seq=6 ready=1 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=1 seq=7 ready=1 syncing=0 takeover=0 recovery=0}
+t=106 node=2 event=RX:12 old={role=6 cid=1 term=1 gen=1 seq=6 ready=1 syncing=0 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=7 ready=1 syncing=0 takeover=0 recovery=0}
+t=116 node=1 event=STEP old={role=5 cid=1 term=1 gen=1 seq=7 ready=1 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=1 seq=8 ready=1 syncing=0 takeover=0 recovery=0}
+t=116 node=2 event=RX:12 old={role=6 cid=1 term=1 gen=1 seq=7 ready=1 syncing=0 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=8 ready=1 syncing=0 takeover=0 recovery=0}
+t=126 node=1 event=STEP old={role=5 cid=1 term=1 gen=1 seq=8 ready=1 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=1 seq=9 ready=1 syncing=0 takeover=0 recovery=0}
+t=126 node=2 event=RX:12 old={role=6 cid=1 term=1 gen=1 seq=8 ready=1 syncing=0 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=9 ready=1 syncing=0 takeover=0 recovery=0}
+t=136 node=1 event=STEP old={role=5 cid=1 term=1 gen=1 seq=9 ready=1 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=1 seq=10 ready=1 syncing=0 takeover=0 recovery=0}
+t=136 node=2 event=RX:12 old={role=6 cid=1 term=1 gen=1 seq=9 ready=1 syncing=0 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=10 ready=1 syncing=0 takeover=0 recovery=0}
+t=179 node=2 event=STEP old={role=6 cid=1 term=1 gen=1 seq=10 ready=1 syncing=0 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=10 ready=1 syncing=0 takeover=1 recovery=0}
+t=179 node=2 event=RX:15 old={role=6 cid=1 term=1 gen=1 seq=10 ready=1 syncing=0 takeover=1 recovery=0} new={role=5 cid=1 term=2 gen=1 seq=10 ready=0 syncing=0 takeover=0 recovery=0}
+t=180 node=3 event=RX:8 old={role=3 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=3 cid=1 term=2 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
+t=181 node=4 event=RX:8 old={role=3 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=3 cid=1 term=2 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}

@@ -41,29 +41,50 @@ ctest --test-dir build-c07-wsl --output-on-failure
 
 ## 7. M00 新增观测/基建（不影响协议行为）
 
-- CLV2-00-03：Golden Transition Trace（tests/test_cluster.c 内观测层 + tests/golden/cluster_golden_trace.txt，34 行；M01 重构必须保持字节级一致）。
-- CLV2-00-07：故障注入网络（partition 矩阵、deliver budget、drop_one_in、节点重启），新增 3 个故障测试（分区多数派 takeover、重启无旧 term、丢包最终收敛）。
+- CLV2-00-03：Golden Transition Trace（tests/test_cluster.c 内观测层 + tests/golden/cluster_golden_trace.txt，37 行 old/event/new 三态格式；M01 重构必须保持字节级一致；reference 缺失 fail-closed，仅 `UCN_UPDATE_CLUSTER_GOLDEN=1` 可重生成）。
+- CLV2-00-07：故障注入网络（partition 矩阵/heal、deliver budget、drop/dup/delay/reorder、节点重启、Owner step skip、neighbor state override、xorshift32 seed、storage-failure M04 placeholder），8 个故障测试（分区多数派 takeover、重启无旧 term、丢包最终收敛、deterministic replay、dup/delay/reorder 收敛、skip owner step、neighbor flap、partition heal）。
 - CLV2-00-04：测试夹具 `tests/cluster_test_fixture.[ch]`（set_epoch/set_role/set_backup/set_vote），代表性测试已迁移。
+- CLV2-00-06：Codec fuzz smoke `tests/test_cluster_fuzz.c`（Type1-19 合法 seed × xorshift32 固定种子变异 20000 cases，decode 返回值集合 + decode-OK 不变量 + 长度损坏用例 + live receive 集合；在 ASan/UBSan 路下运行）。
+- CLV2-00-05：资源基线 `tools/cluster_size_report.sh` 输出 `docs/results/m00_matrix/size_report.md`（各 Profile sizeof/.text/.rodata/.data/.bss/max static stack + CORE_ONLY cluster-absent 断言）。
 
-## 8. M00 完整重跑证据（审计版，2026-08-17 干净矩阵）
+## 8. M00 完整重跑证据（审计版，5 路 → 6 路）
 
-在 WSL Ubuntu-24.04-ROS（gcc 13.3.0 / cmake 3.28.3 / ninja 1.11.1）用全新构建目录重跑完整门禁，5 路并行：
+在 WSL Ubuntu-24.04-ROS（gcc 13.3.0 / cmake 3.28.3 / ninja 1.11.1）用全新构建目录重跑完整门禁：
 
 | # | 构建 | 配置 | 结果 | 日志 |
 |---|------|------|------|------|
-| 1 | build-m00-full | FULL Debug, Ninja | **22/22 通过**（3.00 s） | `docs/results/m00_matrix/m00-full.log` |
-| 2 | build-m00-lite | LITE Debug, Ninja | **22/22 通过**（2.56 s） | `docs/results/m00_matrix/m00-lite.log` |
-| 3 | build-m00-nano | NANO Debug, Ninja | **12/12 通过**（2.05 s） | `docs/results/m00_matrix/m00-nano.log` |
-| 4 | build-m00-asan | FULL + `-fsanitize=address,undefined -fno-omit-frame-pointer` | **22/22 通过**（12.37 s） | `docs/results/m00_matrix/m00-asan.log` |
+| 1 | build-m00-full | FULL Debug, Ninja | **22/22 通过** | `docs/results/m00_matrix/m00-full.log` |
+| 2 | build-m00-lite | LITE Debug, Ninja | **22/22 通过** | `docs/results/m00_matrix/m00-lite.log` |
+| 3 | build-m00-nano | NANO Debug, Ninja | **12/12 通过** | `docs/results/m00_matrix/m00-nano.log` |
+| 4 | build-m00-asan | FULL + `-fsanitize=address,undefined -fno-omit-frame-pointer` | **22/22 通过** | `docs/results/m00_matrix/m00-asan.log` |
 | 5 | build-m00-analyzer | FULL + `-fanalyzer` | **22/22 通过**；编译 0 告警（-Werror 下告警即构建失败） | `docs/results/m00_matrix/m00-analyzer.log` |
+| 6 | build-m00-core_only | Core-only（TESTS/SCALE/CLUSTER_SIM/SERVICE 全 OFF，仅 ucn_core） | **通过**：`libucn_cluster.a` 不存在（Cluster OFF 不付 RAM/Flash） | `docs/results/m00_matrix/core_only.log` |
 
-- `ucn_tests` 直跑输出：`UCN_PROFILE name=Full value=3 service=1 node_bytes=10080 link_bytes=40 event_runtime_bytes=432 stream_source_bytes=240 stream_default_storage_bytes=771 can_source_bytes=256 can_default_storage_bytes=1184 transfer_bytes=8840 transfer_rx_bytes=8192 cluster_bytes=1080 federation_bytes=3328` + `All UCN tests passed.`
-- Golden Trace 复核：`tests/golden/cluster_golden_trace.txt` 与测试运行时生成的 `cluster_golden_trace_actual.txt` 逐字节 **IDENTICAL**（各 34 行），M01 门禁就绪。
-- 测试清单（22 项）：ucn_tests（含全部 Cluster 故障注入、golden trace、夹具迁移用例）、cluster sim 64/256/1000 clean+impaired、64 head-failover/mobility/score-shift、64 fast head-failover/fast impaired、scale w0/w1/w2/w3/mixed smoke、tree capacity contract、w0/mixed address-limit reject（WILL_FAIL）。
-- 复跑脚本：`tools/m00_matrix.sh`（rm -rf 全新目录 → configure → build → ctest → 汇总），可随时重放本证据。
+- 门禁脚本 `tools/m00_matrix.sh` 已 fail-closed：6 路逐 PID `wait` 收集状态，任何一路 configure/build/ctest 失败或 core-only 断言失败 → 整体退出非 0；负向验证（人为注入 `-DUCN_PROFILE=BOGUS` 使 nano 路失败）→ 脚本非 0 退出、`MATRIX: FAILURE`（见 `tools/m00_negative_gate_check.sh`）。
+- `ucn_tests` 直跑输出：`cluster_bytes=1080 federation_bytes=3328 node_bytes=10080 ...` + `All UCN tests passed.`
+- Golden Gate（M00.1 后）：reference 只读（源树 `tests/golden/`）、actual 写各自 build 目录（5 路并行无文件竞争）；**reference 缺失 = 测试 FAIL**，仅 `UCN_UPDATE_CLUSTER_GOLDEN=1` 允许显式重生成并提交；负向验证（临时移走 golden）→ 测试失败、进程非 0 退出。
+- Trace 升级为 `old/event/new` 三态行（SYNC / STEP / RX:<type> 事件），37 行覆盖选举→入簇→Backup 指派→主断接管完整生命周期。
 
-记录时间：2026-08-17（M00 审计前完整重跑）。
+记录时间：2026-08-15（M00.1 审计闭环比；早期记录曾因 WSL 时钟漂移误写 08-17，已更正）。
+
+
+## 9. M00 任务逐项审计表（CLV2-00-01 ~ 08，M00.1 闭环比）
+
+| 任务 | 状态 | 证据位置 |
+|---|---|---|
+| CLV2-00-01 基线冻结 | ✅ PASS | 语义基线 `a5718534…`（本文件 §1）；`6bea852` 测试基建；生产 `src/extended/ucn_cluster.c` 在 M00/M00.1 零语义改动（diff 仅注释，见提交序列） |
+| CLV2-00-02 构建矩阵 | ✅ PASS | §8 六路表：FULL/LITE 22/22、NANO 12/12、ASan/UBSan 22/22、fanalyzer 0 告警、CORE_ONLY cluster-absent 断言 |
+| CLV2-00-03 Golden Trace | ✅ PASS（M00.1 封死 fail-open） | 37 行 old/event/new；reference/actual 目录分离（无并行写竞争）；missing→FAIL；`UCN_UPDATE_CLUSTER_GOLDEN=1` 显式重生成 |
+| CLV2-00-04 Test Fixture | ✅ PASS | `tests/cluster_test_fixture.[ch]`；代表性测试已迁移（任务为逐步迁移，不要求一次清空） |
+| CLV2-00-05 资源基线 | ✅ PASS（M00.1 补齐） | `docs/results/m00_matrix/size_report.md`：FULL/LITE/NANO sizeof=1080、.text=30780、.rodata=320、max static stack=208；CORE_ONLY ucn_core .text=137360、cluster 未链接 |
+| CLV2-00-06 Sanitizer/Analyzer/Fuzz | ✅ PASS（M00.1 补 fuzz smoke） | ASan/UBSan 22/22；-Werror 严格告警；-fanalyzer 0 告警；Type1-19 codec fuzz smoke 20000 cases（`tests/test_cluster_fuzz.c`）在 ASan/UBSan 下运行 |
+| CLV2-00-07 Fault Model | ✅ PASS（M00.1 补齐注入面） | §7：partition/heal、drop/dup/delay/reorder、restart、skip-step、neighbor override、xorshift32 seed、storage placeholder（M04 连接）；8 个故障测试含 deterministic replay |
+| CLV2-00-08 任务跟踪 | ✅ PASS（M00.1 逐项绑定） | 本表 + 方案文档里程碑状态表（AUDIT HOLD→用户复签）+ OP-185/186 操作记录 |
+
+## 10. 日期更正说明
+
+- 早期记录曾写「2026-08-17」：系 WSL 时钟漂移所致（实际 Host/WSL/Git 三者现均为 2026-08-15 +0800）。本文件已统一为 2026-08-15。
 
 ---
 
-记录时间：2026-08-17（含审计前完整重跑）。由 CLV2-M00 任务生成；每个后续里程碑增量更新。
+记录时间：2026-08-15（M00.1 审计闭环比）。由 CLV2-M00 任务生成；每个后续里程碑增量更新。
