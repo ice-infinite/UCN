@@ -1359,6 +1359,21 @@ ucn_cluster_transition_reason_t ucn_cluster_test_reason_from_diff(
 {
     return cluster_reason_from_diff(old_phase, new_phase);
 }
+
+/* CLV2-01-04b NIT-1: test-only view of the PRODUCTION OBSERVED table
+ * (CLUSTER_TRANSITION_OBSERVED_ALLOWED = DIRECT union the tick-
+ * granularity compounds), so the T-A observed-pairs gate checks the
+ * SINGLE production table instead of duplicating it in the tests. */
+bool ucn_cluster_test_observed_pair_allowed(ucn_cluster_phase_t old_phase,
+                                            ucn_cluster_phase_t new_phase)
+{
+    if ((unsigned int)old_phase >= (unsigned int)UCN_CLUSTER_PHASE_COUNT ||
+        (unsigned int)new_phase >= (unsigned int)UCN_CLUSTER_PHASE_COUNT) {
+        return false;
+    }
+    return (CLUSTER_TRANSITION_OBSERVED_ALLOWED[old_phase] &
+            (UINT32_C(1) << (unsigned int)new_phase)) != 0U;
+}
 #endif
 
 #undef CLV2_01_04_UNUSED
@@ -3492,7 +3507,22 @@ ucn_result_t ucn_cluster_receive(
 
 static void start_election(ucn_cluster_t *cluster, uint32_t now_ms)
 {
-    cluster->role = UCN_CLUSTER_ROLE_CANDIDATE;
+    /* CLV2-01-04b.1: the role write IS the DETACHED_OBSERVE -> ELECTION
+     * transition.  The ONLY call site is ucn_cluster_step_inner()'s
+     * DETACHED + !recovery_eligible branch (L4126), so the claimed old
+     * phase is always DETACHED_OBSERVE; all other side effects below
+     * stay in the site, in their original order. */
+    if (cluster_transition(cluster, UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                           UCN_CLUSTER_PHASE_ELECTION,
+                           UCN_CLUSTER_REASON_ELECTION_STARTED,
+                           now_ms) != UCN_OK) {
+        /* Fail closed per the migration contract: a rejected transition
+         * (shadow mismatch / illegal pair / pre-mutated phase fields)
+         * leaves every field untouched, so do NOT run the election side
+         * effects on a non-CANDIDATE node.  The next Step re-visits the
+         * DETACHED observation branch. */
+        return;
+    }
     cluster->cluster_id = cluster->config.local_node_id;
     cluster->term = cluster->term == UINT32_MAX ? 1U : cluster->term + 1U;
     if (cluster->term == 0U) {
@@ -3505,6 +3535,13 @@ static void start_election(ucn_cluster_t *cluster, uint32_t now_ms)
         ucn_deadline_from_now(now_ms, cluster->config.election_window_ms);
     cluster->next_advertise_ms = now_ms;
     cluster->stats.elections_started++;
+    /* CLV2-01-04b (roadmap note): post-commit derive assert - after the
+     * transition AND every site side effect, the legacy state must still
+     * derive ELECTION (derive depends only on role == CANDIDATE). */
+#if !defined(NDEBUG)
+    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+           UCN_CLUSTER_PHASE_ELECTION);
+#endif
 }
 
 static void complete_election(ucn_cluster_t *cluster, uint32_t now_ms)

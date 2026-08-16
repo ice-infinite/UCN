@@ -61,6 +61,13 @@ void ucn_cluster_test_transition_asserts_set(bool enabled);
 ucn_cluster_transition_reason_t ucn_cluster_test_reason_from_diff(
     ucn_cluster_phase_t old_phase,
     ucn_cluster_phase_t new_phase);
+
+/* CLV2-01-04b NIT-1: test-only view of the PRODUCTION OBSERVED_ALLOWED
+ * table (DIRECT union the tick-granularity compounds), so the T-A gate
+ * checks the single production table instead of a test-side duplicate. */
+bool ucn_cluster_test_observed_pair_allowed(
+    ucn_cluster_phase_t old_phase,
+    ucn_cluster_phase_t new_phase);
 #endif
 
 #ifdef __cplusplus

@@ -174,9 +174,9 @@ static int cluster_test_shadow_audit(cluster_test_network_t *network)
  * audit() and asserts observed SUBSET-OF CLUSTER_TRANSITION_SPEC at the
  * end of test_cluster() - the missing-direction guard (SPEC must not
  * under-cover reality). */
-/* Forward declarations: the DIRECT / OBSERVED tables and their
- * membership tests are defined near CLUSTER_TRANSITION_DIRECT later in
- * this file. */
+/* Forward declarations: the DIRECT membership test and the OBSERVED
+ * membership wrapper (which delegates to the production table hook) are
+ * defined near CLUSTER_TRANSITION_DIRECT later in this file. */
 static bool cluster_transition_pair_in_direct(ucn_cluster_phase_t old_phase,
                                               ucn_cluster_phase_t new_phase);
 static bool cluster_transition_pair_in_observed(ucn_cluster_phase_t old_phase,
@@ -220,7 +220,8 @@ static void cluster_test_observed_dump(void)
 }
 
 /* T-A final gate (CLV2-01-04a.1 Item 1): every observed pair must be in
- * OBSERVED_ALLOWED (DIRECT union the compound OBSERVED_EXTRA pairs).  A
+ * OBSERVED_ALLOWED - checked against the SINGLE production
+ * CLUSTER_TRANSITION_OBSERVED_ALLOWED table (CLV2-01-04b NIT-1).  A
  * violation is a REAL pair the observed set misses - it must be restored,
  * never hidden. */
 static int cluster_test_observed_within_spec(void)
@@ -3215,11 +3216,11 @@ static int cluster_test_backup_challenge(void)
  * call.  The production CLUSTER_TRANSITION_DIRECT_ALLOWED must accept
  * EXACTLY this set (the 17x17 sweep below cross-checks both directions);
  * the per-edge site citations live on the production table.  The four
- * tick-granularity COMPOUND pairs are deliberately NOT here - they are
- * in CLUSTER_TRANSITION_OBSERVED_EXTRA below and must never be passed to
- * cluster_transition() (wiring realizes them via their DIRECT
- * constituents in sequence).  BACKUP_TAKEOVER stays legal even while
- * takeover_active && backup_syncing holds (CLV2-M01.0.2). */
+ * tick-granularity COMPOUND pairs are deliberately NOT here - they live
+ * only in the production CLUSTER_TRANSITION_OBSERVED_ALLOWED table and
+ * must never be passed to cluster_transition() (wiring realizes them via
+ * their DIRECT constituents in sequence).  BACKUP_TAKEOVER stays legal
+ * even while takeover_active && backup_syncing holds (CLV2-M01.0.2). */
 static const struct cluster_transition_spec_pair {
     ucn_cluster_phase_t old_phase;
     ucn_cluster_phase_t new_phase;
@@ -3264,7 +3265,7 @@ static const struct cluster_transition_spec_pair {
     { UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING, UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING },
     { UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING, UCN_CLUSTER_PHASE_HEAD_NO_BACKUP },
     { UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING, UCN_CLUSTER_PHASE_STEPPING_DOWN },
-    /* HEAD_STABLE (->ASSIGNING is a compound, in OBSERVED_EXTRA only) */
+    /* HEAD_STABLE (->ASSIGNING is an observed compound only) */
     { UCN_CLUSTER_PHASE_HEAD_STABLE, UCN_CLUSTER_PHASE_HEAD_NO_BACKUP },
     { UCN_CLUSTER_PHASE_HEAD_STABLE, UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING },
     { UCN_CLUSTER_PHASE_HEAD_STABLE, UCN_CLUSTER_PHASE_STEPPING_DOWN },
@@ -3275,7 +3276,7 @@ static const struct cluster_transition_spec_pair {
     { UCN_CLUSTER_PHASE_BACKUP_SYNCING, UCN_CLUSTER_PHASE_ELECTION },
     { UCN_CLUSTER_PHASE_BACKUP_SYNCING, UCN_CLUSTER_PHASE_JOIN_PENDING },
     { UCN_CLUSTER_PHASE_BACKUP_SYNCING, UCN_CLUSTER_PHASE_MEMBER_ACTIVE },
-    /* BACKUP_READY (->HEAD_NO_BACKUP is a compound, in OBSERVED_EXTRA) */
+    /* BACKUP_READY (->HEAD_NO_BACKUP is an observed compound only) */
     { UCN_CLUSTER_PHASE_BACKUP_READY, UCN_CLUSTER_PHASE_BACKUP_TAKEOVER },
     { UCN_CLUSTER_PHASE_BACKUP_READY, UCN_CLUSTER_PHASE_BACKUP_SYNCING },
     { UCN_CLUSTER_PHASE_BACKUP_READY, UCN_CLUSTER_PHASE_ELECTION },
@@ -3289,7 +3290,7 @@ static const struct cluster_transition_spec_pair {
     { UCN_CLUSTER_PHASE_BACKUP_TAKEOVER, UCN_CLUSTER_PHASE_MEMBER_ACTIVE },
     { UCN_CLUSTER_PHASE_BACKUP_TAKEOVER, UCN_CLUSTER_PHASE_ELECTION },
     /* STEPPING_DOWN (deadline only; ->MEMBER_ACTIVE / ->DETACHED_OBSERVE
-     * are compounds, in OBSERVED_EXTRA) */
+     * are observed compounds only) */
     { UCN_CLUSTER_PHASE_STEPPING_DOWN, UCN_CLUSTER_PHASE_JOIN_PENDING },
     /* RECOVERY_OBSERVE */
     { UCN_CLUSTER_PHASE_RECOVERY_OBSERVE, UCN_CLUSTER_PHASE_RECOVERY_ELECTION },
@@ -3305,17 +3306,13 @@ static const struct cluster_transition_spec_pair {
     { UCN_CLUSTER_PHASE_RECOVERY_HEAD, UCN_CLUSTER_PHASE_STEPPING_DOWN },
 };
 
-/* CLV2-01-04a.1 (Item 1): the tick-granularity COMPOUND pairs the T-A
- * collector legitimately observes but NO single site performs as one
- * transition.  cluster_transition() must reject them (wiring realizes
- * them via their DIRECT constituents in sequence).  The T-A gate checks
- * observed SUBSET-OF (DIRECT union OBSERVED_EXTRA). */
-static const struct cluster_transition_spec_pair CLUSTER_TRANSITION_OBSERVED_EXTRA[] = {
-    { UCN_CLUSTER_PHASE_HEAD_STABLE, UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING },
-    { UCN_CLUSTER_PHASE_BACKUP_READY, UCN_CLUSTER_PHASE_HEAD_NO_BACKUP },
-    { UCN_CLUSTER_PHASE_STEPPING_DOWN, UCN_CLUSTER_PHASE_MEMBER_ACTIVE },
-    { UCN_CLUSTER_PHASE_STEPPING_DOWN, UCN_CLUSTER_PHASE_DETACHED_OBSERVE },
-};
+/* CLV2-01-04b NIT-1: the tick-granularity COMPOUND pairs are NOT
+ * duplicated here - the T-A gate checks the SINGLE production
+ * CLUSTER_TRANSITION_OBSERVED_ALLOWED table via
+ * ucn_cluster_test_observed_pair_allowed().  cluster_transition() must
+ * reject them (wiring realizes them via their DIRECT constituents in
+ * sequence); the 17x17 sweep below keeps the DIRECT test table pinned to
+ * the production DIRECT table in both directions. */
 
 /* CLV2-01-04a review A (F2): pairs the Current FSM can NEVER perform
  * (see the exclusion comment on CLUSTER_TRANSITION_ALLOWED for the per-pair
@@ -3386,24 +3383,13 @@ static bool cluster_transition_pair_in_direct(ucn_cluster_phase_t old_phase,
     return false;
 }
 
-/* OBSERVED_ALLOWED = DIRECT union the tick-compound OBSERVED_EXTRA. */
+/* CLV2-01-04b NIT-1: OBSERVED_ALLOWED comes from the SINGLE production
+ * table (CLUSTER_TRANSITION_OBSERVED_ALLOWED = DIRECT union the tick
+ * compounds) via the test hook - no test-side duplicate to drift. */
 static bool cluster_transition_pair_in_observed(ucn_cluster_phase_t old_phase,
                                                 ucn_cluster_phase_t new_phase)
 {
-    size_t index;
-
-    if (cluster_transition_pair_in_direct(old_phase, new_phase)) {
-        return true;
-    }
-    for (index = 0U; index < sizeof(CLUSTER_TRANSITION_OBSERVED_EXTRA) /
-                              sizeof(CLUSTER_TRANSITION_OBSERVED_EXTRA[0U]);
-         ++index) {
-        if (CLUSTER_TRANSITION_OBSERVED_EXTRA[index].old_phase == old_phase &&
-            CLUSTER_TRANSITION_OBSERVED_EXTRA[index].new_phase == new_phase) {
-            return true;
-        }
-    }
-    return false;
+    return ucn_cluster_test_observed_pair_allowed(old_phase, new_phase);
 }
 
 /* CLV2-01-04a.1 (Item 3): set the phase-relevant legacy fields so the
