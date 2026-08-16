@@ -4474,14 +4474,17 @@ static int cluster_test_transition_matrix(void)
                  * itself writes role only for those. */
                 switch (new_phase) {
                 case UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING:
-                    /* site: assign_backup() L2360 selects the Backup,
-                     * start_backup_assignment_cycle() L3532 arms it. */
+                    /* CLV2-01-04d.1: apply_legacy already armed
+                     * assign_pending (the phase-defining invariant), and the
+                     * site write (assign_backup() L2677 + cycle L4045) stays
+                     * idempotent - keep it here to mirror the real site. */
                     c->backup_node_id = 2U;
                     c->backup_assign_pending = true;
                     c->backup_ready = false;
                     break;
                 case UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING:
-                    /* site: assignment sweep L3566 completes. */
+                    /* site: sweep-done (send_backup_assignment_step() L4089,
+                     * 01-04d.2 transition then pending=false). */
                     c->backup_node_id = 2U;
                     c->backup_assign_pending = false;
                     c->backup_ready = false;
@@ -4914,13 +4917,18 @@ static int cluster_test_transition_apply(void)
                     c, UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING,
                     UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING,
                     UCN_CLUSTER_REASON_BACKUP_ASSIGNED, now_ms) == UCN_OK);
-    c->backup_assign_pending = true; /* site: start_backup_assignment_cycle L3532 */
+    /* 01-04d.1: apply_legacy already armed pending on the ASSIGNING
+     * entry; the site's start_backup_assignment_cycle() L4045 write stays
+     * (idempotent same value). */
+    c->backup_assign_pending = true;
     TEST_ASSERT(c->backup_generation == 5U);
     TEST_ASSERT(ucn_cluster_test_transition(
                     c, UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING,
                     UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING,
                     UCN_CLUSTER_REASON_BACKUP_SYNC_STARTED, now_ms) == UCN_OK);
-    c->backup_assign_pending = false; /* site: assignment sweep L3566 */
+    /* 01-04d.2: sweep-done transition ASSIGNING -> SYNCING ran in the
+     * call above; the site's pending=false write stays (sweep L4089). */
+    c->backup_assign_pending = false;
     TEST_ASSERT(c->backup_generation == 5U);
     TEST_ASSERT(ucn_cluster_test_transition(
                     c, UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING,
@@ -5031,6 +5039,115 @@ static int cluster_test_transition_apply(void)
     return 0;
 }
 
+/* CLV2-01-04d.1: assign_backup() commits the NO_BACKUP -> ASSIGNING
+ * transition BEFORE the node_id write.  A Head with no Backup selects the
+ * best head-capable candidate: the shadow moves NO_BACKUP -> ASSIGNING with
+ * reason BACKUP_ASSIGNED, apply_legacy arms assign_pending, and the site
+ * writes node_id - so the derive is ASSIGNING at the end of the step (never
+ * a bogus SYNCING) and no extra tick-end pair is minted. */
+static int cluster_test_assign_backup_transition(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    ucn_cluster_t *c;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    head = &network.nodes[0];
+    c = &head->cluster;
+    /* Head with no Backup, two members, both head-capable candidates. */
+    c->role = UCN_CLUSTER_ROLE_HEAD;
+    c->cluster_id = 1U;
+    c->term = 1U;
+    c->head_node_id = head->node_id;
+    c->backup_node_id = 0U;
+    c->backup_generation = 1U;
+    c->backup_ready = false;
+    c->backup_assign_pending = false;
+    c->backup_syncing = false;
+    c->members[0].occupied = true;
+    c->members[0].node_id = network.nodes[1].node_id;
+    c->members[0].lease_expires_at_ms = 100U;
+    c->members[1].occupied = true;
+    c->members[1].node_id = network.nodes[2].node_id;
+    c->members[1].lease_expires_at_ms = 100U;
+    c->candidates[0].occupied = true;
+    c->candidates[0].head_node_id = network.nodes[1].node_id;
+    c->candidates[0].head_score = 3000U;
+    c->candidates[1].occupied = true;
+    c->candidates[1].head_node_id = network.nodes[2].node_id;
+    c->candidates[1].head_score = 2000U;
+    /* The framework shadow must mirror the legacy state before the step
+     * (a real NO_BACKUP Head starts its step like this). */
+    c->shadow_phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    network.now_ms = 0U;
+
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_OK);
+    /* d.1: shadow NO_BACKUP -> ASSIGNING with the explicit reason, pending
+     * armed by apply_legacy, node_id set by the site, derive ASSIGNING. */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_BACKUP_ASSIGNED);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
+    TEST_ASSERT(c->backup_assign_pending == true);
+    TEST_ASSERT(c->backup_node_id == network.nodes[1].node_id);
+    TEST_ASSERT(c->backup_ready == false);
+    TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
+                UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING);
+    return 0;
+}
+
+/* CLV2-01-04d.2: the assignment sweep completion commits the ASSIGNING ->
+ * SYNCING transition BEFORE the pending=false write.  After the last ASSIGN
+ * frame is sent the shadow moves ASSIGNING -> SYNCING with reason
+ * BACKUP_SYNC_STARTED, pending clears, and the derive is SYNCING. */
+static int cluster_test_backup_assignment_sweep_transition(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    ucn_cluster_t *c;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    head = &network.nodes[0];
+    c = &head->cluster;
+    /* Head mid-sweep: Backup selected, one ASSIGN frame still queued. */
+    c->role = UCN_CLUSTER_ROLE_HEAD;
+    c->cluster_id = 1U;
+    c->term = 1U;
+    c->head_node_id = head->node_id;
+    c->backup_node_id = network.nodes[1].node_id;
+    c->backup_generation = 1U;
+    c->backup_ready = false;
+    c->backup_assign_pending = true;
+    c->backup_assign_cursor = 0U;
+    c->backup_assign_remaining = 1U;
+    c->backup_syncing = false;
+    c->members[0].occupied = true;
+    c->members[0].node_id = network.nodes[1].node_id;
+    c->members[0].lease_expires_at_ms = 100U;
+    c->candidates[0].occupied = true;
+    c->candidates[0].head_node_id = network.nodes[1].node_id;
+    c->candidates[0].head_score = 3000U;
+    /* Consistent framework shadow: the sweep is armed, so ASSIGNING. */
+    c->shadow_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING;
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    network.now_ms = 0U;
+
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_OK);
+    /* d.2: sweep done -> shadow ASSIGNING -> SYNCING with the explicit
+     * reason, pending cleared by the site, derive SYNCING. */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_BACKUP_SYNC_STARTED);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
+    TEST_ASSERT(c->backup_assign_pending == false);
+    TEST_ASSERT(c->backup_assign_remaining == 0U);
+    TEST_ASSERT(c->backup_node_id == network.nodes[1].node_id);
+    TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
+                UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
+    return 0;
+}
+
 int test_cluster(void)
 {
     TEST_ASSERT(cluster_test_codec_and_security() == 0);
@@ -5076,6 +5193,10 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_transition_matrix() == 0);
     TEST_ASSERT(cluster_test_transition_preflight() == 0);
     TEST_ASSERT(cluster_test_transition_apply() == 0);
+    /* CLV2-01-04d.1/d.2: the backup-selection and sweep-done sites now
+     * commit their phase transitions through the single entry point. */
+    TEST_ASSERT(cluster_test_assign_backup_transition() == 0);
+    TEST_ASSERT(cluster_test_backup_assignment_sweep_transition() == 0);
     TEST_ASSERT(cluster_test_election_join_and_failover() == 0);
     TEST_ASSERT(cluster_test_head_offer_join_wiring() == 0);
     TEST_ASSERT(cluster_test_member_offer_grace_refresh_wiring() == 0);
