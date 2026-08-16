@@ -928,7 +928,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* assignment sweep done: send_backup_assignment_step() L4089 (transition 01-04d.2 before pending=false) */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING) |
-        /* READY during sweep: handle_backup_ready() L2660 (ready=true L2679) */
+        /* READY during sweep: handle_backup_ready() L2788 (transition L2824, ready=true L2833) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_STABLE) |
         /* Backup lost: remove_member() L2019 (node_id=0 L2027) / expire_members() L4167 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
@@ -936,7 +936,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 
     [UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING] =
-        /* snapshot READY: handle_backup_ready() L2660 */
+        /* snapshot READY: handle_backup_ready() L2788 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_STABLE) |
 
         /* periodic re-assign: start_backup_assignment_cycle() L4045 */
@@ -1240,7 +1240,7 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         break;
     case UCN_CLUSTER_PHASE_HEAD_STABLE:
         /* role only: the caller provides ready=true (handle_backup_ready
-         * L2679 / complete_election caller state). */
+         * L2833 / complete_election caller state). */
         cluster->role = UCN_CLUSTER_ROLE_HEAD;
         break;
     case UCN_CLUSTER_PHASE_BACKUP_SYNCING:
@@ -2834,8 +2834,11 @@ static ucn_result_t send_backup_ready(ucn_cluster_t *cluster)
 
 static ucn_result_t handle_backup_ready(ucn_cluster_t *cluster,
                                           ucn_node_id_t source,
-                                          const ucn_cluster_message_t *message)
+                                          const ucn_cluster_message_t *message,
+                                          uint32_t now_ms)
 {
+    ucn_cluster_phase_t old_phase;
+
     if (cluster->role != UCN_CLUSTER_ROLE_HEAD ||
         source != cluster->backup_node_id) {
         return UCN_ERR_ACCESS;
@@ -2851,7 +2854,36 @@ static ucn_result_t handle_backup_ready(ucn_cluster_t *cluster,
         cluster->stats.stale_messages++;
         return UCN_ERR_REPLAY;
     }
+    /* CLV2-01-04d.3: the READY is the (ASSIGNING|SYNCING) -> STABLE
+     * transition, run BEFORE the phase-relevant ready=true write.  A Head
+     * already STABLE (ready==true) receiving a duplicate same-epoch READY
+     * keeps the legacy idempotent no-op - the STABLE self-loop is not a
+     * DIRECT edge, so it must never reach the entry point. */
+    if (cluster->backup_ready) {
+        return UCN_OK;
+    }
+    /* old_phase is derived from the PRE-CALL state: a selected Backup
+     * with the assignment sweep still armed is HEAD_BACKUP_ASSIGNING,
+     * otherwise HEAD_BACKUP_SYNCING (snapshot in flight). */
+    old_phase = (cluster->backup_assign_pending)
+                    ? UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING
+                    : UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
+    if (cluster_transition(cluster, old_phase,
+                           UCN_CLUSTER_PHASE_HEAD_STABLE,
+                           UCN_CLUSTER_REASON_SNAPSHOT_READY,
+                           now_ms) != UCN_OK) {
+        /* Fail closed: a rejected transition (shadow mismatch / illegal
+         * pair / pre-mutated phase fields) leaves every field untouched
+         * including backup_ready - the Backup is never marked ready. */
+        return UCN_ERR_STATE;
+    }
     cluster->backup_ready = true;
+#if !defined(NDEBUG)
+    /* CLV2-01-04d.3 post-commit derive assert: after the transition AND
+     * the site's ready=true write the Head must derive HEAD_STABLE. */
+    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+           UCN_CLUSTER_PHASE_HEAD_STABLE);
+#endif
     return UCN_OK;
 }
 
@@ -3850,7 +3882,7 @@ static ucn_result_t ucn_cluster_receive_inner(
         case UCN_CLUSTER_MSG_BACKUP_ASSIGN:
             return handle_backup_assign(cluster, source, &message, now_ms);
         case UCN_CLUSTER_MSG_BACKUP_READY:
-            return handle_backup_ready(cluster, source, &message);
+            return handle_backup_ready(cluster, source, &message, now_ms);
         case UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC:
             return handle_backup_member_sync(cluster, source, &message, now_ms);
         case UCN_CLUSTER_MSG_PRIMARY_HEARTBEAT:
