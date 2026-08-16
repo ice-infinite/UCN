@@ -5031,6 +5031,172 @@ static int cluster_test_transition_apply(void)
     return 0;
 }
 
+/* CLV2-01-04d.4: remove_member() / expire_members() backup-eviction
+ * preflight wiring (the FIRST irreversible-site migration).
+ *   (a) a STABLE Head evicts its Backup (LEAVE) -> shadow==NO_BACKUP,
+ *       reason==BACKUP_LOST, member slot freed, node_id=0 / ready=false;
+ *   (b) same from SYNCING and ASSIGNING old phases;
+ *   (c) a non-backup member eviction keeps the legacy path: NO transition
+ *       (shadow unchanged, count 0);
+ *   (d) fail-closed: shadow desync + backup eviction -> preflight rejects
+ *       with UCN_ERR_STATE and NOTHING is touched (memcmp zero-write
+ *       proof - the zero-side-effect-on-validation-failure invariant).
+ * The hooks drive the static sites directly (no network tick), so no
+ * observed phase pair is recorded and the T-A gate keeps the suite count. */
+static int cluster_test_remove_member_backup_loss(void)
+{
+    cluster_test_network_t network;
+    ucn_cluster_t *c;
+    ucn_cluster_t pristine;
+    const uint32_t now_ms = 100U;
+    static const ucn_cluster_phase_t phases[3] = {
+        UCN_CLUSTER_PHASE_HEAD_STABLE,
+        UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING,
+        UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING
+    };
+    size_t index;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    c = &network.nodes[0].cluster;
+    network.now_ms = now_ms;
+    pristine = *c;
+
+    ucn_cluster_test_transition_asserts_set(false);
+
+    /* (a)+(b) remove_member: backup eviction from every Head sub-phase. */
+    for (index = 0U; index < 3U; ++index) {
+        ucn_cluster_phase_t phase = phases[index];
+
+        cluster_test_transition_reset(c, &pristine, phase);
+        cluster_test_seed_legacy(c, phase, now_ms);
+        c->members[0].occupied = true;
+        c->members[0].node_id = 2U; /* the Backup */
+        c->members[0].last_nonce = 7U;
+        c->members[1].occupied = true;
+        c->members[1].node_id = 3U; /* ordinary member */
+        c->members[1].last_nonce = 9U;
+        TEST_ASSERT(test_derive_phase(c, now_ms) == phase);
+
+        ucn_cluster_test_remove_member(c, 2U, now_ms);
+
+        TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
+        TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_BACKUP_LOST);
+        TEST_ASSERT(c->shadow_transition_count == 1U);
+        TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_HEAD);
+        TEST_ASSERT(c->members[0].occupied == false); /* slot freed */
+        TEST_ASSERT(c->members[1].occupied == true);  /* other member lives */
+        TEST_ASSERT(c->members[1].node_id == 3U);
+        TEST_ASSERT(c->backup_node_id == 0U);
+        TEST_ASSERT(c->backup_ready == false);
+        TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                    UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
+    }
+
+    /* (a)+(b) expire_members: the Backup's lease expires -> same result. */
+    for (index = 0U; index < 3U; ++index) {
+        ucn_cluster_phase_t phase = phases[index];
+
+        cluster_test_transition_reset(c, &pristine, phase);
+        cluster_test_seed_legacy(c, phase, now_ms);
+        c->members[0].occupied = true;
+        c->members[0].node_id = 2U; /* the Backup, expired */
+        c->members[0].lease_expires_at_ms = now_ms - 1U;
+        c->members[1].occupied = true;
+        c->members[1].node_id = 3U; /* live member */
+        c->members[1].lease_expires_at_ms = now_ms + 1000U;
+        TEST_ASSERT(test_derive_phase(c, now_ms) == phase);
+
+        ucn_cluster_test_expire_members(c, now_ms);
+
+        TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
+        TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_BACKUP_LOST);
+        TEST_ASSERT(c->shadow_transition_count == 1U);
+        TEST_ASSERT(c->members[0].occupied == false); /* backup evicted */
+        TEST_ASSERT(c->members[1].occupied == true);  /* live member stays */
+        TEST_ASSERT(c->backup_node_id == 0U);
+        TEST_ASSERT(c->backup_ready == false);
+        TEST_ASSERT(c->stats.member_leases_expired == 1U);
+        TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                    UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
+    }
+
+    /* (c) remove_member: non-backup eviction -> legacy path, NO
+     * transition (shadow + count untouched). */
+    cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_HEAD_STABLE);
+    cluster_test_seed_legacy(c, UCN_CLUSTER_PHASE_HEAD_STABLE, now_ms);
+    c->members[0].occupied = true;
+    c->members[0].node_id = 2U; /* the Backup */
+    c->members[1].occupied = true;
+    c->members[1].node_id = 3U;
+    ucn_cluster_test_remove_member(c, 3U, now_ms);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_STABLE);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_UNKNOWN);
+    TEST_ASSERT(c->shadow_transition_count == 0U);
+    TEST_ASSERT(c->members[1].occupied == false); /* evicted */
+    TEST_ASSERT(c->members[0].occupied == true);  /* backup survives */
+    TEST_ASSERT(c->backup_node_id == 2U);
+    /* legacy backup_resync() ran: ready cleared, snapshot reset. */
+    TEST_ASSERT(c->backup_ready == false);
+    TEST_ASSERT(c->backup_sync_cursor == 0U);
+
+    /* (c-expire) expire_members: non-backup expiry -> legacy path, NO
+     * transition. */
+    cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_HEAD_STABLE);
+    cluster_test_seed_legacy(c, UCN_CLUSTER_PHASE_HEAD_STABLE, now_ms);
+    c->members[0].occupied = true;
+    c->members[0].node_id = 2U; /* the Backup, live */
+    c->members[0].lease_expires_at_ms = now_ms + 1000U;
+    c->members[1].occupied = true;
+    c->members[1].node_id = 3U; /* expired */
+    c->members[1].lease_expires_at_ms = now_ms - 1U;
+    ucn_cluster_test_expire_members(c, now_ms);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_STABLE);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_UNKNOWN);
+    TEST_ASSERT(c->shadow_transition_count == 0U);
+    TEST_ASSERT(c->members[1].occupied == false);
+    TEST_ASSERT(c->members[0].occupied == true);
+    TEST_ASSERT(c->backup_node_id == 2U);
+    TEST_ASSERT(c->stats.member_leases_expired == 1U);
+
+    /* (d) remove_member: shadow desync + backup eviction -> preflight
+     * rejects and NOTHING is touched (memcmp zero-write proof). */
+    cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_HEAD_STABLE);
+    cluster_test_seed_legacy(c, UCN_CLUSTER_PHASE_HEAD_STABLE, now_ms);
+    c->members[0].occupied = true;
+    c->members[0].node_id = 2U;
+    c->members[1].occupied = true;
+    c->members[1].node_id = 3U;
+    c->shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE; /* desync */
+    {
+        ucn_cluster_t before = *c;
+
+        ucn_cluster_test_remove_member(c, 2U, now_ms);
+        TEST_ASSERT(memcmp(c, &before, sizeof(*c)) == 0);
+    }
+
+    /* (d-expire) expire_members: same invariant - the expired Backup's
+     * slot is NOT freed and no other expired member is evicted either
+     * (the whole pass aborts before any write). */
+    cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_HEAD_STABLE);
+    cluster_test_seed_legacy(c, UCN_CLUSTER_PHASE_HEAD_STABLE, now_ms);
+    c->members[0].occupied = true;
+    c->members[0].node_id = 2U;
+    c->members[0].lease_expires_at_ms = now_ms - 1U;
+    c->members[1].occupied = true;
+    c->members[1].node_id = 3U;
+    c->members[1].lease_expires_at_ms = now_ms - 1U; /* also expired */
+    c->shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE; /* desync */
+    {
+        ucn_cluster_t before = *c;
+
+        ucn_cluster_test_expire_members(c, now_ms);
+        TEST_ASSERT(memcmp(c, &before, sizeof(*c)) == 0);
+    }
+
+    ucn_cluster_test_transition_asserts_set(true);
+    return 0;
+}
+
 int test_cluster(void)
 {
     TEST_ASSERT(cluster_test_codec_and_security() == 0);
@@ -5082,6 +5248,7 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_member_better_head_switch_wiring() == 0);
     TEST_ASSERT(cluster_test_capacity_is_bounded() == 0);
     TEST_ASSERT(cluster_test_neighbor_summary_api() == 0);
+    TEST_ASSERT(cluster_test_remove_member_backup_loss() == 0);
     /* CLV2-01-04a review B (T-A): every phase pair actually OBSERVED by
      * the scenario suite must be a member of the observed SPEC
      * (CLUSTER_TRANSITION_OBSERVED_ALLOWED = DIRECT + tick compounds).
