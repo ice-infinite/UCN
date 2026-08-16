@@ -1672,6 +1672,63 @@ static int cluster_test_join_pending_stepdown(void)
                 UCN_CLUSTER_PHASE_JOIN_PENDING);
     TEST_ASSERT(node->cluster.transition_reason ==
                 UCN_CLUSTER_REASON_INIT);
+
+    /* (c) CLV2-01-04b.6 (human MAJOR): a JOIN_PENDING node whose shadow is
+     * deliberately desynced from legacy (shadow=DETACHED_OBSERVE while
+     * role=JOIN_PENDING derives JOIN_PENDING) makes the transition's
+     * shadow==old_phase check fail (the FIRST validation - the derive
+     * assert is never reached).  The transition must be rejected
+     * fail-closed and the anti-replay fence must NOT be consumed: no
+     * half-commit. */
+    node->cluster.role = UCN_CLUSTER_ROLE_JOIN_PENDING;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
+    node->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    node->cluster.cluster_id = 1U;
+    node->cluster.term = 5U;
+    node->cluster.head_node_id = network.nodes[0].node_id;
+    node->cluster.pending_head_node_id = network.nodes[0].node_id;
+    node->cluster.pending_cluster_id = 1U;
+    node->cluster.pending_term = 5U;
+    node->cluster.last_stepdown_nonce = 1U;
+    ucn_cluster_test_transition_asserts_set(false); /* survive the knob assert */
+    {
+        uint32_t before_nonce = node->cluster.last_stepdown_nonce;
+        ucn_node_id_t before_pending_head =
+            node->cluster.pending_head_node_id;
+        uint32_t before_pending_cluster =
+            node->cluster.pending_cluster_id;
+        uint32_t before_pending_term = node->cluster.pending_term;
+
+        (void)memset(&message, 0, sizeof(message));
+        message.type = UCN_CLUSTER_MSG_HEAD_STEPDOWN;
+        message.role = UCN_CLUSTER_ROLE_HEAD;
+        message.cluster_id = 1U;
+        message.term = 5U;
+        message.head_node_id = network.nodes[0].node_id;
+        message.lease_ms = 8000U;
+        message.nonce = 2U; /* fresh: strictly greater than the fence */
+        TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+        TEST_ASSERT(ucn_cluster_receive(&node->cluster,
+                                        network.nodes[0].node_id,
+                                        true, encoded, sizeof(encoded)) ==
+                    UCN_ERR_STATE);
+        /* THE fix: the fence is NOT consumed by a rejected transition. */
+        TEST_ASSERT(node->cluster.last_stepdown_nonce == before_nonce);
+        /* No partial commit: the legacy detach never ran. */
+        TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+        TEST_ASSERT(node->cluster.pending_head_node_id == before_pending_head);
+        TEST_ASSERT(node->cluster.pending_cluster_id == before_pending_cluster);
+        TEST_ASSERT(node->cluster.pending_term == before_pending_term);
+        /* The phase did NOT migrate: the end-of-RX shadow sync re-aligns
+         * the mirror to the UNCHANGED legacy (derive==JOIN_PENDING), so
+         * shadow returns to JOIN_PENDING - it never advanced to
+         * DETACHED_OBSERVE and no STEPDOWN_ORDERED was recorded. */
+        TEST_ASSERT(node->cluster.shadow_phase ==
+                    UCN_CLUSTER_PHASE_JOIN_PENDING);
+        TEST_ASSERT(node->cluster.transition_reason !=
+                    UCN_CLUSTER_REASON_STEPDOWN_ORDERED);
+    }
+    ucn_cluster_test_transition_asserts_set(true);
     return 0;
 }
 
