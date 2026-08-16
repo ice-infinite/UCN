@@ -1324,6 +1324,10 @@ static int cluster_test_full_head_term_convergence(void)
     head->cluster.head_node_id = head->node_id;
     head->cluster.config.head_score = 7000U;
     head->cluster.current_head_score = 7000U;
+    /* CLV2-01-04d.6: the HEAD_NO_BACKUP -> STEPPING_DOWN transition now
+     * validates shadow == old_phase, so the fixture must keep the shadow
+     * mirror aligned with the legacy derive (role == HEAD, no Backup). */
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
 
     (void)memset(&message, 0, sizeof(message));
     message.type = UCN_CLUSTER_MSG_ADVERTISE;
@@ -3825,6 +3829,190 @@ static int cluster_test_member_better_head_switch_wiring(void)
     return 0;
 }
 
+/* CLV2-01-04d.5: backup_resync() wiring - a HEAD_STABLE node restarting
+ * its Backup snapshot performs the HEAD_STABLE -> HEAD_BACKUP_SYNCING
+ * transition through the single entry point (reason RESYNC_STARTED)
+ * BEFORE the site's ready=false write; a node that is already SYNCING
+ * (ready cleared first by remove_member()/expire_members(), or a resync
+ * already in flight) runs NO transition - the legacy body alone re-arms
+ * the snapshot. */
+static int cluster_test_resync_transition_wiring(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 0U;
+    head = &network.nodes[0];
+
+    /* (a) HEAD_STABLE -> HEAD_BACKUP_SYNCING via BACKUP_RESYNC_REQ:
+     * the transition commits FIRST (shadow + EXPLICIT RESYNC_STARTED),
+     * then the site re-arms the snapshot in its original order. */
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.backup_node_id = network.nodes[1].node_id;
+    head->cluster.backup_generation = 1U;
+    head->cluster.backup_ready = true;
+    head->cluster.backup_sync_cursor = 5U;
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_STABLE;
+    head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    head->cluster.shadow_transition_count = 0U;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_RESYNC_REQ;
+    message.role = UCN_CLUSTER_ROLE_BACKUP;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.backup_generation = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&head->cluster, network.nodes[1].node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(head->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
+    TEST_ASSERT(head->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_RESYNC_STARTED);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 1U);
+    /* site effects in original order: cursor reset, ready=false, re-arm. */
+    TEST_ASSERT(head->cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    TEST_ASSERT(head->cluster.backup_node_id == network.nodes[1].node_id);
+    TEST_ASSERT(head->cluster.backup_sync_cursor == 0U);
+    TEST_ASSERT(head->cluster.backup_ready == false);
+    TEST_ASSERT(head->cluster.next_backup_sync_ms == 0U);
+    TEST_ASSERT(head->cluster.backup_resync_deadline_ms != 0U);
+
+    /* (b) already SYNCING (ready=false): NO transition - the legacy body
+     * alone re-arms the snapshot, exactly as before the migration. */
+    head->cluster.backup_sync_cursor = 7U;
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
+    head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    head->cluster.shadow_transition_count = 0U;
+    message.nonce = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&head->cluster, network.nodes[1].node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(head->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
+    TEST_ASSERT(head->cluster.transition_reason == UCN_CLUSTER_REASON_INIT);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 0U);
+    TEST_ASSERT(head->cluster.backup_sync_cursor == 0U);
+    TEST_ASSERT(head->cluster.backup_ready == false);
+    return 0;
+}
+
+/* CLV2-01-04d.6: begin_ordered_stepdown() wiring - a HEAD_* source
+ * yielding to a stable/better Head performs the HEAD_* -> STEPPING_DOWN
+ * transition through the single entry point (reason STEPDOWN_ORDERED)
+ * BEFORE the role write; the RECOVERY_HEAD offer source keeps the
+ * CURRENT legacy path untouched (no RECOVERY_HEAD -> STEPPING_DOWN
+ * pre-wire - 01-04f territory). */
+static int cluster_test_head_stepdown_transition_wiring(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    cluster_test_node_t *recovery;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    uint32_t nonce;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 60U;
+    head = &network.nodes[0];
+
+    /* (c) A HEAD_STABLE node receives repeated higher-score HEAD_DECLAREs
+     * from a better Head (switch_required_samples = 3, tenure elapsed):
+     * on the qualifying sample the HEAD_STABLE -> STEPPING_DOWN
+     * transition runs FIRST (shadow + STEPDOWN_ORDERED), then the site
+     * yields (eligible=false, deadline armed, pending Head identity). */
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.config.head_score = 100U;
+    head->cluster.current_head_score = 100U;
+    head->cluster.role_since_ms = 0U;
+    head->cluster.backup_node_id = network.nodes[2].node_id;
+    head->cluster.backup_generation = 1U;
+    head->cluster.backup_ready = true;
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_STABLE;
+    head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    head->cluster.shadow_transition_count = 0U;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_HEAD_DECLARE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = network.nodes[1].node_id;
+    message.head_score = 200U; /* improves by > 20% over 100 */
+    message.available_capacity = 3U;
+    message.lease_ms = 40U;
+    for (nonce = 1U; nonce <= 3U; ++nonce) {
+        message.nonce = nonce;
+        TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+        TEST_ASSERT(ucn_cluster_receive(&head->cluster,
+                                        network.nodes[1].node_id, true,
+                                        encoded, sizeof(encoded)) == UCN_OK);
+    }
+    TEST_ASSERT(head->cluster.role == UCN_CLUSTER_ROLE_STEPPING_DOWN);
+    TEST_ASSERT(head->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_STEPPING_DOWN);
+    TEST_ASSERT(head->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_STEPDOWN_ORDERED);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(head->cluster.recovery_eligible == false);
+    TEST_ASSERT(head->cluster.recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(head->cluster.stepdown_deadline_ms ==
+                ucn_deadline_from_now(
+                    network.now_ms,
+                    head->cluster.config.keepalive_interval_ms));
+    TEST_ASSERT(head->cluster.pending_head_node_id ==
+                network.nodes[1].node_id);
+    TEST_ASSERT(head->cluster.pending_cluster_id == 1U);
+    TEST_ASSERT(head->cluster.pending_term == 1U);
+    TEST_ASSERT(head->cluster.pending_head_score == 200U);
+    TEST_ASSERT(head->cluster.stats.head_switches == 1U);
+    /* The Head keeps its Backup selection through the ordered yield. */
+    TEST_ASSERT(head->cluster.backup_node_id == network.nodes[2].node_id);
+    TEST_ASSERT(head->cluster.backup_ready == true);
+
+    /* (d) RECOVERY_HEAD offer source: the CURRENT legacy path stays
+     * untouched - no entry-point transition.  The shadow is deliberately
+     * desynced (shadow != RECOVERY_HEAD): the legacy body ignores the
+     * mirror, so the stepdown still completes - a wrongly-wired
+     * transition would have failed the shadow==old check fail-closed and
+     * left the role untouched. */
+    recovery = &network.nodes[3];
+    recovery->cluster.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    recovery->cluster.cluster_id = 1U;
+    recovery->cluster.term = 1U;
+    recovery->cluster.head_node_id = recovery->node_id;
+    recovery->cluster.shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
+    recovery->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    recovery->cluster.shadow_transition_count = 0U;
+    message.nonce = 10U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&recovery->cluster,
+                                    network.nodes[1].node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(recovery->cluster.role == UCN_CLUSTER_ROLE_STEPPING_DOWN);
+    TEST_ASSERT(recovery->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_STEPPING_DOWN);
+    TEST_ASSERT(recovery->cluster.pending_head_node_id ==
+                network.nodes[1].node_id);
+    TEST_ASSERT(recovery->cluster.pending_cluster_id == 1U);
+    TEST_ASSERT(recovery->cluster.pending_term == 1U);
+    TEST_ASSERT(recovery->cluster.pending_head_score == 200U);
+    TEST_ASSERT(recovery->cluster.recovery_eligible == false);
+    TEST_ASSERT(recovery->cluster.recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(recovery->cluster.stepdown_deadline_ms != 0U);
+    return 0;
+}
+
 static int cluster_test_capacity_is_bounded(void)
 {
     cluster_test_network_t network;
@@ -5487,6 +5675,12 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_head_offer_join_wiring() == 0);
     TEST_ASSERT(cluster_test_member_offer_grace_refresh_wiring() == 0);
     TEST_ASSERT(cluster_test_member_better_head_switch_wiring() == 0);
+    /* CLV2-01-04d.5/.6: backup_resync() (HEAD_STABLE -> HEAD_BACKUP_
+     * SYNCING, RESYNC_STARTED) and begin_ordered_stepdown() (HEAD_* ->
+     * STEPPING_DOWN, STEPDOWN_ORDERED; RECOVERY_HEAD offer stays legacy)
+     * wired through the single transition entry point. */
+    TEST_ASSERT(cluster_test_resync_transition_wiring() == 0);
+    TEST_ASSERT(cluster_test_head_stepdown_transition_wiring() == 0);
     TEST_ASSERT(cluster_test_capacity_is_bounded() == 0);
     TEST_ASSERT(cluster_test_neighbor_summary_api() == 0);
     TEST_ASSERT(cluster_test_remove_member_backup_loss() == 0);
