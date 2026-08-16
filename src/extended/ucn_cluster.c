@@ -886,7 +886,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
 
     [UCN_CLUSTER_PHASE_MEMBER_ACTIVE] =
 
-        /* Head lease expired: ucn_cluster_step_inner() L4231 (grace armed L4249) */
+        /* Head lease expired: ucn_cluster_step_inner() L4231 (grace armed L4269) */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE) |
         /* BACKUP_ASSIGN(self): handle_backup_assign() L2585 */
@@ -903,7 +903,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* HEAD_STEPDOWN -> set_detached() L1915 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
 
-        /* grace timeout: step L4253 (recovery_eligible=true) + set_detached() L1915 */
+        /* grace timeout: step L4279 (transition L4291) + set_detached() L1915 */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) |
         /* better Head switch: begin_join() L1967 via consider_head_offer() L2194 */
@@ -948,7 +948,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* Backup lost: remove_member() L2019 / expire_members() L4167 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
 
-        /* resync: backup_resync() L4249 (ready=false L4119) */
+        /* resync: backup_resync() L4114 (ready=false L4121) */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING) |
         /* ordered stepdown: begin_ordered_stepdown() L2219 */
@@ -960,7 +960,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* Primary lost / stepdown: HEAD_STEPDOWN -> backup_clear_sync() L2503 -> set_detached() L1915 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
 
-        /* Primary lost (eligible): step L4310 (eligible=true) + backup_clear_sync() L2503 */
+        /* Primary lost (eligible): step L4362 (eligible=true L4364) + backup_clear_sync() L2503 */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) |
         /* score challenge: backup_challenge() L2241 (role=CANDIDATE L2253) */
@@ -988,7 +988,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* majority reached: complete_takeover() L2899 (role=HEAD L2903, node_id=0 L2913) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
 
-        /* timeout / stepdown: step L4323 -> backup_clear_sync() L2503 -> set_detached() L1915 */
+        /* timeout / stepdown: step L4374 -> backup_clear_sync() L2503 -> set_detached() L1915 */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
         /* newer-Term Head: consider_head_offer() L2194 */
@@ -1000,11 +1000,11 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
 
     [UCN_CLUSTER_PHASE_STEPPING_DOWN] =
 
-        /* stepdown deadline: ucn_cluster_step_inner() L4231 (role=JOIN_PENDING L4383) */
+        /* stepdown deadline: ucn_cluster_step_inner() L4231 (role=JOIN_PENDING L4437) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING),
 
     [UCN_CLUSTER_PHASE_RECOVERY_OBSERVE] =
-        /* backoff armed: start_recovery_backoff() L3265 (deadline L3268) via step L4340 */
+        /* backoff armed: start_recovery_backoff() L3265 (deadline L3268) via step L4392 */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_ELECTION) |
         /* Head offer: begin_join() L1967 via consider_head_offer() L2194 */
@@ -1177,7 +1177,7 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
     case UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE:
 
         /* Sole inbound edge: ucn_cluster_step_inner() L4231 arms the
-         * grace deadline L4249. */
+         * grace deadline L4269. */
 
         cluster->role = UCN_CLUSTER_ROLE_MEMBER;
         if (cluster->head_grace_deadline_ms == 0U) {
@@ -1217,7 +1217,7 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         /* role only: caller-provided node_id/assign_pending/ready state
 
          * decides the sub-phase (complete_election L3735 / backup_resync
-         * L4249 / assignment sweep L3908). */
+         * L4114 / assignment sweep L3908). */
 
         cluster->role = UCN_CLUSTER_ROLE_HEAD;
         break;
@@ -1259,8 +1259,8 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         break;
     case UCN_CLUSTER_PHASE_RECOVERY_OBSERVE:
 
-        /* Every inbound edge (grace timeout L4253 + set_detached() L1915;
-         * backup missed-heartbeat L4310 + backup_clear_sync() L2503;
+        /* Every inbound edge (grace timeout L4279 + set_detached() L1915;
+         * backup missed-heartbeat L4362 + backup_clear_sync() L2503;
          * RECOVERY_HEAD TTL stepdown_recovery_head L3295 -> set_detached()
 
          * L1915) results in role=DETACHED, eligible=true, backoff=0, and
@@ -4247,14 +4247,66 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
          * member lease lapses; stay MEMBER briefly so the member can still
          * ACK TAKEOVER_PREPARE / switch on HEAD_TAKEOVER before detaching. */
         if (cluster->head_grace_deadline_ms == 0U) {
+            /* CLV2-01-04c.1: arming the grace deadline IS the
+             * MEMBER_ACTIVE -> MEMBER_TAKEOVER_GRACE transition - call it
+             * BEFORE any phase-relevant write.  apply_legacy(GRACE)
+             * writes role + the deadline_from_now(now, keepalive) the
+             * site used (verified identical), so the site rewrite below
+             * is idempotent with the same value (kept authoritative,
+             * original order). */
+            if (cluster_transition(cluster,
+                                   UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                                   UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE,
+                                   UCN_CLUSTER_REASON_HEAD_LEASE_EXPIRED,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: a rejected transition (shadow mismatch /
+                 * illegal pair / pre-mutated phase fields) leaves every
+                 * field untouched - do NOT arm grace or count the expiry;
+                 * the next Step re-visits the lease check. */
+                return UCN_ERR_STATE;
+            }
             cluster->stats.head_leases_expired++;
             cluster->head_grace_deadline_ms = ucn_deadline_from_now(
                 now_ms, cluster->config.keepalive_interval_ms);
+#if !defined(NDEBUG)
+            /* CLV2-01-04c.1 post-commit derive assert: after the
+             * transition AND the site's deadline write the node must
+             * still derive MEMBER_TAKEOVER_GRACE (role == MEMBER with an
+             * armed grace deadline). */
+            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                   UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE);
+#endif
         } else if (ucn_deadline_expired(now_ms,
                                        cluster->head_grace_deadline_ms)) {
+            /* CLV2-01-04c.3: the grace timeout IS the
+             * MEMBER_TAKEOVER_GRACE -> RECOVERY_OBSERVE transition - call
+             * it FIRST.  apply_legacy(RECOVERY_OBSERVE) writes role=
+             * DETACHED + eligible=true + backoff=0 + grace=0 +
+             * known_backup_*=0, so the site's eligible=true rewrite below
+             * is redundant-but-harmless and set_detached() re-applies the
+             * same epoch/vote/lease/grace clears with the observation
+             * deadline.  The pre-derive requires the legacy to STILL
+             * derive MEMBER_TAKEOVER_GRACE (eligible must stay false), so
+             * recovery_eligible is written only AFTER the call. */
+            if (cluster_transition(cluster,
+                                   UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE,
+                                   UCN_CLUSTER_PHASE_RECOVERY_OBSERVE,
+                                   UCN_CLUSTER_REASON_GRACE_TIMEOUT,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: do NOT detach on a rejected transition;
+                 * the node stays in grace and the next Step re-visits. */
+                return UCN_ERR_STATE;
+            }
             cluster->recovery_eligible = true;
             set_detached(cluster, now_ms,
                          cluster->config.recovery_observation_ms);
+#if !defined(NDEBUG)
+            /* CLV2-01-04c.3 post-commit derive assert: after the
+             * transition AND every site effect the node must derive
+             * RECOVERY_OBSERVE (role == DETACHED, eligible, no backoff). */
+            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                   UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+#endif
         }
     }
     if (cluster->role == UCN_CLUSTER_ROLE_HEAD) {
