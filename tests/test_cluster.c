@@ -1446,6 +1446,11 @@ static int cluster_test_join_txid_and_stepdown_nonce(void)
     /* STEPDOWN nonce replay guard on a member. */
     node = &network.nodes[1];
     node->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    /* CLV2-01-04c.5: the migrated MEMBER stepdown path validates
+     * shadow == old_phase (MEMBER_ACTIVE) fail-closed - align the
+     * mirror, exactly as a real join flow leaves it after the
+     * end-of-step/RX shadow sync. */
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     node->cluster.cluster_id = 1U;
     node->cluster.term = 1U;
     node->cluster.head_node_id = network.nodes[0].node_id;
@@ -1725,6 +1730,147 @@ static int cluster_test_join_pending_stepdown(void)
          * DETACHED_OBSERVE and no STEPDOWN_ORDERED was recorded. */
         TEST_ASSERT(node->cluster.shadow_phase ==
                     UCN_CLUSTER_PHASE_JOIN_PENDING);
+        TEST_ASSERT(node->cluster.transition_reason !=
+                    UCN_CLUSTER_REASON_STEPDOWN_ORDERED);
+    }
+    ucn_cluster_test_transition_asserts_set(true);
+    return 0;
+}
+
+/* CLV2-01-04c.5: the MEMBER sub-branch of the HEAD_STEPDOWN handler now
+ * routes through the single transition entry point with the b.6
+ * fail-closed discipline: the old phase is derived from the PRE-CALL
+ * state (role==MEMBER: an armed grace deadline means MEMBER_TAKEOVER_GRACE,
+ * otherwise MEMBER_ACTIVE), the transition runs FIRST, and the anti-replay
+ * fence is consumed + set_detached() runs ONLY on success. */
+static int cluster_test_member_stepdown_shadow_transition(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *node;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 0U;
+    node = &network.nodes[2];
+
+    /* (a) A MEMBER_ACTIVE node receives a HEAD_STEPDOWN of the CURRENT
+     * epoch with a fresh nonce: MEMBER_ACTIVE -> DETACHED_OBSERVE through
+     * the entry point with the EXPLICIT STEPDOWN_ORDERED reason (never
+     * the RESET BEST-EFFORT fallback), the fence advances, and the legacy
+     * detach site effects still run in their original order. */
+    node->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    node->cluster.cluster_id = 1U;
+    node->cluster.term = 5U;
+    node->cluster.head_node_id = network.nodes[0].node_id;
+    node->cluster.last_stepdown_nonce = 0U;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_HEAD_STEPDOWN;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 5U;
+    message.head_node_id = network.nodes[0].node_id;
+    message.lease_ms = 8000U;
+    message.nonce = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, network.nodes[0].node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(node->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+    TEST_ASSERT(node->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_STEPDOWN_ORDERED);
+    TEST_ASSERT(node->cluster.shadow_transition_count == 1U);
+    /* fence advanced; the site-side detach still ran (nonce then
+     * set_detached(), in original order) */
+    TEST_ASSERT(node->cluster.last_stepdown_nonce == 1U);
+    TEST_ASSERT(node->cluster.cluster_id == 0U);
+    TEST_ASSERT(node->cluster.term == 0U);
+    TEST_ASSERT(node->cluster.head_node_id == 0U);
+    TEST_ASSERT(node->cluster.head_lease_expires_at_ms == 0U);
+    TEST_ASSERT(node->cluster.head_grace_deadline_ms == 0U);
+    TEST_ASSERT(node->cluster.member_voted_term == 0U);
+    TEST_ASSERT(node->cluster.known_backup_node_id == 0U);
+    TEST_ASSERT(node->cluster.observation_deadline_ms != 0U);
+
+    /* (b) A MEMBER already in takeover grace (armed deadline) detaches
+     * from MEMBER_TAKEOVER_GRACE -> DETACHED_OBSERVE the same way (old
+     * phase == GRACE). */
+    node->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    node->cluster.head_grace_deadline_ms = ucn_deadline_from_now(
+        network.now_ms, node->cluster.config.keepalive_interval_ms);
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE;
+    node->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    node->cluster.cluster_id = 1U;
+    node->cluster.term = 5U;
+    node->cluster.head_node_id = network.nodes[0].node_id;
+    node->cluster.last_stepdown_nonce = 1U;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_HEAD_STEPDOWN;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 5U;
+    message.head_node_id = network.nodes[0].node_id;
+    message.lease_ms = 8000U;
+    message.nonce = 2U; /* fresh: strictly greater than the fence */
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, network.nodes[0].node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(node->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+    TEST_ASSERT(node->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_STEPDOWN_ORDERED);
+    TEST_ASSERT(node->cluster.last_stepdown_nonce == 2U);
+    TEST_ASSERT(node->cluster.head_grace_deadline_ms == 0U);
+
+    /* (c) CLV2-01-04c.5 (b.6 lesson): a MEMBER whose shadow is
+     * deliberately desynced from legacy (shadow=DETACHED_OBSERVE while
+     * role=MEMBER derives MEMBER_ACTIVE) makes the transition's
+     * shadow==old_phase check fail (the FIRST validation - the derive
+     * assert is never reached).  The transition is rejected fail-closed
+     * and the anti-replay fence is NOT consumed: no half-commit. */
+    node->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
+    node->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    node->cluster.cluster_id = 1U;
+    node->cluster.term = 5U;
+    node->cluster.head_node_id = network.nodes[0].node_id;
+    node->cluster.last_stepdown_nonce = 2U;
+    ucn_cluster_test_transition_asserts_set(false); /* survive the knob assert */
+    {
+        uint32_t before_nonce = node->cluster.last_stepdown_nonce;
+        uint32_t before_cid = node->cluster.cluster_id;
+        uint32_t before_term = node->cluster.term;
+        ucn_node_id_t before_head = node->cluster.head_node_id;
+
+        (void)memset(&message, 0, sizeof(message));
+        message.type = UCN_CLUSTER_MSG_HEAD_STEPDOWN;
+        message.role = UCN_CLUSTER_ROLE_HEAD;
+        message.cluster_id = 1U;
+        message.term = 5U;
+        message.head_node_id = network.nodes[0].node_id;
+        message.lease_ms = 8000U;
+        message.nonce = 3U; /* fresh: strictly greater than the fence */
+        TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+        TEST_ASSERT(ucn_cluster_receive(&node->cluster,
+                                        network.nodes[0].node_id,
+                                        true, encoded, sizeof(encoded)) ==
+                    UCN_ERR_STATE);
+        /* THE b.6 fix: the fence is NOT consumed by a rejected transition. */
+        TEST_ASSERT(node->cluster.last_stepdown_nonce == before_nonce);
+        /* No partial commit: the legacy detach never ran. */
+        TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_MEMBER);
+        TEST_ASSERT(node->cluster.cluster_id == before_cid);
+        TEST_ASSERT(node->cluster.term == before_term);
+        TEST_ASSERT(node->cluster.head_node_id == before_head);
+        /* The phase did NOT migrate: the end-of-RX shadow sync re-aligns
+         * the mirror to the UNCHANGED legacy (derive==MEMBER_ACTIVE), so
+         * shadow returns to MEMBER_ACTIVE - it never advanced to
+         * DETACHED_OBSERVE and no STEPDOWN_ORDERED was recorded. */
+        TEST_ASSERT(node->cluster.shadow_phase ==
+                    UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
         TEST_ASSERT(node->cluster.transition_reason !=
                     UCN_CLUSTER_REASON_STEPDOWN_ORDERED);
     }
@@ -4836,6 +4982,7 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_join_reject_shadow_transition() == 0);
     TEST_ASSERT(cluster_test_join_accept_out_of_order_after_backup_assign() == 0);
     TEST_ASSERT(cluster_test_join_pending_stepdown() == 0);
+    TEST_ASSERT(cluster_test_member_stepdown_shadow_transition() == 0);
     TEST_ASSERT(cluster_test_fault_partition_takeover() == 0);
     TEST_ASSERT(cluster_test_fault_restart_no_old_term() == 0);
     TEST_ASSERT(cluster_test_fault_drop_eventually_converges() == 0);
