@@ -1601,6 +1601,92 @@ static int cluster_test_join_accept_out_of_order_after_backup_assign(void)
     return 0;
 }
 
+static int cluster_test_join_pending_stepdown(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *node;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 0U;
+    node = &network.nodes[2];
+
+    /* (a) A join-pending node receives a HEAD_STEPDOWN of the CURRENT
+     * epoch with a fresh nonce: the join attempt ends through the single
+     * transition entry point (explicit STEPDOWN_ORDERED - never the
+     * JOIN_REJECTED BEST-EFFORT fallback) and the legacy detach site
+     * still runs. */
+    node->cluster.role = UCN_CLUSTER_ROLE_JOIN_PENDING;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_JOIN_PENDING;
+    node->cluster.cluster_id = 1U;
+    node->cluster.term = 5U;
+    node->cluster.head_node_id = network.nodes[0].node_id;
+    node->cluster.pending_head_node_id = network.nodes[0].node_id;
+    node->cluster.pending_cluster_id = 1U;
+    node->cluster.pending_term = 5U;
+    node->cluster.last_stepdown_nonce = 0U;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_HEAD_STEPDOWN;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 5U;
+    message.head_node_id = network.nodes[0].node_id;
+    message.lease_ms = 8000U;
+    message.nonce = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, network.nodes[0].node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(node->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+    TEST_ASSERT(node->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_STEPDOWN_ORDERED);
+    /* the nonce fence advanced and the site-side detach still ran */
+    TEST_ASSERT(node->cluster.last_stepdown_nonce == 1U);
+    TEST_ASSERT(node->cluster.pending_head_node_id == 0U);
+
+    /* (b) A STALE nonce of the same epoch is fenced BEFORE any transition
+     * is attempted: no state change, no reason change. */
+    node->cluster.role = UCN_CLUSTER_ROLE_JOIN_PENDING;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_JOIN_PENDING;
+    node->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    node->cluster.cluster_id = 1U;
+    node->cluster.term = 5U;
+    node->cluster.head_node_id = network.nodes[0].node_id;
+    node->cluster.last_stepdown_nonce = 1U;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_HEAD_STEPDOWN;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 5U;
+    message.head_node_id = network.nodes[0].node_id;
+    message.lease_ms = 8000U;
+    message.nonce = 1U; /* not strictly greater than last_stepdown_nonce */
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, network.nodes[0].node_id,
+                                    true, encoded, sizeof(encoded)) ==
+                UCN_ERR_ACCESS);
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(node->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(node->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_INIT);
+    return 0;
+}
+
+/* CLV2-M00-03: deterministic golden trace over the canonical lifecycle
+ * (election -> join -> backup -> failover takeover).  Compares byte-wise
+ * against tests/golden/cluster_golden_trace.txt (committed reference).
+ *
+ * CLV2-M00.1 fail-closed rules:
+ *  - the reference file is read-only during tests; the actual trace is
+ *    written into the BUILD directory (per-route, no parallel races);
+ *  - a MISSING reference FAILS the test unless the environment variable
+ *    UCN_UPDATE_CLUSTER_GOLDEN=1 explicitly requests regeneration (a
+ *    maintenance action that must be followed by a commit);
+ *  - every transition line carries old/event/new snapshots (SYNC, STEP
+ *    and RX:<type> events). */
 /* CLV2-M00-03: deterministic golden trace over the canonical lifecycle
  * (election -> join -> backup -> failover takeover).  Compares byte-wise
  * against tests/golden/cluster_golden_trace.txt (committed reference).
@@ -4399,6 +4485,7 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_join_txid_and_stepdown_nonce() == 0);
     TEST_ASSERT(cluster_test_join_reject_shadow_transition() == 0);
     TEST_ASSERT(cluster_test_join_accept_out_of_order_after_backup_assign() == 0);
+    TEST_ASSERT(cluster_test_join_pending_stepdown() == 0);
     TEST_ASSERT(cluster_test_fault_partition_takeover() == 0);
     TEST_ASSERT(cluster_test_fault_restart_no_old_term() == 0);
     TEST_ASSERT(cluster_test_fault_drop_eventually_converges() == 0);
