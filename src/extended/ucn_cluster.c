@@ -1312,6 +1312,15 @@ static bool cluster_transition_assert_enabled = true;
 #define CLV2_01_04_ASSERT_FAIL(msg) do { (void)0; } while (0)
 #endif
 
+/* CLV2-01-04d.0 (human auditor recommendation for the d-group's
+ * irreversible-site hazards): the validation chain is extracted into a
+ * shared static helper with ZERO writes and exposed as
+ * cluster_transition_preflight(), so d-group sites (remove_member() /
+ * expire_members() and other irreversible side-effect sites) can validate
+ * BEFORE running their Current-order irreversible writes - a rejected
+ * preflight aborts the site BEFORE any auxiliary state is committed
+ * (no b.6-style half-commit). */
+
 /* CLV2-01-04 RULE: cluster_transition() may centralize existing state
  * transitions, but MUST NOT create new protocol semantics.  Entry/exit
  * actions may only reproduce effects already performed by the migrated
@@ -1323,17 +1332,14 @@ static ucn_result_t cluster_transition(ucn_cluster_t *cluster,
                                        uint32_t now_ms)
     CLV2_01_04_UNUSED;
 
-static ucn_result_t cluster_transition(ucn_cluster_t *cluster,
-                                       ucn_cluster_phase_t old_phase,
-                                       ucn_cluster_phase_t new_phase,
-                                       ucn_cluster_transition_reason_t reason,
-                                       uint32_t now_ms)
+/* CLV2-01-04d.0: the full validation chain - ALL checks, NO writes.  A
+ * rejection returns UCN_ERR_STATE (or UCN_ERR_ARGUMENT for NULL) and
+ * leaves every field untouched. */
+static ucn_result_t cluster_transition_validate(ucn_cluster_t *cluster,
+                                                ucn_cluster_phase_t old_phase,
+                                                ucn_cluster_phase_t new_phase,
+                                                uint32_t now_ms)
 {
-    /* CLV2-01-04 RULE: cluster_transition() may centralize existing state
-     * transitions, but MUST NOT create new protocol semantics.  Entry/exit
-     * actions may only reproduce effects already performed by the migrated
-     * legacy transition site. */
-
     if (cluster == NULL) {
         return UCN_ERR_ARGUMENT;
     }
@@ -1362,6 +1368,45 @@ static ucn_result_t cluster_transition(ucn_cluster_t *cluster,
                "(site pre-mutated phase-relevant fields?)");
 #endif
         return UCN_ERR_STATE;
+    }
+    return UCN_OK;
+}
+
+/* CLV2-01-04d.0: pure validation, NEVER commits.  A d-group site calls
+ * this BEFORE its irreversible Current-order side effects; if it rejects,
+ * the site must abort BEFORE any auxiliary write so nothing is
+ * half-committed.  The phase commit itself still goes through
+ * cluster_transition(). */
+static ucn_result_t cluster_transition_preflight(ucn_cluster_t *cluster,
+                                                 ucn_cluster_phase_t old_phase,
+                                                 ucn_cluster_phase_t new_phase,
+                                                 uint32_t now_ms)
+    CLV2_01_04_UNUSED;
+
+static ucn_result_t cluster_transition_preflight(ucn_cluster_t *cluster,
+                                                 ucn_cluster_phase_t old_phase,
+                                                 ucn_cluster_phase_t new_phase,
+                                                 uint32_t now_ms)
+{
+    return cluster_transition_validate(cluster, old_phase, new_phase, now_ms);
+}
+
+static ucn_result_t cluster_transition(ucn_cluster_t *cluster,
+                                       ucn_cluster_phase_t old_phase,
+                                       ucn_cluster_phase_t new_phase,
+                                       ucn_cluster_transition_reason_t reason,
+                                       uint32_t now_ms)
+{
+    ucn_result_t result;
+
+    /* CLV2-01-04 RULE: cluster_transition() may centralize existing state
+     * transitions, but MUST NOT create new protocol semantics.  Entry/exit
+     * actions may only reproduce effects already performed by the migrated
+     * legacy transition site. */
+    result = cluster_transition_validate(cluster, old_phase, new_phase,
+                                         now_ms);
+    if (result != UCN_OK) {
+        return result;
     }
     /* 1) Commit the shadow mirror (explicit reason replaces the M01
      *    BEST-EFFORT diff inference).  CLV2-01-04a review A (F4): an
@@ -1401,6 +1446,19 @@ ucn_result_t ucn_cluster_test_transition(ucn_cluster_t *cluster,
 void ucn_cluster_test_transition_asserts_set(bool enabled)
 {
     cluster_transition_assert_enabled = enabled;
+}
+
+/* CLV2-01-04d.0: test-only view of the pure-validation preflight (NEVER
+ * commits), so tests can prove that a rejected preflight performs ZERO
+ * writes. */
+ucn_result_t ucn_cluster_test_transition_preflight(
+    ucn_cluster_t *cluster,
+    ucn_cluster_phase_t old_phase,
+    ucn_cluster_phase_t new_phase,
+    uint32_t now_ms)
+{
+    return cluster_transition_preflight(cluster, old_phase, new_phase,
+                                        now_ms);
 }
 
 /* Test-only view of the BEST-EFFORT pair->reason table, so the matrix

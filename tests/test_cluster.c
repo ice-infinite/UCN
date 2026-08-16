@@ -4585,6 +4585,71 @@ static int cluster_test_transition_matrix(void)
     return 0;
 }
 
+/* CLV2-01-04d.0: preflight is pure validation with ZERO writes - it must
+ * never advance the shadow / reason / count or touch legacy fields, on
+ * either the accept or the reject path (the d-group irreversible-site
+ * pattern relies on this: preflight before the Current-order side
+ * effects, commit afterwards). */
+static int cluster_test_transition_preflight(void)
+{
+    cluster_test_network_t network;
+    ucn_cluster_t pristine;
+    ucn_cluster_t before;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 0U;
+    network.nodes[0].cluster.backup_node_id = 2U;
+    pristine = network.nodes[0].cluster;
+
+    ucn_cluster_test_transition_asserts_set(false);
+    {
+        ucn_cluster_t *c = &network.nodes[0].cluster;
+
+        /* (a) legal DIRECT pair, legacy + shadow aligned: UCN_OK and NO
+         * write of any kind. */
+        cluster_test_transition_reset(c, &pristine,
+                                      UCN_CLUSTER_PHASE_JOIN_PENDING);
+        cluster_test_seed_legacy(c, UCN_CLUSTER_PHASE_JOIN_PENDING,
+                                 network.now_ms);
+        before = *c;
+        TEST_ASSERT(ucn_cluster_test_transition_preflight(
+                        c, UCN_CLUSTER_PHASE_JOIN_PENDING,
+                        UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                        network.now_ms) == UCN_OK);
+        TEST_ASSERT(memcmp(c, &before, sizeof(*c)) == 0);
+
+        /* (b1) illegal pair (JOIN_PENDING -> HEAD_STABLE is not DIRECT):
+         * UCN_ERR_STATE and NO write. */
+        cluster_test_transition_reset(c, &pristine,
+                                      UCN_CLUSTER_PHASE_JOIN_PENDING);
+        cluster_test_seed_legacy(c, UCN_CLUSTER_PHASE_JOIN_PENDING,
+                                 network.now_ms);
+        before = *c;
+        TEST_ASSERT(ucn_cluster_test_transition_preflight(
+                        c, UCN_CLUSTER_PHASE_JOIN_PENDING,
+                        UCN_CLUSTER_PHASE_HEAD_STABLE,
+                        network.now_ms) == UCN_ERR_STATE);
+        TEST_ASSERT(memcmp(c, &before, sizeof(*c)) == 0);
+
+        /* (b2) shadow desync (shadow != claimed old_phase): UCN_ERR_STATE
+         * and NO write - the d-group pattern relies on this to abort
+         * BEFORE the irreversible site side effects run. */
+        cluster_test_transition_reset(c, &pristine,
+                                      UCN_CLUSTER_PHASE_JOIN_PENDING);
+        cluster_test_seed_legacy(c, UCN_CLUSTER_PHASE_JOIN_PENDING,
+                                 network.now_ms);
+        c->shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE; /* desync */
+        before = *c;
+        TEST_ASSERT(ucn_cluster_test_transition_preflight(
+                        c, UCN_CLUSTER_PHASE_JOIN_PENDING,
+                        UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                        network.now_ms) == UCN_ERR_STATE);
+        TEST_ASSERT(memcmp(c, &before, sizeof(*c)) == 0);
+    }
+    ucn_cluster_test_transition_asserts_set(true);
+    return 0;
+}
+
 /* CLV2-01-04a: field-level semantics of legal transitions and the
  * fail-closed rejections. */
 static int cluster_test_transition_apply(void)
@@ -5009,6 +5074,7 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_lease_grace_reasons() == 0);
     TEST_ASSERT(cluster_test_shadow_takeover_late_sync() == 0);
     TEST_ASSERT(cluster_test_transition_matrix() == 0);
+    TEST_ASSERT(cluster_test_transition_preflight() == 0);
     TEST_ASSERT(cluster_test_transition_apply() == 0);
     TEST_ASSERT(cluster_test_election_join_and_failover() == 0);
     TEST_ASSERT(cluster_test_head_offer_join_wiring() == 0);

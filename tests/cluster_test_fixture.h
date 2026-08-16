@@ -68,6 +68,14 @@ ucn_cluster_transition_reason_t ucn_cluster_test_reason_from_diff(
 bool ucn_cluster_test_observed_pair_allowed(
     ucn_cluster_phase_t old_phase,
     ucn_cluster_phase_t new_phase);
+
+/* CLV2-01-04d.0: test-only view of the pure-validation preflight (NEVER
+ * commits), so tests can prove a rejected preflight performs ZERO writes. */
+ucn_result_t ucn_cluster_test_transition_preflight(
+    ucn_cluster_t *cluster,
+    ucn_cluster_phase_t old_phase,
+    ucn_cluster_phase_t new_phase,
+    uint32_t now_ms);
 #endif
 
 #ifdef __cplusplus
