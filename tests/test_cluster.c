@@ -3265,6 +3265,240 @@ static int cluster_test_head_offer_join_wiring(void)
     return 0;
 }
 
+/* CLV2-01-04c.2: consider_head_offer()'s same-cluster same-term Head
+ * offer refresh path: a MEMBER in takeover grace performs the
+ * MEMBER_TAKEOVER_GRACE -> MEMBER_ACTIVE transition through the single
+ * entry point (reason HEAD_LEASE_RENEWED) BEFORE the site's lease
+ * refresh + grace=0 writes; a MEMBER_ACTIVE node performs NO transition
+ * (the grace=0 write stays a no-op); a shadow/legacy mismatch fails
+ * closed and the lease is NOT refreshed. */
+static int cluster_test_member_offer_grace_refresh_wiring(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *member;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 100U;
+    member = &network.nodes[2]; /* node 3: a MEMBER of Head node 1 */
+    member->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    member->cluster.cluster_id = 1U;
+    member->cluster.term = 1U;
+    member->cluster.head_node_id = 1U;
+    member->cluster.current_head_score = 9000U;
+    member->cluster.head_lease_expires_at_ms = 110U;
+    member->cluster.role_since_ms = 90U;
+
+    /* Scenario A (required): the member is in takeover grace and the
+     * same-cluster same-term Head offer refreshes the lease -> the GRACE
+     * -> MEMBER_ACTIVE transition is committed FIRST (reason
+     * HEAD_LEASE_RENEWED), then the site writes run in original order
+     * (lease refresh + grace=0) and the grace is cleared. */
+    member->cluster.head_grace_deadline_ms = 150U;
+    member->cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE;
+    TEST_ASSERT(test_derive_phase(&member->cluster, 100U) ==
+                UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE);
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_ADVERTISE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = 1U;
+    message.head_score = 9000U;
+    message.available_capacity = 3U;
+    message.lease_ms = 8000U;
+    message.nonce = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&member->cluster, 1U, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(member->cluster.role == UCN_CLUSTER_ROLE_MEMBER);
+    TEST_ASSERT(member->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+    TEST_ASSERT(member->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_HEAD_LEASE_RENEWED);
+    TEST_ASSERT(member->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(member->cluster.head_grace_deadline_ms == 0U);
+    /* Lease refreshed: now 100 + config.lease_ms 40 == 140. */
+    TEST_ASSERT(member->cluster.head_lease_expires_at_ms == 140U);
+    TEST_ASSERT(member->cluster.current_head_score == 9000U);
+    TEST_ASSERT(test_derive_phase(&member->cluster, 100U) ==
+                UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+
+    /* Scenario B: an already MEMBER_ACTIVE node performs NO transition -
+     * the refresh keeps the shadow MEMBER_ACTIVE and the grace=0 write is
+     * a no-op. */
+    member->cluster.shadow_transition_count = 0U;
+    member->cluster.transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    member->cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    member->cluster.head_grace_deadline_ms = 0U;
+    member->cluster.head_lease_expires_at_ms = 120U;
+    message.nonce = 2U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&member->cluster, 1U, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(member->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+    TEST_ASSERT(member->cluster.shadow_transition_count == 0U);
+    TEST_ASSERT(member->cluster.head_lease_expires_at_ms == 140U);
+    TEST_ASSERT(member->cluster.head_grace_deadline_ms == 0U);
+
+    /* Scenario C (fail closed): a member whose shadow mirror is stale
+     * (MEMBER_ACTIVE while the legacy state derives GRACE) rejects the
+     * transition - the lease is NOT refreshed and the grace is NOT
+     * cleared; the end-of-RX shadow sync then reconciles the mirror. */
+    {
+        cluster_test_network_t net2;
+
+        TEST_ASSERT(cluster_test_network_init(&net2, 3U) == 0);
+        net2.now_ms = 100U;
+        net2.nodes[2].cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+        net2.nodes[2].cluster.cluster_id = 1U;
+        net2.nodes[2].cluster.term = 1U;
+        net2.nodes[2].cluster.head_node_id = 1U;
+        net2.nodes[2].cluster.current_head_score = 9000U;
+        net2.nodes[2].cluster.head_lease_expires_at_ms = 110U;
+        net2.nodes[2].cluster.head_grace_deadline_ms = 150U;
+        net2.nodes[2].cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+        ucn_cluster_test_transition_asserts_set(false);
+        message.nonce = 3U;
+        TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+        TEST_ASSERT(ucn_cluster_receive(&net2.nodes[2].cluster, 1U, true,
+                                        encoded, sizeof(encoded)) == UCN_OK);
+        ucn_cluster_test_transition_asserts_set(true);
+        TEST_ASSERT(net2.nodes[2].cluster.role == UCN_CLUSTER_ROLE_MEMBER);
+        TEST_ASSERT(net2.nodes[2].cluster.head_lease_expires_at_ms == 110U);
+        TEST_ASSERT(net2.nodes[2].cluster.head_grace_deadline_ms == 150U);
+        TEST_ASSERT(net2.nodes[2].cluster.shadow_phase ==
+                    UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE);
+    }
+    return 0;
+}
+
+/* CLV2-01-04c.4: consider_head_offer()'s better-Head switch path: the
+ * LEAVE notice to the old Head stays FIRST, then stats.head_switches++,
+ * then the MEMBER_ACTIVE / MEMBER_TAKEOVER_GRACE -> JOIN_PENDING
+ * transition (reason JOIN_INITIATED) runs fail-closed, and only then is
+ * the begin_join() field payload applied via begin_join_prepare_fields().
+ * The join sends nothing, so the queued LEAVE proves the order, and the
+ * shadow lands on JOIN_PENDING with reason JOIN_INITIATED. */
+static int cluster_test_member_better_head_switch_wiring(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *member;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    size_t index;
+    size_t leave_count;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 100U;
+    member = &network.nodes[2]; /* node 3: MEMBER of old Head node 4 */
+    member->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    member->cluster.cluster_id = 1U;
+    member->cluster.term = 1U;
+    member->cluster.head_node_id = 4U;
+    member->cluster.current_head_score = 2000U;
+    member->cluster.head_lease_expires_at_ms = 140U;
+    member->cluster.role_since_ms = 0U;
+
+    /* Scenario A (required): a MEMBER_ACTIVE node accepts a better Head
+     * (node 2, score 7000 > 2000 * 1.2) after the required samples ->
+     * LEAVE queued to the old Head, head_switches==1, shadow ==
+     * JOIN_PENDING with reason JOIN_INITIATED, join payload applied. */
+    member->cluster.head_grace_deadline_ms = 0U;
+    member->cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_ADVERTISE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = 2U; /* better Head: node 2 */
+    message.head_score = 7000U;
+    message.available_capacity = 3U;
+    message.lease_ms = 8000U;
+    for (index = 0U; index < 3U; ++index) {
+        message.nonce = (uint32_t)(index + 1U);
+        TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+        TEST_ASSERT(ucn_cluster_receive(&member->cluster, 2U, true,
+                                        encoded, sizeof(encoded)) == UCN_OK);
+    }
+    TEST_ASSERT(member->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(member->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(member->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_JOIN_INITIATED);
+    TEST_ASSERT(member->cluster.stats.head_switches == 1U);
+    TEST_ASSERT(member->cluster.pending_head_node_id == 2U);
+    TEST_ASSERT(member->cluster.pending_cluster_id == 1U);
+    TEST_ASSERT(member->cluster.pending_term == 1U);
+    TEST_ASSERT(member->cluster.pending_head_score == 7000U);
+    TEST_ASSERT(member->cluster.role_since_ms == 100U);
+    TEST_ASSERT(member->cluster.next_join_retry_ms == 100U);
+    TEST_ASSERT(member->cluster.recovery_eligible == false);
+    TEST_ASSERT(test_derive_phase(&member->cluster, 100U) ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+    /* The LEAVE to the old Head is the ONLY queued frame, so it precedes
+     * the (send-free) join payload. */
+    leave_count = 0U;
+    for (index = 0U; index < network.queue_count; ++index) {
+        if (network.queue[index].destination == 4U &&
+            network.queue[index].payload[1U] ==
+                (uint8_t)UCN_CLUSTER_MSG_LEAVE) {
+            leave_count++;
+        }
+    }
+    TEST_ASSERT(leave_count == 1U);
+    TEST_ASSERT(network.queue_count == 1U);
+
+    /* Scenario B: the same better-Head switch from MEMBER_TAKEOVER_GRACE
+     * (armed grace) -> GRACE -> JOIN_PENDING, LEAVE still queued first. */
+    {
+        cluster_test_network_t net2;
+
+        TEST_ASSERT(cluster_test_network_init(&net2, 3U) == 0);
+        net2.now_ms = 100U;
+        net2.nodes[2].cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+        net2.nodes[2].cluster.cluster_id = 1U;
+        net2.nodes[2].cluster.term = 1U;
+        net2.nodes[2].cluster.head_node_id = 4U;
+        net2.nodes[2].cluster.current_head_score = 2000U;
+        net2.nodes[2].cluster.head_lease_expires_at_ms = 140U;
+        net2.nodes[2].cluster.head_grace_deadline_ms = 150U;
+        net2.nodes[2].cluster.shadow_phase =
+            UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE;
+        for (index = 0U; index < 3U; ++index) {
+            message.nonce = (uint32_t)(index + 10U);
+            TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+            TEST_ASSERT(ucn_cluster_receive(&net2.nodes[2].cluster, 2U, true,
+                                            encoded, sizeof(encoded)) == UCN_OK);
+        }
+        TEST_ASSERT(net2.nodes[2].cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+        TEST_ASSERT(net2.nodes[2].cluster.shadow_phase ==
+                    UCN_CLUSTER_PHASE_JOIN_PENDING);
+        TEST_ASSERT(net2.nodes[2].cluster.transition_reason ==
+                    UCN_CLUSTER_REASON_JOIN_INITIATED);
+        TEST_ASSERT(net2.nodes[2].cluster.stats.head_switches == 1U);
+        TEST_ASSERT(net2.nodes[2].cluster.pending_head_node_id == 2U);
+        TEST_ASSERT(net2.nodes[2].cluster.pending_cluster_id == 1U);
+        TEST_ASSERT(net2.nodes[2].cluster.pending_term == 1U);
+        TEST_ASSERT(net2.nodes[2].cluster.pending_head_score == 7000U);
+        leave_count = 0U;
+        for (index = 0U; index < net2.queue_count; ++index) {
+            if (net2.queue[index].destination == 4U &&
+                net2.queue[index].payload[1U] ==
+                    (uint8_t)UCN_CLUSTER_MSG_LEAVE) {
+                leave_count++;
+            }
+        }
+        TEST_ASSERT(leave_count == 1U);
+        TEST_ASSERT(net2.queue_count == 1U);
+    }
+    return 0;
+}
+
 static int cluster_test_capacity_is_bounded(void)
 {
     cluster_test_network_t network;
@@ -4571,6 +4805,8 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_transition_apply() == 0);
     TEST_ASSERT(cluster_test_election_join_and_failover() == 0);
     TEST_ASSERT(cluster_test_head_offer_join_wiring() == 0);
+    TEST_ASSERT(cluster_test_member_offer_grace_refresh_wiring() == 0);
+    TEST_ASSERT(cluster_test_member_better_head_switch_wiring() == 0);
     TEST_ASSERT(cluster_test_capacity_is_bounded() == 0);
     TEST_ASSERT(cluster_test_neighbor_summary_api() == 0);
     /* CLV2-01-04a review B (T-A): every phase pair actually OBSERVED by

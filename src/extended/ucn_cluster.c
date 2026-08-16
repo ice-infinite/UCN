@@ -851,7 +851,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* observe timeout (head_capable): start_election() L3694 (transition L3703) */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION) |
-        /* stable Head offer: cluster_transition() L2383 via consider_head_offer() L2194 DETACHED (!recovery_eligible); RECOVERY_* keeps begin_join() L1967 */
+        /* stable Head offer: cluster_transition() L2414 via consider_head_offer() L2269 DETACHED (!recovery_eligible); RECOVERY_* keeps begin_join() L1972 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
         /* joins a recovery Head: handle_recovery_declare() L3311 (role=MEMBER L3377) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
@@ -865,7 +865,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING) |
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING) |
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_STABLE) |
-        /* stable Head offer: cluster_transition() L2383 via consider_head_offer() L2194 CANDIDATE (!recovery_eligible) */
+        /* stable Head offer: cluster_transition() L2414 via consider_head_offer() L2269 CANDIDATE (!recovery_eligible) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
 
         /* loss: complete_election() L3735 -> set_detached() L1915 (role=DETACHED L1920) */
@@ -893,12 +893,12 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING) |
         /* stepdown / reset: HEAD_STEPDOWN -> set_detached() L1915 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
-        /* better Head switch: begin_join() L1967 via consider_head_offer() L2194 */
+        /* better Head switch: cluster_transition() L2480 via consider_head_offer() L2269 MEMBER (!grace) + begin_join_prepare_fields() L1956 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING),
 
     [UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE] =
-        /* Head lease renewed: consider_head_offer() L2194 refresh (grace=0 L2281) /
-         * handle_head_takeover() L3129 (grace=0 L3164) */
+        /* Head lease renewed: cluster_transition() L2292 via consider_head_offer() L2269
+         * refresh (grace=0 site write) / handle_head_takeover() L3129 (grace=0 L3164) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
         /* HEAD_STEPDOWN -> set_detached() L1915 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
@@ -906,7 +906,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* grace timeout: step L4253 (recovery_eligible=true) + set_detached() L1915 */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) |
-        /* better Head switch: begin_join() L1967 via consider_head_offer() L2194 */
+        /* better Head switch: cluster_transition() L2469 via consider_head_offer() L2269 GRACE + begin_join_prepare_fields() L1956 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
         /* BACKUP_ASSIGN(self): handle_backup_assign() L2585 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING),
@@ -1152,12 +1152,13 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         cluster->role = UCN_CLUSTER_ROLE_CANDIDATE;
         break;
     case UCN_CLUSTER_PHASE_JOIN_PENDING:
-        /* CLV2-01-04b.3: DETACHED/ELECTION (!recovery_eligible) sources
-         * transition via cluster_transition() at consider_head_offer()
-         * L2383 (apply_legacy writes role + eligible=false + backoff=0);
-         * RECOVERY / MEMBER / GRACE / BACKUP sources keep begin_join() L1967
-         * (role L1975; candidacy abandon lives in the shared field helper
-         * begin_join_prepare_fields() L1951).  begin_join() does NOT clear
+        /* CLV2-01-04b.3: DETACHED/ELECTION (!recovery_eligible) and
+         * MEMBER/GRACE (01-04c.4) sources transition via cluster_transition()
+         * at consider_head_offer() L2414/L2469/L2480 (apply_legacy writes
+         * role + eligible=false + backoff=0); RECOVERY / BACKUP newer-Term /
+         * JOIN_PENDING re-target sources keep begin_join() L1972 (role L1980;
+         * candidacy abandon lives in the shared field helper
+         * begin_join_prepare_fields() L1956).  begin_join() does NOT clear
          * the mirror/known_backup (only the BACKUP higher-Term path does
          * backup_clear_sync() BEFORE the join, at the site). */
         cluster->role = UCN_CLUSTER_ROLE_JOIN_PENDING;
@@ -1946,12 +1947,13 @@ static void set_detached(
 }
 
 /* CLV2-01-04b.3: begin_join()'s field payload WITHOUT the role write.
- * The migrated consider_head_offer() callers (DETACHED_OBSERVE/ELECTION,
- * !recovery_eligible) run cluster_transition() FIRST (which owns the role
- * write via apply_legacy) and then apply the remaining site payload through
- * this helper.  begin_join() still applies ALL fields (helper + role) for
- * its not-yet-migrated callers (BACKUP newer-Term, MEMBER better-Head
- * switch, JOIN_PENDING re-target, RECOVERY_* sources). */
+ * The migrated consider_head_offer() callers (DETACHED_OBSERVE/ELECTION
+ * !recovery_eligible, MEMBER/GRACE better-Head switch 01-04c.4) run
+ * cluster_transition() FIRST (which owns the role write via apply_legacy)
+ * and then apply the remaining site payload through this helper.
+ * begin_join() still applies ALL fields (helper + role) for its
+ * not-yet-migrated callers (BACKUP newer-Term, JOIN_PENDING re-target,
+ * RECOVERY_* sources). */
 static void begin_join_prepare_fields(
     ucn_cluster_t *cluster,
     const ucn_cluster_candidate_t *candidate,
@@ -2280,11 +2282,37 @@ static void consider_head_offer(
         candidate->head_node_id == cluster->head_node_id &&
         candidate->cluster_id == cluster->cluster_id &&
         candidate->term == cluster->term) {
+        /* CLV2-01-04c.2: a same-cluster same-term Head offer while the
+         * node is in takeover grace IS the MEMBER_TAKEOVER_GRACE ->
+         * MEMBER_ACTIVE lease-renewal transition: run it FIRST (fail
+         * closed) and keep the site's lease refresh + grace=0 writes in
+         * original order.  A MEMBER_ACTIVE node performs no transition
+         * (the grace=0 write is then a no-op); apply_legacy writes
+         * role+grace=0 for the GRACE inbound. */
+        if (cluster->head_grace_deadline_ms != 0U) {
+            if (cluster_transition(cluster,
+                                   UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE,
+                                   UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                                   UCN_CLUSTER_REASON_HEAD_LEASE_RENEWED,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: a rejected transition (shadow mismatch /
+                 * illegal pair / pre-mutated phase fields) leaves every
+                 * field untouched - do NOT refresh the lease. */
+                return;
+            }
+        }
         cluster->head_lease_expires_at_ms =
             ucn_deadline_from_now(now_ms, cluster->config.lease_ms);
         cluster->head_grace_deadline_ms = 0U;
         cluster->current_head_score = candidate->head_score;
         candidate->better_samples = 0U;
+#if !defined(NDEBUG)
+        /* CLV2-01-04c.2 post-commit derive assert: after the transition
+         * (when applicable) and every site write the legacy state must
+         * still derive MEMBER_ACTIVE (role == MEMBER, no armed grace). */
+        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+               UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+#endif
         return;
     }
     if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
@@ -2425,12 +2453,48 @@ static void consider_head_offer(
         candidate->better_samples++;
     }
     if (candidate->better_samples >= cluster->config.switch_required_samples) {
+        /* CLV2-01-04c.4 (human-ordered): the LEAVE notice to the old Head
+         * stays FIRST, then stats.head_switches++, THEN the transition
+         * (MEMBER_ACTIVE or MEMBER_TAKEOVER_GRACE -> JOIN_PENDING) runs
+         * fail-closed, and only afterwards is the begin_join() field
+         * payload applied through begin_join_prepare_fields() (apply_legacy
+         * owns the role write).  Neither the LEAVE send nor head_switches++
+         * is a phase-relevant mutation, so the pre-transition derive check
+         * still passes. */
         (void)send_message(cluster, cluster->head_node_id,
                            UCN_CLUSTER_MSG_LEAVE, UCN_CLUSTER_ROLE_MEMBER,
                            cluster->cluster_id, cluster->term,
                            cluster->head_node_id, cluster->current_head_score, 0U);
         cluster->stats.head_switches++;
-        begin_join(cluster, candidate, now_ms);
+        if (cluster->head_grace_deadline_ms != 0U) {
+            if (cluster_transition(cluster,
+                                   UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE,
+                                   UCN_CLUSTER_PHASE_JOIN_PENDING,
+                                   UCN_CLUSTER_REASON_JOIN_INITIATED,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: a rejected transition (shadow mismatch /
+                 * illegal pair / pre-mutated phase fields) leaves every
+                 * field untouched - do NOT apply the join payload. */
+                return;
+            }
+        } else {
+            if (cluster_transition(cluster,
+                                   UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                                   UCN_CLUSTER_PHASE_JOIN_PENDING,
+                                   UCN_CLUSTER_REASON_JOIN_INITIATED,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: see the GRACE branch above. */
+                return;
+            }
+        }
+        begin_join_prepare_fields(cluster, candidate, now_ms);
+#if !defined(NDEBUG)
+        /* CLV2-01-04c.4 post-commit derive assert: after the transition
+         * and the site join payload the legacy state must still derive
+         * JOIN_PENDING. */
+        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+               UCN_CLUSTER_PHASE_JOIN_PENDING);
+#endif
     }
 }
 
