@@ -847,158 +847,158 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         0U,
 
     [UCN_CLUSTER_PHASE_DETACHED_OBSERVE] =
-        /* observe timeout (head_capable): start_election() L3493 (role=CANDIDATE L3495) */
+        /* observe timeout (head_capable): start_election() L3512 (transition L3519) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION) |
-        /* stable Head offer: begin_join() L1885 (role=JOIN_PENDING L1893) via consider_head_offer() L2157 */
+        /* stable Head offer: begin_join() L1904 (role=JOIN_PENDING L1912) via consider_head_offer() L2176 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
-        /* joins a recovery Head: handle_recovery_declare() L3175 (role=MEMBER L3241) */
+        /* joins a recovery Head: handle_recovery_declare() L3194 (role=MEMBER L3260) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
 
     [UCN_CLUSTER_PHASE_ELECTION] =
-        /* win: complete_election() L3510 (role=HEAD L3534); the backup
-         * sub-phase derives from the caller's preserved backup_* state. */
+        /* win: complete_election() L3551 (win dispatch L3599); the HEAD
+         * sub-phase is dispatched from the pre-call backup_* state. */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING) |
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING) |
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_STABLE) |
-        /* stable Head offer: begin_join() L1885 via consider_head_offer() L2157 CANDIDATE branch */
+        /* stable Head offer: begin_join() L1904 via consider_head_offer() L2176 CANDIDATE branch */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
-        /* loss: complete_election() -> set_detached() L1856 (role=DETACHED L1861) */
+        /* loss: complete_election() L3551 -> set_detached() L1875 (role=DETACHED L1880) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE),
 
     [UCN_CLUSTER_PHASE_JOIN_PENDING] =
-        /* exact JOIN_ACCEPT: handle_join_accept() L2025 (role=MEMBER L2049) */
+        /* exact JOIN_ACCEPT: handle_join_accept() L2044 (role=MEMBER L2068) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
-        /* exact JOIN_REJECT / HEAD_STEPDOWN -> set_detached() L1856 */
+        /* exact JOIN_REJECT / HEAD_STEPDOWN -> set_detached() L1875 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
-        /* BACKUP_ASSIGN(self) arrives first: handle_backup_assign() L2449 (role=BACKUP L2485) */
+        /* BACKUP_ASSIGN(self) arrives first: handle_backup_assign() L2468 (role=BACKUP L2504) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING),
 
     [UCN_CLUSTER_PHASE_MEMBER_ACTIVE] =
-        /* Head lease expired: ucn_cluster_step_inner() L3965 (grace armed L3983) */
+        /* Head lease expired: ucn_cluster_step_inner() L4047 (grace armed L4065) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE) |
-        /* BACKUP_ASSIGN(self): handle_backup_assign() L2449 */
+        /* BACKUP_ASSIGN(self): handle_backup_assign() L2468 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING) |
-        /* stepdown / reset: HEAD_STEPDOWN -> set_detached() L1856 */
+        /* stepdown / reset: HEAD_STEPDOWN -> set_detached() L1875 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
-        /* better Head switch: begin_join() L1885 via consider_head_offer() L2157 */
+        /* better Head switch: begin_join() L1904 via consider_head_offer() L2176 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING),
 
     [UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE] =
-        /* Head lease renewed: consider_head_offer() L2157 refresh (grace=0 L2174) /
-         * handle_head_takeover() L2993 (grace=0 L3028) */
+        /* Head lease renewed: consider_head_offer() L2176 refresh (grace=0 L2193) /
+         * handle_head_takeover() L3012 (grace=0 L3047) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
-        /* HEAD_STEPDOWN -> set_detached() L1856 */
+        /* HEAD_STEPDOWN -> set_detached() L1875 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
-        /* grace timeout: step L3987 (recovery_eligible=true) + set_detached() L1856 */
+        /* grace timeout: step L4069 (recovery_eligible=true) + set_detached() L1875 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) |
-        /* better Head switch: begin_join() L1885 via consider_head_offer() L2157 */
+        /* better Head switch: begin_join() L1904 via consider_head_offer() L2176 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
-        /* BACKUP_ASSIGN(self): handle_backup_assign() L2449 */
+        /* BACKUP_ASSIGN(self): handle_backup_assign() L2468 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING),
 
     [UCN_CLUSTER_PHASE_HEAD_NO_BACKUP] =
-        /* Backup selected: assign_backup() L2399 (node_id L2436) +
-         * start_backup_assignment_cycle() L3571 (assign_pending L3608) */
+        /* Backup selected: assign_backup() L2418 (node_id L2455) +
+         * start_backup_assignment_cycle() L3653 (assign_pending L3690) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING) |
-        /* ordered stepdown: begin_ordered_stepdown() L2112 (role=STEPPING_DOWN L2120) */
+        /* ordered stepdown: begin_ordered_stepdown() L2131 (role=STEPPING_DOWN L2139) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 
     [UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING] =
-        /* assignment sweep done: send_backup_assignment_step() L3615 (assign_pending=false L3642) */
+        /* assignment sweep done: send_backup_assignment_step() L3697 (assign_pending=false L3724) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING) |
-        /* READY during sweep: handle_backup_ready() L2524 (ready=true L2543) */
+        /* READY during sweep: handle_backup_ready() L2543 (ready=true L2562) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_STABLE) |
-        /* Backup lost: remove_member() L1942 (node_id=0 L1950) / expire_members() L3901 */
+        /* Backup lost: remove_member() L1961 (node_id=0 L1969) / expire_members() L3983 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
-        /* ordered stepdown: begin_ordered_stepdown() L2112 */
+        /* ordered stepdown: begin_ordered_stepdown() L2131 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 
     [UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING] =
-        /* snapshot READY: handle_backup_ready() L2524 */
+        /* snapshot READY: handle_backup_ready() L2543 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_STABLE) |
-        /* periodic re-assign: start_backup_assignment_cycle() L3571 */
+        /* periodic re-assign: start_backup_assignment_cycle() L3653 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING) |
-        /* Backup lost: remove_member() L1942 / expire_members() L3901 */
+        /* Backup lost: remove_member() L1961 / expire_members() L3983 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
-        /* ordered stepdown: begin_ordered_stepdown() L2112 */
+        /* ordered stepdown: begin_ordered_stepdown() L2131 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 
     [UCN_CLUSTER_PHASE_HEAD_STABLE] =
-        /* Backup lost: remove_member() L1942 / expire_members() L3901 */
+        /* Backup lost: remove_member() L1961 / expire_members() L3983 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
-        /* resync: backup_resync() L3846 (ready=false L3853) */
+        /* resync: backup_resync() L3928 (ready=false L3935) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING) |
-        /* ordered stepdown: begin_ordered_stepdown() L2112 */
+        /* ordered stepdown: begin_ordered_stepdown() L2131 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 
     [UCN_CLUSTER_PHASE_BACKUP_SYNCING] =
-        /* snapshot READY: handle_backup_member_sync() L2547 SYNC_END (syncing=false L2623, ready=true L2624) */
+        /* snapshot READY: handle_backup_member_sync() L2566 SYNC_END (syncing=false L2642, ready=true L2643) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_READY) |
-        /* Primary lost / stepdown: HEAD_STEPDOWN -> backup_clear_sync() L2367 -> set_detached() L1856 */
+        /* Primary lost / stepdown: HEAD_STEPDOWN -> backup_clear_sync() L2386 -> set_detached() L1875 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
-        /* Primary lost (eligible): step L4044 (eligible=true) + backup_clear_sync() L2367 */
+        /* Primary lost (eligible): step L4126 (eligible=true) + backup_clear_sync() L2386 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) |
-        /* score challenge: backup_challenge() L2134 (role=CANDIDATE L2146) */
+        /* score challenge: backup_challenge() L2153 (role=CANDIDATE L2165) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION) |
-        /* newer-Term Head: consider_head_offer() L2157 (takeover=false L2207) + backup_clear_sync() L2367 + begin_join() L1885 */
+        /* newer-Term Head: consider_head_offer() L2176 (takeover=false L2226) + backup_clear_sync() L2386 + begin_join() L1904 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
-        /* HEAD_TAKEOVER / recovery: handle_head_takeover() L2993 (role=MEMBER L3021) */
+        /* HEAD_TAKEOVER / recovery: handle_head_takeover() L3012 (role=MEMBER L3040) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
 
     [UCN_CLUSTER_PHASE_BACKUP_READY] =
-        /* Primary lease lapsed: start_takeover() L2806 (takeover=true L2811) */
+        /* Primary lease lapsed: start_takeover() L2825 (takeover=true L2830) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_TAKEOVER) |
-        /* DELTA gap / resync: handle_backup_member_sync() L2547 (DELTA gap L2576-2577, SYNC_BEGIN L2598-2599) */
+        /* DELTA gap / resync: handle_backup_member_sync() L2566 (DELTA gap L2595-2596, SYNC_BEGIN L2617-2618) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING) |
-        /* score challenge: backup_challenge() L2134 */
+        /* score challenge: backup_challenge() L2153 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION) |
-        /* newer-Term Head: consider_head_offer() L2157 */
+        /* newer-Term Head: consider_head_offer() L2176 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
-        /* Primary lost / stepdown: HEAD_STEPDOWN -> backup_clear_sync() L2367 -> set_detached() L1856 */
+        /* Primary lost / stepdown: HEAD_STEPDOWN -> backup_clear_sync() L2386 -> set_detached() L1875 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
-        /* HEAD_TAKEOVER / recovery: handle_head_takeover() L2993 */
+        /* HEAD_TAKEOVER / recovery: handle_head_takeover() L3012 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
 
     [UCN_CLUSTER_PHASE_BACKUP_TAKEOVER] =
-        /* majority reached: complete_takeover() L2763 (role=HEAD L2767, node_id=0 L2777) */
+        /* majority reached: complete_takeover() L2782 (role=HEAD L2786, node_id=0 L2796) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
-        /* timeout / stepdown: step L4057 -> backup_clear_sync() L2367 -> set_detached() L1856 */
+        /* timeout / stepdown: step L4139 -> backup_clear_sync() L2386 -> set_detached() L1875 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
-        /* newer-Term Head: consider_head_offer() L2157 */
+        /* newer-Term Head: consider_head_offer() L2176 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
-        /* HEAD_TAKEOVER / recovery: handle_head_takeover() L2993 */
+        /* HEAD_TAKEOVER / recovery: handle_head_takeover() L3012 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
-        /* score challenge: backup_challenge() L2134 */
+        /* score challenge: backup_challenge() L2153 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION),
 
     [UCN_CLUSTER_PHASE_STEPPING_DOWN] =
-        /* stepdown deadline: ucn_cluster_step_inner() L3965 (role=JOIN_PENDING L4117) */
+        /* stepdown deadline: ucn_cluster_step_inner() L4047 (role=JOIN_PENDING L4199) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING),
 
     [UCN_CLUSTER_PHASE_RECOVERY_OBSERVE] =
-        /* backoff armed: start_recovery_backoff() L3129 (deadline L3132) via step L4074 */
+        /* backoff armed: start_recovery_backoff() L3148 (deadline L3151) via step L4156 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_ELECTION) |
-        /* Head offer: begin_join() L1885 via consider_head_offer() L2157 */
+        /* Head offer: begin_join() L1904 via consider_head_offer() L2176 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
-        /* recovery Head join: handle_recovery_declare() L3175 */
+        /* recovery Head join: handle_recovery_declare() L3194 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
 
     [UCN_CLUSTER_PHASE_RECOVERY_ELECTION] =
-        /* quorum, declare: declare_recovery_head() L3136 (role=RECOVERY_HEAD L3141) */
+        /* quorum, declare: declare_recovery_head() L3155 (role=RECOVERY_HEAD L3160) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_HEAD) |
-        /* Head offer: begin_join() L1885 via consider_head_offer() L2157 */
+        /* Head offer: begin_join() L1904 via consider_head_offer() L2176 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
-        /* recovery Head join: handle_recovery_declare() L3175 */
+        /* recovery Head join: handle_recovery_declare() L3194 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
 
     [UCN_CLUSTER_PHASE_RECOVERY_HEAD] =
-        /* TTL expired (cooldown): stepdown_recovery_head() L3159 -> set_detached() L1856 */
+        /* TTL expired (cooldown): stepdown_recovery_head() L3178 -> set_detached() L1875 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) |
-        /* lost arbitration / HEAD_TAKEOVER: handle_recovery_declare() L3175 /
-         * handle_head_takeover() L2993 */
+        /* lost arbitration / HEAD_TAKEOVER: handle_recovery_declare() L3194 /
+         * handle_head_takeover() L3012 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
-        /* stable Head reclaims: begin_ordered_stepdown() L2112 */
+        /* stable Head reclaims: begin_ordered_stepdown() L2131 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 };
 
@@ -1102,8 +1102,8 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         cluster->role = UCN_CLUSTER_ROLE_DISABLED;
         break;
     case UCN_CLUSTER_PHASE_DETACHED_OBSERVE:
-        /* Every inbound edge goes through set_detached() L1856
-         * (role=DETACHED L1861, known_backup cleared L1870, grace L1878);
+        /* Every inbound edge goes through set_detached() L1875
+         * (role=DETACHED L1880, known_backup cleared L1889, grace L1897);
          * recovery_eligible is false on every inbound edge (the only
          * eligible=true writers produce RECOVERY_OBSERVE) and no inbound
          * edge arms backoff. */
@@ -1115,15 +1115,15 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         cluster->known_backup_generation = 0U;
         break;
     case UCN_CLUSTER_PHASE_ELECTION:
-        /* role only: start_election() L3493 / backup_challenge() L2134
+        /* role only: start_election() L3512 / backup_challenge() L2153
          * write role=CANDIDATE; their mirror clears are site-owned and
          * must NOT be replayed here (members[]/backup_generation survive
          * a challenge, exactly as the real site leaves them). */
         cluster->role = UCN_CLUSTER_ROLE_CANDIDATE;
         break;
     case UCN_CLUSTER_PHASE_JOIN_PENDING:
-        /* begin_join() L1885: role=JOIN_PENDING L1893, abandons Recovery
-         * candidacy L1891-1892; the mirror/known_backup are NOT cleared by
+        /* begin_join() L1904: role=JOIN_PENDING L1912, abandons Recovery
+         * candidacy L1910-1911; the mirror/known_backup are NOT cleared by
          * begin_join() (only the BACKUP higher-Term path does backup_clear_
          * sync() BEFORE begin_join, at the site). */
         cluster->role = UCN_CLUSTER_ROLE_JOIN_PENDING;
@@ -1131,8 +1131,8 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         cluster->recovery_backoff_deadline_ms = 0U;
         break;
     case UCN_CLUSTER_PHASE_MEMBER_ACTIVE:
-        /* handle_join_accept() L2025 (role=MEMBER L2049, grace=0 L2058)
-         * and handle_head_takeover() L2993 (role L3021, grace=0 L3028)
+        /* handle_join_accept() L2044 (role=MEMBER L2068, grace=0 L2077)
+         * and handle_head_takeover() L3012 (role L3040, grace=0 L3047)
          * both write role+grace; recovery_eligible is false on every
          * inbound edge.  known_backup_* are NOT cleared by
          * handle_join_accept() (retained-state Test A). */
@@ -1141,8 +1141,8 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         cluster->recovery_eligible = false;
         break;
     case UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE:
-        /* Sole inbound edge: ucn_cluster_step_inner() L3965 arms the
-         * grace deadline L3983. */
+        /* Sole inbound edge: ucn_cluster_step_inner() L4047 arms the
+         * grace deadline L4065. */
         cluster->role = UCN_CLUSTER_ROLE_MEMBER;
         if (cluster->head_grace_deadline_ms == 0U) {
             cluster->head_grace_deadline_ms = ucn_deadline_from_now(
@@ -1153,10 +1153,10 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         /* Entering HEAD_NO_BACKUP canonicalizes node_id=0 / ready=false
          * as a DESTINATION invariant: HEAD_NO_BACKUP is DEFINED by
          * backup_node_id == 0, so the hook normalizes it regardless of
-         * which inbound site ran (remove_member() L1942 / expire_members()
-         * L3901 / complete_takeover() L2763 / handle_backup_reject()).
+         * which inbound site ran (remove_member() L1961 / expire_members()
+         * L3983 / complete_takeover() L2782 / handle_backup_reject()).
          * Note this is NOT true of every inbound edge's own writes: the
-         * ELECTION inbound (complete_election() L3510) LEAVES the
+         * ELECTION inbound (complete_election() L3551) LEAVES the
          * candidate's preserved backup_* state, which decides the actual
          * destination sub-phase - the 01-04b complete_election wiring must
          * dispatch on that caller state (NO_BACKUP only when node_id==0,
@@ -1167,59 +1167,59 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         cluster->backup_ready = false;
         break;
     case UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING:
-        /* role only: assign_backup() L2399 writes node_id/ready and
-         * start_backup_assignment_cycle() L3571 sets assign_pending at the
-         * SITE; complete_election() L3510 leaves the caller's backup state
+        /* role only: assign_backup() L2418 writes node_id/ready and
+         * start_backup_assignment_cycle() L3653 sets assign_pending at the
+         * SITE; complete_election() L3551 leaves the caller's backup state
          * (which decides the sub-phase). */
         cluster->role = UCN_CLUSTER_ROLE_HEAD;
         break;
     case UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING:
         /* role only: caller-provided node_id/assign_pending/ready state
-         * decides the sub-phase (complete_election L3510 / backup_resync
-         * L3846 / assignment sweep L3642). */
+         * decides the sub-phase (complete_election L3551 / backup_resync
+         * L3928 / assignment sweep L3724). */
         cluster->role = UCN_CLUSTER_ROLE_HEAD;
         break;
     case UCN_CLUSTER_PHASE_HEAD_STABLE:
         /* role only: the caller provides ready=true (handle_backup_ready
-         * L2543 / complete_election caller state). */
+         * L2562 / complete_election caller state). */
         cluster->role = UCN_CLUSTER_ROLE_HEAD;
         break;
     case UCN_CLUSTER_PHASE_BACKUP_SYNCING:
-        /* handle_backup_assign() L2449 (role=BACKUP L2485, syncing=true
-         * L2492, ready=false L2493) and handle_backup_member_sync() L2547
-         * BEGIN/gap (L2598-2599, L2611-2612) both write role+syncing+ready;
+        /* handle_backup_assign() L2468 (role=BACKUP L2504, syncing=true
+         * L2511, ready=false L2512) and handle_backup_member_sync() L2566
+         * BEGIN/gap (L2617-2618, L2630-2631) both write role+syncing+ready;
          * takeover is never set on an inbound edge of this phase. */
         cluster->role = UCN_CLUSTER_ROLE_BACKUP;
         cluster->backup_ready = false;
         cluster->backup_syncing = true;
         break;
     case UCN_CLUSTER_PHASE_BACKUP_READY:
-        /* handle_backup_member_sync() L2547 SYNC_END: role=BACKUP,
-         * syncing=false L2623, ready=true L2624. */
+        /* handle_backup_member_sync() L2566 SYNC_END: role=BACKUP,
+         * syncing=false L2642, ready=true L2643. */
         cluster->role = UCN_CLUSTER_ROLE_BACKUP;
         cluster->backup_ready = true;
         cluster->backup_syncing = false;
         break;
     case UCN_CLUSTER_PHASE_BACKUP_TAKEOVER:
-        /* start_takeover() L2806: role=BACKUP, takeover=true L2811;
+        /* start_takeover() L2825: role=BACKUP, takeover=true L2830;
          * ready/syncing are NOT cleared (CLV2-M01.0.2: the takeover_active
          * && syncing combo is reachable and must be expressed). */
         cluster->role = UCN_CLUSTER_ROLE_BACKUP;
         cluster->backup_takeover_active = true;
         break;
     case UCN_CLUSTER_PHASE_STEPPING_DOWN:
-        /* begin_ordered_stepdown() L2112: role=STEPPING_DOWN L2120, yields
-         * Recovery candidacy L2117-2118; the Head keeps its Backup
+        /* begin_ordered_stepdown() L2131: role=STEPPING_DOWN L2139, yields
+         * Recovery candidacy L2136-2137; the Head keeps its Backup
          * selection (node_id/ready) until the deadline. */
         cluster->role = UCN_CLUSTER_ROLE_STEPPING_DOWN;
         cluster->recovery_eligible = false;
         cluster->recovery_backoff_deadline_ms = 0U;
         break;
     case UCN_CLUSTER_PHASE_RECOVERY_OBSERVE:
-        /* Every inbound edge (grace timeout L3987 + set_detached() L1856;
-         * backup missed-heartbeat L4044 + backup_clear_sync() L2367;
-         * RECOVERY_HEAD TTL stepdown_recovery_head L3159 -> set_detached()
-         * L1856) results in role=DETACHED, eligible=true, backoff=0, and
+        /* Every inbound edge (grace timeout L4069 + set_detached() L1875;
+         * backup missed-heartbeat L4126 + backup_clear_sync() L2386;
+         * RECOVERY_HEAD TTL stepdown_recovery_head L3178 -> set_detached()
+         * L1875) results in role=DETACHED, eligible=true, backoff=0, and
          * set_detached() clears grace + known_backup. */
         cluster->role = UCN_CLUSTER_ROLE_DETACHED;
         cluster->recovery_eligible = true;
@@ -1301,17 +1301,21 @@ static ucn_result_t cluster_transition(ucn_cluster_t *cluster,
             "cluster_transition: illegal or mismatched phase transition");
         return UCN_ERR_STATE;
     }
-    /* CLV2-01-04a.1 (Item 3): pre-transition discipline - the current
-     * legacy state must still derive the claimed old phase BEFORE
-     * committing, so a site that already mutated phase-relevant legacy
-     * fields is caught.  Fields a site sets AFTER the call are fine (the
-     * end-of-step/RX shadow sync re-aligns). */
+    /* CLV2-01-04a.1 (Item 3) + CLV2-01-04b.2 (human MINOR): the
+     * pre-transition discipline is now a REAL runtime validation in BOTH
+     * build modes, before any write - the current legacy state must be
+     * valid and must still derive the claimed old phase, so a site that
+     * already mutated phase-relevant legacy fields is caught and fails
+     * closed (UCN_ERR_STATE, nothing committed).  Fields a site sets
+     * AFTER the call are fine (the end-of-step/RX shadow sync re-aligns). */
+    if (!cluster_legacy_state_is_valid(cluster) ||
+        cluster_phase_from_legacy_state(cluster, now_ms) != old_phase) {
 #if !defined(NDEBUG)
-    if (cluster_phase_from_legacy_state(cluster, now_ms) != old_phase) {
         assert(0 && "cluster_transition: legacy does not derive old_phase "
                "(site pre-mutated phase-relevant fields?)");
-    }
 #endif
+        return UCN_ERR_STATE;
+    }
     /* 1) Commit the shadow mirror (explicit reason replaces the M01
      *    BEST-EFFORT diff inference).  CLV2-01-04a review A (F4): an
      *    UNKNOWN or out-of-range reason must never be recorded on an
@@ -3549,6 +3553,7 @@ static void complete_election(ucn_cluster_t *cluster, uint32_t now_ms)
     size_t index;
     ucn_node_id_t best_node = cluster->config.local_node_id;
     uint16_t best_score = cluster->config.head_score;
+    ucn_cluster_phase_t target_phase;
 
     for (index = 0U; index < UCN_CLUSTER_MAX_CANDIDATES; ++index) {
         const ucn_cluster_candidate_t *candidate = &cluster->candidates[index];
@@ -3565,14 +3570,54 @@ static void complete_election(ucn_cluster_t *cluster, uint32_t now_ms)
         }
     }
     if (best_node != cluster->config.local_node_id) {
+        /* CLV2-01-04b.2 loss path (human TRAP 1): transition FIRST,
+         * set_detached() second - set_detached() writes role=DETACHED,
+         * which would violate the pre-transition derive discipline if it
+         * ran before the transition.  After the transition its role
+         * rewrite is redundant-but-harmless; its epoch/vote/lease/
+         * deadline/grace/known_backup clears stay site-owned. */
+        if (cluster_transition(cluster, UCN_CLUSTER_PHASE_ELECTION,
+                               UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                               UCN_CLUSTER_REASON_ELECTION_LOST,
+                               now_ms) != UCN_OK) {
+            /* Fail closed: rejected transition leaves every field
+             * untouched - do not run the detach side effects. */
+            return;
+        }
         set_detached(cluster, now_ms, cluster->config.observation_ms);
+#if !defined(NDEBUG)
+        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+               UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+#endif
         return;
     }
-    cluster->role = UCN_CLUSTER_ROLE_HEAD;
+    /* CLV2-01-04b.2 win path (human TRAP 2): the destination HEAD
+     * sub-phase is dispatched from the PRE-CALL preserved backup_* state
+     * (read BEFORE the transition - apply_legacy(HEAD_NO_BACKUP) forces
+     * backup_node_id=0, so post-call reads would be wrong). */
+    if (cluster->backup_node_id == 0U) {
+        target_phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+    } else if (cluster->backup_ready) {
+        target_phase = UCN_CLUSTER_PHASE_HEAD_STABLE;
+    } else if (cluster->backup_assign_pending) {
+        target_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING;
+    } else {
+        target_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
+    }
+    if (cluster_transition(cluster, UCN_CLUSTER_PHASE_ELECTION,
+                           target_phase, UCN_CLUSTER_REASON_ELECTION_WON,
+                           now_ms) != UCN_OK) {
+        /* Fail closed: do not run the win side effects on a non-HEAD
+         * node. */
+        return;
+    }
     cluster->role_since_ms = now_ms;
     cluster->election_deadline_ms = 0U;
     cluster->next_advertise_ms = now_ms;
     cluster->stats.elections_won++;
+#if !defined(NDEBUG)
+    assert(cluster_phase_from_legacy_state(cluster, now_ms) == target_phase);
+#endif
 }
 
 static size_t admitted_peer_count(const ucn_cluster_t *cluster)

@@ -2753,11 +2753,57 @@ static int cluster_test_election_join_and_failover(void)
 {
     cluster_test_network_t network;
     uint32_t now_ms;
+    ucn_cluster_phase_t prev_phase[3] = {
+        UCN_CLUSTER_PHASE_DISABLED,
+        UCN_CLUSTER_PHASE_DISABLED,
+        UCN_CLUSTER_PHASE_DISABLED
+    };
+    bool saw_election_started = false;
+    bool saw_election_won = false;
+    bool saw_election_lost = false;
 
     TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
     for (now_ms = 0U; now_ms <= 140U; ++now_ms) {
+        size_t index;
         TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+        /* CLV2-01-04b.2 NIT: election-lifecycle reason loop - every phase
+         * transition each node makes through the first election must carry
+         * the exact reason from the migrated sites: ELECTION_STARTED on
+         * entering ELECTION, ELECTION_WON on the winner's HEAD_*, and
+         * ELECTION_LOST on a loser's ELECTON->DETACHED_OBSERVE. */
+        for (index = 0U; index < 3U; ++index) {
+            ucn_cluster_t *c = &network.nodes[index].cluster;
+            ucn_cluster_phase_t cur = c->shadow_phase;
+
+            if (cur != prev_phase[index]) {
+                if (cur == UCN_CLUSTER_PHASE_ELECTION) {
+                    TEST_ASSERT(c->transition_reason ==
+                                UCN_CLUSTER_REASON_ELECTION_STARTED);
+                    saw_election_started = true;
+                } else if (prev_phase[index] == UCN_CLUSTER_PHASE_ELECTION &&
+                           cur >= UCN_CLUSTER_PHASE_HEAD_NO_BACKUP &&
+                           cur <= UCN_CLUSTER_PHASE_HEAD_STABLE) {
+                    /* ELECTION -> HEAD_* is the election win itself;
+                     * later HEAD sub-phase churn (ASSIGNING/SYNCING/
+                     * STABLE) carries its own reasons. */
+                    TEST_ASSERT(c->transition_reason ==
+                                UCN_CLUSTER_REASON_ELECTION_WON);
+                    saw_election_won = true;
+                } else if (cur == UCN_CLUSTER_PHASE_DETACHED_OBSERVE &&
+                           prev_phase[index] == UCN_CLUSTER_PHASE_ELECTION) {
+                    TEST_ASSERT(c->transition_reason ==
+                                UCN_CLUSTER_REASON_ELECTION_LOST);
+                    saw_election_lost = true;
+                }
+                prev_phase[index] = cur;
+            }
+        }
     }
+    /* Every election-lifecycle reason was actually observed on the real
+     * path (start -> win, start -> loss). */
+    TEST_ASSERT(saw_election_started);
+    TEST_ASSERT(saw_election_won);
+    TEST_ASSERT(saw_election_lost);
     if (ucn_cluster_member_count(&network.nodes[0].cluster) != 3U) {
         printf("CLUSTER_DEBUG head_role=%u members=%zu roles=%u/%u/%u/%u "
                "accepted=%lu rejected=%lu sent=%lu received=%lu\n",
