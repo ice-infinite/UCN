@@ -891,7 +891,8 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE) |
         /* BACKUP_ASSIGN(self): handle_backup_assign() L2585 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING) |
-        /* stepdown / reset: HEAD_STEPDOWN -> set_detached() L1915 */
+        /* stepdown / reset: HEAD_STEPDOWN (receive_inner L3580,
+         * transition L3649, CLV2-01-04c.5) -> set_detached() L1915 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
         /* better Head switch: begin_join() L1967 via consider_head_offer() L2194 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING),
@@ -900,7 +901,8 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* Head lease renewed: consider_head_offer() L2194 refresh (grace=0 L2281) /
          * handle_head_takeover() L3129 (grace=0 L3164) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
-        /* HEAD_STEPDOWN -> set_detached() L1915 */
+        /* HEAD_STEPDOWN (receive_inner L3580, transition L3649,
+         * CLV2-01-04c.5) -> set_detached() L1915 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
 
         /* grace timeout: step L4253 (recovery_eligible=true) + set_detached() L1915 */
@@ -3626,17 +3628,52 @@ static ucn_result_t ucn_cluster_receive_inner(
                     assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
                            UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
 #endif
-                } else {
-                    /* MEMBER/BACKUP sub-branches stay CURRENT legacy order
-                     * (write the nonce first, then branch) - they are not
-                     * migrated yet. */
-                    cluster->last_stepdown_nonce = message.nonce;
-                    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
-                        backup_clear_sync(cluster, now_ms);
-                    } else {
-                        set_detached(cluster, now_ms,
-                                     cluster->config.observation_ms);
+                } else if (cluster->role == UCN_CLUSTER_ROLE_MEMBER) {
+                    /* CLV2-01-04c.5: the MEMBER sub-branch migrates with
+                     * the b.6 fail-closed lesson.  The old phase is
+                     * derived from the PRE-CALL state (role==MEMBER: an
+                     * armed grace deadline means MEMBER_TAKEOVER_GRACE,
+                     * otherwise MEMBER_ACTIVE) and the transition runs
+                     * FIRST - set_detached() writes role=DETACHED, which
+                     * would trip the pre-transition derive check if it ran
+                     * first.  Reason is EXPLICIT STEPDOWN_ORDERED (the
+                     * BEST-EFFORT fallback for this pair would mint
+                     * RESET/GRACE_TIMEOUT, semantically wrong for an
+                     * ordered stepdown).  On success the site consumes the
+                     * anti-replay fence and runs set_detached() in the
+                     * original order; set_detached()'s epoch/vote/lease/
+                     * deadline/known_backup clears stay site-owned. */
+                    ucn_cluster_phase_t old_phase =
+                        (cluster->head_grace_deadline_ms != 0U)
+                            ? UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE
+                            : UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+
+                    if (cluster_transition(cluster, old_phase,
+                                           UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                                           UCN_CLUSTER_REASON_STEPDOWN_ORDERED,
+                                           now_ms) != UCN_OK) {
+                        /* Fail closed: a rejected transition leaves every
+                         * field untouched INCLUDING the anti-replay fence
+                         * - the node stays MEMBER and a later well-formed
+                         * STEPDOWN may still be accepted. */
+                        return UCN_ERR_STATE;
                     }
+                    cluster->last_stepdown_nonce = message.nonce;
+                    set_detached(cluster, now_ms,
+                                 cluster->config.observation_ms);
+#if !defined(NDEBUG)
+                    /* CLV2-01-04c.5 post-commit derive assert: after the
+                     * transition AND set_detached() the legacy state must
+                     * still derive DETACHED_OBSERVE. */
+                    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                           UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+#endif
+                } else {
+                    /* BACKUP sub-branch stays CURRENT legacy order (write
+                     * the nonce first, then backup_clear_sync) - it is
+                     * not migrated yet (01-04e). */
+                    cluster->last_stepdown_nonce = message.nonce;
+                    backup_clear_sync(cluster, now_ms);
                 }
                 return UCN_OK;
             }
