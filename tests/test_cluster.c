@@ -2442,6 +2442,65 @@ static int cluster_test_shadow_grace_timeout(void)
     return 0;
 }
 
+/* CLV2-01-04c: the member lease-expiry / grace-timeout path flows through
+ * cluster_transition().  (a) lease expiry arms the grace: the FIRST GRACE
+ * tick must pin reason HEAD_LEASE_EXPIRED with an armed grace deadline
+ * (role stays MEMBER); (b) the grace deadline then expires with no Head:
+ * RECOVERY_OBSERVE pinned to reason GRACE_TIMEOUT (role DETACHED,
+ * recovery_eligible, grace disarmed, no backoff).  The shadow audit
+ * already covers the phase sequence; these asserts pin the reasons at the
+ * right ticks. */
+static int cluster_test_lease_grace_reasons(void)
+{
+    cluster_test_network_t network;
+    ucn_cluster_t *member;
+    uint32_t now_ms;
+    bool saw_grace_arm = false;
+    bool saw_grace_timeout = false;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    for (now_ms = 0U; now_ms <= 140U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+    }
+    TEST_ASSERT(network.nodes[0].cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    /* Both Head and Backup die: nobody can take over, so the member's
+     * grace must run to its timeout. */
+    network.nodes[0].alive = false;
+    network.nodes[1].alive = false;
+    member = &network.nodes[2].cluster;
+    for (now_ms = 141U; now_ms <= 400U; ++now_ms) {
+        TEST_ASSERT(cluster_test_tick(&network, now_ms) == 0);
+        /* (a) lease expiry arms the grace: the FIRST GRACE tick carries
+         * reason HEAD_LEASE_EXPIRED, role stays MEMBER and the deadline
+         * is armed (shadow == derived == MEMBER_TAKEOVER_GRACE). */
+        if (!saw_grace_arm &&
+            member->shadow_phase == UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE) {
+            TEST_ASSERT(member->transition_reason ==
+                        UCN_CLUSTER_REASON_HEAD_LEASE_EXPIRED);
+            TEST_ASSERT(member->role == UCN_CLUSTER_ROLE_MEMBER);
+            TEST_ASSERT(member->head_grace_deadline_ms != 0U);
+            TEST_ASSERT(member->stats.head_leases_expired == 1U);
+            saw_grace_arm = true;
+        }
+        /* (b) the grace deadline expires with no Head: RECOVERY_OBSERVE
+         * carries reason GRACE_TIMEOUT with role DETACHED, eligibility
+         * armed and the grace deadline disarmed. */
+        if (!saw_grace_timeout &&
+            member->shadow_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) {
+            TEST_ASSERT(member->transition_reason ==
+                        UCN_CLUSTER_REASON_GRACE_TIMEOUT);
+            TEST_ASSERT(member->role == UCN_CLUSTER_ROLE_DETACHED);
+            TEST_ASSERT(member->recovery_eligible == true);
+            TEST_ASSERT(member->head_grace_deadline_ms == 0U);
+            saw_grace_timeout = true;
+        }
+    }
+    TEST_ASSERT(saw_grace_arm);
+    TEST_ASSERT(saw_grace_timeout);
+    TEST_ASSERT(member->shadow_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    return 0;
+}
+
 /* CLV2-M01.0.2: a delayed same-generation Type12 (SYNC_BEGIN) from the
  * old Primary can re-arm backup_syncing while takeover is active.
  * Current FSM accepts it (no takeover guard in the handler), so the
@@ -4566,6 +4625,7 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_phase_mapping_static() == 0);
     TEST_ASSERT(cluster_test_shadow_lifecycle() == 0);
     TEST_ASSERT(cluster_test_shadow_grace_timeout() == 0);
+    TEST_ASSERT(cluster_test_lease_grace_reasons() == 0);
     TEST_ASSERT(cluster_test_shadow_takeover_late_sync() == 0);
     TEST_ASSERT(cluster_test_transition_matrix() == 0);
     TEST_ASSERT(cluster_test_transition_apply() == 0);
