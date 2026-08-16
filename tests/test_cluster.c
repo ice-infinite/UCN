@@ -5454,6 +5454,8 @@ static int cluster_test_backup_assignment_sweep_transition(void)
     TEST_ASSERT(c->backup_node_id == network.nodes[1].node_id);
     TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
                 UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
+    return 0;
+}
 
 /* CLV2-01-04d.4: remove_member() / expire_members() backup-eviction
  * preflight wiring (the FIRST irreversible-site migration).
@@ -5544,8 +5546,9 @@ static int cluster_test_remove_member_backup_loss(void)
                     UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
     }
 
-    /* (c) remove_member: non-backup eviction -> legacy path, NO
-     * transition (shadow + count untouched). */
+    /* (c) remove_member: non-backup eviction -> NO BACKUP_LOST transition;
+     * but the legacy backup_resync() still runs (Current behaviour), and with
+     * d.5 merged that resync is itself a STABLE->SYNCING transition. */
     cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_HEAD_STABLE);
     cluster_test_seed_legacy(c, UCN_CLUSTER_PHASE_HEAD_STABLE, now_ms);
     c->members[0].occupied = true;
@@ -5553,9 +5556,11 @@ static int cluster_test_remove_member_backup_loss(void)
     c->members[1].occupied = true;
     c->members[1].node_id = 3U;
     ucn_cluster_test_remove_member(c, 3U, now_ms);
-    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_STABLE);
-    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_UNKNOWN);
-    TEST_ASSERT(c->shadow_transition_count == 0U);
+    /* the backup-loss path was NOT taken (reason must not be BACKUP_LOST);
+     * the resync transition (d.5) is the correct Current semantics. */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_RESYNC_STARTED);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
     TEST_ASSERT(c->members[1].occupied == false); /* evicted */
     TEST_ASSERT(c->members[0].occupied == true);  /* backup survives */
     TEST_ASSERT(c->backup_node_id == 2U);
@@ -5563,8 +5568,8 @@ static int cluster_test_remove_member_backup_loss(void)
     TEST_ASSERT(c->backup_ready == false);
     TEST_ASSERT(c->backup_sync_cursor == 0U);
 
-    /* (c-expire) expire_members: non-backup expiry -> legacy path, NO
-     * transition. */
+    /* (c-expire) expire_members: non-backup expiry -> NO BACKUP_LOST;
+     * the legacy resync (d.5) still transitions STABLE->SYNCING. */
     cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_HEAD_STABLE);
     cluster_test_seed_legacy(c, UCN_CLUSTER_PHASE_HEAD_STABLE, now_ms);
     c->members[0].occupied = true;
@@ -5574,9 +5579,9 @@ static int cluster_test_remove_member_backup_loss(void)
     c->members[1].node_id = 3U; /* expired */
     c->members[1].lease_expires_at_ms = now_ms - 1U;
     ucn_cluster_test_expire_members(c, now_ms);
-    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_STABLE);
-    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_UNKNOWN);
-    TEST_ASSERT(c->shadow_transition_count == 0U);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_RESYNC_STARTED);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
     TEST_ASSERT(c->members[1].occupied == false);
     TEST_ASSERT(c->members[0].occupied == true);
     TEST_ASSERT(c->backup_node_id == 2U);

@@ -4516,9 +4516,14 @@ static void backup_resync(ucn_cluster_t *cluster)
         if (pre_phase == UCN_CLUSTER_PHASE_HEAD_STABLE) {
             /* CLV2-01-04d.5 post-commit derive assert: the STABLE-origin
              * transition + the site's ready=false write must land on
-             * HEAD_BACKUP_SYNCING (no assignment sweep in flight - a
-             * READY Backup implies the sweep had completed). */
-            assert(derived == UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
+             * HEAD_BACKUP_SYNCING - UNLESS the step's periodic re-assign
+             * armed the assignment sweep in this same tick (assign_pending
+             * = true while ready was still true keeps derive STABLE;
+             * after ready=false the derive is ASSIGNING while the sweep is
+             * mid-drain, else SYNCING).  The end-of-step shadow sync then
+             * mints the already-observed SYNCING->ASSIGNING pair. */
+            assert(derived == UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING ||
+                   derived == UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING);
         } else {
             /* No transition ran: the legacy body alone must NOT move
              * the phase - an already-SYNCING/ASSIGNING head (e.g.
