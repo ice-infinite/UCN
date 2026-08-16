@@ -931,6 +931,12 @@ static int cluster_test_backup_ready_fencing(void)
     head->cluster.backup_generation = 1U;
     head->cluster.membership_sequence = 3U;
     head->cluster.backup_ready = false;
+    /* CLV2-01-04d.3: the migrated READY handler validates shadow == the
+     * derived old phase (HEAD_BACKUP_SYNCING: node selected, sweep done,
+     * snapshot in flight) before the STABLE transition, so the manual
+     * staging must align the mirror too. */
+    head->cluster.backup_assign_pending = false;
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
 
     /* Current epoch READY: accepted. */
     (void)memset(&message, 0, sizeof(message));
@@ -962,6 +968,115 @@ static int cluster_test_backup_ready_fencing(void)
                                     true, encoded, sizeof(encoded)) ==
                 UCN_ERR_REPLAY);
     TEST_ASSERT(head->cluster.backup_ready == false);
+    return 0;
+}
+
+/* CLV2-01-04d.3: handle_backup_ready() is wired onto cluster_transition()
+ * - the READY is the SYNCING/ASSIGNING -> HEAD_STABLE transition, run
+ * BEFORE the ready=true write and fail-closed.  (a) a SYNCING Head
+ * receives BACKUP_READY -> shadow==STABLE, reason==SNAPSHOT_READY;
+ * (b) an ASSIGNING Head (assign_pending) receives the same epoch ->
+ * identical result, old_phase==HEAD_BACKUP_ASSIGNING; (c) a shadow
+ * desync fails closed with UCN_ERR_STATE and ready stays false. */
+static int cluster_test_backup_ready_transition(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    ucn_cluster_t *c;
+    ucn_cluster_t before;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    head = &network.nodes[0];
+    c = &head->cluster;
+    network.now_ms = 0U;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_READY;
+    message.role = UCN_CLUSTER_ROLE_BACKUP;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.backup_generation = 1U;
+    message.membership_sequence = 3U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+
+    /* (a) SYNCING Head: selected Backup, sweep complete, snapshot in
+     * flight (assign_pending false, ready false). */
+    c->role = UCN_CLUSTER_ROLE_HEAD;
+    c->cluster_id = 1U;
+    c->term = 1U;
+    c->head_node_id = head->node_id;
+    c->backup_node_id = network.nodes[1].node_id;
+    c->backup_generation = 1U;
+    c->membership_sequence = 3U;
+    c->backup_ready = false;
+    c->backup_assign_pending = false;
+    c->shadow_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
+    TEST_ASSERT(ucn_cluster_receive(c, network.nodes[1].node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_STABLE);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_SNAPSHOT_READY);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
+    TEST_ASSERT(c->backup_ready == true);
+    TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
+                UCN_CLUSTER_PHASE_HEAD_STABLE);
+
+    /* (b) ASSIGNING Head: same-epoch READY while the assignment sweep is
+     * still pending - old_phase derives HEAD_BACKUP_ASSIGNING. */
+    c->role = UCN_CLUSTER_ROLE_HEAD;
+    c->cluster_id = 1U;
+    c->term = 1U;
+    c->head_node_id = head->node_id;
+    c->backup_node_id = network.nodes[1].node_id;
+    c->backup_generation = 1U;
+    c->membership_sequence = 3U;
+    c->backup_ready = false;
+    c->backup_assign_pending = true;
+    c->shadow_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING;
+    TEST_ASSERT(ucn_cluster_receive(c, network.nodes[1].node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_STABLE);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_SNAPSHOT_READY);
+    TEST_ASSERT(c->backup_ready == true);
+    TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
+                UCN_CLUSTER_PHASE_HEAD_STABLE);
+
+    /* (c) fail-closed: the shadow claims DETACHED_OBSERVE while the
+     * legacy state derives SYNCING - the STABLE transition rejects with
+     * UCN_ERR_STATE and ready stays false (no phase-relevant write). */
+    c->role = UCN_CLUSTER_ROLE_HEAD;
+    c->cluster_id = 1U;
+    c->term = 1U;
+    c->head_node_id = head->node_id;
+    c->backup_node_id = network.nodes[1].node_id;
+    c->backup_generation = 1U;
+    c->membership_sequence = 3U;
+    c->backup_ready = false;
+    c->backup_assign_pending = false;
+    c->shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE; /* desync */
+    /* Rejection tests silence the Debug assert knob (framework
+     * convention, cluster_transition_assert_enabled) so the release
+     * behaviour - UCN_ERR_STATE with ZERO writes - can be verified. */
+    ucn_cluster_test_transition_asserts_set(false);
+    before = *c;
+    TEST_ASSERT(ucn_cluster_receive(c, network.nodes[1].node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_ERR_STATE);
+    TEST_ASSERT(c->backup_ready == false);
+    TEST_ASSERT(c->backup_assign_pending == false);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_HEAD);
+    TEST_ASSERT(c->backup_node_id == network.nodes[1].node_id);
+    TEST_ASSERT(c->membership_sequence == before.membership_sequence);
+    /* The transition never committed: no STABLE shadow, no READY reason. */
+    TEST_ASSERT(c->shadow_phase != UCN_CLUSTER_PHASE_HEAD_STABLE);
+    TEST_ASSERT(c->transition_reason != UCN_CLUSTER_REASON_SNAPSHOT_READY);
+    /* The end-of-RX mirror sync re-aligns shadow to the UNCHANGED legacy
+     * state (SYNCING) - exactly the CLV2-01-02 behaviour for a rejected
+     * message; the legacy state itself never derived STABLE. */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
+    TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
+                UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
+    ucn_cluster_test_transition_asserts_set(true);
     return 0;
 }
 
@@ -3063,6 +3178,12 @@ static int cluster_test_backup_sync(void)
     head->cluster.backup_generation = 1U;
     head->cluster.backup_ready = false;
     head->cluster.backup_sync_cursor = 0U;
+    /* CLV2-01-04d.3: the manual staging must align the shadow mirror
+     * with the derived HEAD_BACKUP_SYNCING phase (selected Backup, sweep
+     * complete, snapshot in flight) - the migrated READY handler
+     * validates shadow == old before the STABLE transition. */
+    head->cluster.backup_assign_pending = false;
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
     backup->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
     backup->cluster.cluster_id = 1U;
     backup->cluster.term = 1U;
@@ -4487,7 +4608,7 @@ static int cluster_test_transition_matrix(void)
                     c->backup_ready = false;
                     break;
                 case UCN_CLUSTER_PHASE_HEAD_STABLE:
-                    /* site: handle_backup_ready() L2467. */
+                    /* site: handle_backup_ready() L2833 (ready=true). */
                     c->backup_node_id = 2U;
                     c->backup_ready = true;
                     break;
@@ -4927,7 +5048,7 @@ static int cluster_test_transition_apply(void)
                     UCN_CLUSTER_PHASE_HEAD_STABLE,
                     UCN_CLUSTER_REASON_SNAPSHOT_READY, now_ms) == UCN_OK);
     TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_STABLE);
-    c->backup_ready = true; /* site: handle_backup_ready L2467 */
+    c->backup_ready = true; /* site: handle_backup_ready L2833 */
     TEST_ASSERT(c->backup_ready == true);
     TEST_ASSERT(c->backup_generation == 5U);
     /* STABLE -> NO_BACKUP (Backup lost) also keeps the generation. */
@@ -5037,6 +5158,7 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_v3_codec() == 0);
     TEST_ASSERT(cluster_test_backup_sync() == 0);
     TEST_ASSERT(cluster_test_backup_ready_fencing() == 0);
+    TEST_ASSERT(cluster_test_backup_ready_transition() == 0);
     TEST_ASSERT(cluster_test_primary_heartbeat_fencing() == 0);
     TEST_ASSERT(cluster_test_member_nonce_32bit() == 0);
     TEST_ASSERT(cluster_test_golden_trace() == 0);
