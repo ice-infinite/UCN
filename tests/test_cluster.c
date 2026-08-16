@@ -2844,6 +2844,149 @@ static int cluster_test_election_join_and_failover(void)
     return 0;
 }
 
+/* CLV2-01-04b.3: consider_head_offer()'s stable-Head-offer join now runs
+ * DETACHED_OBSERVE/ELECTION -> JOIN_PENDING through the single transition
+ * entry point (reason JOIN_INITIATED) BEFORE any phase-relevant legacy
+ * mutation, then applies the begin_join() field payload at the site via
+ * begin_join_prepare_fields().  A CANDIDATE node (the required scenario)
+ * and a DETACHED_OBSERVE node both land on shadow == JOIN_PENDING with
+ * transition_reason == JOIN_INITIATED; a recovery-eligible node keeps the
+ * legacy begin_join() (01-04f owns the RECOVERY_* sources); a shadow
+ * mismatch fails closed and applies NO join payload. */
+static int cluster_test_head_offer_join_wiring(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *candidate;
+    cluster_test_node_t *detached;
+    cluster_test_node_t *recovery;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 0U;
+
+    /* Scenario A (required): a CANDIDATE node (ELECTION) accepts a stable
+     * Head ADVERTISE with available_capacity > 0 -> ELECTION -> JOIN_PENDING,
+     * shadow committed FIRST with reason JOIN_INITIATED, then the site
+     * field payload. */
+    candidate = &network.nodes[1];
+    TEST_ASSERT(ucn_cluster_test_transition(
+                    &candidate->cluster, UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                    UCN_CLUSTER_PHASE_ELECTION,
+                    UCN_CLUSTER_REASON_ELECTION_STARTED, 0U) == UCN_OK);
+    TEST_ASSERT(candidate->cluster.role == UCN_CLUSTER_ROLE_CANDIDATE);
+    candidate->cluster.cluster_id = candidate->node_id;
+    candidate->cluster.term = 1U;
+    candidate->cluster.head_node_id = candidate->node_id;
+    candidate->cluster.election_deadline_ms = 20U;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_ADVERTISE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = network.nodes[0].node_id;
+    message.head_score = 9000U;
+    message.available_capacity = 3U;
+    message.lease_ms = 8000U;
+    message.nonce = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&candidate->cluster,
+                                    network.nodes[0].node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(candidate->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(candidate->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(candidate->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_JOIN_INITIATED);
+    TEST_ASSERT(candidate->cluster.pending_head_node_id ==
+                network.nodes[0].node_id);
+    TEST_ASSERT(candidate->cluster.pending_cluster_id == 1U);
+    TEST_ASSERT(candidate->cluster.pending_term == 1U);
+    TEST_ASSERT(candidate->cluster.pending_head_score == 9000U);
+    TEST_ASSERT(candidate->cluster.role_since_ms == 0U);
+    TEST_ASSERT(candidate->cluster.next_join_retry_ms == 0U);
+    TEST_ASSERT(candidate->cluster.recovery_eligible == false);
+    TEST_ASSERT(candidate->cluster.recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(test_derive_phase(&candidate->cluster, 0U) ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+
+    /* Scenario B: a DETACHED_OBSERVE node accepts the same offer ->
+     * DETACHED_OBSERVE -> JOIN_PENDING through the entry point. */
+    detached = &network.nodes[2];
+    TEST_ASSERT(detached->cluster.role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(detached->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+    message.nonce = 2U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&detached->cluster,
+                                    network.nodes[0].node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(detached->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(detached->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(detached->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_JOIN_INITIATED);
+    TEST_ASSERT(detached->cluster.pending_head_node_id ==
+                network.nodes[0].node_id);
+    TEST_ASSERT(detached->cluster.pending_cluster_id == 1U);
+    TEST_ASSERT(detached->cluster.pending_term == 1U);
+    TEST_ASSERT(detached->cluster.recovery_eligible == false);
+
+    /* Scenario C: a recovery-eligible node keeps the legacy begin_join()
+     * (RECOVERY_* sources stay legacy until 01-04f) - the join still
+     * completes with the full field payload, and the end-of-RX shadow
+     * sync derives JOIN_PENDING from the legacy state. */
+    recovery = &network.nodes[3];
+    recovery->cluster.role = UCN_CLUSTER_ROLE_DETACHED;
+    recovery->cluster.recovery_eligible = true;
+    recovery->cluster.recovery_backoff_deadline_ms = 0U;
+    message.nonce = 3U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&recovery->cluster,
+                                    network.nodes[0].node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(recovery->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(recovery->cluster.pending_head_node_id ==
+                network.nodes[0].node_id);
+    TEST_ASSERT(recovery->cluster.pending_term == 1U);
+    TEST_ASSERT(recovery->cluster.recovery_eligible == false);
+    TEST_ASSERT(recovery->cluster.recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(recovery->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(recovery->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_JOIN_INITIATED);
+
+    /* Scenario D (fail closed): a node whose legacy state (CANDIDATE) does
+     * NOT derive the claimed old phase from the shadow mirror (stale
+     * DETACHED_OBSERVE) rejects the transition - the join payload is NOT
+     * applied and every field is left untouched.  The end-of-RX shadow
+     * sync then reconciles the mirror to the legacy CANDIDATE state. */
+    {
+        cluster_test_network_t net2;
+
+        TEST_ASSERT(cluster_test_network_init(&net2, 3U) == 0);
+        net2.now_ms = 0U;
+        net2.nodes[1].cluster.role = UCN_CLUSTER_ROLE_CANDIDATE;
+        ucn_cluster_test_transition_asserts_set(false);
+        message.nonce = 9U;
+        TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+        TEST_ASSERT(ucn_cluster_receive(&net2.nodes[1].cluster,
+                                        network.nodes[0].node_id, true,
+                                        encoded, sizeof(encoded)) == UCN_OK);
+        ucn_cluster_test_transition_asserts_set(true);
+        TEST_ASSERT(net2.nodes[1].cluster.role == UCN_CLUSTER_ROLE_CANDIDATE);
+        TEST_ASSERT(net2.nodes[1].cluster.pending_head_node_id == 0U);
+        TEST_ASSERT(net2.nodes[1].cluster.pending_cluster_id == 0U);
+        TEST_ASSERT(net2.nodes[1].cluster.pending_term == 0U);
+        TEST_ASSERT(net2.nodes[1].cluster.pending_head_score == 0U);
+        TEST_ASSERT(net2.nodes[1].cluster.recovery_eligible == false);
+        TEST_ASSERT(net2.nodes[1].cluster.shadow_phase ==
+                    UCN_CLUSTER_PHASE_ELECTION);
+    }
+    return 0;
+}
+
 static int cluster_test_capacity_is_bounded(void)
 {
     cluster_test_network_t network;
@@ -4146,6 +4289,7 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_transition_matrix() == 0);
     TEST_ASSERT(cluster_test_transition_apply() == 0);
     TEST_ASSERT(cluster_test_election_join_and_failover() == 0);
+    TEST_ASSERT(cluster_test_head_offer_join_wiring() == 0);
     TEST_ASSERT(cluster_test_capacity_is_bounded() == 0);
     TEST_ASSERT(cluster_test_neighbor_summary_api() == 0);
     /* CLV2-01-04a review B (T-A): every phase pair actually OBSERVED by
