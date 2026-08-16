@@ -867,9 +867,10 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE),
 
     [UCN_CLUSTER_PHASE_JOIN_PENDING] =
-        /* exact JOIN_ACCEPT: handle_join_accept() L2044 (role=MEMBER L2068) */
+        /* exact JOIN_ACCEPT: handle_join_accept() L2044 (transition L2078, grace=0 L2096) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
-        /* exact JOIN_REJECT / HEAD_STEPDOWN -> set_detached() L1875 */
+        /* exact JOIN_REJECT (receive_inner L3425, transition L3442) /
+         * HEAD_STEPDOWN -> set_detached() L1875 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
         /* BACKUP_ASSIGN(self) arrives first: handle_backup_assign() L2468 (role=BACKUP L2504) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING),
@@ -1131,7 +1132,7 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         cluster->recovery_backoff_deadline_ms = 0U;
         break;
     case UCN_CLUSTER_PHASE_MEMBER_ACTIVE:
-        /* handle_join_accept() L2044 (role=MEMBER L2068, grace=0 L2077)
+        /* handle_join_accept() L2044 (transition L2078, grace=0 L2096)
          * and handle_head_takeover() L3012 (role L3040, grace=0 L3047)
          * both write role+grace; recovery_eligible is false on every
          * inbound edge.  known_backup_* are NOT cleared by
@@ -2064,8 +2065,27 @@ static ucn_result_t handle_join_accept(
             return UCN_ERR_ACCESS;
         }
     }
-    if (cluster->role != UCN_CLUSTER_ROLE_BACKUP) {
-        cluster->role = UCN_CLUSTER_ROLE_MEMBER;
+    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
+        /* CLV2-01-04b.4: a pre-assigned Backup node (BACKUP_ASSIGN(self)
+         * won the race against this late JOIN_ACCEPT) must NOT transition
+         * - it only refreshes the epoch fields below (keep current
+         * behaviour; the shadow stays BACKUP_SYNCING). */
+    } else {
+        /* CLV2-01-04b.4: the role write IS the JOIN_PENDING ->
+         * MEMBER_ACTIVE transition.  The runtime pre-derive (shadow ==
+         * JOIN_PENDING + legacy derives JOIN_PENDING) rejects in Debug if
+         * a site pre-mutated phase-relevant fields; fail closed BEFORE
+         * the epoch refresh. */
+        if (cluster_transition(cluster, UCN_CLUSTER_PHASE_JOIN_PENDING,
+                               UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                               UCN_CLUSTER_REASON_JOIN_ACCEPTED,
+                               now_ms) != UCN_OK) {
+            /* Fail closed per the migration contract: a rejected
+             * transition (shadow mismatch / illegal pair / pre-mutated
+             * phase fields) leaves every field untouched, so do NOT run
+             * the accept side effects on a non-MEMBER node. */
+            return UCN_ERR_STATE;
+        }
     }
     cluster->role_since_ms = now_ms;
     cluster->cluster_id = message->cluster_id;
@@ -2080,6 +2100,17 @@ static ucn_result_t handle_join_accept(
     cluster->pending_cluster_id = 0U;
     cluster->pending_term = 0U;
     cluster->stats.joins_accepted++;
+#if !defined(NDEBUG)
+    /* CLV2-01-04b.4 post-commit derive assert: after the transition AND
+     * every site side effect the join path must still derive
+     * MEMBER_ACTIVE (derive depends only on role == MEMBER with no armed
+     * grace deadline).  The pre-assigned Backup path performs no
+     * transition, so its (unchanged) BACKUP_SYNCING shadow is untouched. */
+    if (cluster->role != UCN_CLUSTER_ROLE_BACKUP) {
+        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+               UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+    }
+#endif
     return UCN_OK;
 }
 
@@ -3402,9 +3433,34 @@ static ucn_result_t ucn_cluster_receive_inner(
                 /* C07.7 P1: only a reject of the exact join txid ends the
                  * attempt; a stale reject of an earlier join is ignored. */
                 message.nonce == cluster->pending_join_nonce) {
+                /* CLV2-01-04b.4: the detach IS the JOIN_PENDING ->
+                 * DETACHED_OBSERVE transition - call it BEFORE
+                 * set_detached() (set_detached() writes role=DETACHED,
+                 * which would violate the pre-transition derive
+                 * discipline if it ran first).  set_detached()'s
+                 * epoch/vote/lease/grace/known_backup clears stay
+                 * site-owned and run after, in original order. */
+                if (cluster_transition(cluster,
+                                       UCN_CLUSTER_PHASE_JOIN_PENDING,
+                                       UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                                       UCN_CLUSTER_REASON_JOIN_REJECTED,
+                                       now_ms) != UCN_OK) {
+                    /* Fail closed: a rejected transition (shadow mismatch
+                     * / illegal pair / pre-mutated phase fields) leaves
+                     * every field untouched - do NOT run the detach side
+                     * effects; the next Step re-visits the join retry. */
+                    return UCN_ERR_STATE;
+                }
                 cluster->stats.joins_rejected++;
                 set_detached(cluster, now_ms,
                              cluster->config.observation_ms);
+#if !defined(NDEBUG)
+                /* CLV2-01-04b.4 post-commit derive assert: after the
+                 * transition AND set_detached() the legacy state must
+                 * still derive DETACHED_OBSERVE. */
+                assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                       UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+#endif
                 return UCN_OK;
             }
             return UCN_ERR_ACCESS;

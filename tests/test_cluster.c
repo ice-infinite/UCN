@@ -1416,6 +1416,11 @@ static int cluster_test_join_txid_and_stepdown_nonce(void)
     node->cluster.pending_cluster_id = 1U;
     node->cluster.pending_term = 5U;
     node->cluster.pending_join_nonce = 9U;
+    /* CLV2-01-04b.4: the JOIN_REJECT detach now routes through
+     * cluster_transition(), which fails closed unless the shadow mirror
+     * already derives JOIN_PENDING - align it (a real join flow syncs the
+     * shadow at the end of the begin_join step/RX). */
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_JOIN_PENDING;
     network.now_ms = 0U;
 
     /* A reject of an old txid cannot abort the current join. */
@@ -1463,6 +1468,136 @@ static int cluster_test_join_txid_and_stepdown_nonce(void)
     TEST_ASSERT(ucn_cluster_receive(&node->cluster, network.nodes[0].node_id,
                                     true, encoded, sizeof(encoded)) == UCN_ERR_ACCESS);
     TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_MEMBER);
+    return 0;
+}
+
+/* CLV2-01-04b.4 (a): a JOIN_PENDING node that joins a full/frozen Head and
+ * receives the exact-epoch JOIN_REJECT detaches THROUGH the single
+ * transition entry point: shadow lands on DETACHED_OBSERVE with reason
+ * JOIN_REJECTED (not just the legacy role write). */
+static int cluster_test_join_reject_shadow_transition(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *node;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    node = &network.nodes[2];
+    node->cluster.role = UCN_CLUSTER_ROLE_JOIN_PENDING;
+    node->cluster.pending_head_node_id = network.nodes[0].node_id;
+    node->cluster.pending_cluster_id = 1U;
+    node->cluster.pending_term = 5U;
+    node->cluster.pending_join_nonce = 9U;
+    /* Align the shadow mirror: a real join flow syncs it to JOIN_PENDING
+     * at the end of the begin_join step/RX; the migrated JOIN_REJECT path
+     * fails closed unless the shadow already derives the claimed phase. */
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_JOIN_PENDING;
+    network.now_ms = 0U;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_JOIN_REJECT;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 5U;
+    message.head_node_id = network.nodes[0].node_id;
+    message.lease_ms = 40U;
+    message.nonce = 9U; /* exact join txid */
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, network.nodes[0].node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
+
+    /* Legacy detach site effects are preserved (epoch/vote/lease clears). */
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(node->cluster.cluster_id == 0U);
+    TEST_ASSERT(node->cluster.term == 0U);
+    TEST_ASSERT(node->cluster.head_node_id == 0U);
+    TEST_ASSERT(node->cluster.head_lease_expires_at_ms == 0U);
+    TEST_ASSERT(node->cluster.member_voted_term == 0U);
+    TEST_ASSERT(node->cluster.stats.joins_rejected == 1U);
+    /* The transition entry point committed the shadow + exact reason. */
+    TEST_ASSERT(node->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+    TEST_ASSERT(node->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_JOIN_REJECTED);
+    TEST_ASSERT(node->cluster.shadow_transition_count == 1U);
+    return 0;
+}
+
+/* CLV2-01-04b.4 (b): OUT-OF-ORDER join - BACKUP_ASSIGN(self) wins the race
+ * against a late JOIN_ACCEPT.  The node transitions JOIN_PENDING ->
+ * BACKUP_SYNCING at the assign; the late ACCEPT must NOT transition (the
+ * pre-assigned Backup only refreshes its epoch fields), so the shadow
+ * stays BACKUP_SYNCING with no MEMBER transition and no UCN_ERR_STATE. */
+static int cluster_test_join_accept_out_of_order_after_backup_assign(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *node;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    node = &network.nodes[1]; /* head-capable, so BACKUP_ASSIGN(self) works */
+    node->cluster.role = UCN_CLUSTER_ROLE_JOIN_PENDING;
+    node->cluster.pending_head_node_id = network.nodes[0].node_id;
+    node->cluster.pending_cluster_id = 1U;
+    node->cluster.pending_term = 5U;
+    node->cluster.pending_join_nonce = 9U;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_JOIN_PENDING;
+    network.now_ms = 0U;
+
+    /* BACKUP_ASSIGN(self) arrives first: JOIN_PENDING -> BACKUP_SYNCING. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_ASSIGN;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 5U;
+    message.head_node_id = network.nodes[0].node_id;
+    message.sync_token = node->node_id;
+    message.backup_generation = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, network.nodes[0].node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(node->cluster.backup_syncing == true);
+    TEST_ASSERT(node->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+
+    /* A late JOIN_ACCEPT (same epoch + txid, fencing still passes) must
+     * NOT transition: shadow stays BACKUP_SYNCING, role stays BACKUP. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_JOIN_ACCEPT;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 5U;
+    message.head_node_id = network.nodes[0].node_id;
+    message.head_score = 9000U;
+    message.lease_ms = 40U;
+    message.nonce = 9U; /* exact join txid */
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, network.nodes[0].node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(node->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    TEST_ASSERT(node->cluster.shadow_phase != UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+    /* One shadow transition only (the BACKUP_ASSIGN); the ACCEPT refreshed
+     * epoch fields without moving the phase. */
+    TEST_ASSERT(node->cluster.shadow_transition_count == 1U);
+    /* The accept side effects still run for the pre-assigned Backup
+     * (pending_head/cluster/term are cleared; the C07.7 join txid
+     * pending_join_nonce is deliberately left untouched by the site). */
+    TEST_ASSERT(node->cluster.pending_head_node_id == 0U);
+    TEST_ASSERT(node->cluster.pending_cluster_id == 0U);
+    TEST_ASSERT(node->cluster.pending_term == 0U);
+    TEST_ASSERT(node->cluster.head_node_id == network.nodes[0].node_id);
+    TEST_ASSERT(node->cluster.cluster_id == 1U);
+    TEST_ASSERT(node->cluster.term == 5U);
+    TEST_ASSERT(node->cluster.stats.joins_accepted == 1U);
+    /* known_backup_* retained (retained-state Test A; the ACCEPT never
+     * clears the assignment knowledge). */
+    TEST_ASSERT(node->cluster.known_backup_node_id == node->node_id);
+    TEST_ASSERT(node->cluster.known_backup_generation == 1U);
     return 0;
 }
 
@@ -4119,6 +4254,8 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_delta_gap_resync() == 0);
     TEST_ASSERT(cluster_test_backup_reject_switches_candidate() == 0);
     TEST_ASSERT(cluster_test_join_txid_and_stepdown_nonce() == 0);
+    TEST_ASSERT(cluster_test_join_reject_shadow_transition() == 0);
+    TEST_ASSERT(cluster_test_join_accept_out_of_order_after_backup_assign() == 0);
     TEST_ASSERT(cluster_test_fault_partition_takeover() == 0);
     TEST_ASSERT(cluster_test_fault_restart_no_old_term() == 0);
     TEST_ASSERT(cluster_test_fault_drop_eventually_converges() == 0);
