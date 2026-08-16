@@ -930,7 +930,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING) |
         /* READY during sweep: handle_backup_ready() L2788 (transition L2824, ready=true L2833) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_STABLE) |
-        /* Backup lost: remove_member() L2019 (node_id=0 L2027) / expire_members() L4167 */
+        /* Backup lost: remove_member() L2085 (node_id=0 L2127) / expire_members() L4373 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
         /* ordered stepdown: begin_ordered_stepdown() L2219 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
@@ -942,16 +942,17 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* periodic re-assign: start_backup_assignment_cycle() L4045 */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING) |
-        /* Backup lost: remove_member() L2019 / expire_members() L4167 */
+        /* Backup lost: remove_member() L2085 / expire_members() L4373 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
         /* ordered stepdown: begin_ordered_stepdown() L2219 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 
     [UCN_CLUSTER_PHASE_HEAD_STABLE] =
-        /* Backup lost: remove_member() L2019 / expire_members() L4167 */
+        /* Backup lost: remove_member() L2085 / expire_members() L4373 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
 
-        /* resync: backup_resync() L4362 (ready=false L4369) */
+        /* resync: backup_resync() (transition, ready=false); line numbers
+         * best-effort per drift policy */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING) |
         /* ordered stepdown: begin_ordered_stepdown() L2219 */
@@ -1197,8 +1198,8 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         /* Entering HEAD_NO_BACKUP canonicalizes node_id=0 / ready=false
          * as a DESTINATION invariant: HEAD_NO_BACKUP is DEFINED by
          * backup_node_id == 0, so the hook normalizes it regardless of
-         * which inbound site ran (remove_member() L2019 / expire_members()
-         * L4167 / complete_takeover() L2899 / handle_backup_reject()).
+         * which inbound site ran (remove_member() L2085 / expire_members()
+         * L4373 / complete_takeover() L2899 / handle_backup_reject()).
          * Note this is NOT true of every inbound edge's own writes: the
 
          * ELECTION inbound (complete_election() L3735) LEAVES the
@@ -1233,8 +1234,8 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
     case UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING:
         /* role only: caller-provided node_id/assign_pending/ready state
 
-         * decides the sub-phase (complete_election L3735 / backup_resync
-         * L4362 / assignment sweep L4089). */
+         * decides the sub-phase (complete_election / backup_resync /
+         * assignment sweep; line numbers best-effort per drift policy). */
 
         cluster->role = UCN_CLUSTER_ROLE_HEAD;
         break;
@@ -2096,16 +2097,61 @@ static ucn_cluster_member_t *allocate_member(
     return NULL;
 }
 
-static void remove_member(ucn_cluster_t *cluster, ucn_node_id_t node_id)
+static void remove_member(ucn_cluster_t *cluster, ucn_node_id_t node_id,
+                          uint32_t now_ms)
 {
     ucn_cluster_member_t *member = find_member(cluster, node_id);
 
-    if (member != NULL) {
-        (void)memset(member, 0, sizeof(*member));
-    }
     if (cluster->backup_node_id == node_id) {
+        /* CLV2-01-04d.4: preflight pattern (human auditor design) for the
+         * backup-eviction branch - the FIRST irreversible-site wiring.
+         * The preflight validates the PRE-CALL state with ZERO writes, so
+         * a rejected validation (shadow desync / illegal pair / pre-mutated
+         * phase fields) aborts BEFORE the member slot or the backup fields
+         * are touched.  The transition then commits BEFORE the phase-
+         * relevant clears: cluster_transition_validate() re-derives
+         * old_phase from the legacy fields at commit time, so a site that
+         * already cleared backup_node_id would be rejected as
+         * 'pre-mutated'.  apply_legacy(HEAD_NO_BACKUP) writes role +
+         * node_id=0 + ready=false, so the site's own clears below are
+         * idempotent (d.0 framework note) and run in the original order. */
+        ucn_cluster_phase_t old_phase =
+            cluster_phase_from_legacy_state(cluster, now_ms);
+
+        if (cluster_transition_preflight(cluster, old_phase,
+                                         UCN_CLUSTER_PHASE_HEAD_NO_BACKUP,
+                                         now_ms) != UCN_OK) {
+            /* Fail closed: NOTHING is touched - the member slot stays
+             * occupied and the backup identity is untouched. */
+            return;
+        }
+        if (cluster_transition(cluster, old_phase,
+                               UCN_CLUSTER_PHASE_HEAD_NO_BACKUP,
+                               UCN_CLUSTER_REASON_BACKUP_LOST,
+                               now_ms) != UCN_OK) {
+            /* Fail closed: a rejected commit also leaves every field
+             * untouched (nothing was mutated yet). */
+            return;
+        }
+        /* Current irreversible side effects in original order: free the
+         * member slot, clear the backup identity (idempotent with
+         * apply_legacy), then resync (early-returns: node_id == 0). */
+        if (member != NULL) {
+            (void)memset(member, 0, sizeof(*member));
+        }
         cluster->backup_node_id = 0U;
         cluster->backup_ready = false;
+        backup_resync(cluster);
+#if !defined(NDEBUG)
+        /* CLV2-01-04d.4 post-commit derive assert: after the transition
+         * AND the site clears the legacy state must derive HEAD_NO_BACKUP. */
+        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+               UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
+#endif
+        return;
+    }
+    if (member != NULL) {
+        (void)memset(member, 0, sizeof(*member));
     }
     backup_resync(cluster);
 }
@@ -3778,7 +3824,7 @@ static ucn_result_t ucn_cluster_receive_inner(
                     return UCN_ERR_REPLAY;
                 }
             }
-            remove_member(cluster, source);
+            remove_member(cluster, source, now_ms);
             return UCN_OK;
         case UCN_CLUSTER_MSG_HEAD_STEPDOWN:
             /* C07.7 P1: the Backup must also leave with the members on an
@@ -4450,7 +4496,50 @@ static void expire_members(ucn_cluster_t *cluster, uint32_t now_ms)
 {
     size_t index;
     bool changed = false;
+    bool backup_expired = false;
 
+    /* CLV2-01-04d.4: preflight pattern for the backup-expiry branch.  The
+     * backup's expiry is detected on the PRE-CALL state (read-only), the
+     * transition is validated + committed BEFORE the phase-relevant clears
+     * (the d.0 derive check rejects a post-mutation commit; apply_legacy
+     * clears node_id/ready, so the eviction loop's own clears below are
+     * idempotent), and the Current irreversible side effects run after in
+     * original order.  A non-backup expiry keeps the legacy path below: no
+     * transition, no shadow write. */
+    for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+        if (cluster->backup_node_id != 0U &&
+            cluster->members[index].occupied &&
+            cluster->members[index].node_id == cluster->backup_node_id &&
+            ucn_deadline_expired(now_ms,
+                                 cluster->members[index].lease_expires_at_ms)) {
+            backup_expired = true;
+            break;
+        }
+    }
+
+    if (backup_expired) {
+        ucn_cluster_phase_t old_phase =
+            cluster_phase_from_legacy_state(cluster, now_ms);
+
+        if (cluster_transition_preflight(cluster, old_phase,
+                                         UCN_CLUSTER_PHASE_HEAD_NO_BACKUP,
+                                         now_ms) != UCN_OK) {
+            /* Fail closed: a rejected preflight leaves every member slot
+             * AND the backup fields untouched (no partial eviction). */
+            return;
+        }
+        if (cluster_transition(cluster, old_phase,
+                               UCN_CLUSTER_PHASE_HEAD_NO_BACKUP,
+                               UCN_CLUSTER_REASON_BACKUP_LOST,
+                               now_ms) != UCN_OK) {
+            /* Fail closed: a rejected commit leaves every field untouched. */
+            return;
+        }
+    }
+
+    /* Current irreversible side effects in original order: evict every
+     * expired member (the Backup included when it expired), clear the
+     * backup identity, then resync. */
     for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
         if (cluster->members[index].occupied &&
             ucn_deadline_expired(now_ms,
@@ -4470,6 +4559,15 @@ static void expire_members(ucn_cluster_t *cluster, uint32_t now_ms)
     if (changed) {
         backup_resync(cluster);
     }
+#if !defined(NDEBUG)
+    if (backup_expired) {
+        /* CLV2-01-04d.4 post-commit derive assert: after the transition
+         * AND the eviction loop the legacy state must derive
+         * HEAD_NO_BACKUP. */
+        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+               UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
+    }
+#endif
 }
 
 static void send_join_request(ucn_cluster_t *cluster, uint32_t now_ms)
@@ -4832,3 +4930,22 @@ const ucn_cluster_stats_t *ucn_cluster_get_stats(const ucn_cluster_t *cluster)
 {
     return cluster == NULL ? NULL : &cluster->stats;
 }
+
+#if defined(UCN_CLUSTER_ENABLE_TEST_HOOKS)
+/* CLV2-01-04d.4: test-only views of the static d-group sites
+ * remove_member() / expire_members(), so tests can drive the
+ * backup-eviction preflight pattern directly (no network tick, no
+ * observed-pair recording) and prove the zero-side-effect invariant. */
+void ucn_cluster_test_remove_member(ucn_cluster_t *cluster,
+                                    ucn_node_id_t node_id,
+                                    uint32_t now_ms)
+{
+    remove_member(cluster, node_id, now_ms);
+}
+
+void ucn_cluster_test_expire_members(ucn_cluster_t *cluster,
+                                     uint32_t now_ms)
+{
+    expire_members(cluster, now_ms);
+}
+#endif

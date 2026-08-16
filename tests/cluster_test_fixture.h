@@ -76,6 +76,15 @@ ucn_result_t ucn_cluster_test_transition_preflight(
     ucn_cluster_phase_t old_phase,
     ucn_cluster_phase_t new_phase,
     uint32_t now_ms);
+
+/* CLV2-01-04d.4: test-only views of the static d-group sites
+ * remove_member() / expire_members() (see ucn_cluster.c), so tests can
+ * drive the backup-eviction preflight pattern directly. */
+void ucn_cluster_test_remove_member(ucn_cluster_t *cluster,
+                                    ucn_node_id_t node_id,
+                                    uint32_t now_ms);
+void ucn_cluster_test_expire_members(ucn_cluster_t *cluster,
+                                     uint32_t now_ms);
 #endif
 
 #ifdef __cplusplus

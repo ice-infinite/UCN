@@ -1,0 +1,4 @@
+# CLV2-M00-03: the golden reference is byte-compared by the trace gate
+# (strcmp per line).  Keep it LF so WSL (no core.autocrlf) and Windows
+# builds see identical bytes; normalized per the CLV2-01-04d.4 GOLDEN CHECK.
+tests/golden/cluster_golden_trace.txt text eol=lf
