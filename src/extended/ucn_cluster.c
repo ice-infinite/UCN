@@ -2412,9 +2412,43 @@ static void begin_ordered_stepdown(ucn_cluster_t *cluster,
 
 /* §8.3 Backup score challenge: a Backup that is significantly better than
  * its live Primary (and after the minimum tenure) leaves the Backup role and
- * re-enters election so the current Head can observe and yield to it. */
-static void backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms)
+ * re-enters election so the current Head can observe and yield to it.
+ * CLV2-01-04e.7 (MAJOR 2.A): the score improvement IS the BACKUP_* ->
+ * ELECTION transition.  The pre-phase derives from the CURRENT legacy
+ * state (takeover_active -> BACKUP_TAKEOVER, ready -> BACKUP_READY, else
+ * -> BACKUP_SYNCING) so ONE call site covers all three DIRECT sources;
+ * the legacy score event decides THAT the transition runs, and
+ * cluster_transition() validates whether the shadow agrees (a caller
+ * NEVER uses the shadow to decide whether to SKIP the call).  The
+ * transition is called FIRST, UNCONDITIONALLY, fail closed.  A
+ * takeover-active Backup CAN receive the same-primary same-cluster
+ * same-term ADVERTISE from its still-live Primary (lease evidence via
+ * the ADVERTISE), so BACKUP_TAKEOVER -> ELECTION is REAL and wired too;
+ * the M01.0.2 takeover_active && syncing combo stays expressible until
+ * the site clears it below - a late Type12 during takeover must never be
+ * rejected for phase reasons. */
+static ucn_result_t backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms)
 {
+    ucn_cluster_phase_t pre_phase;
+
+    /* CLV2-01-04e.7: derive the pre-phase from the PRE-CALL legacy state
+     * (never from the shadow mirror) and commit the transition through
+     * the single entry point BEFORE any site write.  apply_legacy
+     * (ELECTION) writes role=CANDIDATE ONLY - every mirror/primary/
+     * deadline clear below stays caller-owned at the site in original
+     * order (members[]/backup_generation survive a challenge, exactly as
+     * the real site leaves them). */
+    pre_phase = cluster_phase_from_legacy_state(cluster, now_ms);
+    if (cluster_transition(cluster, pre_phase,
+                           UCN_CLUSTER_PHASE_ELECTION,
+                           UCN_CLUSTER_REASON_ELECTION_STARTED,
+                           now_ms) != UCN_OK) {
+        /* Fail closed: a rejected transition (shadow mismatch / illegal
+         * pair / pre-mutated phase fields) leaves every field untouched -
+         * the score challenge is skipped (the Backup keeps its mirror and
+         * the next same-primary ADVERTISE re-visits the challenge). */
+        return UCN_ERR_STATE;
+    }
     cluster->backup_ready = false;
     cluster->backup_syncing = false;
     cluster->backup_primary_node_id = 0U;
@@ -2424,7 +2458,9 @@ static void backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms)
     cluster->backup_takeover_active = false;
     cluster->stats.head_switches++;
     /* Re-enter election in the SAME Cluster (keep cluster_id, bump Term) so
-     * the current Head can observe the higher score and yield to us. */
+     * the current Head can observe the higher score and yield to us.  The
+     * site's role write is idempotent with apply_legacy(ELECTION) (kept in
+     * original order for the not-yet-migrated callers). */
     cluster->role = UCN_CLUSTER_ROLE_CANDIDATE;
     cluster->term = cluster->term == UINT32_MAX ? 1U : cluster->term + 1U;
     cluster->head_node_id = cluster->config.local_node_id;
@@ -2434,6 +2470,14 @@ static void backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms)
         ucn_deadline_from_now(now_ms, cluster->config.election_window_ms);
     cluster->next_advertise_ms = now_ms;
     cluster->stats.elections_started++;
+#if !defined(NDEBUG)
+    /* CLV2-01-04e.7 post-commit derive assert: after the transition AND
+     * every site write the node must derive ELECTION (role == CANDIDATE
+     * with the mirror cleared). */
+    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+           UCN_CLUSTER_PHASE_ELECTION);
+#endif
+    return UCN_OK;
 }
 
 static void consider_head_offer(
@@ -2496,13 +2540,20 @@ static void consider_head_offer(
                 ucn_deadline_from_now(now_ms, cluster->config.lease_ms);
             /* §8.3: a Backup that is significantly better than its live
              * Primary (after minimum tenure) challenges by re-entering
-             * election; this must not be gated by Primary capacity. */
+             * election; this must not be gated by Primary capacity.
+             * CLV2-01-04e.7: the challenge is fail-closed inside
+             * backup_challenge() (the score-improvement event decides,
+             * the entry point validates).  consider_head_offer is void
+             * and its RX caller ignores the result, so a rejected
+             * transition (shadow desync) silently skips the challenge -
+             * the lease refresh above already ran and the next
+             * same-primary ADVERTISE re-visits it. */
             if (score_improves_by(cluster->config.head_score,
                                   candidate->head_score,
                                   cluster->config.switch_improvement_percent) &&
                 ucn_elapsed_at_least(now_ms, cluster->role_since_ms,
                                      cluster->config.head_min_tenure_ms)) {
-                backup_challenge(cluster, now_ms);
+                (void)backup_challenge(cluster, now_ms);
             }
         } else if (candidate->cluster_id == cluster->cluster_id &&
                    candidate->term > cluster->term) {
@@ -5647,5 +5698,20 @@ ucn_result_t ucn_cluster_test_complete_takeover(ucn_cluster_t *cluster,
     complete_takeover(cluster, now_ms);
     return cluster->shadow_transition_count == before ? UCN_ERR_STATE
                                                       : UCN_OK;
+}
+
+/* CLV2-01-04e.7: test-only view of the static score-challenge site
+ * backup_challenge(), so tests can drive it directly and verify the full
+ * site-side field effects (and the fail-closed rejection with zero
+ * writes) without an end-of-RX shadow sync re-aligning the mirror.
+ * backup_challenge() reports the outcome itself (UCN_OK on commit,
+ * UCN_ERR_STATE on a rejected transition). */
+ucn_result_t ucn_cluster_test_backup_challenge(ucn_cluster_t *cluster,
+                                               uint32_t now_ms)
+{
+    if (cluster == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    return backup_challenge(cluster, now_ms);
 }
 #endif

@@ -5936,6 +5936,27 @@ static int cluster_test_stable_switchback(void)
     return 0;
 }
 
+/* CLV2-01-04e.7 (MAJOR 2.A): backup_challenge() - a Backup whose score is
+ * significantly better than its live Primary (after the minimum tenure)
+ * re-enters election - now commits BACKUP_* -> ELECTION (ELECTION_STARTED)
+ * through the single entry point UNCONDITIONALLY (the score-improvement
+ * ADVERTISE decides THAT the challenge runs; cluster_transition() validates
+ * whether the shadow agrees), BEFORE any site write, fail-closed.
+ *
+ *  (a) BACKUP_READY source: the same-primary same-cluster same-term
+ *      better-score ADVERTISE (existing staging) asserts the explicit
+ *      transition (shadow==ELECTION, reason==ELECTION_STARTED, count==1)
+ *      plus the FULL site clear set in original order (F1 anchor).
+ *  (b) BACKUP_SYNCING source: the same ADVERTISE commits the same
+ *      explicit transition (syncing=true, ready=false).
+ *  (c) BACKUP_TAKEOVER source: a takeover-active Backup (with the
+ *      M01.0.2 takeover_active && syncing combo) CAN receive the same
+ *      ADVERTISE from its still-live Primary (lease evidence) -> the
+ *      same explicit transition; takeover/syncing are cleared by the
+ *      site, never rejected for phase reasons.
+ *  (d) shadow-desync: a stale shadow fails closed with UCN_ERR_STATE,
+ *      ZERO site writes and an untouched mirror (driven via the test
+ *      hook so no end-of-RX sync can re-align the mirror afterwards). */
 static int cluster_test_backup_challenge(void)
 {
     cluster_test_network_t network;
@@ -5943,7 +5964,9 @@ static int cluster_test_backup_challenge(void)
     cluster_test_node_t *backup;
     ucn_cluster_message_t message;
     uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    ucn_result_t result;
 
+    /* ============ (a) BACKUP_READY + better-score same-primary ADVERTISE ============ */
     TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
     head = &network.nodes[0];
     backup = &network.nodes[1];
@@ -5962,6 +5985,16 @@ static int cluster_test_backup_challenge(void)
     backup->cluster.backup_primary_node_id = head->node_id;
     backup->cluster.config.head_score = 9500U;
     backup->cluster.role_since_ms = 0U;
+    backup->cluster.backup_ready = true;   /* BACKUP_READY source */
+    backup->cluster.backup_syncing = false;
+    backup->cluster.backup_takeover_active = false;
+    /* CLV2-01-04e.7: the migrated challenge validates shadow == the
+     * derived old phase, so the manual staging must align the mirror. */
+    backup->cluster.shadow_phase = UCN_CLUSTER_PHASE_BACKUP_READY;
+    backup->cluster.transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    backup->cluster.shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(&backup->cluster, 60U) ==
+                UCN_CLUSTER_PHASE_BACKUP_READY);
 
     (void)memset(&message, 0, sizeof(message));
     message.type = UCN_CLUSTER_MSG_ADVERTISE;
@@ -5981,6 +6014,173 @@ static int cluster_test_backup_challenge(void)
     TEST_ASSERT(backup->cluster.cluster_id == 1U); /* same Cluster */
     TEST_ASSERT(backup->cluster.term == 2U); /* Term bumped */
     TEST_ASSERT(backup->cluster.head_node_id == backup->node_id);
+    /* CLV2-01-04e.7: the explicit ELECTION_STARTED transition committed
+     * through the single entry point (shadow/reason/count). */
+    TEST_ASSERT(backup->cluster.shadow_phase == UCN_CLUSTER_PHASE_ELECTION);
+    TEST_ASSERT(backup->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_ELECTION_STARTED);
+    TEST_ASSERT(backup->cluster.shadow_transition_count == 1U);
+    /* The FULL site clear set stays AT THE SITE in original order (F1
+     * anchor): mirror/primary/deadline fields cleared, the role write is
+     * idempotent with apply_legacy(ELECTION) (kept for the not-yet-
+     * migrated callers), Term/head/score/timers refresh, and
+     * members[]/backup_generation survive the challenge. */
+    TEST_ASSERT(backup->cluster.backup_ready == false);
+    TEST_ASSERT(backup->cluster.backup_syncing == false);
+    TEST_ASSERT(backup->cluster.backup_primary_node_id == 0U);
+    TEST_ASSERT(backup->cluster.backup_primary_deadline_ms == 0U);
+    TEST_ASSERT(backup->cluster.backup_primary_lease_deadline_ms == 0U);
+    TEST_ASSERT(backup->cluster.backup_missed_heartbeats == 0U);
+    TEST_ASSERT(backup->cluster.backup_takeover_active == false);
+    TEST_ASSERT(backup->cluster.stats.head_switches == 1U);
+    TEST_ASSERT(backup->cluster.current_head_score ==
+                backup->cluster.config.head_score);
+    TEST_ASSERT(backup->cluster.role_since_ms == 60U);
+    TEST_ASSERT(backup->cluster.election_deadline_ms ==
+                ucn_deadline_from_now(60U,
+                    backup->cluster.config.election_window_ms));
+    TEST_ASSERT(backup->cluster.next_advertise_ms == 60U);
+    TEST_ASSERT(backup->cluster.stats.elections_started == 1U);
+    /* Post-commit derive: the node now derives ELECTION. */
+    TEST_ASSERT(test_derive_phase(&backup->cluster, 60U) ==
+                UCN_CLUSTER_PHASE_ELECTION);
+
+    /* ============ (b) BACKUP_SYNCING source: same explicit transition ============ */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    head = &network.nodes[0];
+    backup = &network.nodes[1];
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.config.head_score = 6000U;
+    head->cluster.current_head_score = 6000U;
+    backup->cluster.role = UCN_CLUSTER_ROLE_BACKUP;
+    backup->cluster.cluster_id = 1U;
+    backup->cluster.term = 1U;
+    backup->cluster.head_node_id = head->node_id;
+    backup->cluster.backup_primary_node_id = head->node_id;
+    backup->cluster.config.head_score = 9500U;
+    backup->cluster.role_since_ms = 0U;
+    backup->cluster.backup_ready = false;
+    backup->cluster.backup_syncing = true; /* BACKUP_SYNCING source */
+    backup->cluster.backup_takeover_active = false;
+    backup->cluster.shadow_phase = UCN_CLUSTER_PHASE_BACKUP_SYNCING;
+    backup->cluster.transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    backup->cluster.shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(&backup->cluster, 60U) ==
+                UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    message.nonce = 2U;
+    network.now_ms = 60U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.role == UCN_CLUSTER_ROLE_CANDIDATE);
+    TEST_ASSERT(backup->cluster.term == 2U);
+    TEST_ASSERT(backup->cluster.cluster_id == 1U);
+    TEST_ASSERT(backup->cluster.shadow_phase == UCN_CLUSTER_PHASE_ELECTION);
+    TEST_ASSERT(backup->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_ELECTION_STARTED);
+    TEST_ASSERT(backup->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(backup->cluster.backup_ready == false);
+    TEST_ASSERT(backup->cluster.backup_syncing == false);
+    TEST_ASSERT(backup->cluster.backup_takeover_active == false);
+    TEST_ASSERT(backup->cluster.stats.head_switches == 1U);
+    TEST_ASSERT(backup->cluster.stats.elections_started == 1U);
+    TEST_ASSERT(test_derive_phase(&backup->cluster, 60U) ==
+                UCN_CLUSTER_PHASE_ELECTION);
+
+    /* ============ (c) BACKUP_TAKEOVER source (M01.0.2 combo) ============ */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    head = &network.nodes[0];
+    backup = &network.nodes[1];
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.config.head_score = 6000U;
+    head->cluster.current_head_score = 6000U;
+    backup->cluster.role = UCN_CLUSTER_ROLE_BACKUP;
+    backup->cluster.cluster_id = 1U;
+    backup->cluster.term = 1U;
+    backup->cluster.head_node_id = head->node_id;
+    backup->cluster.backup_primary_node_id = head->node_id;
+    backup->cluster.config.head_score = 9500U;
+    backup->cluster.role_since_ms = 0U;
+    backup->cluster.backup_ready = false;
+    backup->cluster.backup_syncing = true;  /* M01.0.2: takeover_active && */
+    backup->cluster.backup_takeover_active = true; /* syncing is REACHABLE */
+    backup->cluster.shadow_phase = UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
+    backup->cluster.transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    backup->cluster.shadow_transition_count = 0U;
+    TEST_ASSERT(test_legacy_state_valid(&backup->cluster) == true);
+    TEST_ASSERT(test_derive_phase(&backup->cluster, 60U) ==
+                UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
+    message.nonce = 3U;
+    network.now_ms = 60U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.role == UCN_CLUSTER_ROLE_CANDIDATE);
+    TEST_ASSERT(backup->cluster.term == 2U);
+    TEST_ASSERT(backup->cluster.cluster_id == 1U);
+    TEST_ASSERT(backup->cluster.shadow_phase == UCN_CLUSTER_PHASE_ELECTION);
+    TEST_ASSERT(backup->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_ELECTION_STARTED);
+    TEST_ASSERT(backup->cluster.shadow_transition_count == 1U);
+    /* The takeover-active Backup's challenge clears takeover AND syncing
+     * at the site - the M01.0.2 combo is expressible, never rejected for
+     * phase reasons; a late Type12 during takeover must never be blocked
+     * by this path. */
+    TEST_ASSERT(backup->cluster.backup_takeover_active == false);
+    TEST_ASSERT(backup->cluster.backup_syncing == false);
+    TEST_ASSERT(backup->cluster.backup_ready == false);
+    TEST_ASSERT(backup->cluster.stats.head_switches == 1U);
+    TEST_ASSERT(backup->cluster.stats.elections_started == 1U);
+    TEST_ASSERT(test_derive_phase(&backup->cluster, 60U) ==
+                UCN_CLUSTER_PHASE_ELECTION);
+
+    /* ============ (d) shadow-desync: fail closed, ZERO site writes ============ */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 60U;
+    backup = &network.nodes[1];
+    backup->cluster.role = UCN_CLUSTER_ROLE_BACKUP;
+    backup->cluster.cluster_id = 1U;
+    backup->cluster.term = 1U;
+    backup->cluster.head_node_id = 1U;
+    backup->cluster.backup_primary_node_id = 1U;
+    backup->cluster.config.head_score = 9500U;
+    backup->cluster.role_since_ms = 0U;
+    backup->cluster.backup_ready = true;
+    backup->cluster.backup_syncing = false;
+    backup->cluster.backup_takeover_active = false;
+    backup->cluster.shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE; /* stale */
+    backup->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    backup->cluster.shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(&backup->cluster, 60U) ==
+                UCN_CLUSTER_PHASE_BACKUP_READY);
+    ucn_cluster_test_transition_asserts_set(false);
+    result = ucn_cluster_test_backup_challenge(&backup->cluster, 60U);
+    ucn_cluster_test_transition_asserts_set(true);
+    TEST_ASSERT(result == UCN_ERR_STATE);
+    /* NOTHING of the site clear set ran (fail closed). */
+    TEST_ASSERT(backup->cluster.role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(backup->cluster.term == 1U);
+    TEST_ASSERT(backup->cluster.head_node_id == 1U);
+    TEST_ASSERT(backup->cluster.backup_ready == true);
+    TEST_ASSERT(backup->cluster.backup_syncing == false);
+    TEST_ASSERT(backup->cluster.backup_takeover_active == false);
+    TEST_ASSERT(backup->cluster.backup_primary_node_id == 1U);
+    TEST_ASSERT(backup->cluster.backup_primary_lease_deadline_ms == 0U);
+    TEST_ASSERT(backup->cluster.stats.head_switches == 0U);
+    TEST_ASSERT(backup->cluster.stats.elections_started == 0U);
+    /* The shadow mirror is untouched (no transition, no sync mint). */
+    TEST_ASSERT(backup->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+    TEST_ASSERT(backup->cluster.transition_reason == UCN_CLUSTER_REASON_INIT);
+    TEST_ASSERT(backup->cluster.shadow_transition_count == 0U);
+    TEST_ASSERT(test_derive_phase(&backup->cluster, 60U) ==
+                UCN_CLUSTER_PHASE_BACKUP_READY);
     return 0;
 }
 
