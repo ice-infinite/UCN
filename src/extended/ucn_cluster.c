@@ -881,7 +881,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
          * HEAD_STEPDOWN -> set_detached() L2006 */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
-        /* BACKUP_ASSIGN(self) arrives first: handle_backup_assign() L2851 (role=BACKUP L2887) */
+        /* BACKUP_ASSIGN(self) arrives first: handle_backup_assign() L2851 (transition L2909, role=BACKUP L2919) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING),
 
     [UCN_CLUSTER_PHASE_MEMBER_ACTIVE] =
@@ -889,7 +889,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* Head lease expired: ucn_cluster_step_inner() L4899 (grace armed L4935) */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE) |
-        /* BACKUP_ASSIGN(self): handle_backup_assign() L2851 */
+        /* BACKUP_ASSIGN(self): handle_backup_assign() L2851 (transition L2909) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING) |
         /* stepdown / reset: HEAD_STEPDOWN (receive_inner L3902,
          * transition L3971, CLV2-01-04c.5) -> set_detached() L2006 */
@@ -910,7 +910,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) |
         /* better Head switch: cluster_transition() L2635 via consider_head_offer() L2435 GRACE + begin_join_prepare_fields() L2111 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
-        /* BACKUP_ASSIGN(self): handle_backup_assign() L2851 */
+        /* BACKUP_ASSIGN(self): handle_backup_assign() L2851 (transition L2909) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING),
 
     [UCN_CLUSTER_PHASE_HEAD_NO_BACKUP] =
@@ -928,7 +928,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* assignment sweep done: send_backup_assignment_step() L4369 (transition 01-04d.2 before pending=false) */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING) |
-        /* READY during sweep: handle_backup_ready() L2926 (transition L2962, ready=true L2971) */
+        /* READY during sweep: handle_backup_ready() L2970 (transition L3005, ready=true L3014) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_STABLE) |
         /* Backup lost: remove_member() L2111 (node_id=0 L2153) / expire_members() L4783 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
@@ -936,7 +936,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 
     [UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING] =
-        /* snapshot READY: handle_backup_ready() L2926 */
+        /* snapshot READY: handle_backup_ready() L2970 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_STABLE) |
 
         /* periodic re-assign: start_backup_assignment_cycle() L4241 */
@@ -963,7 +963,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 
     [UCN_CLUSTER_PHASE_BACKUP_SYNCING] =
-        /* snapshot READY: handle_backup_member_sync() L2981 SYNC_END (syncing=false L3057, ready=true L3058) */
+        /* snapshot READY: handle_backup_member_sync() L3025 SYNC_END (syncing=false L3100, ready=true L3101) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_READY) |
         /* Primary lost / stepdown: HEAD_STEPDOWN -> backup_clear_sync() L2736 -> set_detached() L2006 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
@@ -981,7 +981,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
     [UCN_CLUSTER_PHASE_BACKUP_READY] =
         /* Primary lease lapsed: start_takeover() L3594 (takeover=true L3273) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_TAKEOVER) |
-        /* DELTA gap / resync: handle_backup_member_sync() L2981 (DELTA gap L3010-2713, SYNC_BEGIN L3032-2735) */
+        /* DELTA gap / resync: handle_backup_member_sync() L3025 (DELTA gap L3052-2713, SYNC_BEGIN L3070-2735) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING) |
         /* score challenge: backup_challenge() L2412 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION) |
@@ -1246,21 +1246,22 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         break;
     case UCN_CLUSTER_PHASE_HEAD_STABLE:
         /* role only: the caller provides ready=true (handle_backup_ready
-         * L2971 / complete_election caller state). */
+         * L3014 / complete_election caller state). */
         cluster->role = UCN_CLUSTER_ROLE_HEAD;
         break;
     case UCN_CLUSTER_PHASE_BACKUP_SYNCING:
-        /* handle_backup_assign() L2851 (role=BACKUP L2887, syncing=true
-         * L2894, ready=false L2895) and handle_backup_member_sync() L2981
-         * BEGIN/gap (L3032-2735, L3045-2748) both write role+syncing+ready;
-         * takeover is never set on an inbound edge of this phase. */
+        /* handle_backup_assign() L2851 (transition L2909, role=BACKUP
+         * L2919, syncing=true L2926, ready=false L2927) and
+         * handle_backup_member_sync() L3025 BEGIN/gap both write
+         * role+syncing+ready; takeover is never set on an inbound edge of
+         * this phase. */
         cluster->role = UCN_CLUSTER_ROLE_BACKUP;
         cluster->backup_ready = false;
         cluster->backup_syncing = true;
         break;
     case UCN_CLUSTER_PHASE_BACKUP_READY:
-        /* handle_backup_member_sync() L2981 SYNC_END: role=BACKUP,
-         * syncing=false L3057, ready=true L3058. */
+        /* handle_backup_member_sync() L3025 SYNC_END: role=BACKUP,
+         * syncing=false L3100, ready=true L3101. */
         cluster->role = UCN_CLUSTER_ROLE_BACKUP;
         cluster->backup_ready = true;
         cluster->backup_syncing = false;
@@ -2852,6 +2853,8 @@ static ucn_result_t handle_backup_assign(ucn_cluster_t *cluster,
                                            const ucn_cluster_message_t *message,
                                            uint32_t now_ms)
 {
+    ucn_cluster_phase_t old_phase;
+
     {
         ucn_node_id_t expected_head = 0U;
 
@@ -2883,6 +2886,36 @@ static ucn_result_t handle_backup_assign(ucn_cluster_t *cluster,
     if (!cluster->config.head_capable) {
         return UCN_ERR_UNSUPPORTED;
     }
+    /* CLV2-01-04e.1: the BACKUP_ASSIGN(self) IS the MEMBER_ACTIVE /
+     * MEMBER_TAKEOVER_GRACE / JOIN_PENDING -> BACKUP_SYNCING transition
+     * (BACKUP_ASSIGNED), committed BEFORE any primary/generation/mirror
+     * write.  SHADOW-GUARD RULE: legacy/event decides WHICH transition
+     * should happen (the Head assigned this node); cluster_transition()/
+     * preflight validates whether Shadow agrees.  The transition is called
+     * UNCONDITIONALLY - never skipped because shadow_phase != old: a
+     * shadow-desync must fail closed here (UCN_ERR_STATE, nothing
+     * committed) instead of silently falling back to the end-of-RX
+     * shadow_sync() minting.  old_phase comes from the PRE-CALL legacy
+     * state: a Member with the grace deadline armed is in TAKEOVER_GRACE,
+     * otherwise MEMBER_ACTIVE; a JOIN_PENDING node stays JOIN_PENDING
+     * (pre-assigned join path). */
+    if (cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING) {
+        old_phase = UCN_CLUSTER_PHASE_JOIN_PENDING;
+    } else {
+        old_phase = (cluster->head_grace_deadline_ms != 0U)
+                        ? UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE
+                        : UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    }
+    if (cluster_transition(cluster, old_phase,
+                           UCN_CLUSTER_PHASE_BACKUP_SYNCING,
+                           UCN_CLUSTER_REASON_BACKUP_ASSIGNED,
+                           now_ms) != UCN_OK) {
+        /* Fail closed per the migration contract: a rejected transition
+         * (shadow mismatch / illegal pair / pre-mutated phase fields)
+         * leaves every field untouched - do NOT commit the Backup
+         * identity (primary/generation/mirror stay unset). */
+        return UCN_ERR_STATE;
+    }
     cluster->role = UCN_CLUSTER_ROLE_BACKUP;
     /* Commit the identity now: a JOIN_ACCEPT may be dropped on a lossy
      * link, and a stale head_node_id==local would otherwise make the
@@ -2901,6 +2934,17 @@ static ucn_result_t handle_backup_assign(ucn_cluster_t *cluster,
         ucn_deadline_from_now(now_ms, cluster->config.lease_ms);
     cluster->backup_missed_heartbeats = 0U;
     (void)clear_members(cluster);
+#if !defined(NDEBUG)
+    /* CLV2-01-04e.1 post-commit derive assert: after the transition AND
+     * every site effect (role/identity, syncing=true, ready=false,
+     * primary/generation, deadlines, members cleared) the legacy state
+     * must still derive BACKUP_SYNCING.  takeover_active is never armed
+     * on an inbound edge of this transition (the already-BACKUP replay
+     * check above returns first), so the M01.0.2 takeover-active combo
+     * can never be created or cleared here. */
+    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+           UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+#endif
     return UCN_OK;
 }
 
