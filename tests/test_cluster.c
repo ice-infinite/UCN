@@ -3301,6 +3301,330 @@ static int cluster_test_backup_sync(void)
 }
 
 
+/* CLV2-01-04e.2: handle_backup_member_sync() SYNC_END wiring through
+ * the single transition entry point.  The SYNC_END-with-full-coverage
+ * event decides the BACKUP_SYNCING -> BACKUP_READY transition
+ * (SNAPSHOT_READY); cluster_transition() validates whether the shadow
+ * agrees and fails closed (UCN_ERR_STATE, zero writes) on a mismatch -
+ * the Backup is never marked ready against a desynced shadow.  The
+ * transition runs BEFORE the site's syncing=false/ready=true writes;
+ * SYNC_BEGIN / DELTA-gap / member-data paths stay legacy (no
+ * transition).  M01.0.2: a late SYNC_END while takeover is active keeps
+ * the phase BACKUP_TAKEOVER (takeover precedence) - no transition, the
+ * legacy body still applies the sync frames. */
+static int cluster_test_backup_sync_transition(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    cluster_test_node_t *backup;
+    cluster_test_node_t *third;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    size_t count_takeover;
+    ucn_result_t result;
+
+    /* Stage head=HEAD, backup + third = MEMBER over the fully-connected
+     * test network; a BACKUP_ASSIGN turns the designated node into a
+     * syncing Backup (the post-RX mirror sync aligns shadow with the
+     * derived BACKUP_SYNCING). */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    head = &network.nodes[0];
+    backup = &network.nodes[1];
+    third = &network.nodes[2];
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.backup_node_id = backup->node_id;
+    head->cluster.backup_generation = 1U;
+    head->cluster.backup_ready = false;
+    head->cluster.backup_assign_pending = false;
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
+    backup->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    backup->cluster.cluster_id = 1U;
+    backup->cluster.term = 1U;
+    backup->cluster.head_node_id = head->node_id;
+    backup->cluster.config.head_capable = true;
+    third->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    third->cluster.cluster_id = 1U;
+    third->cluster.term = 1U;
+    third->cluster.head_node_id = head->node_id;
+    third->cluster.config.head_capable = false;
+    network.now_ms = 0U;
+    TEST_ASSERT(cluster_test_sync_neighbors(&network) == 0);
+
+    /* BACKUP_ASSIGN -> role BACKUP, syncing, shadow aligned. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_ASSIGN;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.backup_generation = 1U;
+    message.sync_token = backup->node_id;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(backup->cluster.backup_syncing == true);
+    TEST_ASSERT(backup->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    /* Reset the shadow bookkeeping so every transition-count assertion
+     * below measures THIS scenario only. */
+    backup->cluster.shadow_phase = UCN_CLUSTER_PHASE_BACKUP_SYNCING;
+    backup->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    backup->cluster.shadow_transition_count = 0U;
+
+    /* (b) SYNC_BEGIN re-enters SYNCING with NO transition: count and
+     * shadow stay put. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.flags = UCN_CLUSTER_FLAG_SYNC_BEGIN;
+    message.backup_generation = 1U;
+    message.membership_sequence = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.backup_syncing == true);
+    TEST_ASSERT(backup->cluster.backup_ready == false);
+    TEST_ASSERT(backup->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    TEST_ASSERT(backup->cluster.shadow_transition_count == 0U);
+
+    /* (c) DELTA gap: stays SYNCING, RESYNC_REQ queued, NO transition. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.flags = UCN_CLUSTER_FLAG_SYNC_DELTA;
+    message.backup_generation = 1U;
+    message.membership_sequence = 5U; /* gap: expected 2 */
+    message.member_node_id = third->node_id;
+    message.member_lease_ms = 8000U;
+    message.member_nonce = 7U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) ==
+                UCN_ERR_REPLAY);
+    TEST_ASSERT(backup->cluster.backup_syncing == true);
+    TEST_ASSERT(backup->cluster.backup_ready == false);
+    TEST_ASSERT(backup->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    TEST_ASSERT(backup->cluster.shadow_transition_count == 0U);
+    TEST_ASSERT(network.queue_count == 1U); /* BACKUP_RESYNC_REQ pending. */
+    network.queue_count = 0U;
+
+    /* Member record (seq 2): the mirror now covers node 2 (fully
+     * connected admitted peers) so the END has full coverage. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.backup_generation = 1U;
+    message.membership_sequence = 2U;
+    message.member_node_id = third->node_id;
+    message.member_lease_ms = 8000U;
+    message.member_nonce = 7U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.shadow_transition_count == 0U);
+
+    /* (a) SYNC_END with full coverage: shadow == BACKUP_READY with
+     * reason SNAPSHOT_READY, count +1, ready=true, BACKUP_READY sent. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.flags = UCN_CLUSTER_FLAG_SYNC_END;
+    message.backup_generation = 1U;
+    message.membership_sequence = 3U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_BACKUP_READY);
+    TEST_ASSERT(backup->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_SNAPSHOT_READY);
+    TEST_ASSERT(backup->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(backup->cluster.backup_ready == true);
+    TEST_ASSERT(backup->cluster.backup_syncing == false);
+    TEST_ASSERT(test_derive_phase(&backup->cluster, network.now_ms) ==
+                UCN_CLUSTER_PHASE_BACKUP_READY);
+    TEST_ASSERT(network.queue_count == 1U); /* BACKUP_READY pending. */
+    network.queue_count = 0U;
+
+    /* Re-enter SYNCING with a fresh snapshot BEGIN for the desync
+     * scenario (a fresh BEGIN restarts the membership_sequence). */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.flags = UCN_CLUSTER_FLAG_SYNC_BEGIN;
+    message.backup_generation = 1U;
+    message.membership_sequence = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.backup_syncing == true);
+    TEST_ASSERT(backup->cluster.backup_ready == false);
+    backup->cluster.shadow_phase = UCN_CLUSTER_PHASE_BACKUP_SYNCING;
+    backup->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    backup->cluster.shadow_transition_count = 0U;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.backup_generation = 1U;
+    message.membership_sequence = 2U;
+    message.member_node_id = third->node_id;
+    message.member_lease_ms = 8000U;
+    message.member_nonce = 7U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+
+    /* (d) shadow-desync at SYNC_END: the legacy event still decides the
+     * transition (derive == BACKUP_SYNCING), so the transition is called
+     * UNCONDITIONALLY; the shadow validate gate rejects (claims
+     * BACKUP_READY) and the site fails closed - ready is NOT set.  The
+     * rejection asserts are silenced (framework convention) so the
+     * release UCN_ERR_STATE path can be verified. */
+    backup->cluster.shadow_phase = UCN_CLUSTER_PHASE_BACKUP_READY; /* desync */
+    ucn_cluster_test_transition_asserts_set(false);
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.flags = UCN_CLUSTER_FLAG_SYNC_END;
+    message.backup_generation = 1U;
+    message.membership_sequence = 3U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    result = ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                 encoded, sizeof(encoded));
+    TEST_ASSERT(result == UCN_ERR_STATE);
+    TEST_ASSERT(backup->cluster.backup_ready == false);  /* NOT set */
+    TEST_ASSERT(backup->cluster.backup_syncing == true); /* NOT cleared */
+    TEST_ASSERT(backup->cluster.shadow_phase !=
+                UCN_CLUSTER_PHASE_BACKUP_READY);
+    TEST_ASSERT(backup->cluster.transition_reason !=
+                UCN_CLUSTER_REASON_SNAPSHOT_READY);
+    /* The transition never committed: the end-of-RX mirror sync re-aligns
+     * the shadow to the UNCHANGED legacy state (BACKUP_SYNCING), exactly
+     * the CLV2-01-02 behaviour for a rejected message. */
+    TEST_ASSERT(backup->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    TEST_ASSERT(test_derive_phase(&backup->cluster, network.now_ms) ==
+                UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    TEST_ASSERT(network.queue_count == 0U); /* no BACKUP_READY sent */
+    ucn_cluster_test_transition_asserts_set(true);
+
+    /* (e) M01.0.2: a late SYNC_END during takeover.  First complete the
+     * snapshot (SYNCING -> READY), then start the takeover the way the
+     * real FSM does (READY -> BACKUP_TAKEOVER, TAKEOVER_STARTED, a DIRECT
+     * edge - the lease-expiry trigger only fires on a READY Backup).  A
+     * delayed old-Primary SYNC_BEGIN then re-arms syncing while takeover
+     * stays active (the reachable M01.0.2 combo, exactly as
+     * cluster_test_shadow_takeover_late_sync injects); the late END with
+     * full coverage must NOT transition (derive == BACKUP_TAKEOVER takes
+     * precedence) - the legacy body still applies the sync frames
+     * (syncing=false, ready=true, BACKUP_READY sent) and the phase stays
+     * BACKUP_TAKEOVER with takeover_active preserved. */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.flags = UCN_CLUSTER_FLAG_SYNC_END;
+    message.backup_generation = 1U;
+    /* The rejected (d) END already advanced membership_sequence to 3
+     * (the legacy sequence write precedes the SYNC_END branch), so the
+     * re-completion END must carry sequence 4. */
+    message.membership_sequence = 4U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_BACKUP_READY);
+    TEST_ASSERT(ucn_cluster_test_transition(
+                    &backup->cluster, UCN_CLUSTER_PHASE_BACKUP_READY,
+                    UCN_CLUSTER_PHASE_BACKUP_TAKEOVER,
+                    UCN_CLUSTER_REASON_TAKEOVER_STARTED,
+                    network.now_ms) == UCN_OK);
+    TEST_ASSERT(backup->cluster.backup_takeover_active == true);
+    TEST_ASSERT(backup->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
+    network.queue_count = 0U; /* drop the (e)-start READY; only the late
+                                 END's READY must remain pending */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.flags = UCN_CLUSTER_FLAG_SYNC_BEGIN;
+    message.backup_generation = 1U;
+    message.membership_sequence = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.backup_takeover_active == true);
+    TEST_ASSERT(backup->cluster.backup_syncing == true);
+    TEST_ASSERT(backup->cluster.backup_ready == false);
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.backup_generation = 1U;
+    message.membership_sequence = 2U;
+    message.member_node_id = third->node_id;
+    message.member_lease_ms = 8000U;
+    message.member_nonce = 7U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    count_takeover = backup->cluster.shadow_transition_count;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.flags = UCN_CLUSTER_FLAG_SYNC_END;
+    message.backup_generation = 1U;
+    message.membership_sequence = 3U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&backup->cluster, head->node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(backup->cluster.backup_takeover_active == true);
+    TEST_ASSERT(backup->cluster.backup_ready == true);
+    TEST_ASSERT(backup->cluster.backup_syncing == false);
+    TEST_ASSERT(backup->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
+    TEST_ASSERT(backup->cluster.shadow_transition_count == count_takeover);
+    TEST_ASSERT(network.queue_count == 1U); /* BACKUP_READY pending. */
+    return 0;
+}
+
 static int cluster_test_takeover_guard(void)
 {
     cluster_test_network_t network;
@@ -5952,6 +6276,10 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_codec_and_security() == 0);
     TEST_ASSERT(cluster_test_v3_codec() == 0);
     TEST_ASSERT(cluster_test_backup_sync() == 0);
+    /* CLV2-01-04e.2: handle_backup_member_sync() SYNC_END wiring through
+     * the single transition entry point (explicit SNAPSHOT_READY reason,
+     * fail-closed desync gate, M01.0.2 takeover precedence). */
+    TEST_ASSERT(cluster_test_backup_sync_transition() == 0);
     TEST_ASSERT(cluster_test_backup_ready_fencing() == 0);
     TEST_ASSERT(cluster_test_backup_ready_transition() == 0);
     TEST_ASSERT(cluster_test_primary_heartbeat_fencing() == 0);

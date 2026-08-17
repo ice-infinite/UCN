@@ -963,7 +963,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 
     [UCN_CLUSTER_PHASE_BACKUP_SYNCING] =
-        /* snapshot READY: handle_backup_member_sync() L2981 SYNC_END (syncing=false L3057, ready=true L3058) */
+        /* snapshot READY: handle_backup_member_sync() L2980 SYNC_END (CLV2-01-04e.2 transition L3069, site writes L3091-3092) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_READY) |
         /* Primary lost / stepdown: HEAD_STEPDOWN -> backup_clear_sync() L2736 -> set_detached() L2006 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
@@ -981,7 +981,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
     [UCN_CLUSTER_PHASE_BACKUP_READY] =
         /* Primary lease lapsed: start_takeover() L3594 (takeover=true L3273) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_TAKEOVER) |
-        /* DELTA gap / resync: handle_backup_member_sync() L2981 (DELTA gap L3010-2713, SYNC_BEGIN L3032-2735) */
+        /* DELTA gap / resync: handle_backup_member_sync() L2980 (DELTA gap L3008-3012, SYNC_BEGIN L3026-3037) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING) |
         /* score challenge: backup_challenge() L2412 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION) |
@@ -1251,16 +1251,16 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         break;
     case UCN_CLUSTER_PHASE_BACKUP_SYNCING:
         /* handle_backup_assign() L2851 (role=BACKUP L2887, syncing=true
-         * L2894, ready=false L2895) and handle_backup_member_sync() L2981
-         * BEGIN/gap (L3032-2735, L3045-2748) both write role+syncing+ready;
+         * L2894, ready=false L2895) and handle_backup_member_sync() L2980
+         * BEGIN/gap (L3031-3032, L3044-3045) both write role+syncing+ready;
          * takeover is never set on an inbound edge of this phase. */
         cluster->role = UCN_CLUSTER_ROLE_BACKUP;
         cluster->backup_ready = false;
         cluster->backup_syncing = true;
         break;
     case UCN_CLUSTER_PHASE_BACKUP_READY:
-        /* handle_backup_member_sync() L2981 SYNC_END: role=BACKUP,
-         * syncing=false L3057, ready=true L3058. */
+        /* handle_backup_member_sync() L2980 SYNC_END: role=BACKUP
+         * (CLV2-01-04e.2 transition L3069, site writes L3091-3092). */
         cluster->role = UCN_CLUSTER_ROLE_BACKUP;
         cluster->backup_ready = true;
         cluster->backup_syncing = false;
@@ -3053,6 +3053,41 @@ static ucn_result_t handle_backup_member_sync(ucn_cluster_t *cluster,
     cluster->membership_sequence = message->membership_sequence;
     if ((message->flags & UCN_CLUSTER_FLAG_SYNC_END) != 0U) {
         if (backup_covers_all_members(cluster)) {
+            /* CLV2-01-04e.2: the SYNC_END-with-full-coverage event IS the
+             * BACKUP_SYNCING -> BACKUP_READY transition (SNAPSHOT_READY),
+             * committed through the single entry point BEFORE the site's
+             * syncing=false/ready=true writes.  The LEGACY event decides
+             * which transition happens; cluster_transition() validates
+             * whether the shadow agrees and fails closed (UCN_ERR_STATE,
+             * zero writes) on a mismatch - the Backup is never marked
+             * ready against a desynced shadow.  The pre-call derive check
+             * only excludes the M01.0.2 takeover-precedence case: a node
+             * with takeover_active derives BACKUP_TAKEOVER, for which no
+             * SYNCING->READY edge exists - the legacy body below still
+             * applies the sync frames per Current behaviour (the phase
+             * stays BACKUP_TAKEOVER). */
+            if (cluster_phase_from_legacy_state(cluster, now_ms) ==
+                UCN_CLUSTER_PHASE_BACKUP_SYNCING) {
+                if (cluster_transition(
+                        cluster, UCN_CLUSTER_PHASE_BACKUP_SYNCING,
+                        UCN_CLUSTER_PHASE_BACKUP_READY,
+                        UCN_CLUSTER_REASON_SNAPSHOT_READY,
+                        now_ms) != UCN_OK) {
+                    /* Fail closed: a rejected transition (shadow mismatch
+                     * / pre-mutated phase fields) leaves every field
+                     * untouched including backup_ready - the Backup is
+                     * never marked ready. */
+                    return UCN_ERR_STATE;
+                }
+#if !defined(NDEBUG)
+                /* CLV2-01-04e.2 post-commit derive assert: after the
+                 * transition (apply_legacy wrote syncing=false/ready=true)
+                 * the legacy state must derive BACKUP_READY; the site's
+                 * idempotent writes below keep it there. */
+                assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                       UCN_CLUSTER_PHASE_BACKUP_READY);
+#endif
+            }
             cluster->backup_syncing = false;
             cluster->backup_ready = true;
             return send_backup_ready(cluster);
