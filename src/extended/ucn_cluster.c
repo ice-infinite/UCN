@@ -899,7 +899,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
 
     [UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE] =
         /* Head lease renewed: cluster_transition() L2458 via consider_head_offer() L2435
-         * refresh (grace=0 site write) / handle_head_takeover() L3455 (grace=0 L3490) */
+         * refresh (grace=0 site write) / handle_head_takeover() L3504 (grace=0 L3578) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
         /* HEAD_STEPDOWN (receive_inner L3902, transition L3971,
          * CLV2-01-04c.5) -> set_detached() L2006 */
@@ -976,11 +976,11 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION) |
         /* newer-Term Head: consider_head_offer() L2435 (takeover=false L2511) + backup_clear_sync() L2736 + begin_join() L2059 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
-        /* HEAD_TAKEOVER / recovery: handle_head_takeover() L3455 (role=MEMBER L3483) */
+        /* HEAD_TAKEOVER / recovery: handle_head_takeover() L3504 (role=MEMBER L3571) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
 
     [UCN_CLUSTER_PHASE_BACKUP_READY] =
-        /* Primary lease lapsed: start_takeover() L3594 (takeover=true L3273) */
+        /* Primary lease lapsed: start_takeover() L3293 (takeover=true L3315) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_TAKEOVER) |
         /* DELTA gap / resync: handle_backup_member_sync() (DELTA gap,
          * SYNC_BEGIN paths; no transition - phase stays SYNCING) */
@@ -991,19 +991,19 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
         /* Primary lost / stepdown: HEAD_STEPDOWN -> backup_clear_sync() L2736 -> set_detached() L2006 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
-        /* HEAD_TAKEOVER / recovery: handle_head_takeover() L3455 */
+        /* HEAD_TAKEOVER / recovery: handle_head_takeover() L3504 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
 
     [UCN_CLUSTER_PHASE_BACKUP_TAKEOVER] =
-        /* majority reached: complete_takeover() L3225 (role=HEAD L3229, node_id=0 L3239) */
+        /* majority reached: complete_takeover() L3226 (role=HEAD L3247, node_id=0 L3257) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
 
-        /* timeout / stepdown: step L5043 -> backup_clear_sync() L2736 -> set_detached() L2006 */
+        /* timeout / stepdown: step L5156 -> backup_clear_sync() L2738 -> set_detached() L2008 */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
         /* newer-Term Head: consider_head_offer() L2435 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
-        /* HEAD_TAKEOVER / recovery: handle_head_takeover() L3455 */
+        /* HEAD_TAKEOVER / recovery: handle_head_takeover() L3504 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
         /* score challenge: backup_challenge() L2412 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION),
@@ -1182,8 +1182,8 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         break;
     case UCN_CLUSTER_PHASE_MEMBER_ACTIVE:
         /* handle_join_accept() L2239 (transition L2273, grace=0 via
-         * apply_legacy) and handle_head_takeover() L3455 (role L3483,
-         * grace=0 L3490) both write role+grace; recovery_eligible is
+         * apply_legacy) and handle_head_takeover() L3504 (role L3571,
+         * grace=0 L3578) both write role+grace; recovery_eligible is
          * false on every inbound edge.  known_backup_* are NOT cleared
          * by handle_join_accept() (retained-state Test A). */
         cluster->role = UCN_CLUSTER_ROLE_MEMBER;
@@ -1206,7 +1206,7 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
          * as a DESTINATION invariant: HEAD_NO_BACKUP is DEFINED by
          * backup_node_id == 0, so the hook normalizes it regardless of
          * which inbound site ran (remove_member() L2111 / expire_members()
-         * L4783 / complete_takeover() L3225 / handle_backup_reject()).
+         * L4783 / complete_takeover() L3226 / handle_backup_reject()).
          * Note this is NOT true of every inbound edge's own writes: the
 
          * ELECTION inbound (complete_election() L4094) LEAVES the
@@ -1268,7 +1268,7 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         cluster->backup_syncing = false;
         break;
     case UCN_CLUSTER_PHASE_BACKUP_TAKEOVER:
-        /* start_takeover() L3594: role=BACKUP, takeover=true L3273;
+        /* start_takeover() L3293: role=BACKUP, takeover=true L3315;
          * ready/syncing are NOT cleared (CLV2-M01.0.2: the takeover_active
          * && syncing combo is reachable and must be expressed). */
         cluster->role = UCN_CLUSTER_ROLE_BACKUP;
@@ -1383,8 +1383,10 @@ static ucn_result_t cluster_transition_validate(ucn_cluster_t *cluster,
      * build modes, before any write - the current legacy state must be
      * valid and must still derive the claimed old phase, so a site that
      * already mutated phase-relevant legacy fields is caught and fails
-     * closed (UCN_ERR_STATE, nothing committed).  Fields a site sets
-     * AFTER the call are fine (the end-of-step/RX shadow sync re-aligns). */
+     * closed (UCN_ERR_STATE, nothing committed).  A migrated site may
+     * perform caller-owned post-transition writes only when they preserve
+     * the committed new phase; migrated phase changes must not rely on
+     * shadow_sync minting (CLV2-01-04e NIT, human auditor). */
     if (!cluster_legacy_state_is_valid(cluster) ||
         cluster_phase_from_legacy_state(cluster, now_ms) != old_phase) {
         /* CLV2-01-04d.7 (ITEM 7d): the pre-derive failure is knob-gated so
@@ -3305,6 +3307,23 @@ static void complete_takeover(ucn_cluster_t *cluster, uint32_t now_ms)
 {
     size_t index;
 
+    /* CLV2-01-04e.4 (F1 anchor, human e-group focus 3): the quorum IS
+     * the BACKUP_TAKEOVER -> HEAD_NO_BACKUP transition - call it FIRST,
+     * UNCONDITIONALLY, fail closed.  apply_legacy(HEAD_NO_BACKUP) writes
+     * role + backup_node_id=0 + ready=false ONLY; everything else below
+     * is caller-owned and stays AT THE SITE in original order
+     * (takeover_active / syncing / primary / known_backup_* / term /
+     * head / deadlines / cursors / stats).  On a rejected transition
+     * NOTHING of the clear set runs - the takeover stays active and the
+     * ack stays counted (the shadow anomaly surfaces in Debug). */
+    if (cluster_transition(cluster, UCN_CLUSTER_PHASE_BACKUP_TAKEOVER,
+                           UCN_CLUSTER_PHASE_HEAD_NO_BACKUP,
+                           UCN_CLUSTER_REASON_TAKEOVER_QUORUM,
+                           now_ms) != UCN_OK) {
+        /* Fail closed per the migration contract: do NOT promote, do NOT
+         * clear any takeover / mirror state. */
+        return;
+    }
     cluster->role = UCN_CLUSTER_ROLE_HEAD;
     cluster->term = cluster->term == UINT32_MAX ? 1U : cluster->term + 1U;
     cluster->head_node_id = cluster->config.local_node_id;
@@ -3342,6 +3361,13 @@ static void complete_takeover(ucn_cluster_t *cluster, uint32_t now_ms)
         (uint8_t)member_count_u16(cluster);
     cluster->backup_takeover_announce_active =
         cluster->backup_takeover_announce_remaining != 0U;
+#if !defined(NDEBUG)
+    /* CLV2-01-04e.4 post-commit derive assert: after the transition AND
+     * every site write the node must derive HEAD_NO_BACKUP (role == HEAD
+     * with backup_node_id == 0; ready was cleared). */
+    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+           UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
+#endif
 }
 
 static void start_takeover(ucn_cluster_t *cluster, uint32_t now_ms)
@@ -3349,6 +3375,23 @@ static void start_takeover(ucn_cluster_t *cluster, uint32_t now_ms)
     size_t index;
     bool self_in_mirror = false;
 
+    /* CLV2-01-04e.3: the lapsed Primary lease IS the BACKUP_READY ->
+     * BACKUP_TAKEOVER transition - call it FIRST, UNCONDITIONALLY, fail
+     * closed.  apply_legacy(BACKUP_TAKEOVER) writes role + takeover_
+     * active ONLY - it NEVER touches syncing/ready (CLV2-M01.0.2: a late
+     * same-generation Type12 can re-arm syncing while takeover is active
+     * and the takeover_active && syncing combo must stay expressible).
+     * All deadline/cursor/ack state stays caller-owned at the site in
+     * original order. */
+    if (cluster_transition(cluster, UCN_CLUSTER_PHASE_BACKUP_READY,
+                           UCN_CLUSTER_PHASE_BACKUP_TAKEOVER,
+                           UCN_CLUSTER_REASON_TAKEOVER_STARTED,
+                           now_ms) != UCN_OK) {
+        /* Fail closed: do NOT arm takeover / reset the ack bookkeeping on
+         * a rejected transition (shadow mismatch / illegal pair /
+         * pre-mutated phase fields); the next step re-visits the lease. */
+        return;
+    }
     cluster->backup_takeover_active = true;
     cluster->backup_takeover_ack_count = 0U;
     cluster->backup_takeover_acked = 0U;
@@ -3369,6 +3412,13 @@ static void start_takeover(ucn_cluster_t *cluster, uint32_t now_ms)
     if (self_in_mirror) {
         cluster->backup_takeover_ack_count = 1U;
     }
+#if !defined(NDEBUG)
+    /* CLV2-01-04e.3 post-commit derive assert: after the transition AND
+     * every site write the node must derive BACKUP_TAKEOVER (role ==
+     * BACKUP with takeover_active == true). */
+    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+           UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
+#endif
 }
 
 static void send_takeover_prepare_step(ucn_cluster_t *cluster)
@@ -3555,6 +3605,45 @@ static ucn_result_t handle_head_takeover(ucn_cluster_t *cluster,
         cluster->role != UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
         return UCN_ERR_ACCESS;
     }
+    /* CLV2-01-04e.6: the BACKUP_* and GRACE inbound phases are migrated.
+     * old_phase is derived from the PRE-CALL legacy state (role + flags),
+     * NEVER from the shadow mirror, and the transition is called
+     * UNCONDITIONALLY (fail closed - a shadow mismatch trips the validate
+     * gate).  apply_legacy(MEMBER_ACTIVE) writes role + grace=0 +
+     * eligible=false ONLY; the full clear set (takeover/syncing/ready/
+     * known_backup_*) and the epoch refresh stay AT THE SITE below in
+     * original order (F1 anchor).  A plain MEMBER_ACTIVE inbound (role ==
+     * MEMBER, no armed grace) performs NO transition - no self-loop
+     * exists - and the JOIN_PENDING / RECOVERY_HEAD inbound edges stay
+     * with their 01-04b/f sites (the end-of-RX shadow sync re-aligns). */
+    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
+        ucn_cluster_phase_t old_phase = cluster->backup_takeover_active
+                                            ? UCN_CLUSTER_PHASE_BACKUP_TAKEOVER
+                                            : (cluster->backup_ready
+                                                   ? UCN_CLUSTER_PHASE_BACKUP_READY
+                                                   : UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+
+        if (cluster_transition(cluster, old_phase,
+                               UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                               UCN_CLUSTER_REASON_TAKEOVER_STARTED,
+                               now_ms) != UCN_OK) {
+            /* Fail closed: do NOT refresh the epoch / clear the mirror on
+             * a rejected transition (shadow mismatch / illegal pair /
+             * pre-mutated phase fields). */
+            return UCN_ERR_STATE;
+        }
+    } else if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+               cluster->head_grace_deadline_ms != 0U) {
+        if (cluster_transition(cluster,
+                               UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE,
+                               UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                               UCN_CLUSTER_REASON_TAKEOVER_STARTED,
+                               now_ms) != UCN_OK) {
+            /* Fail closed: do NOT refresh the epoch on a rejected
+             * transition; the node stays in grace. */
+            return UCN_ERR_STATE;
+        }
+    }
     /* A Recovery Head defers to the stable higher-Term Head immediately. */
     cluster->recovery_eligible = false;
     cluster->recovery_cluster_id = 0U;
@@ -3576,6 +3665,13 @@ static ucn_result_t handle_head_takeover(ucn_cluster_t *cluster,
     cluster->backup_ready = false;
     cluster->known_backup_node_id = 0U;
     cluster->known_backup_generation = 0U;
+#if !defined(NDEBUG)
+    /* CLV2-01-04e.6 post-commit derive assert: after the transition (or
+     * the legacy no-transition path) AND every site write the node must
+     * derive MEMBER_ACTIVE (role == MEMBER, no armed grace deadline). */
+    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+           UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+#endif
     return UCN_OK;
 }
 
@@ -4295,9 +4391,9 @@ static uint32_t backup_control_spacing_ms(const ucn_cluster_t *cluster,
  *     expire_members() after HEAD_*->NOB transition  -> explicit (d.4)
  *     handle_backup_reject() after HEAD_*->NOB        -> explicit (d.7 ITEM 3)
  *     assign_backup() no-candidate (node_id already 0) -> phase unchanged
- *     complete_takeover()                            -> legacy (01-04e
- *        takeover group, out of scope: BACKUP->HEAD entry, not the
- *        HEAD-ladder sub-phase ladder itself)
+ *     complete_takeover()                            -> explicit (01-04e.4:
+ *        BACKUP_TAKEOVER -> HEAD_NO_BACKUP transition commit; the
+ *        HEAD-ladder sub-phase ladder itself is untouched)
  *   backup_node_id = best_node_id:
  *     assign_backup() after NOB->ASSIGNING transition -> explicit (d.1)
  *   backup_ready = false:
@@ -4307,7 +4403,7 @@ static uint32_t backup_control_spacing_ms(const ucn_cluster_t *cluster,
  *     handle_backup_reject() (post HEAD_*->NOB, idempotent) -> explicit (d.7 ITEM 3)
  *     assign_backup() (post NOB->ASSIGNING, idempotent) -> explicit (d.1)
  *     backup_resync() (post STABLE->target, idempotent) -> explicit (d.7 ITEM 4)
- *     complete_takeover()                            -> legacy (01-04e)
+ *     complete_takeover()                            -> explicit (01-04e.4)
  *     BACKUP-side sites (backup_challenge / backup_clear_sync /
  *       handle_backup_assign / handle_backup_member_sync /
  *       handle_head_takeover clears)                 -> not head-ladder
@@ -4490,7 +4586,11 @@ static void send_backup_assignment_step(ucn_cluster_t *cluster,
              * would strand pending=true with remaining=0 - the next call
              * early-returns forever).  The preflight performs the full
              * validation with ZERO writes; the commit after the send
-             * cannot then reject (nothing phase-relevant changes between). */
+             * cannot then reject (nothing phase-relevant changes between).
+             * CLV2-01-04e M02 note: this preflight->commit window MUST
+             * NOT invoke a callback capable of mutating Cluster phase
+             * state (send_backup_assign -> send_cluster_message -> the
+             * platform send hook is phase-agnostic by contract). */
             if (cluster->backup_assign_remaining == 1U &&
                 transition_required &&
                 cluster_transition_preflight(
@@ -5136,9 +5236,34 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
     if (cluster->role == UCN_CLUSTER_ROLE_BACKUP &&
         cluster->backup_takeover_active &&
         ucn_deadline_expired(now_ms, cluster->backup_takeover_deadline_ms)) {
+        /* CLV2-01-04e.5: the expired takeover window IS the BACKUP_TAKEOVER
+         * -> DETACHED_OBSERVE transition - call it FIRST, UNCONDITIONALLY,
+         * fail closed.  apply_legacy(DETACHED_OBSERVE) writes role=DETACHED
+         * + recovery_eligible=false + backoff/grace/known_backup_*=0, so
+         * the site does NOT set eligible (matching Current: a takeover-
+         * active Backup is never recovery-eligible); backup_clear_sync()
+         * then re-applies the mirror clears + set_detached() in original
+         * order.  On a rejected transition NOTHING runs - the takeover
+         * stays active and the next step re-visits the deadline. */
+        if (cluster_transition(cluster, UCN_CLUSTER_PHASE_BACKUP_TAKEOVER,
+                               UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                               UCN_CLUSTER_REASON_TAKEOVER_TIMEOUT,
+                               now_ms) != UCN_OK) {
+            /* Fail closed: do NOT count the expiry or clear the mirror on
+             * a rejected transition (shadow mismatch / illegal pair /
+             * pre-mutated phase fields). */
+            return UCN_ERR_STATE;
+        }
         /* Majority not reached in the window -> fall back to re-election. */
         cluster->stats.head_leases_expired++;
         backup_clear_sync(cluster, now_ms);
+#if !defined(NDEBUG)
+        /* CLV2-01-04e.5 post-commit derive assert: after the transition
+         * AND every site effect the node must derive DETACHED_OBSERVE
+         * (role == DETACHED, recovery_eligible == false, no backoff). */
+        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+               UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+#endif
         return UCN_OK;
     }
     if (cluster->role == UCN_CLUSTER_ROLE_BACKUP &&
@@ -5361,5 +5486,42 @@ void ucn_cluster_test_queue_backup_assignment_for_member(
     ucn_cluster_t *cluster, ucn_node_id_t member_node_id, uint32_t now_ms)
 {
     queue_backup_assignment_for_member(cluster, member_node_id, now_ms);
+}
+
+/* CLV2-01-04e: test-only views of the takeover-lifecycle sites wired in
+ * this point (start_takeover / complete_takeover), so tests can drive the
+ * BACKUP_READY -> BACKUP_TAKEOVER and BACKUP_TAKEOVER -> HEAD_NO_BACKUP
+ * transitions directly and verify the full site-side field effects (and
+ * the fail-closed rejection with zero writes). */
+ucn_result_t ucn_cluster_test_start_takeover(ucn_cluster_t *cluster,
+                                             uint32_t now_ms)
+{
+    uint32_t before;
+
+    if (cluster == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    before = cluster->shadow_transition_count;
+    start_takeover(cluster, now_ms);
+    /* start_takeover() is void: report the transition outcome by whether
+     * the entry point committed (shadow_transition_count++ on success; a
+     * rejected transition performs ZERO writes and leaves the count
+     * untouched). */
+    return cluster->shadow_transition_count == before ? UCN_ERR_STATE
+                                                      : UCN_OK;
+}
+
+ucn_result_t ucn_cluster_test_complete_takeover(ucn_cluster_t *cluster,
+                                                uint32_t now_ms)
+{
+    uint32_t before;
+
+    if (cluster == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    before = cluster->shadow_transition_count;
+    complete_takeover(cluster, now_ms);
+    return cluster->shadow_transition_count == before ? UCN_ERR_STATE
+                                                      : UCN_OK;
 }
 #endif
