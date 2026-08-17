@@ -1256,13 +1256,23 @@ static int cluster_test_takeover_vote_identity(void)
  * higher-Term Head during its takeover window must abandon the takeover
  * and join that Head; a different Cluster's term is NOT comparable
  * (Target v2 §8.3) and must not interrupt the takeover. */
+/* CLV2-01-04e.7: the BACKUP higher-Term same-Cluster Head offer is a BACKUP exit site
+ * (NOT a Recovery site): consider_head_offer() commits the BACKUP_READY / BACKUP_SYNCING /
+ * BACKUP_TAKEOVER -> JOIN_PENDING transition through the single entry point (reason
+ * JOIN_INITIATED) BEFORE any site write, then runs the site's original writes in order
+ * (takeover=false; backup_clear_sync(); begin_join()).  A shadow/legacy desync fails closed
+ * with ZERO site writes - the Backup keeps its state and a later well-formed offer may still
+ * be accepted.  The end-of-RX shadow sync only reconciles the mirror (never mints the phase). */
 static int cluster_test_takeover_interrupted_by_newer_head(void)
 {
     cluster_test_network_t network;
+    cluster_test_network_t net2;
+    cluster_test_network_t net3;
     cluster_test_node_t *backup;
     cluster_test_node_t *newer_head;
     ucn_cluster_message_t message;
     uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    uint32_t baseline_count;
 
     TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
     backup = &network.nodes[1];
@@ -1273,9 +1283,18 @@ static int cluster_test_takeover_interrupted_by_newer_head(void)
     backup->cluster.head_node_id = newer_head->node_id;
     backup->cluster.backup_primary_node_id = newer_head->node_id;
     backup->cluster.backup_generation = 1U;
+    /* M01.0.2: takeover_active && backup_syncing is REACHABLE (a late same-generation
+     * Type12 during takeover); the higher-Term offer must never be rejected for phase
+     * reasons - the derive stays BACKUP_TAKEOVER and the transition must commit. */
     backup->cluster.backup_takeover_active = true;
+    backup->cluster.backup_syncing = true;
     backup->cluster.backup_primary_lease_deadline_ms = 1U;
+    backup->cluster.shadow_phase = UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
+    backup->cluster.transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    backup->cluster.shadow_transition_count = 0U;
     network.now_ms = 50U;
+    TEST_ASSERT(test_derive_phase(&backup->cluster, 50U) ==
+                UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
 
     /* A foreign Cluster with a higher term must NOT interrupt takeover. */
     (void)memset(&message, 0, sizeof(message));
@@ -1293,8 +1312,14 @@ static int cluster_test_takeover_interrupted_by_newer_head(void)
                                     true, encoded, sizeof(encoded)) == UCN_OK);
     TEST_ASSERT(backup->cluster.backup_takeover_active == true);
     TEST_ASSERT(backup->cluster.role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(backup->cluster.shadow_transition_count == 0U);
 
-    /* The same Cluster at a higher term interrupts and joins. */
+    /* The same Cluster at a higher term interrupts and joins.  CLV2-01-04e.7:
+     * the BACKUP_TAKEOVER -> JOIN_PENDING transition (JOIN_INITIATED) commits FIRST (fail
+     * closed), then the site's writes run in order: takeover=false, backup_clear_sync()
+     * (identity cleared, epoch reset via set_detached), begin_join() (pending_* re-populated
+     * from the candidate). */
+    baseline_count = backup->cluster.shadow_transition_count;
     (void)memset(&message, 0, sizeof(message));
     message.type = UCN_CLUSTER_MSG_ADVERTISE;
     message.role = UCN_CLUSTER_ROLE_HEAD;
@@ -1310,8 +1335,155 @@ static int cluster_test_takeover_interrupted_by_newer_head(void)
                                     true, encoded, sizeof(encoded)) == UCN_OK);
     TEST_ASSERT(backup->cluster.backup_takeover_active == false);
     TEST_ASSERT(backup->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(backup->cluster.shadow_phase == UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(backup->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_JOIN_INITIATED);
+    TEST_ASSERT(backup->cluster.shadow_transition_count ==
+                baseline_count + 1U);
+    /* backup_clear_sync() + set_detached() site effects in original order. */
+    TEST_ASSERT(backup->cluster.backup_syncing == false);
+    TEST_ASSERT(backup->cluster.backup_ready == false);
+    TEST_ASSERT(backup->cluster.backup_primary_node_id == 0U);
+    TEST_ASSERT(backup->cluster.backup_generation == 0U);
+    TEST_ASSERT(backup->cluster.membership_sequence == 0U);
+    TEST_ASSERT(backup->cluster.backup_primary_deadline_ms == 0U);
+    TEST_ASSERT(backup->cluster.backup_missed_heartbeats == 0U);
+    TEST_ASSERT(backup->cluster.cluster_id == 0U);
+    TEST_ASSERT(backup->cluster.term == 0U);
+    TEST_ASSERT(backup->cluster.head_node_id == 0U);
+    TEST_ASSERT(backup->cluster.current_head_score == 0U);
+    TEST_ASSERT(backup->cluster.known_backup_node_id == 0U);
+    TEST_ASSERT(backup->cluster.known_backup_generation == 0U);
+    TEST_ASSERT(backup->cluster.head_lease_expires_at_ms == 0U);
+    TEST_ASSERT(backup->cluster.head_grace_deadline_ms == 0U);
+    TEST_ASSERT(backup->cluster.election_deadline_ms == 0U);
+    /* begin_join() re-populates the pending fields from the candidate. */
+    TEST_ASSERT(backup->cluster.pending_head_node_id == newer_head->node_id);
+    TEST_ASSERT(backup->cluster.pending_cluster_id == 1U);
+    TEST_ASSERT(backup->cluster.pending_term == 2U);
+    TEST_ASSERT(backup->cluster.pending_head_score == 9000U);
+    TEST_ASSERT(backup->cluster.role_since_ms == 50U);
+    TEST_ASSERT(backup->cluster.next_join_retry_ms == 50U);
+    TEST_ASSERT(backup->cluster.recovery_eligible == false);
+    TEST_ASSERT(backup->cluster.recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(test_derive_phase(&backup->cluster, 50U) ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+
+    /* Scenario A: a READY Backup (no takeover) accepts the same higher-Term same-Cluster
+     * Head offer -> BACKUP_READY -> JOIN_PENDING (JOIN_INITIATED), full backup identity
+     * cleared, takeover stays clear. */
+    TEST_ASSERT(cluster_test_network_init(&net2, 3U) == 0);
+    net2.now_ms = 50U;
+    net2.nodes[1].cluster.role = UCN_CLUSTER_ROLE_BACKUP;
+    net2.nodes[1].cluster.cluster_id = 1U;
+    net2.nodes[1].cluster.term = 1U;
+    net2.nodes[1].cluster.head_node_id = 1U;
+    net2.nodes[1].cluster.backup_primary_node_id = 1U;
+    net2.nodes[1].cluster.backup_generation = 7U;
+    net2.nodes[1].cluster.backup_ready = true;
+    net2.nodes[1].cluster.backup_syncing = false;
+    net2.nodes[1].cluster.backup_takeover_active = false;
+    net2.nodes[1].cluster.backup_primary_deadline_ms = 200U;
+    net2.nodes[1].cluster.membership_sequence = 4U;
+    net2.nodes[1].cluster.backup_missed_heartbeats = 2U;
+    net2.nodes[1].cluster.shadow_phase = UCN_CLUSTER_PHASE_BACKUP_READY;
+    net2.nodes[1].cluster.transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    net2.nodes[1].cluster.shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(&net2.nodes[1].cluster, 50U) ==
+                UCN_CLUSTER_PHASE_BACKUP_READY);
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_ADVERTISE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 2U;
+    message.head_node_id = 1U;
+    message.head_score = 9000U;
+    message.available_capacity = 2U;
+    message.lease_ms = 8000U;
+    message.nonce = 7U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&net2.nodes[1].cluster, 1U, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(net2.nodes[1].cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(net2.nodes[1].cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(net2.nodes[1].cluster.transition_reason ==
+                UCN_CLUSTER_REASON_JOIN_INITIATED);
+    TEST_ASSERT(net2.nodes[1].cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(net2.nodes[1].cluster.backup_takeover_active == false);
+    TEST_ASSERT(net2.nodes[1].cluster.backup_ready == false);
+    TEST_ASSERT(net2.nodes[1].cluster.backup_syncing == false);
+    TEST_ASSERT(net2.nodes[1].cluster.backup_primary_node_id == 0U);
+    TEST_ASSERT(net2.nodes[1].cluster.backup_generation == 0U);
+    TEST_ASSERT(net2.nodes[1].cluster.membership_sequence == 0U);
+    TEST_ASSERT(net2.nodes[1].cluster.backup_primary_deadline_ms == 0U);
+    TEST_ASSERT(net2.nodes[1].cluster.backup_missed_heartbeats == 0U);
+    TEST_ASSERT(net2.nodes[1].cluster.pending_head_node_id == 1U);
+    TEST_ASSERT(net2.nodes[1].cluster.pending_cluster_id == 1U);
+    TEST_ASSERT(net2.nodes[1].cluster.pending_term == 2U);
+    TEST_ASSERT(net2.nodes[1].cluster.pending_head_score == 9000U);
+    TEST_ASSERT(net2.nodes[1].cluster.role_since_ms == 50U);
+    TEST_ASSERT(net2.nodes[1].cluster.next_join_retry_ms == 50U);
+    TEST_ASSERT(net2.nodes[1].cluster.recovery_eligible == false);
+    TEST_ASSERT(net2.nodes[1].cluster.recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(test_derive_phase(&net2.nodes[1].cluster, 50U) ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+
+    /* Scenario B (fail closed): a shadow/legacy desync (stale shadow BACKUP_TAKEOVER while
+     * the legacy derives BACKUP_READY) rejects the transition - ZERO site writes: no
+     * takeover clear, no backup identity clear, no join (pending_* untouched); the end-of-RX
+     * shadow sync merely reconciles the mirror to BACKUP_READY. */
+    TEST_ASSERT(cluster_test_network_init(&net3, 3U) == 0);
+    net3.now_ms = 50U;
+    net3.nodes[1].cluster.role = UCN_CLUSTER_ROLE_BACKUP;
+    net3.nodes[1].cluster.cluster_id = 1U;
+    net3.nodes[1].cluster.term = 1U;
+    net3.nodes[1].cluster.head_node_id = 1U;
+    net3.nodes[1].cluster.backup_primary_node_id = 1U;
+    net3.nodes[1].cluster.backup_generation = 7U;
+    net3.nodes[1].cluster.backup_ready = true;
+    net3.nodes[1].cluster.backup_syncing = false;
+    net3.nodes[1].cluster.backup_takeover_active = false;
+    net3.nodes[1].cluster.shadow_phase = UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
+    net3.nodes[1].cluster.transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    net3.nodes[1].cluster.shadow_transition_count = 0U;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_ADVERTISE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 2U;
+    message.head_node_id = 1U;
+    message.head_score = 9000U;
+    message.available_capacity = 2U;
+    message.lease_ms = 8000U;
+    message.nonce = 9U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    ucn_cluster_test_transition_asserts_set(false);
+    TEST_ASSERT(ucn_cluster_receive(&net3.nodes[1].cluster, 1U, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    ucn_cluster_test_transition_asserts_set(true);
+    TEST_ASSERT(net3.nodes[1].cluster.role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(net3.nodes[1].cluster.shadow_phase !=
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(net3.nodes[1].cluster.transition_reason !=
+                UCN_CLUSTER_REASON_JOIN_INITIATED);
+    TEST_ASSERT(net3.nodes[1].cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(net3.nodes[1].cluster.backup_ready == true);
+    TEST_ASSERT(net3.nodes[1].cluster.backup_syncing == false);
+    TEST_ASSERT(net3.nodes[1].cluster.backup_takeover_active == false);
+    TEST_ASSERT(net3.nodes[1].cluster.backup_primary_node_id == 1U);
+    TEST_ASSERT(net3.nodes[1].cluster.backup_generation == 7U);
+    TEST_ASSERT(net3.nodes[1].cluster.cluster_id == 1U);
+    TEST_ASSERT(net3.nodes[1].cluster.term == 1U);
+    TEST_ASSERT(net3.nodes[1].cluster.head_node_id == 1U);
+    TEST_ASSERT(net3.nodes[1].cluster.pending_head_node_id == 0U);
+    TEST_ASSERT(net3.nodes[1].cluster.pending_cluster_id == 0U);
+    TEST_ASSERT(net3.nodes[1].cluster.pending_term == 0U);
+    TEST_ASSERT(net3.nodes[1].cluster.pending_head_score == 0U);
+    TEST_ASSERT(net3.nodes[1].cluster.recovery_eligible == false);
     return 0;
 }
+
 
 /* C07.7 P1: available_capacity == 0 only gates new JOINs; it must not
  * block a higher-Term Head from converging a full Head onto it. */

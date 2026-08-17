@@ -2563,9 +2563,46 @@ static void consider_head_offer(
              * different Cluster's term is NOT comparable (Target §8.3):
              * cross-Cluster convergence is owned by Head-to-Head Merge,
              * never by a Backup jumping at a foreign term. */
+            /* CLV2-01-04e.7 (human audit MAJOR 2.B): this is a BACKUP exit
+             * site, NOT a Recovery site.  The higher-Term Head event decides
+             * the BACKUP_SYNCING/READY/TAKEOVER -> JOIN_PENDING transition
+             * (JOIN_INITIATED) - commit it through the single entry point
+             * BEFORE any site write, UNCONDITIONALLY (Shadow-Guard RULE: the
+             * legacy/event decides WHICH transition; cluster_transition()
+             * validates whether the shadow agrees; the caller never uses
+             * shadow_phase to decide whether to SKIP the call).  On rejection
+             * (shadow desync / illegal pair / pre-mutated phase fields) fail
+             * closed: NO site write runs - the takeover stays armed, the
+             * backup identity stays, no join - and a later well-formed offer
+             * may still be accepted.  The pre-phase is derived from the
+             * legacy state (takeover_active -> BACKUP_TAKEOVER, ready ->
+             * BACKUP_READY, else -> BACKUP_SYNCING); the M01.0.2 combo
+             * (takeover_active && backup_syncing) stays expressible and the
+             * late-Type12 case is never rejected for phase reasons. */
+            {
+                const ucn_cluster_phase_t pre_phase =
+                    cluster_phase_from_legacy_state(cluster, now_ms);
+
+                if (cluster_transition(cluster, pre_phase,
+                                       UCN_CLUSTER_PHASE_JOIN_PENDING,
+                                       UCN_CLUSTER_REASON_JOIN_INITIATED,
+                                       now_ms) != UCN_OK) {
+                    return;
+                }
+            }
             cluster->backup_takeover_active = false;
             backup_clear_sync(cluster, now_ms);
             begin_join(cluster, candidate, now_ms);
+#if !defined(NDEBUG)
+            /* CLV2-01-04e.7 post-commit derive assert: after the transition
+             * (apply_legacy wrote role=JOIN_PENDING + recovery_eligible=false
+             * + backoff=0) and every site write (backup_clear_sync()'s
+             * set_detached() rewrote DETACHED, then begin_join() rewrote
+             * JOIN_PENDING - redundant-but-harmless) the legacy state must
+             * still derive JOIN_PENDING, exactly what the shadow committed. */
+            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                   UCN_CLUSTER_PHASE_JOIN_PENDING);
+#endif
         }
         return;
     }
