@@ -1732,6 +1732,176 @@ static int cluster_test_join_accept_out_of_order_after_backup_assign(void)
     return 0;
 }
 
+/* CLV2-01-04e.1: handle_backup_assign() is wired onto cluster_transition()
+ * - the assignment IS the MEMBER_ACTIVE / MEMBER_TAKEOVER_GRACE /
+ * JOIN_PENDING -> BACKUP_SYNCING transition (reason BACKUP_ASSIGNED), run
+ * UNCONDITIONALLY (no shadow guard) BEFORE any primary/generation/mirror
+ * write and fail closed.  (a) MEMBER_ACTIVE -> shadow==BACKUP_SYNCING,
+ * reason==BACKUP_ASSIGNED, primary/gen/mirror fields set; (a2) a MEMBER
+ * with the grace deadline armed -> same via the GRACE old phase; (b)
+ * JOIN_PENDING (pre-assigned path) -> same; (c) a shadow desync fails
+ * closed with UCN_ERR_STATE and primary/generation/mirror are NOT
+ * written (mirror-symmetric to the d.3 READY rejection test). */
+static int cluster_test_backup_assign_transition(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *node;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    ucn_cluster_t *c;
+    ucn_cluster_t before;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 0U;
+    node = &network.nodes[1]; /* head-capable, so BACKUP_ASSIGN(self) works */
+    c = &node->cluster;
+
+    /* Encoded BACKUP_ASSIGN(self) from the Head (node 0). */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_ASSIGN;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 5U;
+    message.head_node_id = network.nodes[0].node_id;
+    message.sync_token = node->node_id;
+    message.backup_generation = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+
+    /* (a) MEMBER_ACTIVE receives BACKUP_ASSIGN(self): the transition is
+     * committed BEFORE the primary/generation/mirror writes and every
+     * site effect lands in order. */
+    node->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    node->cluster.cluster_id = 1U;
+    node->cluster.term = 5U;
+    node->cluster.head_node_id = network.nodes[0].node_id;
+    node->cluster.config.head_capable = true;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    c->members[0].occupied = true; /* stale mirror must be cleared */
+    c->members[0].node_id = 3U;
+    TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
+                UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+    TEST_ASSERT(ucn_cluster_receive(c, network.nodes[0].node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_BACKUP_ASSIGNED);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(c->backup_syncing == true);
+    TEST_ASSERT(c->backup_ready == false);
+    TEST_ASSERT(c->backup_primary_node_id == network.nodes[0].node_id);
+    TEST_ASSERT(c->backup_generation == 1U);
+    TEST_ASSERT(c->membership_sequence == 0U);
+    TEST_ASSERT(c->backup_primary_deadline_ms != 0U);
+    TEST_ASSERT(c->backup_primary_lease_deadline_ms != 0U);
+    TEST_ASSERT(c->backup_missed_heartbeats == 0U);
+    TEST_ASSERT(c->members[0].occupied == false); /* cleared */
+    TEST_ASSERT(c->known_backup_node_id == node->node_id);
+    TEST_ASSERT(c->known_backup_generation == 1U);
+    TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
+                UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+
+    /* (a2) a MEMBER in TAKEOVER_GRACE (grace deadline armed) receives it:
+     * old_phase derives MEMBER_TAKEOVER_GRACE from the PRE-CALL legacy
+     * state. */
+    node->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    node->cluster.cluster_id = 1U;
+    node->cluster.term = 5U;
+    node->cluster.head_node_id = network.nodes[0].node_id;
+    node->cluster.config.head_capable = true;
+    node->cluster.head_grace_deadline_ms =
+        ucn_deadline_from_now(network.now_ms, 40U);
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE;
+    TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
+                UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE);
+    TEST_ASSERT(ucn_cluster_receive(c, network.nodes[0].node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_BACKUP_ASSIGNED);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(c->backup_primary_node_id == network.nodes[0].node_id);
+    TEST_ASSERT(c->backup_generation == 1U);
+    TEST_ASSERT(c->backup_takeover_active == false); /* M01.0.2: never armed */
+    TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
+                UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+
+    /* (b) JOIN_PENDING (pre-assigned join path) receives it: same
+     * transition, shadow stays BACKUP_SYNCING with the identity set. */
+    node->cluster.role = UCN_CLUSTER_ROLE_JOIN_PENDING;
+    node->cluster.cluster_id = 1U;
+    node->cluster.term = 5U;
+    node->cluster.head_node_id = network.nodes[0].node_id;
+    node->cluster.pending_head_node_id = network.nodes[0].node_id;
+    node->cluster.pending_cluster_id = 1U;
+    node->cluster.pending_term = 5U;
+    node->cluster.pending_join_nonce = 9U;
+    node->cluster.config.head_capable = true;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_JOIN_PENDING;
+    TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(ucn_cluster_receive(c, network.nodes[0].node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_BACKUP_ASSIGNED);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(c->backup_syncing == true);
+    TEST_ASSERT(c->backup_ready == false);
+    TEST_ASSERT(c->backup_primary_node_id == network.nodes[0].node_id);
+    TEST_ASSERT(c->backup_generation == 1U);
+    TEST_ASSERT(c->known_backup_node_id == node->node_id);
+    TEST_ASSERT(c->known_backup_generation == 1U);
+    TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
+                UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+
+    /* (c) fail-closed: the shadow claims DETACHED_OBSERVE while the legacy
+     * state derives MEMBER_ACTIVE - the BACKUP_SYNCING transition rejects
+     * with UCN_ERR_STATE and primary/generation/mirror are NOT written.
+     * The mirror/identity fields the earlier sub-cases committed are
+     * explicitly reset first so the fail-closed assertions below prove
+     * the rejected transition itself wrote NOTHING. */
+    node->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    node->cluster.cluster_id = 1U;
+    node->cluster.term = 5U;
+    node->cluster.head_node_id = network.nodes[0].node_id;
+    node->cluster.config.head_capable = true;
+    node->cluster.head_grace_deadline_ms = 0U;
+    node->cluster.backup_primary_node_id = 0U;
+    node->cluster.backup_generation = 0U;
+    node->cluster.backup_syncing = false;
+    node->cluster.backup_ready = false;
+    node->cluster.backup_takeover_active = false;
+    node->cluster.membership_sequence = 0U;
+    node->cluster.backup_primary_deadline_ms = 0U;
+    node->cluster.backup_primary_lease_deadline_ms = 0U;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE; /* desync */
+    /* Rejection tests silence the Debug assert knob (framework
+     * convention, cluster_transition_assert_enabled) so the release
+     * behaviour - UCN_ERR_STATE with ZERO writes - can be verified. */
+    ucn_cluster_test_transition_asserts_set(false);
+    before = *c;
+    TEST_ASSERT(ucn_cluster_receive(c, network.nodes[0].node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_ERR_STATE);
+    /* The transition never committed: no primary/gen/mirror write. */
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_MEMBER);
+    TEST_ASSERT(c->backup_primary_node_id == 0U);
+    TEST_ASSERT(c->backup_generation == 0U);
+    TEST_ASSERT(c->backup_syncing == false);
+    TEST_ASSERT(c->backup_ready == false);
+    TEST_ASSERT(c->backup_primary_deadline_ms == before.backup_primary_deadline_ms);
+    TEST_ASSERT(c->backup_primary_lease_deadline_ms ==
+                before.backup_primary_lease_deadline_ms);
+    TEST_ASSERT(c->membership_sequence == before.membership_sequence);
+    TEST_ASSERT(c->shadow_phase != UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    TEST_ASSERT(c->transition_reason != UCN_CLUSTER_REASON_BACKUP_ASSIGNED);
+    /* The end-of-RX mirror sync re-aligns shadow to the UNCHANGED legacy
+     * state (MEMBER_ACTIVE) - exactly the CLV2-01-02 behaviour for a
+     * rejected message; the legacy state itself never derived SYNCING. */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+    TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
+                UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+    ucn_cluster_test_transition_asserts_set(true);
+    return 0;
+}
+
 static int cluster_test_join_pending_stepdown(void)
 {
     cluster_test_network_t network;
@@ -3195,11 +3365,16 @@ static int cluster_test_backup_sync(void)
      * validates shadow == old before the STABLE transition. */
     head->cluster.backup_assign_pending = false;
     head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
+    /* CLV2-01-04e.1: the manual staging must align the shadow mirror
+     * with the derived MEMBER_ACTIVE phase - the migrated BACKUP_ASSIGN
+     * handler validates shadow == old before the BACKUP_SYNCING
+     * transition (shadow-guard closure). */
     backup->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
     backup->cluster.cluster_id = 1U;
     backup->cluster.term = 1U;
     backup->cluster.head_node_id = head->node_id;
     backup->cluster.config.head_capable = true;
+    backup->cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     third->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
     third->cluster.cluster_id = 1U;
     third->cluster.term = 1U;
@@ -5963,6 +6138,10 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_join_txid_and_stepdown_nonce() == 0);
     TEST_ASSERT(cluster_test_join_reject_shadow_transition() == 0);
     TEST_ASSERT(cluster_test_join_accept_out_of_order_after_backup_assign() == 0);
+    /* CLV2-01-04e.1: handle_backup_assign() commits the member/join ->
+     * BACKUP_SYNCING transition (BACKUP_ASSIGNED) before the primary/
+     * generation/mirror writes, fail-closed on a shadow desync. */
+    TEST_ASSERT(cluster_test_backup_assign_transition() == 0);
     TEST_ASSERT(cluster_test_join_pending_stepdown() == 0);
     TEST_ASSERT(cluster_test_member_stepdown_shadow_transition() == 0);
     TEST_ASSERT(cluster_test_fault_partition_takeover() == 0);
