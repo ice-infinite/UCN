@@ -4671,6 +4671,60 @@ static uint32_t backup_control_spacing_ms(const ucn_cluster_t *cluster,
  *   STABLE->ASSIGNING (armed-sweep resync): REAL direct transition via
  *     backup_resync() target dispatch (d.7 ITEM 4) - promoted to DIRECT
  *     in CLUSTER_TRANSITION_DIRECT_ALLOWED (d.7 ITEM 5).
+ * =====================================================================
+ *
+ * CLV2-01-04e.7 (human audit item 5): BACKUP-side phase-defining write
+ * audit - every write to backup_ready / backup_syncing /
+ * backup_takeover_active / role (while leaving a BACKUP role) is either
+ * part of an explicit cluster_transition()/preflight commit or keeps the
+ * phase unchanged.  NO BACKUP-side phase change depends on the end-of-RX
+ * cluster_shadow_sync() minting anymore.
+ *
+ *   backup_ready = true:
+ *     handle_backup_member_sync() SYNC_END after SYNCING->READY (e.2)
+ *                                                    -> explicit transition
+ *   backup_ready = false:
+ *     apply_legacy(BACKUP_SYNCING) commit            -> transition commit
+ *     apply_legacy(HEAD_NO_BACKUP) commit (complete_takeover) -> e.4 commit
+ *     handle_backup_assign() after *->BACKUP_SYNCING  -> explicit (e.1)
+ *     handle_backup_member_sync() re-entry (BEGIN/DELTA-gap/seq-gap)
+ *       after READY->SYNCING                         -> explicit (e.7)
+ *     backup_challenge() after *->ELECTION           -> explicit (e.7)
+ *     handle_head_takeover() clears after *->MEMBER_ACTIVE -> explicit (e.6)
+ *     start_takeover() (backup_ready stays, M01.0.2) -> not written
+ *     backup_clear_sync() (idempotent post-transition cleanup, incl.
+ *       the e.7 detach paths and the e.5 timeout site) -> post-commit
+ *   backup_syncing = true:
+ *     apply_legacy(BACKUP_SYNCING) commit            -> transition commit
+ *     handle_backup_assign() after *->BACKUP_SYNCING  -> explicit (e.1)
+ *     handle_backup_member_sync() re-entry (BEGIN/DELTA-gap/seq-gap)
+ *       after READY->SYNCING                         -> explicit (e.7)
+ *   backup_syncing = false:
+ *     apply_legacy(BACKUP_READY) commit              -> transition commit
+ *     apply_legacy(HEAD_NO_BACKUP) commit (complete_takeover) -> e.4 commit
+ *     handle_backup_member_sync() SYNC_END after SYNCING->READY (e.2)
+ *                                                    -> explicit transition
+ *     backup_challenge() after *->ELECTION           -> explicit (e.7)
+ *     handle_head_takeover() clears after *->MEMBER_ACTIVE -> explicit (e.6)
+ *     backup_clear_sync() (idempotent post-transition cleanup) -> post-commit
+ *   backup_takeover_active = true:
+ *     apply_legacy(BACKUP_TAKEOVER) commit           -> transition commit
+ *     start_takeover() after READY->TAKEOVER         -> explicit (e.3)
+ *   backup_takeover_active = false:
+ *     apply_legacy(HEAD_NO_BACKUP) commit (complete_takeover) -> e.4 commit
+ *     backup_challenge() after TAKEOVER->ELECTION    -> explicit (e.7)
+ *     consider_head_offer() higher-Term after *->JOIN_PENDING -> explicit (e.7)
+ *     handle_head_takeover() after TAKEOVER->MEMBER_ACTIVE -> explicit (e.6)
+ *     backup_clear_sync() (idempotent cleanup; NOT cleared by the e.5
+ *       timeout site itself - matches Current)       -> post-commit
+ *   role leaving BACKUP (CANDIDATE / DETACHED / JOIN_PENDING / MEMBER /
+ *     HEAD):
+ *     apply_legacy commits (ELECTION/DETACHED_OBSERVE/JOIN_PENDING/
+ *       MEMBER_ACTIVE/HEAD_NO_BACKUP)                -> transition commits
+ *     backup_challenge() (e.7), consider_head_offer() (e.7),
+ *       handle_head_takeover() (e.6), HEAD_STEPDOWN BACKUP branch (e.7),
+ *       member_sync detach preflight+commit (e.7), start_takeover keeps
+ *       role BACKUP (e.3), complete_takeover (e.4)   -> explicit
  * ===================================================================== */
 
 static void start_backup_assignment_cycle(ucn_cluster_t *cluster,
