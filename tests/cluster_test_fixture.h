@@ -92,6 +92,9 @@ void ucn_cluster_test_start_backup_assignment_cycle(ucn_cluster_t *cluster,
                                                     uint32_t now_ms);
 void ucn_cluster_test_send_backup_assignment_step(ucn_cluster_t *cluster,
                                                   uint32_t now_ms);
+void ucn_cluster_test_assign_backup(ucn_cluster_t *cluster, uint32_t now_ms);
+void ucn_cluster_test_queue_backup_assignment_for_member(
+    ucn_cluster_t *cluster, ucn_node_id_t member_node_id, uint32_t now_ms);
 #endif
 
 #ifdef __cplusplus
