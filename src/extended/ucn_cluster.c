@@ -3003,8 +3003,13 @@ static ucn_result_t handle_backup_assign(ucn_cluster_t *cluster,
                            now_ms) != UCN_OK) {
         /* Fail closed per the migration contract: a rejected transition
          * (shadow mismatch / illegal pair / pre-mutated phase fields)
-         * leaves every field untouched - do NOT commit the Backup
-         * identity (primary/generation/mirror stay unset). */
+         * leaves the PHASE-RELEVANT fields untouched - the Backup
+         * identity (primary/generation/mirror/deadlines) is NOT
+         * committed.  known_backup_node_id/generation were already
+         * written above for EVERY assignment recipient (Current
+         * behavior, same as c.4's LEAVE-before-transition): the shared
+         * assignment record is not phase-relevant and is not rolled
+         * back, exactly as Current leaves it. */
         return UCN_ERR_STATE;
     }
     cluster->role = UCN_CLUSTER_ROLE_BACKUP;
