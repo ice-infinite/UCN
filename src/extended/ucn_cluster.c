@@ -4376,11 +4376,50 @@ static ucn_result_t ucn_cluster_receive_inner(
                            UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
 #endif
                 } else {
-                    /* BACKUP sub-branch stays CURRENT legacy order (write
-                     * the nonce first, then backup_clear_sync) - it is
-                     * not migrated yet (01-04e). */
+                    /* CLV2-01-04e.7 (human audit MAJOR 2.C): the BACKUP
+                     * sub-branch migrates with the b.6 fail-closed lesson.
+                     * The old phase is derived from the PRE-CALL state
+                     * (takeover_active -> BACKUP_TAKEOVER, ready ->
+                     * BACKUP_READY, else BACKUP_SYNCING - cluster_phase_
+                     * from_legacy_state() IS this derivation for role
+                     * BACKUP) and the transition runs FIRST with the
+                     * EXPLICIT STEPDOWN_ORDERED reason (an ordered
+                     * stepdown is an ordered stepdown regardless of role;
+                     * the BEST-EFFORT fallback would mint PRIMARY_LOST /
+                     * TAKEOVER_TIMEOUT, semantically wrong).  backup_
+                     * clear_sync() writes role=DETACHED, which would trip
+                     * the pre-transition derive check if it ran first;
+                     * its role rewrite afterwards is redundant-but-harmless
+                     * (its mirror clears stay site-owned).  On success the
+                     * site consumes the anti-replay fence and runs
+                     * backup_clear_sync() in the original order; the
+                     * M01.0.2 takeover_active && syncing combo is a valid
+                     * BACKUP_TAKEOVER pre-state and must never be rejected
+                     * for phase reasons (a late Type12 during takeover is
+                     * fine - the DIRECT edge TAKEOVER->DETACHED exists for
+                     * the stepdown path). */
+                    ucn_cluster_phase_t pre_phase =
+                        cluster_phase_from_legacy_state(cluster, now_ms);
+
+                    if (cluster_transition(cluster, pre_phase,
+                                           UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                                           UCN_CLUSTER_REASON_STEPDOWN_ORDERED,
+                                           now_ms) != UCN_OK) {
+                        /* Fail closed: a rejected transition leaves every
+                         * field untouched INCLUDING the anti-replay fence
+                         * - the node stays BACKUP and a later well-formed
+                         * STEPDOWN may still be accepted. */
+                        return UCN_ERR_STATE;
+                    }
                     cluster->last_stepdown_nonce = message.nonce;
                     backup_clear_sync(cluster, now_ms);
+#if !defined(NDEBUG)
+                    /* CLV2-01-04e.7 post-commit derive assert: after the
+                     * transition AND backup_clear_sync() the legacy state
+                     * must still derive DETACHED_OBSERVE. */
+                    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                           UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+#endif
                 }
                 return UCN_OK;
             }
