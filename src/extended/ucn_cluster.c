@@ -982,8 +982,11 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
     [UCN_CLUSTER_PHASE_BACKUP_READY] =
         /* Primary lease lapsed: start_takeover() L3293 (takeover=true L3315) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_TAKEOVER) |
-        /* DELTA gap / resync: handle_backup_member_sync() (DELTA gap,
-         * SYNC_BEGIN paths; no transition - phase stays SYNCING) */
+        /* DELTA gap / resync: handle_backup_member_sync() DELTA-gap /
+         * fresh-SYNC_BEGIN / snapshot-seq-gap paths re-enter SYNCING via
+         * the explicit READY->SYNCING transition (CLV2-01-04e.7,
+         * RESYNC_STARTED) - the pair was DIRECT all along and is now
+         * actually committed at the site */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING) |
         /* score challenge: backup_challenge() L2412 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION) |
