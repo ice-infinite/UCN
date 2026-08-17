@@ -4790,6 +4790,58 @@ static int cluster_test_takeover_lifecycle_wiring(void)
     TEST_ASSERT(c->recovery_eligible == false);
     TEST_ASSERT(test_derive_phase(c, 100U) == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
 
+    /* (f4) e.6 BACKUP_SYNCING inbound (review C MINOR 1): a syncing (not
+     * yet READY) Backup switched by the higher-Term Head announcement
+     * must take the same MEMBER_ACTIVE transition and the full clear set
+     * - the else-of-the-ternary edge of handle_head_takeover (derive
+     * old=BACKUP_SYNCING for role==BACKUP && !takeover && !ready), which
+     * no other sub-case covers. */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 100U;
+    node = &network.nodes[2]; /* node 3: a syncing Backup of Head node 1 */
+    c = &node->cluster;
+    c->role = UCN_CLUSTER_ROLE_BACKUP;
+    c->cluster_id = 1U;
+    c->term = 5U;
+    c->head_node_id = 1U;
+    c->current_head_score = 9000U;
+    c->backup_primary_node_id = 1U;
+    c->backup_generation = 7U;
+    c->backup_ready = false;
+    c->backup_syncing = true;
+    c->backup_takeover_active = false;
+    c->known_backup_node_id = 2U; /* the announcing new Head */
+    c->known_backup_generation = 7U;
+    c->head_lease_expires_at_ms = 150U;
+    c->head_grace_deadline_ms = 0U;
+    c->shadow_phase = UCN_CLUSTER_PHASE_BACKUP_SYNCING;
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, 100U) == UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    message.nonce = 0U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(c, 2U, true, encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_MEMBER);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_TAKEOVER_STARTED);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
+    TEST_ASSERT(c->cluster_id == 1U);
+    TEST_ASSERT(c->term == 6U);
+    TEST_ASSERT(c->head_node_id == 2U);
+    TEST_ASSERT(c->current_head_score == 7000U);
+    TEST_ASSERT(c->head_lease_expires_at_ms == ucn_deadline_from_now(
+                    100U, 8000U));
+    TEST_ASSERT(c->head_grace_deadline_ms == 0U);
+    TEST_ASSERT(c->next_keepalive_ms == 100U);
+    /* F1 anchor: the full clear set stayed AT THE SITE. */
+    TEST_ASSERT(c->backup_takeover_active == false);
+    TEST_ASSERT(c->backup_syncing == false);
+    TEST_ASSERT(c->backup_ready == false);
+    TEST_ASSERT(c->known_backup_node_id == 0U);
+    TEST_ASSERT(c->known_backup_generation == 0U);
+    TEST_ASSERT(c->recovery_eligible == false);
+    TEST_ASSERT(test_derive_phase(c, 100U) == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+
     /* (g) e.6 shadow-desync: stale shadow (DETACHED_OBSERVE) while the
      * legacy derives BACKUP_READY -> receive fails closed, NOTHING
      * cleared and NO epoch refresh; the end-of-RX sync re-aligns the
