@@ -3030,6 +3030,7 @@ static ucn_result_t handle_backup_member_sync(ucn_cluster_t *cluster,
                                                 uint32_t now_ms)
 {
     ucn_cluster_member_t *member;
+    ucn_cluster_phase_t old_phase;
 
     if (cluster->role != UCN_CLUSTER_ROLE_BACKUP ||
         source != cluster->backup_primary_node_id) {
@@ -3053,6 +3054,28 @@ static ucn_result_t handle_backup_member_sync(ucn_cluster_t *cluster,
             return UCN_OK;
         }
         if (message->membership_sequence != cluster->membership_sequence + 1U) {
+            /* CLV2-01-04e.7: a DELTA gap re-enters SYNCING - the
+             * BACKUP_READY -> BACKUP_SYNCING transition (RESYNC_STARTED),
+             * committed BEFORE the site's ready=false/syncing=true writes,
+             * UNCONDITIONAL on the legacy event (the derived pre-phase
+             * decides: BACKUP_READY -> explicit transition, BACKUP_SYNCING
+             * -> self no-op, BACKUP_TAKEOVER (M01.0.2 late-sync) -> NO
+             * transition, takeover precedence - the legacy body still
+             * applies the resync).  Shadow-Guard RULE: the caller never
+             * skips the transition because shadow_phase differs; a shadow
+             * desync must fail closed (UCN_ERR_STATE, zero re-entry
+             * writes) instead of silently falling back to the end-of-RX
+             * shadow_sync() minting (d.7.1-forbidden). */
+            if (cluster_phase_from_legacy_state(cluster, now_ms) ==
+                UCN_CLUSTER_PHASE_BACKUP_READY) {
+                if (cluster_transition(
+                        cluster, UCN_CLUSTER_PHASE_BACKUP_READY,
+                        UCN_CLUSTER_PHASE_BACKUP_SYNCING,
+                        UCN_CLUSTER_REASON_RESYNC_STARTED,
+                        now_ms) != UCN_OK) {
+                    return UCN_ERR_STATE;
+                }
+            }
             cluster->backup_ready = false;
             cluster->backup_syncing = true;
             (void)send_backup_resync_req(cluster);
@@ -3071,6 +3094,25 @@ static ucn_result_t handle_backup_member_sync(ucn_cluster_t *cluster,
         return UCN_OK;
     }
     if ((message->flags & UCN_CLUSTER_FLAG_SYNC_BEGIN) != 0U) {
+        /* CLV2-01-04e.7: a fresh snapshot BEGIN re-enters SYNCING - the
+         * BACKUP_READY -> BACKUP_SYNCING transition (RESYNC_STARTED),
+         * committed BEFORE the site drops the mirror and writes
+         * syncing=true/ready=false, UNCONDITIONAL on the legacy event
+         * (derived pre-phase decides, takeover precedence for M01.0.2).
+         * Fail closed: a rejected transition (shadow desync) returns
+         * UCN_ERR_STATE with ZERO re-entry writes (mirror + sequence +
+         * ready/syncing all untouched) - the end-of-RX sync then re-aligns
+         * to the unchanged phase. */
+        if (cluster_phase_from_legacy_state(cluster, now_ms) ==
+            UCN_CLUSTER_PHASE_BACKUP_READY) {
+            if (cluster_transition(
+                    cluster, UCN_CLUSTER_PHASE_BACKUP_READY,
+                    UCN_CLUSTER_PHASE_BACKUP_SYNCING,
+                    UCN_CLUSTER_REASON_RESYNC_STARTED,
+                    now_ms) != UCN_OK) {
+                return UCN_ERR_STATE;
+            }
+        }
         /* A fresh snapshot re-enters SYNCING and drops any stale mirror.
          * The new snapshot restarts its own membership_sequence. */
         (void)clear_members(cluster);
@@ -3084,6 +3126,23 @@ static ucn_result_t handle_backup_member_sync(ucn_cluster_t *cluster,
         return UCN_OK;
     }
     if (message->membership_sequence != cluster->membership_sequence + 1U) {
+        /* CLV2-01-04e.7: a dropped/reordered snapshot frame re-enters
+         * SYNCING - the BACKUP_READY -> BACKUP_SYNCING transition
+         * (RESYNC_STARTED), committed BEFORE the site's syncing=true/
+         * ready=false writes, UNCONDITIONAL on the legacy event (derived
+         * pre-phase decides, takeover precedence for M01.0.2).  Fail
+         * closed: a rejected transition returns UCN_ERR_STATE with ZERO
+         * re-entry writes. */
+        if (cluster_phase_from_legacy_state(cluster, now_ms) ==
+            UCN_CLUSTER_PHASE_BACKUP_READY) {
+            if (cluster_transition(
+                    cluster, UCN_CLUSTER_PHASE_BACKUP_READY,
+                    UCN_CLUSTER_PHASE_BACKUP_SYNCING,
+                    UCN_CLUSTER_REASON_RESYNC_STARTED,
+                    now_ms) != UCN_OK) {
+                return UCN_ERR_STATE;
+            }
+        }
         /* A dropped/reordered snapshot frame on a lossy link: stay syncing
          * and await the bounded snapshot retransmit (a fresh BEGIN resets
          * the sequence) instead of detaching. */
@@ -3139,19 +3198,84 @@ static ucn_result_t handle_backup_member_sync(ucn_cluster_t *cluster,
             cluster->backup_ready = true;
             return send_backup_ready(cluster);
         }
+        /* CLV2-01-04e.7: the coverage-failed SYNC_END detaches the Backup
+         * ((SYNCING|READY|TAKEOVER) -> DETACHED_OBSERVE).  d.4 preflight
+         * pattern: validate the PRE-CALL state with ZERO writes, run the
+         * Current-order stats/send, then commit BEFORE backup_clear_sync()
+         * (which is then idempotent cleanup; set_detached()'s role rewrite
+         * is redundant-but-harmless per the b.6/c.5 precedent).
+         * Reason choice (human auditor): PRIMARY_LOST for EVERY pre-state -
+         * the primary's sync stream failed.  For the TAKEOVER pre-state
+         * (reachable via the M01.0.2 late-sync combo) TAKEOVER_TIMEOUT
+         * would be a lie: the takeover did NOT time out, so the honest
+         * reason is the sync-stream failure.  The TAKEOVER pre-state is
+         * NEVER rejected here just to avoid the edge - if the legacy body
+         * detaches, the transition must express it. */
+        old_phase = cluster_phase_from_legacy_state(cluster, now_ms);
+        if (cluster_transition_preflight(
+                cluster, old_phase,
+                UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                now_ms) != UCN_OK) {
+            /* Fail closed: NOTHING is touched - no stats++, no reject
+             * sent, no detach; the end-of-RX sync re-aligns the shadow. */
+            return UCN_ERR_STATE;
+        }
         cluster->stats.joins_rejected++;
         /* C07.7 P1: tell the Head immediately so it can pick the next
          * candidate instead of waiting for the member lease to expire. */
         (void)send_backup_reject(cluster,
                                   UCN_CLUSTER_BACKUP_REJECT_COVERAGE);
+        if (cluster_transition(cluster, old_phase,
+                               UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                               UCN_CLUSTER_REASON_PRIMARY_LOST,
+                               now_ms) != UCN_OK) {
+            /* Fail closed: nothing phase-relevant was touched yet. */
+            return UCN_ERR_STATE;
+        }
         backup_clear_sync(cluster, now_ms);
+#if !defined(NDEBUG)
+        /* CLV2-01-04e.7 post-commit derive assert: after the transition
+         * AND backup_clear_sync() the legacy state must derive
+         * DETACHED_OBSERVE. */
+        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+               UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+#endif
         return UCN_OK;
     }
     member = backup_allocate_mirror(cluster, message->member_node_id);
     if (member == NULL) {
+        /* CLV2-01-04e.7: a mirror-allocation failure detaches the Backup
+         * ((SYNCING|READY|TAKEOVER) -> DETACHED_OBSERVE) - the same d.4
+         * preflight pattern and PRIMARY_LOST reason as the coverage-failed
+         * END (the primary's sync stream failed; TAKEOVER_TIMEOUT would be
+         * a lie for a sync failure during takeover).  Preflight validates
+         * with ZERO writes before the Current-order reject send; the
+         * commit runs BEFORE the idempotent backup_clear_sync(). */
+        old_phase = cluster_phase_from_legacy_state(cluster, now_ms);
+        if (cluster_transition_preflight(
+                cluster, old_phase,
+                UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                now_ms) != UCN_OK) {
+            /* Fail closed: NOTHING is touched. */
+            return UCN_ERR_STATE;
+        }
         (void)send_backup_reject(cluster,
                                   UCN_CLUSTER_BACKUP_REJECT_NO_SPACE);
+        if (cluster_transition(cluster, old_phase,
+                               UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                               UCN_CLUSTER_REASON_PRIMARY_LOST,
+                               now_ms) != UCN_OK) {
+            /* Fail closed: nothing phase-relevant was touched yet. */
+            return UCN_ERR_STATE;
+        }
         backup_clear_sync(cluster, now_ms);
+#if !defined(NDEBUG)
+        /* CLV2-01-04e.7 post-commit derive assert: after the transition
+         * AND backup_clear_sync() the legacy state must derive
+         * DETACHED_OBSERVE. */
+        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+               UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+#endif
         return UCN_ERR_NO_SPACE;
     }
     member->lease_expires_at_ms =
