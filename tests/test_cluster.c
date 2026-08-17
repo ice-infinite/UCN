@@ -1488,6 +1488,13 @@ static int cluster_test_backup_reject_switches_candidate(void)
     head->cluster.backup_node_id = rejected->node_id;
     head->cluster.backup_generation = 1U;
     head->cluster.backup_ready = false;
+    /* CLV2-01-04d.7 (MAJOR 1C): the reject path now transitions the
+     * HEAD_BACKUP_* -> HEAD_NO_BACKUP phase explicitly, so the shadow must
+     * be synced to the setup state (a real head has a synced shadow at
+     * every step/RX boundary). */
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
+    head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    head->cluster.shadow_transition_count = 0U;
     /* Mirror: node2 (rejected, score 3000) and node3 (score 2000). */
     head->cluster.members[0].occupied = true;
     head->cluster.members[0].node_id = rejected->node_id;
@@ -4480,8 +4487,10 @@ static const struct cluster_transition_spec_pair {
     { UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING, UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING },
     { UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING, UCN_CLUSTER_PHASE_HEAD_NO_BACKUP },
     { UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING, UCN_CLUSTER_PHASE_STEPPING_DOWN },
-    /* HEAD_STABLE (->ASSIGNING is an observed compound only) */
+    /* HEAD_STABLE (->ASSIGNING is now DIRECT: backup_resync with an
+     * armed sweep, CLV2-01-04d.7 ITEM 5) */
     { UCN_CLUSTER_PHASE_HEAD_STABLE, UCN_CLUSTER_PHASE_HEAD_NO_BACKUP },
+    { UCN_CLUSTER_PHASE_HEAD_STABLE, UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING },
     { UCN_CLUSTER_PHASE_HEAD_STABLE, UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING },
     { UCN_CLUSTER_PHASE_HEAD_STABLE, UCN_CLUSTER_PHASE_STEPPING_DOWN },
     /* BACKUP_SYNCING */
@@ -4728,9 +4737,11 @@ static void cluster_test_transition_reset(ucn_cluster_t *cluster,
  * rejected with UCN_ERR_STATE and NO state change (fail-closed).  The
  * task's examples (JOIN_PENDING -> HEAD_STABLE, DETACHED_OBSERVE ->
  * BACKUP_READY) are covered by the grid below.  The observed compounds
- * (HEAD_STABLE->HEAD_BACKUP_ASSIGNING, BACKUP_READY->HEAD_NO_BACKUP,
- * STEPPING_DOWN->MEMBER_ACTIVE/DETACHED_OBSERVE) are gate-only: they span
- * a whole tick and are never callable through cluster_transition(). */
+ * (BACKUP_READY->HEAD_NO_BACKUP, STEPPING_DOWN->MEMBER_ACTIVE/
+ * DETACHED_OBSERVE) are gate-only: they span a whole tick and are never
+ * callable through cluster_transition().  HEAD_STABLE->HEAD_BACKUP_
+ * ASSIGNING is now a REAL DIRECT edge (backup_resync with an armed sweep,
+ * CLV2-01-04d.7 ITEM 5). */
 static int cluster_test_transition_matrix(void)
 {
     cluster_test_network_t network;
@@ -5626,6 +5637,196 @@ static int cluster_test_remove_member_backup_loss(void)
     return 0;
 }
 
+/* CLV2-01-04d.7 (HEAD-Ladder Closure): every head-ladder phase-relevant
+ * write site now either keeps the phase unchanged or flows through an
+ * explicit cluster_transition()/preflight - no end-of-step shadow_sync()
+ * minting is relied on.  These cases pin the four new wiring points:
+ * (a) start_backup_assignment_cycle SYNCING->ASSIGNING + self re-arm;
+ * (b) handle_backup_reject full STABLE->NO_BACKUP->ASSIGNING chain;
+ * (c) backup_resync with an armed sweep -> direct STABLE->ASSIGNING;
+ * (d) sweep-done last-frame preflight failure leaves the sweep untouched,
+ *     then the restored state completes with an explicit SYNCING. */
+static int cluster_test_head_ladder_closure(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    ucn_cluster_t pristine;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    uint32_t now_ms = 0U;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = now_ms;
+    head = &network.nodes[0];
+    pristine = network.nodes[0].cluster;
+
+    /* (a) start_backup_assignment_cycle: a SYNCING head arming the sweep
+     * transitions SYNCING -> ASSIGNING (BACKUP_ASSIGNED) BEFORE the
+     * pending write; a second call (already ASSIGNING) is a self re-arm
+     * with NO new transition. */
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.backup_node_id = network.nodes[1].node_id;
+    head->cluster.backup_generation = 1U;
+    head->cluster.backup_ready = false;
+    head->cluster.backup_assign_pending = false;
+    head->cluster.backup_assign_remaining = 0U;
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
+    head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    head->cluster.shadow_transition_count = 0U;
+    head->cluster.members[0].occupied = true;
+    head->cluster.members[0].node_id = network.nodes[1].node_id;
+    ucn_cluster_test_start_backup_assignment_cycle(&head->cluster, now_ms);
+    TEST_ASSERT(head->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING);
+    TEST_ASSERT(head->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_BACKUP_ASSIGNED);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(head->cluster.backup_assign_pending == true);
+    TEST_ASSERT(head->cluster.backup_assign_remaining == 1U);
+    /* self re-arm: already ASSIGNING -> no transition, no count bump. */
+    ucn_cluster_test_start_backup_assignment_cycle(&head->cluster, now_ms);
+    TEST_ASSERT(head->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(head->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_BACKUP_ASSIGNED);
+
+    /* (b) handle_backup_reject: STABLE -> NO_BACKUP (BACKUP_LOST) via the
+     * entry point, then the reslection commits NO_BACKUP -> ASSIGNING
+     * (BACKUP_ASSIGNED) with an aligned shadow guard - TWO explicit
+     * transitions, no stale-shadow fallback (count == 2). */
+    cluster_test_transition_reset(&head->cluster, &pristine,
+                                  UCN_CLUSTER_PHASE_HEAD_STABLE);
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.backup_node_id = network.nodes[1].node_id;
+    head->cluster.backup_generation = 1U;
+    head->cluster.backup_ready = true;
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_STABLE;
+    head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    head->cluster.shadow_transition_count = 0U;
+    head->cluster.members[0].occupied = true;
+    head->cluster.members[0].node_id = network.nodes[1].node_id;
+    head->cluster.members[1].occupied = true;
+    head->cluster.members[1].node_id = network.nodes[2].node_id;
+    head->cluster.candidates[0].occupied = true;
+    head->cluster.candidates[0].head_node_id = network.nodes[1].node_id;
+    head->cluster.candidates[0].head_score = 3000U;
+    head->cluster.candidates[1].occupied = true;
+    head->cluster.candidates[1].head_node_id = network.nodes[2].node_id;
+    head->cluster.candidates[1].head_score = 2000U;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_REJECT;
+    message.role = UCN_CLUSTER_ROLE_BACKUP;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.backup_generation = 1U;
+    message.reject_reason = UCN_CLUSTER_BACKUP_REJECT_COVERAGE;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&head->cluster,
+                                    network.nodes[1].node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(head->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 2U);
+    TEST_ASSERT(head->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_BACKUP_ASSIGNED);
+    TEST_ASSERT(head->cluster.backup_node_id == network.nodes[2].node_id);
+    TEST_ASSERT(head->cluster.backup_rejected_node_id ==
+                network.nodes[1].node_id);
+    TEST_ASSERT(head->cluster.backup_candidate_cooldown_until_ms != 0U);
+
+    /* (c) backup_resync with an armed sweep: a STABLE head (ready == true
+     * keeps derive STABLE via ready precedence) with pending armed gets a
+     * RESYNC_REQ - the destination is dispatched to ASSIGNING and the
+     * transition is REAL and DIRECT (RESYNC_STARTED). */
+    cluster_test_transition_reset(&head->cluster, &pristine,
+                                  UCN_CLUSTER_PHASE_HEAD_STABLE);
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.backup_node_id = network.nodes[1].node_id;
+    head->cluster.backup_generation = 1U;
+    head->cluster.backup_ready = true;
+    head->cluster.backup_assign_pending = true; /* armed sweep window */
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_STABLE;
+    head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    head->cluster.shadow_transition_count = 0U;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_BACKUP_RESYNC_REQ;
+    message.role = UCN_CLUSTER_ROLE_BACKUP;
+    message.cluster_id = 1U;
+    message.term = 1U;
+    message.head_node_id = head->node_id;
+    message.backup_generation = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&head->cluster,
+                                    network.nodes[1].node_id, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(head->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING);
+    TEST_ASSERT(head->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_RESYNC_STARTED);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(head->cluster.backup_ready == false);
+    TEST_ASSERT(head->cluster.backup_assign_pending == true);
+
+    /* (d) sweep-done last-frame preflight failure: the ASSIGNING->SYNCING
+     * commit cannot run (legacy no longer derives ASSIGNING - node_id was
+     * cleared), so the preflight rejects BEFORE the last ASSIGN is sent
+     * and NO sweep state moves; once the legacy is restored the next call
+     * completes with an explicit SYNCING. */
+    cluster_test_transition_reset(&head->cluster, &pristine,
+                                  UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING);
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 1U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.backup_node_id = 0U; /* desync: derive is NO_BACKUP */
+    head->cluster.backup_generation = 1U; /* valid BACKUP_ASSIGN encode */
+    head->cluster.backup_ready = false;
+    head->cluster.backup_assign_pending = true;
+    head->cluster.backup_assign_remaining = 1U;
+    head->cluster.backup_assign_cursor = 0U;
+    head->cluster.next_backup_assign_ms = 0U;
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING;
+    head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    head->cluster.shadow_transition_count = 0U;
+    head->cluster.members[0].occupied = true;
+    head->cluster.members[0].node_id = network.nodes[1].node_id;
+    network.queue_count = 0U;
+    ucn_cluster_test_transition_asserts_set(false);
+    ucn_cluster_test_send_backup_assignment_step(&head->cluster, now_ms);
+    TEST_ASSERT(network.queue_count == 0U); /* nothing sent */
+    TEST_ASSERT(head->cluster.backup_assign_remaining == 1U);
+    TEST_ASSERT(head->cluster.backup_assign_pending == true);
+    TEST_ASSERT(head->cluster.backup_assign_cursor == 0U);
+    TEST_ASSERT(head->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 0U);
+    /* restore the legacy: derive is ASSIGNING again -> next call succeeds
+     * with the explicit ASSIGNING -> SYNCING commit. */
+    head->cluster.backup_node_id = network.nodes[1].node_id;
+    ucn_cluster_test_send_backup_assignment_step(&head->cluster, now_ms);
+    TEST_ASSERT(network.queue_count == 1U); /* the last ASSIGN was sent */
+    TEST_ASSERT(head->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
+    TEST_ASSERT(head->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_BACKUP_SYNC_STARTED);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(head->cluster.backup_assign_pending == false);
+    TEST_ASSERT(head->cluster.backup_assign_remaining == 0U);
+    ucn_cluster_test_transition_asserts_set(true);
+    return 0;
+}
+
 int test_cluster(void)
 {
     TEST_ASSERT(cluster_test_codec_and_security() == 0);
@@ -5686,6 +5887,7 @@ int test_cluster(void)
      * wired through the single transition entry point. */
     TEST_ASSERT(cluster_test_resync_transition_wiring() == 0);
     TEST_ASSERT(cluster_test_head_stepdown_transition_wiring() == 0);
+    TEST_ASSERT(cluster_test_head_ladder_closure() == 0);
     TEST_ASSERT(cluster_test_capacity_is_bounded() == 0);
     TEST_ASSERT(cluster_test_neighbor_summary_api() == 0);
     TEST_ASSERT(cluster_test_remove_member_backup_loss() == 0);

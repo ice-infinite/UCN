@@ -85,6 +85,13 @@ void ucn_cluster_test_remove_member(ucn_cluster_t *cluster,
                                     uint32_t now_ms);
 void ucn_cluster_test_expire_members(ucn_cluster_t *cluster,
                                      uint32_t now_ms);
+
+/* CLV2-01-04d.7: test-only views of the head-ladder sites wired in this
+ * point (start_backup_assignment_cycle / send_backup_assignment_step). */
+void ucn_cluster_test_start_backup_assignment_cycle(ucn_cluster_t *cluster,
+                                                    uint32_t now_ms);
+void ucn_cluster_test_send_backup_assignment_step(ucn_cluster_t *cluster,
+                                                  uint32_t now_ms);
 #endif
 
 #ifdef __cplusplus
