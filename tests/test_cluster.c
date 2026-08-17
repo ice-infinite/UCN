@@ -3526,6 +3526,12 @@ static int cluster_test_backup_sync_transition(void)
     backup->cluster.term = 1U;
     backup->cluster.head_node_id = head->node_id;
     backup->cluster.config.head_capable = true;
+    /* CLV2-01-04e.1 (e-group merge cross-point): the manual staging must
+     * align the shadow mirror with the derived MEMBER_ACTIVE phase - the
+     * migrated BACKUP_ASSIGN handler validates shadow == old before the
+     * BACKUP_SYNCING transition (shadow-guard closure), exactly like the
+     * sibling staging at cluster_test_backup_assign_transition(). */
+    backup->cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     third->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
     third->cluster.cluster_id = 1U;
     third->cluster.term = 1U;
