@@ -851,7 +851,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* observe timeout (head_capable): start_election() L4055 (transition L4062) */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION) |
-        /* stable Head offer: cluster_transition() L2580 via consider_head_offer() L2435 DETACHED (!recovery_eligible); RECOVERY_* keeps begin_join() L2059 */
+        /* stable Head offer: cluster_transition() via consider_head_offer() DETACHED (!recovery_eligible, 01-04b.3) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
         /* joins a recovery Head: handle_recovery_declare() L3637 (role=MEMBER L4062) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
@@ -1020,7 +1020,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* backoff armed: start_recovery_backoff() L3591 (deadline L3594) via step L5060 */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_ELECTION) |
-        /* Head offer: begin_join() L2059 via consider_head_offer() L2435 */
+        /* Head offer: cluster_transition() via consider_head_offer() RECOVERY_* (01-04f) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
         /* recovery Head join: handle_recovery_declare() L3637 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
@@ -1028,7 +1028,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
     [UCN_CLUSTER_PHASE_RECOVERY_ELECTION] =
         /* quorum, declare: declare_recovery_head() L3598 (role=RECOVERY_HEAD L3603) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_HEAD) |
-        /* Head offer: begin_join() L2059 via consider_head_offer() L2435 */
+        /* Head offer: cluster_transition() via consider_head_offer() RECOVERY_* (01-04f) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
         /* recovery Head join: handle_recovery_declare() L3637 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
@@ -1175,15 +1175,16 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         cluster->role = UCN_CLUSTER_ROLE_CANDIDATE;
         break;
     case UCN_CLUSTER_PHASE_JOIN_PENDING:
-        /* CLV2-01-04b.3: DETACHED/ELECTION (!recovery_eligible) and
-         * MEMBER/GRACE (01-04c.4) sources transition via cluster_transition()
-         * at consider_head_offer() L2511/L2635/L2646 (apply_legacy writes
-         * role + eligible=false + backoff=0); RECOVERY / BACKUP newer-Term /
-         * JOIN_PENDING re-target sources keep begin_join() L2059 (role L2067;
-         * candidacy abandon lives in the shared field helper
-         * begin_join_prepare_fields() L2048).  begin_join() does NOT clear
-         * the mirror/known_backup (only the BACKUP higher-Term path does
-         * backup_clear_sync() BEFORE the join, at the site). */
+        /* CLV2-01-04b.3 + 01-04c.4 + 01-04f: DETACHED/ELECTION
+         * (!recovery_eligible), MEMBER/GRACE and RECOVERY_* sources
+         * transition via cluster_transition() at consider_head_offer()
+         * (apply_legacy writes role + eligible=false + backoff=0); the
+         * BACKUP newer-Term and JOIN_PENDING re-target sources keep
+         * begin_join() L2059 (role L2067; candidacy abandon lives in the
+         * shared field helper begin_join_prepare_fields() L2048).
+         * begin_join() does NOT clear the mirror/known_backup (only the
+         * BACKUP higher-Term path does backup_clear_sync() BEFORE the
+         * join, at the site). */
         cluster->role = UCN_CLUSTER_ROLE_JOIN_PENDING;
         cluster->recovery_eligible = false;
         cluster->recovery_backoff_deadline_ms = 0U;
@@ -1286,10 +1287,10 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         cluster->backup_takeover_active = true;
         break;
     case UCN_CLUSTER_PHASE_STEPPING_DOWN:
-        /* begin_ordered_stepdown() L2356: role=STEPPING_DOWN L2390 (via
-         * apply_legacy on the HEAD_* path; the site write is kept for the
-         * RECOVERY_HEAD legacy source), yields Recovery candidacy
-         * L2387-2317; the Head keeps its Backup
+        /* begin_ordered_stepdown() L2356: role=STEPPING_DOWN (via
+         * apply_legacy on both the HEAD_* and RECOVERY_HEAD sources,
+         * 01-04d.6/01-04f; the site's own role write stays, idempotent),
+         * yields Recovery candidacy L2387-2317; the Head keeps its Backup
          * selection (node_id/ready) until the deadline. */
         cluster->role = UCN_CLUSTER_ROLE_STEPPING_DOWN;
         cluster->recovery_eligible = false;
@@ -2049,12 +2050,12 @@ static void set_detached(
 
 /* CLV2-01-04b.3: begin_join()'s field payload WITHOUT the role write.
  * The migrated consider_head_offer() callers (DETACHED_OBSERVE/ELECTION
- * !recovery_eligible, MEMBER/GRACE better-Head switch 01-04c.4) run
- * cluster_transition() FIRST (which owns the role write via apply_legacy)
- * and then apply the remaining site payload through this helper.
- * begin_join() still applies ALL fields (helper + role) for its
- * not-yet-migrated callers (BACKUP newer-Term, JOIN_PENDING re-target,
- * RECOVERY_* sources). */
+ * !recovery_eligible, MEMBER/GRACE better-Head switch 01-04c.4, and the
+ * RECOVERY_* sources 01-04f) run cluster_transition() FIRST (which owns
+ * the role write via apply_legacy) and then apply the remaining site
+ * payload through this helper.  begin_join() still applies ALL fields
+ * (helper + role) for its not-yet-migrated callers (BACKUP newer-Term,
+ * JOIN_PENDING re-target). */
 static void begin_join_prepare_fields(
     ucn_cluster_t *cluster,
     const ucn_cluster_candidate_t *candidate,
@@ -2372,21 +2373,24 @@ static void begin_ordered_stepdown(ucn_cluster_t *cluster,
                                     const ucn_cluster_candidate_t *candidate,
                                     uint32_t now_ms)
 {
-    /* CLV2-01-04d.6: a HEAD_* source yields through the entry point
-     * BEFORE any phase-relevant write - the transition (STEPDOWN_ORDERED)
-     * commits first and apply_legacy(STEPPING_DOWN) owns the role write;
-     * the site keeps eligible=false / backoff=0 / stepdown_deadline in
-     * their original order.  The RECOVERY_HEAD offer source (01-04f)
-     * keeps the CURRENT legacy path untouched - RECOVERY_HEAD ->
-     * STEPPING_DOWN is NOT pre-wired here. */
-    if (cluster->role == UCN_CLUSTER_ROLE_HEAD) {
+    /* CLV2-01-04d.6 (HEAD_* sources) + CLV2-01-04f (RECOVERY_HEAD offer
+     * source, SITE B): a Head source yields through the entry point BEFORE
+     * any phase-relevant write - the transition (STEPDOWN_ORDERED) commits
+     * first and apply_legacy(STEPPING_DOWN) owns the role write; the site
+     * keeps eligible=false / backoff=0 / stepdown_deadline in their
+     * original order.  The legacy reclaim event decides THAT the stepdown
+     * runs; cluster_transition() validates whether the shadow agrees (a
+     * caller NEVER uses the shadow to decide whether to SKIP the call). */
+    if (cluster->role == UCN_CLUSTER_ROLE_HEAD ||
+        cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
         ucn_cluster_phase_t old_phase =
             cluster_phase_from_legacy_state(cluster, now_ms);
 
         if (old_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP ||
             old_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING ||
             old_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING ||
-            old_phase == UCN_CLUSTER_PHASE_HEAD_STABLE) {
+            old_phase == UCN_CLUSTER_PHASE_HEAD_STABLE ||
+            old_phase == UCN_CLUSTER_PHASE_RECOVERY_HEAD) {
             if (cluster_transition(cluster, old_phase,
                                    UCN_CLUSTER_PHASE_STEPPING_DOWN,
                                    UCN_CLUSTER_REASON_STEPDOWN_ORDERED,
@@ -2412,10 +2416,11 @@ static void begin_ordered_stepdown(ucn_cluster_t *cluster,
     cluster->pending_head_score = candidate->head_score;
     cluster->stats.head_switches++;
 #if !defined(NDEBUG)
-    /* CLV2-01-04d.6 post-commit derive assert: after the transition AND
-     * every site effect the node must derive STEPPING_DOWN (the role
-     * write is owned by apply_legacy on the HEAD_* path; the RECOVERY_HEAD
-     * path still writes it here, so the assert holds for both). */
+    /* CLV2-01-04d.6/01-04f post-commit derive assert: after the
+     * transition AND every site effect the node must derive STEPPING_DOWN
+     * (the role write at the site is idempotent with
+     * apply_legacy(STEPPING_DOWN), so the assert holds for both the
+     * HEAD_* and RECOVERY_HEAD sources). */
     assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
            UCN_CLUSTER_PHASE_STEPPING_DOWN);
 #endif
@@ -2667,13 +2672,16 @@ static void consider_head_offer(
         if (candidate->available_capacity == 0U) {
             return;
         }
-        /* CLV2-01-04b.3: a DETACHED_OBSERVE or ELECTION node accepting a
-         * stable Head offer performs the DETACHED_OBSERVE/ELECTION ->
-         * JOIN_PENDING transition through the single entry point BEFORE
-         * any phase-relevant legacy mutation (the role write is owned by
-         * apply_legacy); the remaining begin_join() field payload follows
-         * at the site.  RECOVERY_* sources (recovery_eligible) keep the
-         * legacy begin_join() until 01-04f. */
+        /* CLV2-01-04b.3 (DETACHED_OBSERVE/ELECTION) + CLV2-01-04f SITE A
+         * (RECOVERY_*): a detached/election node accepting a stable Head
+         * offer performs the -> JOIN_PENDING transition through the single
+         * entry point BEFORE any phase-relevant legacy mutation (the role
+         * write is owned by apply_legacy); the remaining begin_join()
+         * field payload follows at the site via begin_join_prepare_fields().
+         * The legacy stable-Head offer event decides THAT the join runs;
+         * cluster_transition() validates whether the shadow agrees (a
+         * caller NEVER uses the shadow to decide whether to SKIP the
+         * call). */
         if (!cluster->recovery_eligible) {
             ucn_cluster_phase_t old_phase =
                 (cluster->role == UCN_CLUSTER_ROLE_CANDIDATE)
@@ -2696,8 +2704,33 @@ static void consider_head_offer(
 #endif
             return;
         }
-        begin_join(cluster, candidate, now_ms);
-        return;
+        /* CLV2-01-04f SITE A: a RECOVERY_OBSERVE / RECOVERY_ELECTION node
+         * (role DETACHED + recovery_eligible; the armed backoff decides the
+         * sub-phase) accepting a stable-Head offer commits RECOVERY_* ->
+         * JOIN_PENDING (JOIN_INITIATED) through the single entry point
+         * BEFORE any site write; apply_legacy(JOIN_PENDING) writes role +
+         * eligible=false + backoff=0, then the begin_join() field payload
+         * follows at the site. */
+        {
+            ucn_cluster_phase_t old_phase =
+                cluster_phase_from_legacy_state(cluster, now_ms);
+
+            if (cluster_transition(cluster, old_phase,
+                                   UCN_CLUSTER_PHASE_JOIN_PENDING,
+                                   UCN_CLUSTER_REASON_JOIN_INITIATED,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: a rejected transition (shadow mismatch /
+                 * illegal pair / pre-mutated phase fields) leaves every
+                 * field untouched - do not apply the join payload. */
+                return;
+            }
+            begin_join_prepare_fields(cluster, candidate, now_ms);
+#if !defined(NDEBUG)
+            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                   UCN_CLUSTER_PHASE_JOIN_PENDING);
+#endif
+            return;
+        }
     }
     if (cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING) {
         /* Re-target a stale pending Head (e.g. after a takeover): switch
@@ -5859,5 +5892,41 @@ ucn_result_t ucn_cluster_test_backup_challenge(ucn_cluster_t *cluster,
         return UCN_ERR_ARGUMENT;
     }
     return backup_challenge(cluster, now_ms);
+}
+
+/* CLV2-01-04f: test-only views of the static RECOVERY-domain offer sites
+ * consider_head_offer() / begin_ordered_stepdown(), so tests can drive the
+ * RECOVERY_* -> JOIN_PENDING (SITE A) and RECOVERY_HEAD -> STEPPING_DOWN
+ * (SITE B) transitions directly and verify the full site-side field effects
+ * (and the fail-closed rejection with zero writes) without an end-of-RX
+ * shadow sync re-aligning the mirror.  Both sites are void: report the
+ * transition outcome by whether the entry point committed
+ * (shadow_transition_count++ on success; a rejected transition performs
+ * ZERO writes and leaves the count untouched). */
+ucn_result_t ucn_cluster_test_consider_head_offer(
+    ucn_cluster_t *cluster, ucn_cluster_candidate_t *candidate, uint32_t now_ms)
+{
+    uint32_t before;
+
+    if (cluster == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    before = cluster->shadow_transition_count;
+    consider_head_offer(cluster, candidate, now_ms);
+    return cluster->shadow_transition_count == before ? UCN_ERR_STATE : UCN_OK;
+}
+
+ucn_result_t ucn_cluster_test_begin_ordered_stepdown(
+    ucn_cluster_t *cluster, const ucn_cluster_candidate_t *candidate,
+    uint32_t now_ms)
+{
+    uint32_t before;
+
+    if (cluster == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    before = cluster->shadow_transition_count;
+    begin_ordered_stepdown(cluster, candidate, now_ms);
+    return cluster->shadow_transition_count == before ? UCN_ERR_STATE : UCN_OK;
 }
 #endif

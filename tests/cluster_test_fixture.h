@@ -116,6 +116,20 @@ ucn_result_t ucn_cluster_test_complete_takeover(ucn_cluster_t *cluster,
  * was rejected (fail closed). */
 ucn_result_t ucn_cluster_test_backup_challenge(ucn_cluster_t *cluster,
                                                uint32_t now_ms);
+
+/* CLV2-01-04f: test-only views of the static RECOVERY-domain offer sites
+ * consider_head_offer() / begin_ordered_stepdown(), so tests can drive the
+ * RECOVERY_* -> JOIN_PENDING and RECOVERY_HEAD -> STEPPING_DOWN transitions
+ * directly and verify the full site-side field effects (and the fail-closed
+ * rejection with zero writes) without an end-of-RX shadow sync re-aligning
+ * the mirror.  Return UCN_OK when the transition committed, UCN_ERR_STATE
+ * when it was rejected (fail closed). */
+ucn_result_t ucn_cluster_test_consider_head_offer(ucn_cluster_t *cluster,
+                                                  ucn_cluster_candidate_t *candidate,
+                                                  uint32_t now_ms);
+ucn_result_t ucn_cluster_test_begin_ordered_stepdown(ucn_cluster_t *cluster,
+                                                     const ucn_cluster_candidate_t *candidate,
+                                                     uint32_t now_ms);
 #endif
 
 #ifdef __cplusplus
