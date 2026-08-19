@@ -3877,9 +3877,16 @@ static ucn_result_t handle_head_takeover(ucn_cluster_t *cluster,
      * MEMBER, no armed grace) performs NO transition - no self-loop
      * exists.  CLV2-01-04f.5: the RECOVERY_HEAD inbound edge is migrated
      * HERE (RECOVERY_YIELDED, the same DIRECT edge as the f.4
-     * handle_recovery_declare yield path); the JOIN_PENDING inbound stays
-     * with its 01-04b join-accept site (do NOT wire it - the end-of-RX
-     * shadow sync re-aligns that source). */
+     * handle_recovery_declare yield path).  CLV2-01-04f.6 (review A MINOR
+     * 1, human's 01-04f plan "JOIN_PENDING/RECOVERY_HEAD->MEMBER_ACTIVE
+     * inbound edges"): the JOIN_PENDING inbound IS migrated HERE too - a
+     * higher-Term HEAD_TAKEOVER switching a join-pending node to
+     * MEMBER_ACTIVE is a REAL second production site for the
+     * JOIN_PENDING->MEMBER_ACTIVE DIRECT edge (the 01-04b join-accept
+     * site is the other), and the end-of-RX shadow sync must no longer
+     * mint it.  Reason TAKEOVER_STARTED (a takeover switched the node,
+     * not a join accept; the JOIN_ACCEPTED diff-table fallback would be
+     * semantically wrong for a HEAD_TAKEOVER event). */
     if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
         ucn_cluster_phase_t old_phase = cluster->backup_takeover_active
                                             ? UCN_CLUSTER_PHASE_BACKUP_TAKEOVER
@@ -3905,6 +3912,25 @@ static ucn_result_t handle_head_takeover(ucn_cluster_t *cluster,
                                now_ms) != UCN_OK) {
             /* Fail closed: do NOT refresh the epoch on a rejected
              * transition; the node stays in grace. */
+            return UCN_ERR_STATE;
+        }
+    } else if (cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING) {
+        /* CLV2-01-04f.6 (review A MINOR 1): a JOIN_PENDING node switched
+         * by the higher-Term HEAD_TAKEOVER commits the JOIN_PENDING ->
+         * MEMBER_ACTIVE transition (TAKEOVER_STARTED) FIRST through the
+         * single entry point, BEFORE any site write.  apply_legacy
+         * (MEMBER_ACTIVE) writes role=MEMBER + grace=0 + eligible=false;
+         * the site's epoch refresh and the pending-head + known-backup
+         * clears below stay site-owned in original order (the role write
+         * is idempotent).  Fail closed: a rejected transition (shadow
+         * desync / illegal pair / pre-mutated phase fields) returns
+         * UCN_ERR_STATE with NOTHING touched - the node stays JOIN_PENDING
+         * with its pending Head and a later well-formed HEAD_TAKEOVER may
+         * still be accepted. */
+        if (cluster_transition(cluster, UCN_CLUSTER_PHASE_JOIN_PENDING,
+                               UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                               UCN_CLUSTER_REASON_TAKEOVER_STARTED,
+                               now_ms) != UCN_OK) {
             return UCN_ERR_STATE;
         }
     } else if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {

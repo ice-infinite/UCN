@@ -7986,6 +7986,114 @@ static int cluster_test_recovery_head_takeover_wiring(void)
     TEST_ASSERT(c->term == 2U);
     TEST_ASSERT(c->head_node_id == source);
     TEST_ASSERT(test_derive_phase(c, 100U) == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+
+    /* ============ (d) JOIN_PENDING inbound (review A MINOR 1, f.6) ============
+     * A join-pending node switched by the higher-Term HEAD_TAKEOVER commits
+     * JOIN_PENDING -> MEMBER_ACTIVE (TAKEOVER_STARTED) through the entry
+     * point FIRST - the second production site for the JOIN_PENDING ->
+     * MEMBER_ACTIVE DIRECT edge (the 01-04b join-accept site is the other);
+     * the end-of-RX sync must no longer mint it. */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 100U;
+    node = &network.nodes[2];
+    c = &node->cluster;
+    source = network.nodes[0].node_id;
+    c->role = UCN_CLUSTER_ROLE_JOIN_PENDING;
+    c->cluster_id = 1U; /* the takeover guard requires cluster_id match
+                            for non-RECOVERY_HEAD roles */
+    c->term = 1U;
+    c->head_node_id = 0U;
+    c->pending_head_node_id = 2U;
+    c->pending_cluster_id = 2U;
+    c->pending_term = 1U;
+    c->known_backup_node_id = source;
+    c->known_backup_generation = 1U;
+    c->shadow_phase = UCN_CLUSTER_PHASE_JOIN_PENDING;
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, 100U) == UCN_CLUSTER_PHASE_JOIN_PENDING);
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_HEAD_TAKEOVER;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 2U; /* strictly higher */
+    message.head_node_id = source;
+    message.head_score = 9000U;
+    message.lease_ms = 40U;
+    message.backup_generation = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(c, source, true, encoded,
+                                    sizeof(encoded)) == UCN_OK);
+    /* the explicit JOIN_PENDING -> MEMBER_ACTIVE transition committed
+     * first (TAKEOVER_STARTED, count +1); apply_legacy wrote
+     * role/grace/eligible; the epoch refresh + pending/known_backup clears
+     * ran at the site in original order. */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_TAKEOVER_STARTED);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_MEMBER);
+    TEST_ASSERT(c->head_grace_deadline_ms == 0U);
+    TEST_ASSERT(c->cluster_id == 1U);
+    TEST_ASSERT(c->term == 2U);
+    TEST_ASSERT(c->head_node_id == source);
+    TEST_ASSERT(c->current_head_score == 9000U);
+    TEST_ASSERT(c->head_lease_expires_at_ms == ucn_deadline_from_now(
+                    100U, 40U));
+    TEST_ASSERT(c->pending_head_node_id == 0U);
+    TEST_ASSERT(c->pending_cluster_id == 0U);
+    TEST_ASSERT(c->pending_term == 0U);
+    TEST_ASSERT(c->known_backup_node_id == 0U);
+    TEST_ASSERT(c->known_backup_generation == 0U);
+    TEST_ASSERT(test_derive_phase(c, 100U) == UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+
+    /* ============ (e) JOIN_PENDING desync sibling: fail closed ============ */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 100U;
+    node = &network.nodes[2];
+    c = &node->cluster;
+    source = network.nodes[0].node_id;
+    c->role = UCN_CLUSTER_ROLE_JOIN_PENDING;
+    c->cluster_id = 1U; /* guard requires cluster_id match */
+    c->term = 1U;
+    c->head_node_id = 0U;
+    c->pending_head_node_id = 2U;
+    c->pending_cluster_id = 2U;
+    c->pending_term = 1U;
+    c->known_backup_node_id = source;
+    c->known_backup_generation = 1U;
+    c->shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE; /* stale */
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, 100U) == UCN_CLUSTER_PHASE_JOIN_PENDING);
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_HEAD_TAKEOVER;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 2U;
+    message.head_node_id = source;
+    message.head_score = 9000U;
+    message.lease_ms = 40U;
+    message.backup_generation = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    ucn_cluster_test_transition_asserts_set(false);
+    TEST_ASSERT(ucn_cluster_receive(c, source, true, encoded,
+                                    sizeof(encoded)) == UCN_ERR_STATE);
+    ucn_cluster_test_transition_asserts_set(true);
+    /* NOTHING touched: still JOIN_PENDING, pending + known_backup kept,
+     * epoch NOT refreshed; the end-of-RX sync re-aligned the mirror to
+     * the unchanged JOIN_PENDING phase. */
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(c->pending_head_node_id == 2U);
+    TEST_ASSERT(c->pending_cluster_id == 2U);
+    TEST_ASSERT(c->pending_term == 1U);
+    TEST_ASSERT(c->known_backup_node_id == source);
+    TEST_ASSERT(c->known_backup_generation == 1U);
+    TEST_ASSERT(c->cluster_id == 1U);
+    TEST_ASSERT(c->term == 1U);
+    TEST_ASSERT(c->head_node_id == 0U);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_JOIN_INITIATED);
+    TEST_ASSERT(c->shadow_transition_count == 1U); /* the re-align mint */
     return 0;
 }
 
