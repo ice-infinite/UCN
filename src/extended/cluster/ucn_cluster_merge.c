@@ -6,6 +6,14 @@
  * body is UNCHANGED; M01 froze the FSM semantics.  Do NOT
  * "optimize" anything here.
  *
+ * CLV2-M03 (03-03, human-audited semantic change): the HEAD branch of
+ * consider_head_offer() now classifies offers by Epoch relation
+ * (ucn_cluster_epoch_compare) instead of raw Term.  Foreign Clusters
+ * truncate the comparison domain - their Term is NEVER authority
+ * (Cluster A term 2 must not surrender to Cluster B term 100); every
+ * same-cluster relation funnels into one authority path.  This is the
+ * ONLY 03-03 semantic delta: all other branches are untouched.
+ *
  * Cross-module (via ucn_cluster_internal.h, all de-static only):
  *   - calls into fsm / membership / backup / ucn_cluster.c core.
  */
@@ -146,6 +154,73 @@ bool candidate_better(
            (candidate_score == current_score && candidate_node < current_node);
 }
 
+/* CLV2-M03 (03-03): the unified SAME-CLUSTER authority path for Head
+ * offers.  Every same-cluster Epoch relation (HIGHER / LOWER / SAME /
+ * CONFLICT) funnels through here - a higher Term wins immediately, a
+ * stale Term is ignored, and a same-Term offer (SAME or CONFLICT) is
+ * arbitrated by the deterministic score/Node-ID ordering, repeated
+ * samples and minimum tenure.  CONFLICT (same cluster, same term,
+ * different Head) is deliberately NOT a foreign merge (03-05 owns the
+ * final conflict handling; until then the score arbitration below
+ * decides, exactly as the pre-03-03 same-term path did). */
+static void classify_same_cluster_authority(
+    ucn_cluster_t *cluster,
+    ucn_cluster_candidate_t *candidate,
+    uint32_t now_ms,
+    ucn_cluster_epoch_relation_t relation)
+{
+    /* relation is (local, remote): LOWER means the REMOTE offer has the
+     * higher Term (the local epoch is lower) - the newer-generation Head
+     * wins immediately (S5.3: the older Head must defer rather than
+     * reclaim by raw score).  HIGHER means the remote is stale. */
+    if (relation == UCN_CLUSTER_EPOCH_RELATION_LOWER) {
+        begin_ordered_stepdown(cluster, candidate, now_ms);
+        return;
+    }
+    if (relation == UCN_CLUSTER_EPOCH_RELATION_HIGHER) {
+        /* A stale Head must not be followed, even with a high score. */
+        return;
+    }
+    /* SAME / CONFLICT: same Cluster, same Term.  Packet loss can let two
+     * candidates finish the same local election.  A worse Head must
+     * eventually yield, otherwise that transient split brain becomes
+     * permanent.  The deterministic score/Node-ID ordering, repeated
+     * samples and minimum tenure keep this convergence bounded without
+     * making a single RSSI sample flap an established Head. */
+    if (!score_improves_by(candidate->head_score,
+                           cluster->config.head_score,
+                           cluster->config.switch_improvement_percent)) {
+        candidate->better_samples = 0U;
+        return;
+    }
+    if (candidate->better_samples < UINT8_MAX) {
+        candidate->better_samples++;
+    }
+    if (candidate->better_samples >=
+            cluster->config.switch_required_samples &&
+        ucn_elapsed_at_least(now_ms, cluster->role_since_ms,
+                             cluster->config.head_min_tenure_ms)) {
+        begin_ordered_stepdown(cluster, candidate, now_ms);
+        candidate->better_samples = 0U;
+    }
+}
+
+/* CLV2-M03 (03-03): a FOREIGN Cluster's Head offer carries NO authority
+ * over this Cluster - the node NEVER surrenders to it and its Term is
+ * NEVER compared with ours (the M03 milestone gate: terms of different
+ * cluster_ids are never directly compared).  Cross-cluster merge
+ * negotiation is a later OP; until then the foreign offer is observed
+ * and deliberately ignored (no state mutation, no score bookkeeping). */
+static void classify_foreign_cluster_merge(
+    ucn_cluster_t *cluster,
+    ucn_cluster_candidate_t *candidate,
+    uint32_t now_ms)
+{
+    (void)cluster;
+    (void)candidate;
+    (void)now_ms;
+}
+
 void consider_head_offer(
     ucn_cluster_t *cluster,
     ucn_cluster_candidate_t *candidate,
@@ -280,32 +355,26 @@ void consider_head_offer(
      * deliberately lease-based in this first stage; C07 owns coordinated
      * backup/merge/stepdown signalling. */
     if (cluster->role == UCN_CLUSTER_ROLE_HEAD) {
-        if (candidate->term > cluster->term) {
-            /* A newer-generation Head wins immediately (§5.3: the older
-             * Head must defer rather than reclaim by raw score). */
-            begin_ordered_stepdown(cluster, candidate, now_ms);
+        /* CLV2-M03 (03-03): classify the offer by Epoch relation, never
+         * by raw Term.  FOREIGN truncates the comparison domain FIRST -
+         * a foreign Cluster's Term is not authority (Cluster A term 2
+         * must not surrender to Cluster B term 100); every same-cluster
+         * relation (HIGHER / LOWER / SAME / CONFLICT) funnels into the
+         * unified authority path.  CONFLICT is NOT a foreign merge. */
+        ucn_cluster_epoch_t local_epoch =
+            ucn_cluster_active_epoch_get(cluster);
+        ucn_cluster_epoch_t remote_epoch;
+        ucn_cluster_epoch_relation_t relation;
+
+        remote_epoch.cluster_id = candidate->cluster_id;
+        remote_epoch.term = candidate->term;
+        remote_epoch.head_node_id = candidate->head_node_id;
+        relation = ucn_cluster_epoch_compare(&local_epoch, &remote_epoch);
+        if (relation == UCN_CLUSTER_EPOCH_RELATION_FOREIGN) {
+            classify_foreign_cluster_merge(cluster, candidate, now_ms);
             return;
         }
-        if (candidate->term < cluster->term) {
-            /* A stale Head must not be followed, even with a high score. */
-            return;
-        }
-        if (!score_improves_by(candidate->head_score,
-                               cluster->config.head_score,
-                               cluster->config.switch_improvement_percent)) {
-            candidate->better_samples = 0U;
-            return;
-        }
-        if (candidate->better_samples < UINT8_MAX) {
-            candidate->better_samples++;
-        }
-        if (candidate->better_samples >=
-                cluster->config.switch_required_samples &&
-            ucn_elapsed_at_least(now_ms, cluster->role_since_ms,
-                                 cluster->config.head_min_tenure_ms)) {
-            begin_ordered_stepdown(cluster, candidate, now_ms);
-            candidate->better_samples = 0U;
-        }
+        classify_same_cluster_authority(cluster, candidate, now_ms, relation);
         return;
     }
     if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {

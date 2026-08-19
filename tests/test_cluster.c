@@ -1487,7 +1487,15 @@ static int cluster_test_takeover_interrupted_by_newer_head(void)
 
 
 /* C07.7 P1: available_capacity == 0 only gates new JOINs; it must not
- * block a higher-Term Head from converging a full Head onto it. */
+ * block a higher-Term Head from converging a full Head onto it.
+ *
+ * CLV2-M03 (03-03, human-audited): the converging Head offer must be
+ * SAME-cluster.  The pre-03-03 test used cluster_id = 2 (foreign) to
+ * prove capacity independence, but that pinned the exact behavior 03-03
+ * deletes - a foreign Cluster's higher Term is never authority, so a
+ * full (capacity 0) foreign Head must NOT pull a Cluster-A Head down.
+ * The P1 concern survives unchanged: capacity 0 must not block the
+ * legitimate SAME-cluster higher-Term convergence. */
 static int cluster_test_full_head_term_convergence(void)
 {
     cluster_test_network_t network;
@@ -1508,13 +1516,16 @@ static int cluster_test_full_head_term_convergence(void)
      * mirror aligned with the legacy derive (role == HEAD, no Backup). */
     head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
 
+    /* FOREIGN offer (Cluster B, term 2 > local 1, capacity 0): the
+     * higher Term is NOT comparable across clusters - the Head must stay
+     * put even though the foreign Head is full and "newer". */
     (void)memset(&message, 0, sizeof(message));
     message.type = UCN_CLUSTER_MSG_ADVERTISE;
     message.role = UCN_CLUSTER_ROLE_HEAD;
-    message.cluster_id = 2U;
-    message.term = 2U; /* newer generation */
+    message.cluster_id = 2U;   /* foreign Cluster B */
+    message.term = 2U;         /* higher NUMBER, but NOT comparable */
     message.head_node_id = network.nodes[1].node_id;
-    message.head_score = 6000U; /* lower score but newer term */
+    message.head_score = 6000U;
     message.available_capacity = 0U; /* full */
     message.lease_ms = 8000U;
     message.nonce = 1U;
@@ -1522,8 +1533,32 @@ static int cluster_test_full_head_term_convergence(void)
     network.now_ms = 60U;
     TEST_ASSERT(ucn_cluster_receive(&head->cluster, network.nodes[1].node_id,
                                     true, encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(head->cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    TEST_ASSERT(head->cluster.shadow_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 0U);
+
+    /* SAME-cluster offer (Cluster A, term 2 > local 1, capacity 0): this
+     * IS legitimate higher authority - the full Head converges onto it
+     * (the C07.7 P1 point: capacity 0 never blocks epoch convergence). */
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_ADVERTISE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;   /* same Cluster A */
+    message.term = 2U;         /* newer generation */
+    message.head_node_id = network.nodes[1].node_id;
+    message.head_score = 6000U; /* lower score but newer term */
+    message.available_capacity = 0U; /* full */
+    message.lease_ms = 8000U;
+    message.nonce = 2U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&head->cluster, network.nodes[1].node_id,
+                                    true, encoded, sizeof(encoded)) == UCN_OK);
     TEST_ASSERT(head->cluster.role == UCN_CLUSTER_ROLE_STEPPING_DOWN);
+    TEST_ASSERT(head->cluster.shadow_phase == UCN_CLUSTER_PHASE_STEPPING_DOWN);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 1U);
     TEST_ASSERT(head->cluster.pending_head_node_id == network.nodes[1].node_id);
+    TEST_ASSERT(head->cluster.pending_cluster_id == 1U);
+    TEST_ASSERT(head->cluster.pending_term == 2U);
     return 0;
 }
 
@@ -8163,6 +8198,150 @@ static int cluster_test_stable_switchback(void)
     return 0;
 }
 
+/* CLV2-M03 (03-03): the HEAD branch of consider_head_offer() classifies
+ * offers by Epoch relation instead of raw Term.  Four pinned groups
+ * (human auditor):
+ *   (1) foreign high-term  (local A/2 vs remote B/100)  -> FOREIGN,
+ *       NEVER HIGHER: no surrender even though 100 > 2 AND the score is
+ *       better - the exact "绝不能进入 HIGHER-authority 让位逻辑" case.
+ *   (2) foreign low-term   (local A/100 vs remote B/2)  -> FOREIGN, same
+ *       contract: cluster_id truncates the domain BEFORE any Term read.
+ *   (3) same-cluster higher (local A/2 vs remote A/3)   -> HIGHER ->
+ *       unified same-cluster authority path -> surrender (legitimate).
+ *   (4) same-cluster same-term different Head           -> CONFLICT,
+ *       NOT a foreign merge: enters the unified same-cluster arbitration
+ *       (score path), never classify_foreign_cluster_merge. */
+static int cluster_test_epoch_classified_head_offer(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *head;
+    ucn_cluster_candidate_t candidate;
+    uint32_t now_ms = 60U; /* past head_min_tenure_ms = 50 */
+    ucn_result_t rc;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    head = &network.nodes[0];
+
+    /* Common HEAD setup: Cluster A (1), term 2, Head = node0, tenure
+     * elapsed, low local score so a better offer would win on score if
+     * the score path were (wrongly) entered. */
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 2U;
+    head->cluster.head_node_id = head->node_id;
+    head->cluster.config.head_score = 6000U;
+    head->cluster.current_head_score = 6000U;
+    head->cluster.role_since_ms = 0U;
+    head->cluster.stepdown_deadline_ms = 0U;
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+    head->cluster.transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    head->cluster.shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(&head->cluster, now_ms) ==
+                UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
+
+    /* Group 1: local A/2 vs remote B/100 (foreign high-term).  The
+     * pre-03-03 code surrendered here (candidate->term > cluster->term
+     * with NO cluster_id check).  03-03: FOREIGN -> no surrender, no
+     * stepdown, no transition, no score bookkeeping.  rc == UCN_ERR_STATE
+     * is the hook's "no transition happened" signal. */
+    (void)memset(&candidate, 0, sizeof(candidate));
+    candidate.occupied = true;
+    candidate.head_node_id = network.nodes[1].node_id;
+    candidate.cluster_id = 2U;   /* foreign Cluster B */
+    candidate.term = 100U;       /* higher NUMBER, but NOT comparable */
+    candidate.head_score = 9500U; /* better score - must not matter */
+    candidate.better_samples = 200U; /* would cross the threshold if scored */
+    rc = ucn_cluster_test_consider_head_offer(&head->cluster, &candidate,
+                                              now_ms);
+    TEST_ASSERT(rc == UCN_ERR_STATE); /* no transition committed */
+    TEST_ASSERT(head->cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    TEST_ASSERT(head->cluster.shadow_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 0U);
+    TEST_ASSERT(head->cluster.stats.head_switches == 0U);
+    TEST_ASSERT(head->cluster.pending_head_node_id == 0U);
+    TEST_ASSERT(candidate.better_samples == 200U); /* foreign path is a no-op */
+
+    /* Group 2: local A/100 vs remote B/2 (foreign low-term).  Same
+     * FOREIGN contract in the reverse direction: the local Term is not
+     * authority over B either, and B's Term is never read for authority. */
+    head->cluster.term = 100U;
+    candidate.cluster_id = 2U;   /* foreign Cluster B */
+    candidate.term = 2U;         /* lower NUMBER, but NOT comparable */
+    candidate.head_score = 9500U;
+    candidate.better_samples = 200U;
+    rc = ucn_cluster_test_consider_head_offer(&head->cluster, &candidate,
+                                              now_ms);
+    TEST_ASSERT(rc == UCN_ERR_STATE);
+    TEST_ASSERT(head->cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 0U);
+    TEST_ASSERT(head->cluster.stats.head_switches == 0U);
+    TEST_ASSERT(candidate.better_samples == 200U);
+
+    /* Group 3: local A/2 vs remote A/3 (same-cluster higher Term).  This
+     * IS legitimate higher authority: HIGHER -> the unified same-cluster
+     * authority path -> ordered stepdown (exactly what Group 1 must NOT
+     * do). */
+    head->cluster.term = 2U;
+    candidate.cluster_id = 1U;   /* same Cluster A */
+    candidate.term = 3U;
+    candidate.head_node_id = network.nodes[1].node_id;
+    candidate.head_score = 9500U;
+    candidate.better_samples = 0U;
+    rc = ucn_cluster_test_consider_head_offer(&head->cluster, &candidate,
+                                              now_ms);
+    TEST_ASSERT(rc == UCN_OK); /* transition committed (STEPDOWN_ORDERED) */
+    TEST_ASSERT(head->cluster.role == UCN_CLUSTER_ROLE_STEPPING_DOWN);
+    TEST_ASSERT(head->cluster.shadow_phase == UCN_CLUSTER_PHASE_STEPPING_DOWN);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(head->cluster.stats.head_switches == 1U);
+    TEST_ASSERT(head->cluster.pending_head_node_id ==
+                network.nodes[1].node_id);
+    TEST_ASSERT(head->cluster.pending_cluster_id == 1U);
+    TEST_ASSERT(head->cluster.pending_term == 3U);
+
+    /* Group 4: local A/2/head0 vs remote A/2/head1 (same-cluster
+     * same-term CONFLICT).  NOT a foreign merge: it must enter the
+     * unified same-cluster arbitration path.  (4a) a score below the
+     * switch threshold resets better_samples to 0 - a foreign no-op
+     * would leave the value untouched, so this proves the CONFLICT was
+     * classified same-cluster; (4b) with the threshold met and tenure
+     * elapsed the score path surrenders, as it did pre-03-03. */
+    head->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    head->cluster.cluster_id = 1U;
+    head->cluster.term = 2U;
+    head->cluster.head_node_id = head->node_id;
+    /* Group 3's stepdown left role_since_ms == 60; the CONFLICT score
+     * path needs a fresh tenure (60 - 0 >= 50), so reset it. */
+    head->cluster.role_since_ms = 0U;
+    head->cluster.stepdown_deadline_ms = 0U;
+    head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+    head->cluster.transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    head->cluster.shadow_transition_count = 0U;
+    head->cluster.stats.head_switches = 0U;
+
+    candidate.cluster_id = 1U;   /* same Cluster A */
+    candidate.term = 2U;         /* same Term -> CONFLICT */
+    candidate.head_node_id = network.nodes[1].node_id;
+    candidate.head_score = 6200U; /* < 7200 = 6000 * 1.20 -> reset branch */
+    candidate.better_samples = 7U;
+    rc = ucn_cluster_test_consider_head_offer(&head->cluster, &candidate,
+                                              now_ms);
+    TEST_ASSERT(rc == UCN_ERR_STATE); /* no transition - reset branch */
+    TEST_ASSERT(head->cluster.role == UCN_CLUSTER_ROLE_HEAD);
+    TEST_ASSERT(candidate.better_samples == 0U); /* same-cluster path ran */
+
+    candidate.head_score = 9500U; /* >= 7200, threshold met */
+    candidate.better_samples = 2U; /* -> 3 >= switch_required_samples */
+    rc = ucn_cluster_test_consider_head_offer(&head->cluster, &candidate,
+                                              now_ms);
+    TEST_ASSERT(rc == UCN_OK); /* transition committed (STEPDOWN_ORDERED) */
+    TEST_ASSERT(head->cluster.role == UCN_CLUSTER_ROLE_STEPPING_DOWN);
+    TEST_ASSERT(head->cluster.shadow_phase == UCN_CLUSTER_PHASE_STEPPING_DOWN);
+    TEST_ASSERT(head->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(head->cluster.stats.head_switches == 1U);
+    TEST_ASSERT(candidate.better_samples == 0U); /* post-stepdown reset */
+    return 0;
+}
 /* CLV2-01-04f (f3, SITE A): consider_head_offer() RECOVERY_* -> JOIN_PENDING
  * wiring.  A RECOVERY_OBSERVE / RECOVERY_ELECTION node (role DETACHED +
  * recovery_eligible; the armed backoff decides the sub-phase) accepting a
@@ -10312,6 +10491,12 @@ int test_cluster(void)
      * phase-preserving. */
     TEST_ASSERT(cluster_test_recovery_declare_wiring() == 0);
     TEST_ASSERT(cluster_test_stable_switchback() == 0);
+    /* CLV2-M03 (03-03): the HEAD branch of consider_head_offer()
+     * classifies by Epoch relation - foreign high/low Term offers never
+     * surrender (A/2 vs B/100 -> FOREIGN), same-cluster higher Term
+     * yields, same-cluster same-term CONFLICT enters the unified
+     * same-cluster arbitration path, never a foreign merge. */
+    TEST_ASSERT(cluster_test_epoch_classified_head_offer() == 0);
     /* CLV2-01-04f (f3 SITE A): consider_head_offer() RECOVERY_* sources
      * (RECOVERY_OBSERVE / RECOVERY_ELECTION) now commit RECOVERY_* ->
      * JOIN_PENDING through the single entry point before the join payload
