@@ -145,6 +145,8 @@ add_library(ucn_cluster STATIC EXCLUDE_FROM_ALL
     src/extended/cluster/ucn_cluster_codec_v3.c
     # CLV2-M02 (02-03): the explicit-phase transition framework.
     src/extended/cluster/ucn_cluster_fsm.c
+    # CLV2-M02 (02-04): the member table + Join/Keepalive/Leave handlers.
+    src/extended/cluster/ucn_cluster_membership.c
 )
 target_link_libraries(ucn_cluster PUBLIC ucn_core)
 target_compile_options(ucn_cluster PRIVATE
@@ -286,6 +288,10 @@ if(UCN_BUILD_TESTS)
     # under UCN_CLUSTER_ENABLE_TEST_HOOKS).
     target_sources(ucn_tests PRIVATE
         src/extended/cluster/ucn_cluster_fsm.c
+    )
+    # CLV2-M02 (02-04): ... and its own membership copy.
+    target_sources(ucn_tests PRIVATE
+        src/extended/cluster/ucn_cluster_membership.c
     )
 
     if(UCN_FEATURE_SERVICE)

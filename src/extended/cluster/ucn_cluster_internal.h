@@ -70,9 +70,60 @@ ucn_cluster_transition_reason_t cluster_rx_reason_from_type(
 void cluster_shadow_sync(ucn_cluster_t *cluster,
                          ucn_cluster_transition_reason_t reason_hint);
 
+/* == Membership module boundary (02-04, this OP) ==
+ * ucn_cluster_membership.c owns the member table (allocation / expiry /
+ * query) and the Join / Keepalive / Leave handlers.  Exposed here
+ * (de-static only) so the remaining ucn_cluster.c modules (receive
+ * dispatch, step, backup) can call them. */
+uint16_t member_count_u16(const ucn_cluster_t *cluster);
+uint16_t available_capacity(const ucn_cluster_t *cluster);
+ucn_cluster_member_t *find_member(ucn_cluster_t *cluster,
+                                  ucn_node_id_t node_id);
+ucn_cluster_member_t *allocate_member(ucn_cluster_t *cluster,
+                                      ucn_node_id_t node_id);
+void remove_member(ucn_cluster_t *cluster, ucn_node_id_t node_id,
+                   uint32_t now_ms);
+void clear_members(ucn_cluster_t *cluster);
+ucn_result_t handle_join_request(ucn_cluster_t *cluster,
+                                 ucn_node_id_t source,
+                                 const ucn_cluster_message_t *message,
+                                 uint32_t now_ms);
+ucn_result_t send_join_reply(ucn_cluster_t *cluster,
+                             ucn_node_id_t destination,
+                             ucn_cluster_message_type_t type,
+                             uint32_t join_nonce);
+ucn_result_t handle_join_accept(ucn_cluster_t *cluster,
+                                ucn_node_id_t source,
+                                const ucn_cluster_message_t *message,
+                                uint32_t now_ms);
+ucn_result_t handle_keepalive(ucn_cluster_t *cluster,
+                              ucn_node_id_t source,
+                              const ucn_cluster_message_t *message,
+                              uint32_t now_ms);
+void expire_members(ucn_cluster_t *cluster, uint32_t now_ms);
+void send_join_request(ucn_cluster_t *cluster, uint32_t now_ms);
+void send_keepalive(ucn_cluster_t *cluster, uint32_t now_ms);
+
+/* Send / token / backup helpers that the membership module calls but
+ * which stay in ucn_cluster.c until their own OPs (02-05 backup).  Same
+ * exposure rule: de-static only, bodies untouched. */
+ucn_result_t send_cluster_message(ucn_cluster_t *cluster,
+                                  ucn_node_id_t destination,
+                                  const ucn_cluster_message_t *message);
+ucn_result_t send_message(ucn_cluster_t *cluster,
+                          ucn_node_id_t destination,
+                          ucn_cluster_message_type_t type,
+                          ucn_cluster_role_t role, uint32_t cluster_id,
+                          uint32_t term, ucn_node_id_t head_node_id,
+                          uint16_t head_score, uint16_t capacity);
+uint32_t next_nonce(ucn_cluster_t *cluster);
+void backup_resync(ucn_cluster_t *cluster);
+void assign_backup(ucn_cluster_t *cluster, uint32_t now_ms);
+void queue_backup_assignment_for_member(ucn_cluster_t *cluster,
+                                        ucn_node_id_t member_node_id,
+                                        uint32_t now_ms);
+
 /* == Module layout for the remaining OPs (append here) ==
- * 02-04  ucn_cluster_membership.c Join, Keepalive, Leave, member
- *                                 allocation/expiry, member query.
  * 02-05  ucn_cluster_backup.c     Backup selection / assignment /
  *                                 snapshot / delta / heartbeat / reject /
  *                                 resync.
