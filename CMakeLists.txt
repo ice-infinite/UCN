@@ -141,6 +141,8 @@ target_compile_options(ucn_transfer PRIVATE
 # original footprint.
 add_library(ucn_cluster STATIC EXCLUDE_FROM_ALL
     src/extended/ucn_cluster.c
+    # CLV2-M02 (02-02): the 32-byte Wire v5 codec is a separate module.
+    src/extended/cluster/ucn_cluster_codec_v3.c
 )
 target_link_libraries(ucn_cluster PUBLIC ucn_core)
 target_compile_options(ucn_cluster PRIVATE
@@ -273,6 +275,11 @@ if(UCN_BUILD_TESTS)
     # archive stays free of test hooks.  Static-library members are only
     # pulled for symbols the objects do not already define.
     target_sources(ucn_tests PRIVATE src/extended/ucn_cluster.c)
+    # CLV2-M02 (02-02): the test binary also compiles its own codec copy so
+    # the test's ucn_cluster.c links against the same codec definitions.
+    target_sources(ucn_tests PRIVATE
+        src/extended/cluster/ucn_cluster_codec_v3.c
+    )
 
     if(UCN_FEATURE_SERVICE)
         target_sources(ucn_tests PRIVATE
