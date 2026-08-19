@@ -154,6 +154,8 @@ add_library(ucn_cluster STATIC EXCLUDE_FROM_ALL
     src/extended/cluster/ucn_cluster_recovery.c
     # CLV2-M02 (02-06): the candidate table / head offer / stepdown / score.
     src/extended/cluster/ucn_cluster_merge.c
+    # CLV2-M03 (03-01): the Epoch value type + pure comparator (infra).
+    src/extended/cluster/ucn_cluster_epoch.c
 )
 target_link_libraries(ucn_cluster PUBLIC ucn_core)
 target_compile_options(ucn_cluster PRIVATE
@@ -311,6 +313,10 @@ if(UCN_BUILD_TESTS)
     # CLV2-M02 (02-06): ... and its own merge/head-offer copy.
     target_sources(ucn_tests PRIVATE
         src/extended/cluster/ucn_cluster_merge.c
+    )
+    # CLV2-M03 (03-01): ... and its own Epoch comparator copy.
+    target_sources(ucn_tests PRIVATE
+        src/extended/cluster/ucn_cluster_epoch.c
     )
 
     if(UCN_FEATURE_SERVICE)
