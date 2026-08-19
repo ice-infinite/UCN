@@ -20,6 +20,13 @@
  * cluster_id is WRONG (Cluster A term 2 must not defer to Cluster B
  * term 100 - that is 03-03's semantic fix, but the comparator must
  * already forbid the cross-cluster term comparison).
+ *
+ * COMPARATOR != VALIDATOR (03-01 NIT-2, human audit): this comparator
+ * does NOT validate whether an Epoch is eligible to become an active
+ * protocol Epoch.  Zero / reserved field validity (cluster_id != 0,
+ * term != 0, head != UCN_NODE_BROADCAST) is enforced by state /
+ * provider invariants (03-08), NOT by this function - do NOT treat
+ * "compare(...) != UNKNOWN" as "epoch is valid".
  */
 
 #include "ucn/ucn_types.h"

@@ -2,6 +2,7 @@
 #define UCN_CLUSTER_H
 
 #include "ucn/ucn_node.h"
+#include "ucn/ucn_cluster_epoch.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -584,6 +585,18 @@ ucn_result_t ucn_cluster_get_member_summary_at(
     size_t table_index,
     ucn_cluster_member_summary_t *summary);
 const ucn_cluster_stats_t *ucn_cluster_get_stats(const ucn_cluster_t *cluster);
+
+/* CLV2-M03 (03-02): the ACTIVE epoch - the logical unification of the
+ * node's current cluster_id / term / head_node_id.  PHYSICAL STORAGE IS
+ * UNCHANGED (the struct still holds the three scalar fields; the struct
+ * size / cluster_bytes is frozen by the M01/M02 gates).  This accessor is
+ * the single read point for the active epoch, and 03-03+ will drive
+ * Head-Offer / Merge / Higher-Authority decisions through
+ * ucn_cluster_epoch_compare() on it instead of hand-written combined
+ * comparisons.  Returns {0,0,0} when the cluster is not attached to a
+ * live epoch (e.g. DETACHED).  This is a READ accessor - it does not
+ * validate the epoch (comparator != validator, 03-01). */
+ucn_cluster_epoch_t ucn_cluster_active_epoch_get(const ucn_cluster_t *cluster);
 
 #ifdef __cplusplus
 }
