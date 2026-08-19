@@ -150,6 +150,10 @@ add_library(ucn_cluster STATIC EXCLUDE_FROM_ALL
     # CLV2-M02 (02-05): the Backup selection/snapshot/heartbeat/resync and
     # Takeover prepare/ACK/complete lifecycle.
     src/extended/cluster/ucn_cluster_backup.c
+    # CLV2-M02 (02-06): the RECOVERY_HEAD quorum/declaration/arbitration/TTL.
+    src/extended/cluster/ucn_cluster_recovery.c
+    # CLV2-M02 (02-06): the candidate table / head offer / stepdown / score.
+    src/extended/cluster/ucn_cluster_merge.c
 )
 target_link_libraries(ucn_cluster PUBLIC ucn_core)
 target_compile_options(ucn_cluster PRIVATE
@@ -299,6 +303,14 @@ if(UCN_BUILD_TESTS)
     # CLV2-M02 (02-05): ... and its own backup/takeover copy.
     target_sources(ucn_tests PRIVATE
         src/extended/cluster/ucn_cluster_backup.c
+    )
+    # CLV2-M02 (02-06): ... and its own recovery copy.
+    target_sources(ucn_tests PRIVATE
+        src/extended/cluster/ucn_cluster_recovery.c
+    )
+    # CLV2-M02 (02-06): ... and its own merge/head-offer copy.
+    target_sources(ucn_tests PRIVATE
+        src/extended/cluster/ucn_cluster_merge.c
     )
 
     if(UCN_FEATURE_SERVICE)

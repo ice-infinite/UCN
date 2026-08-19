@@ -186,10 +186,60 @@ void send_backup_heartbeat(ucn_cluster_t *cluster, uint32_t now_ms);
 void send_backup_delta_step(ucn_cluster_t *cluster);
 void send_backup_snapshot_step(ucn_cluster_t *cluster);
 
-/* == Module layout for the remaining OPs (append here) ==
- * 02-06  ucn_cluster_recovery.c   Recovery quorum / declaration /
- *                                 arbitration / TTL.
- *        ucn_cluster_merge.c      Head offer / stepdown / score switch.
+/* == Recovery module boundary (02-06, this OP) ==
+ * ucn_cluster_recovery.c owns the RECOVERY_HEAD quorum / declaration /
+ * arbitration / TTL lifecycle.  Exposed here (de-static only) for the
+ * remaining ucn_cluster.c modules (receive dispatch, step). */
+uint32_t compute_recovery_backoff(const ucn_cluster_t *cluster);
+bool recovery_quorum_met(const ucn_cluster_t *cluster);
+void start_recovery_backoff(ucn_cluster_t *cluster, uint32_t now_ms);
+void declare_recovery_head(ucn_cluster_t *cluster, uint32_t now_ms);
+void stepdown_recovery_head(ucn_cluster_t *cluster, uint32_t now_ms);
+void send_recovery_declare(ucn_cluster_t *cluster);
+ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
+                                     ucn_node_id_t source,
+                                     const ucn_cluster_message_t *message,
+                                     uint32_t now_ms);
+ucn_result_t handle_recovery_ack(ucn_cluster_t *cluster,
+                                 ucn_node_id_t source,
+                                 const ucn_cluster_message_t *message,
+                                 uint32_t now_ms);
+
+/* == Merge / head-offer module boundary (02-06, this OP) ==
+ * ucn_cluster_merge.c owns the candidate table, score comparison, the
+ * ordered stepdown and the head-offer / score-switch logic.  Exposed here
+ * (de-static only) for the remaining ucn_cluster.c modules (receive
+ * dispatch, step) and the test hooks. */
+ucn_cluster_candidate_t *allocate_candidate(
+    ucn_cluster_t *cluster, ucn_node_id_t node_id, uint32_t now_ms);
+ucn_result_t observe_candidate(ucn_cluster_t *cluster,
+                               ucn_node_id_t source,
+                               const ucn_cluster_message_t *message,
+                               uint32_t now_ms);
+bool candidate_better(uint16_t candidate_score, ucn_node_id_t candidate_node,
+                      uint16_t current_score, ucn_node_id_t current_node);
+void send_head_stepdown(ucn_cluster_t *cluster);
+void begin_ordered_stepdown(ucn_cluster_t *cluster,
+                            const ucn_cluster_candidate_t *candidate,
+                            uint32_t now_ms);
+ucn_result_t backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms);
+
+/* Helpers the merge module calls but which stay in ucn_cluster.c core
+ * (same exposure rule: de-static only, bodies untouched). */
+ucn_result_t cluster_transmit(
+    ucn_cluster_t *cluster, ucn_node_id_t destination,
+    const ucn_cluster_message_t *message,
+    const uint8_t payload[UCN_CLUSTER_MESSAGE_BYTES]);
+void begin_join_prepare_fields(ucn_cluster_t *cluster,
+                               const ucn_cluster_candidate_t *candidate,
+                               uint32_t now_ms);
+void begin_join(ucn_cluster_t *cluster,
+                const ucn_cluster_candidate_t *candidate,
+                uint32_t now_ms);
+
+/* == Module layout complete (02-01..02-06) ==
+ * ucn_cluster.c keeps the public facade / init / views / receive dispatch
+ * / step / shared infra (config, token bucket, transmit).
  */
 
 #ifdef __cplusplus
