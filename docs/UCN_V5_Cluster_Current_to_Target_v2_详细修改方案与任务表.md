@@ -13,7 +13,7 @@
 > |---|---|---|---|
 > | M00 冻结基线 | DONE | 6bea852 + M00.1(6206ce2) + M00.2(2b222b7) | 用户正式签字 PASS（2026-08-15），授权进入 M01 |
 > | M01 显式 Phase | DONE | 01-01..01-04f 全部闭环（OP-203..210） | 用户正式签字 PASS（2026-08-16，ab53b31）：01-01~03 + 01-04a..f 全序列 PASS；全文件断言达成（无正常路径 phase change 绕过 cluster_transition()）；Shadow-Guard 纪律全站成立；M01.0.2 组合保留；Golden 等价；observed 35/0；cluster_bytes 1096。授权进入 M02（纯结构性重构，不得顺手优化 FSM） |
-> | M02 模块拆分 | DONE | 02-01..02-08 全部闭环（OP-211..216） | ucn_cluster.c 6216→1667 行；6 模块 + internal header（codec/fsm/membership/backup/recovery/merge）；字节级等价（函数体未动，仅 de-static + 前向声明）；FULL/ASan/LITE/NANO 全绿；observed 35/0；golden 逐字节不变；cluster_bytes 1096；Core 不反向依赖；EXCLUDE_FROM_ALL 按需链接验证；02-07 opaque 化留待 API 收口阶段（纯结构外） |
+> | M02 模块拆分 | DONE | 02-01..02-06 + approved scope adjustments 02-07/08（OP-211..216 + M02.1 对齐） | ucn_cluster.c 6216→1667 行；6 模块 + internal header（codec/fsm/membership/backup[+takeover 合并]/recovery/merge）；字节级等价（函数体未动，仅 de-static + 前向声明）；FULL/ASan/LITE/NANO 全绿；observed 35/0；golden 逐字节不变；cluster_bytes 1096；Core 不反向依赖；whole-Cluster EXCLUDE_FROM_ALL 按需链接（per-module trim deferred）；02-07 internal storage contract DONE / opaque split → CLV2-14-02 |
 > | M03 Epoch 分类 | TODO | — | — |
 > | M04 Persistence | TODO | — | — |
 > | M05 Wire v4 | TODO | — | — |
@@ -327,12 +327,12 @@ duplicate/replay/reorder
 |---|---:|---|---|---|---|
 | `CLV2-02-01` | P1 | M01 | src/extended/cluster/ucn_cluster_internal.h | 建立 Cluster 私有头：Phase、Event、Epoch helper、member table helper、transition API、模块间最小接口；禁止暴露 Adapter/SDK 类型。 | 依赖图保持 Extended -> Core，Core 源文件不 include Cluster 私有头。 |
 | `CLV2-02-02` | P1 | 02-01 | ucn_cluster_codec_v3.c | 把当前 32 B Format v3 encode/decode、flags/type-role 校验和 byte offset 从 `ucn_cluster.c` 移出；输出字节必须完全一致。 | 所有现有 Codec golden vectors 字节级一致。 |
-| `CLV2-02-03` | P1 | 02-01 | ucn_cluster_fsm.c | 移动 `cluster_transition`、Phase handler、Step dispatch、状态不变量和 Role 映射；`ucn_cluster.c` 只保留 public facade/init/view。 | 生产代码内 Phase 写入只存在于 FSM 模块。 |
+| `CLV2-02-03` | P1 | 02-01 | ucn_cluster_fsm.c | 移动 transition framework（`cluster_transition`/validate/preflight/apply_legacy）、legacy derive、reason table、Shadow mirror、DIRECT/OBSERVED matrix 与状态不变量。**已批准范围调整（M02.1）**：Step/RX orchestration（`ucn_cluster_step_inner`/`ucn_cluster_receive_inner`/election dispatch）保留在 `ucn_cluster.c` facade；domain module 保留自己的 transition site，FSM 集中 transition policy/validation——这是实际架构（比原"Phase 写只存在于 FSM"更合理）。 | 生产代码内 Phase 写入只经 cluster_transition()/preflight（经 internal header 暴露给各模块）。 |
 | `CLV2-02-04` | P1 | 02-01 | ucn_cluster_membership.c | 移动 Join、Keepalive、Leave、member allocation/expiry、member query；当前语义先不变。 | Join/Lease/Replay 测试全部通过。 |
-| `CLV2-02-05` | P1 | 02-01 | ucn_cluster_backup.c、ucn_cluster_takeover.c | 移动 Backup selection/assignment/snapshot/delta/heartbeat/reject/resync 与 Takeover prepare/ACK/complete。 | Backup 与 Takeover 测试无行为差异。 |
+| `CLV2-02-05` | P1 | 02-01 | ucn_cluster_backup.c | 移动 Backup selection/assignment/snapshot/delta/heartbeat/reject/resync 与 Takeover prepare/ACK/complete。**已批准范围调整（M02.1）**：Backup 与 Takeover 合并为单个 `ucn_cluster_backup.c` 模块（二者耦合紧密：takeover 由 backup 生命周期触发、共享 mirror/epoch 字段）；后续如出现独立可裁剪边界再拆。 | Backup 与 Takeover 测试无行为差异。 |
 | `CLV2-02-06` | P1 | 02-01 | ucn_cluster_recovery.c、ucn_cluster_merge.c | 移动 Recovery quorum/declaration/arbitration/TTL 与当前 Head offer/stepdown/score switch；先不引入 Target 新语义。 | Recovery、Head convergence、switchback 测试保持通过。 |
-| `CLV2-02-07` | P1 | 02-03..06 | include/ucn/ucn_cluster_storage.h | 将可变内部存储布局从主 public API 分离：`ucn_cluster.h` 暴露类型/API，唯一 Owner 若需静态分配则 include storage header；应用禁止直接读写内部字段。 | 所有产品目标全量重编译；测试通过 test fixture，而不是 public ABI 访问字段。 |
-| `CLV2-02-08` | P1 | 02-02..07 | CMakeLists.txt / profile build | Cluster 继续是按需 Extended 静态库；每个子模块可按 Feature 裁剪，但禁止 Core-only 产品增加 RAM/BSS。 | Cluster OFF 二进制与基线尺寸一致或差异可解释。 |
+| `CLV2-02-07` | P1 | 02-03..06 | src/extended/cluster/ucn_cluster_internal.h | Internal storage boundary staging / internal ownership contract（**已批准范围调整，M02.1**）：`ucn_cluster_internal.h` 只允许 Extended 内部使用（Core 禁止 include），public read-only view/API 作为应用访问边界。**真正 opaque/storage split（public handle/storage 分离、应用禁止直接读写内部 member/backup/epoch、API version bump）DEFER → CLV2-14-02**。 | internal header 仅 src/extended 使用；Core 不反向依赖。 |
+| `CLV2-02-08` | P1 | 02-02..07 | CMakeLists.txt / profile build | Cluster 继续是按需 Extended 静态库（whole-Cluster opt-in / `EXCLUDE_FROM_ALL`）；Core-only 产品零 Cluster 成本（Cluster OFF 构建验证 `libucn_cluster.a` absent）。**已批准范围调整（M02.1）**：fine-grained per-module Feature trimming（如 `UCN_CLUSTER_ENABLE_BACKUP=0`）DEFER——等 v3 compatibility/Recovery/Backup 具备安全可裁剪边界再做，避免未经验证的协议组合。 | Cluster OFF 二进制与基线尺寸一致或差异可解释；Core-only 零 Cluster 成本。 |
 
 ## 本里程碑禁止事项
 - 禁止 Core include Cluster 私有头。
