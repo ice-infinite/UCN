@@ -336,4 +336,3 @@ ucn_result_t ucn_cluster_message_decode(
     decode_trailing_12b(message, input + CLUSTER_SCORE_OFFSET);
     return message_is_valid(message) ? UCN_OK : UCN_ERR_MALFORMED;
 }
-
