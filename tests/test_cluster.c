@@ -8206,8 +8206,9 @@ static int cluster_test_stable_switchback(void)
  *       better - the exact "绝不能进入 HIGHER-authority 让位逻辑" case.
  *   (2) foreign low-term   (local A/100 vs remote B/2)  -> FOREIGN, same
  *       contract: cluster_id truncates the domain BEFORE any Term read.
- *   (3) same-cluster higher (local A/2 vs remote A/3)   -> HIGHER ->
- *       unified same-cluster authority path -> surrender (legitimate).
+ *   (3) same-cluster higher (local A/2 vs remote A/3)   -> LOWER ->
+ *       (compare(local, remote): remote A/3 IS the higher authority)
+ *       -> unified same-cluster authority path -> surrender (legitimate).
  *   (4) same-cluster same-term different Head           -> CONFLICT,
  *       NOT a foreign merge: enters the unified same-cluster arbitration
  *       (score path), never classify_foreign_cluster_merge. */
@@ -8277,10 +8278,13 @@ static int cluster_test_epoch_classified_head_offer(void)
     TEST_ASSERT(head->cluster.stats.head_switches == 0U);
     TEST_ASSERT(candidate.better_samples == 200U);
 
-    /* Group 3: local A/2 vs remote A/3 (same-cluster higher Term).  This
-     * IS legitimate higher authority: HIGHER -> the unified same-cluster
-     * authority path -> ordered stepdown (exactly what Group 1 must NOT
-     * do). */
+    /* Group 3: local A/2 vs remote A/3 (same-cluster higher Term).
+     * relation == LOWER (compare(local, remote) returns LOWER because
+     * local term 2 < remote term 3), so remote_is_higher_authority ==
+     * true - this IS legitimate higher authority: the unified
+     * same-cluster authority path -> ordered stepdown (exactly what
+     * Group 1 must NOT do).  Never write this as "relation == HIGHER":
+     * HIGHER would mean the REMOTE is stale. */
     head->cluster.term = 2U;
     candidate.cluster_id = 1U;   /* same Cluster A */
     candidate.term = 3U;
