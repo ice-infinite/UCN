@@ -6807,6 +6807,46 @@ static int cluster_test_recovery_step_transitions(void)
     TEST_ASSERT(c->shadow_transition_count == 0U);
     TEST_ASSERT(test_derive_phase(c, now_ms) ==
                 UCN_CLUSTER_PHASE_RECOVERY_HEAD);
+
+    /* ---------- (f) degenerate config: node_id % backoff_max == 0 ----------
+     * A node whose id is a multiple of recovery_backoff_max_ms computes a
+     * ZERO backoff (compute_recovery_backoff), and
+     * ucn_deadline_from_now(now, 0) returns 0 (ucn_duration_is_valid
+     * rejects 0), so the derive STAYS RECOVERY_OBSERVE - a committed
+     * RECOVERY_ELECTION would trip the derive assert / shadow-flap.  Old
+     * code spun in RECOVERY_OBSERVE (re-arming the zero deadline every
+     * Step, nonce bumping) without ever minting a phase change; the
+     * 01-04f wiring must preserve that exactly: NO transition, the site's
+     * start_recovery_backoff() still runs (nonce bump preserved), phase
+     * stays put, no count bump. */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = now_ms;
+    c = &network.nodes[0].cluster;
+    c->config.local_node_id = 5U; /* 5 % recovery_backoff_max_ms(5) == 0 */
+    c->role = UCN_CLUSTER_ROLE_DETACHED;
+    c->recovery_eligible = true;
+    c->recovery_backoff_deadline_ms = 0U;
+    c->recovery_cooldown_until_ms = 0U;
+    c->observation_deadline_ms = 1U; /* expired */
+    c->recovery_nonce = 0U;
+    c->shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_OBSERVE;
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_OK);
+    /* No transition: the site still re-arms (nonce bumps) but the
+     * deadline stays 0 (invalid duration) so the phase stays OBSERVE and
+     * the shadow is untouched - exactly the pre-migration spin. */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_UNKNOWN);
+    TEST_ASSERT(c->shadow_transition_count == 0U);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(c->recovery_eligible == true);
+    TEST_ASSERT(c->recovery_nonce != 0U); /* site write preserved */
+    TEST_ASSERT(c->recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
     return 0;
 }
 

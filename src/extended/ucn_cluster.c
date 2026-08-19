@@ -5601,35 +5601,71 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
             /* Still cooling down after a Recovery stepdown: wait. */
         } else if (cluster->recovery_eligible) {
             if (cluster->recovery_backoff_deadline_ms == 0U) {
-                /* CLV2-01-04f: arming the backoff IS the
+                /* CLV2-01-04f: arming a NON-ZERO backoff IS the
                  * RECOVERY_OBSERVE -> RECOVERY_ELECTION transition - call
-                 * it FIRST, UNCONDITIONALLY, fail closed (Shadow-Guard:
-                 * the legacy event decides WHICH transition, the shadow is
-                 * only validated here).  apply_legacy(RECOVERY_ELECTION)
-                 * writes role=DETACHED + eligible=true ONLY; the caller-
-                 * provided recovery_nonce / backoff_deadline writes stay
-                 * in start_recovery_backoff() (CLV2-01-04a.1 Item 4: never
-                 * auto-mint the backoff). */
-                if (cluster_transition(
-                        cluster, UCN_CLUSTER_PHASE_RECOVERY_OBSERVE,
-                        UCN_CLUSTER_PHASE_RECOVERY_ELECTION,
-                        UCN_CLUSTER_REASON_RECOVERY_BACKOFF,
-                        now_ms) != UCN_OK) {
-                    /* Fail closed: do NOT arm the backoff on a rejected
-                     * transition (shadow mismatch / illegal pair /
-                     * pre-mutated phase fields); the node stays observing
-                     * and the next Step re-visits the deadline. */
-                    return UCN_ERR_STATE;
-                }
-                start_recovery_backoff(cluster, now_ms);
+                 * it FIRST, UNCONDITIONALLY on the legacy event, fail
+                 * closed (Shadow-Guard: the legacy event decides WHICH
+                 * transition, the shadow is only validated here).
+                 * apply_legacy(RECOVERY_ELECTION) writes role=DETACHED +
+                 * eligible=true ONLY; the caller-provided
+                 * recovery_nonce / backoff_deadline writes stay in
+                 * start_recovery_backoff() (CLV2-01-04a.1 Item 4: never
+                 * auto-mint the backoff).  Degenerate-config guard: a
+                 * node_id that is a multiple of recovery_backoff_max_ms
+                 * computes backoff 0, and ucn_deadline_from_now(now, 0)
+                 * returns 0 (ucn_duration_is_valid rejects 0), so the
+                 * derive would stay RECOVERY_OBSERVE - a committed
+                 * RECOVERY_ELECTION would trip the derive assert below /
+                 * shadow-flap in release.  Old code spun in RECOVERY_OBSERVE
+                 * (re-arming the zero deadline every Step) without ever
+                 * minting a phase change; preserve that EXACTLY: no
+                 * transition when the computed backoff is zero, while
+                 * start_recovery_backoff() still runs (the nonce bump is
+                 * preserved) and the phase stays put. */
+                {
+                    /* CLV2-01-04f: the guard below is a LEGACY-side
+                     * discriminator (the event "arm a non-zero backoff"
+                     * only exists when compute_recovery_backoff != 0); it
+                     * never reads the shadow mirror, so the Shadow-Guard
+                     * rule is intact. */
+                    bool backoff_is_nonzero =
+                        compute_recovery_backoff(cluster) != 0U;
+
+                    if (backoff_is_nonzero) {
+                        if (cluster_transition(
+                                cluster, UCN_CLUSTER_PHASE_RECOVERY_OBSERVE,
+                                UCN_CLUSTER_PHASE_RECOVERY_ELECTION,
+                                UCN_CLUSTER_REASON_RECOVERY_BACKOFF,
+                                now_ms) != UCN_OK) {
+                            /* Fail closed: do NOT arm the backoff on a
+                             * rejected transition (shadow mismatch /
+                             * illegal pair / pre-mutated phase fields);
+                             * the node stays observing and the next Step
+                             * re-visits the deadline. */
+                            return UCN_ERR_STATE;
+                        }
+                    }
+                    /* The site still owns the armed backoff (nonce +
+                     * deadline), in original order; in the degenerate
+                     * zero-backoff config it re-arms a zero deadline
+                     * exactly as before (nonce bump preserved) and the
+                     * phase stays RECOVERY_OBSERVE. */
+                    start_recovery_backoff(cluster, now_ms);
 #if !defined(NDEBUG)
-                /* CLV2-01-04f post-commit derive assert: after the
-                 * transition AND the site-owned nonce/deadline writes the
-                 * node must derive RECOVERY_ELECTION (role DETACHED +
-                 * eligible + armed backoff). */
-                assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
-                       UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+                    /* CLV2-01-04f post-commit derive assert: after the
+                     * transition AND the site-owned nonce/deadline writes
+                     * the node must derive RECOVERY_ELECTION (role
+                     * DETACHED + eligible + armed NON-ZERO backoff).  Only
+                     * asserted when the transition RAN - the degenerate
+                     * zero-backoff config skips it entirely (see the
+                     * guard comment above) and derives RECOVERY_OBSERVE. */
+                    if (backoff_is_nonzero) {
+                        assert(cluster_phase_from_legacy_state(cluster,
+                                                               now_ms) ==
+                               UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+                    }
 #endif
+                }
             } else if (ucn_deadline_expired(
                            now_ms, cluster->recovery_backoff_deadline_ms)) {
                 if (recovery_quorum_met(cluster)) {
