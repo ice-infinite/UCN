@@ -425,4 +425,3 @@ void send_keepalive(ucn_cluster_t *cluster, uint32_t now_ms)
     cluster->next_keepalive_ms =
         ucn_deadline_from_now(now_ms, cluster->config.keepalive_interval_ms);
 }
-
