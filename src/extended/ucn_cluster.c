@@ -4076,6 +4076,7 @@ static ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
                                               uint32_t now_ms)
 {
     ucn_cluster_message_t ack;
+    bool phase_committed = false;
 
     if (message->role != UCN_CLUSTER_ROLE_RECOVERY_HEAD ||
         message->head_node_id != source ||
@@ -4111,7 +4112,24 @@ static ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
         return UCN_OK; /* we keep contending; ignore this candidate */
     }
     if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
-        /* Yield the temporary Head role before joining the winner. */
+        /* CLV2-01-04f.4: losing the Recovery arbitration to a strictly
+         * smaller (nonce, node_id) contender IS the RECOVERY_HEAD ->
+         * MEMBER_ACTIVE transition (RECOVERY_YIELDED, a DIRECT edge).  It
+         * runs FIRST through the single entry point; apply_legacy writes
+         * role=MEMBER + grace=0 + eligible=false.  On rejection nothing
+         * changes: the node stays RECOVERY_HEAD and a later smaller
+         * contender may still win (tested). */
+        if (cluster_transition(cluster, UCN_CLUSTER_PHASE_RECOVERY_HEAD,
+                               UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                               UCN_CLUSTER_REASON_RECOVERY_YIELDED,
+                               now_ms) != UCN_OK) {
+            return UCN_ERR_STATE;
+        }
+        phase_committed = true;
+        /* Yield the temporary Head role before joining the winner.  The
+         * cooldown arm, the recovery clears and set_detached()'s role
+         * rewrite are redundant-but-harmless after apply_legacy
+         * (role=MEMBER); they stay site-owned in original order. */
         stepdown_recovery_head(cluster, now_ms);
     }
     /* Re-declaration of the same recovery Head refreshes the member
@@ -4122,6 +4140,37 @@ static ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
             ucn_deadline_from_now(now_ms, message->recovery_ttl_ms);
         cluster->head_grace_deadline_ms = 0U;
         return UCN_OK;
+    }
+    /* CLV2-01-04f.4: the plain join.  Every headless source derives a
+     * pre-phase (RECOVERY_OBSERVE / RECOVERY_ELECTION / DETACHED_OBSERVE
+     * / BACKUP_SYNCING / BACKUP_READY / BACKUP_TAKEOVER - the M01.0.2
+     * takeover_active && syncing combo derives BACKUP_TAKEOVER and must
+     * never be rejected for phase reasons - or MEMBER_TAKEOVER_GRACE)
+     * and commits -> MEMBER_ACTIVE (RECOVERY_WIN) through the single
+     * entry point BEFORE any join-block write, fail-closed.  A MEMBER
+     * with an expired lease already derives MEMBER_ACTIVE: self, no
+     * transition (the join refresh below keeps it MEMBER_ACTIVE).  The
+     * yield path above already committed (phase_committed), so it must
+     * not run a second transition against the now-stale shadow.  The
+     * accepted_recovery_nonce/known_recovery_source writes below are NOT
+     * phase-relevant (derive reads role/eligible/backoff only), but they
+     * run AFTER the transition so a rejection leaves them untouched too. */
+    if (!phase_committed) {
+        ucn_cluster_phase_t pre_phase =
+            cluster_phase_from_legacy_state(cluster, now_ms);
+
+        if (pre_phase != UCN_CLUSTER_PHASE_MEMBER_ACTIVE) {
+            if (cluster_transition(cluster, pre_phase,
+                                   UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                                   UCN_CLUSTER_REASON_RECOVERY_WIN,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: a rejected transition leaves every field
+                 * untouched (accepted_recovery_nonce/known_recovery_
+                 * source included) - the node stays headless and a later
+                 * declaration may still be accepted. */
+                return UCN_ERR_STATE;
+            }
+        }
     }
     cluster->accepted_recovery_nonce = message->recovery_nonce;
     cluster->known_recovery_source = source;
@@ -4146,6 +4195,13 @@ static ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
     /* Joining a recovery Head abandons our own recovery candidacy. */
     cluster->recovery_eligible = false;
     cluster->recovery_backoff_deadline_ms = 0U;
+#if !defined(NDEBUG)
+    /* CLV2-01-04f.4 post-commit derive assert: after the transition AND
+     * every site side effect the legacy state must still derive
+     * MEMBER_ACTIVE (derive depends only on role/grace/eligible). */
+    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+           UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+#endif
     (void)memset(&ack, 0, sizeof(ack));
     ack.type = UCN_CLUSTER_MSG_RECOVERY_ACK;
     ack.role = UCN_CLUSTER_ROLE_MEMBER;
