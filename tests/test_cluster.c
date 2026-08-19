@@ -6570,6 +6570,246 @@ static int cluster_test_recovery_conflict_resolved(void)
     return 0;
 }
 
+/* CLV2-01-04f (f1): the recovery-lifecycle STEP sites run through the
+ * single transition entry point (Shadow-Guard rule: the LEGACY event
+ * decides WHICH transition; cluster_transition() validates whether the
+ * shadow agrees - a caller never uses shadow_phase to skip).  All three
+ * live in the DETACHED + head_capable + observation-expired block (and
+ * the RECOVERY_HEAD TTL block):
+ *   (a) arm backoff:   RECOVERY_OBSERVE -> RECOVERY_ELECTION
+ *       (RECOVERY_BACKOFF) BEFORE start_recovery_backoff() - apply_legacy
+ *       writes role DETACHED + eligible=true; the nonce/backoff deadline
+ *       stay caller-provided at the site (01-04a.1 Item 4: never
+ *       auto-mint backoff);
+ *   (b) declare:       RECOVERY_ELECTION -> RECOVERY_HEAD (RECOVERY_WIN)
+ *       when backoff expired && quorum met, BEFORE declare_recovery_head()
+ *       - apply_legacy writes role=RECOVERY_HEAD only; the site's
+ *       cluster_id/term/head/score/role_since/election_deadline/backoff=0/
+ *       ack counters/recovery_deadline/next_advertise/send/stats stay
+ *       site-owned in original order;
+ *   (c) TTL stepdown:  RECOVERY_HEAD -> RECOVERY_OBSERVE
+ *       (RECOVERY_TTL_EXPIRED) BEFORE stepdown_recovery_head() - the
+ *       cooldown/clears + set_detached() stay site-owned (stepdown keeps
+ *       recovery_eligible=true, so the end state derives RECOVERY_OBSERVE
+ *       exactly as the shadow committed);
+ *   (d) non-quorum backoff re-arm: PHASE-PRESERVING (stays
+ *       RECOVERY_ELECTION) - a plain site write, count unchanged;
+ *   (e) shadow-desync sibling for EACH of the three: a stale shadow
+ *       fails closed with UCN_ERR_STATE and ZERO phase-relevant site
+ *       writes (the end-of-step sync only runs on UCN_OK, so the stale
+ *       shadow stays untouched - the e.5 step-side precedent).
+ * The happy paths alone are mint-masked (the end-of-step sync reproduces
+ * the same shadow/reason/count), so the desync siblings are the
+ * discriminators that pin the explicit cluster_transition() call. */
+static int cluster_test_recovery_step_transitions(void)
+{
+    cluster_test_network_t network;
+    ucn_cluster_t *c;
+    const uint32_t now_ms = 100U;
+
+    /* ---------- (a) arm backoff: RECOVERY_OBSERVE -> RECOVERY_ELECTION ---------- */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = now_ms;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_DETACHED;
+    c->recovery_eligible = true;
+    c->recovery_backoff_deadline_ms = 0U;
+    c->recovery_cooldown_until_ms = 0U;
+    c->observation_deadline_ms = 1U; /* expired */
+    c->shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_OBSERVE;
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_OK);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_RECOVERY_BACKOFF);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(c->recovery_eligible == true);
+    /* The site still owns the armed backoff (nonce + deadline). */
+    TEST_ASSERT(c->recovery_nonce != 0U);
+    TEST_ASSERT(c->recovery_backoff_deadline_ms != 0U);
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+
+    /* ---------- (b) declare: RECOVERY_ELECTION -> RECOVERY_HEAD ---------- */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = now_ms;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_DETACHED;
+    c->recovery_eligible = true;
+    c->recovery_backoff_deadline_ms = now_ms - 1U; /* expired */
+    c->recovery_cooldown_until_ms = 0U;
+    c->observation_deadline_ms = 1U;
+    c->shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_OK);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_RECOVERY_HEAD);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_RECOVERY_WIN);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD);
+    /* The site's declare payload stays site-owned in original order. */
+    TEST_ASSERT(c->recovery_cluster_id == c->config.local_node_id);
+    TEST_ASSERT(c->cluster_id == c->config.local_node_id);
+    TEST_ASSERT(c->term == 1U);
+    TEST_ASSERT(c->head_node_id == c->config.local_node_id);
+    TEST_ASSERT(c->recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(c->recovery_deadline_ms != 0U);
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_HEAD);
+
+    /* ---------- (c) TTL stepdown: RECOVERY_HEAD -> RECOVERY_OBSERVE ---------- */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = now_ms;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    c->recovery_eligible = true; /* stepdown keeps it (real-path invariant) */
+    c->recovery_deadline_ms = 1U; /* expired */
+    c->next_advertise_ms = now_ms + 1000U; /* skip the advertise branch */
+    c->shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_HEAD;
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_HEAD);
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_OK);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    TEST_ASSERT(c->transition_reason ==
+                UCN_CLUSTER_REASON_RECOVERY_TTL_EXPIRED);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(c->recovery_eligible == true); /* kept by stepdown_recovery_head */
+    /* stepdown_recovery_head() site effects in original order. */
+    TEST_ASSERT(c->recovery_cooldown_until_ms != 0U); /* cooldown armed */
+    TEST_ASSERT(c->recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(c->recovery_cluster_id == 0U);
+    TEST_ASSERT(c->recovery_deadline_ms == 0U);
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+
+    /* ---------- (d) non-quorum backoff re-arm: PHASE PRESERVED ---------- */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = now_ms;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_DETACHED;
+    c->recovery_eligible = true;
+    c->recovery_backoff_deadline_ms = now_ms - 1U; /* expired */
+    c->recovery_cooldown_until_ms = 0U;
+    c->observation_deadline_ms = 1U;
+    (void)memset(c->peers, 0, sizeof(c->peers)); /* no visible quorum */
+    c->shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
+    c->transition_reason = UCN_CLUSTER_REASON_RECOVERY_BACKOFF;
+    c->shadow_transition_count = 5U;
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_OK);
+    /* No transition: shadow/reason/count unchanged, the re-arm is a
+     * plain site write. */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_RECOVERY_BACKOFF);
+    TEST_ASSERT(c->shadow_transition_count == 5U);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(c->recovery_eligible == true);
+    TEST_ASSERT(c->recovery_backoff_deadline_ms != now_ms - 1U); /* re-armed */
+    TEST_ASSERT(c->recovery_backoff_deadline_ms != 0U);
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+
+    /* ---------- (e1) desync: arm backoff, stale shadow ---------- */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = now_ms;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_DETACHED;
+    c->recovery_eligible = true;
+    c->recovery_backoff_deadline_ms = 0U;
+    c->recovery_cooldown_until_ms = 0U;
+    c->observation_deadline_ms = 1U;
+    c->recovery_nonce = 0U;
+    c->shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION; /* stale */
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    ucn_cluster_test_transition_asserts_set(false);
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_ERR_STATE);
+    ucn_cluster_test_transition_asserts_set(true);
+    /* ZERO site writes: backoff NOT armed, shadow untouched (the
+     * end-of-step sync only runs on UCN_OK - e.5 precedent). */
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(c->recovery_eligible == true);
+    TEST_ASSERT(c->recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(c->recovery_nonce == 0U);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_UNKNOWN);
+    TEST_ASSERT(c->shadow_transition_count == 0U);
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+
+    /* ---------- (e2) desync: declare, stale shadow ---------- */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = now_ms;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_DETACHED;
+    c->recovery_eligible = true;
+    c->recovery_backoff_deadline_ms = now_ms - 1U; /* expired */
+    c->recovery_cooldown_until_ms = 0U;
+    c->observation_deadline_ms = 1U;
+    c->shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_OBSERVE; /* stale */
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+    ucn_cluster_test_transition_asserts_set(false);
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_ERR_STATE);
+    ucn_cluster_test_transition_asserts_set(true);
+    /* ZERO site writes: still DETACHED, nothing declared. */
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(c->recovery_cluster_id == 0U);
+    TEST_ASSERT(c->cluster_id == 0U);
+    TEST_ASSERT(c->term == 0U);
+    TEST_ASSERT(c->head_node_id == 0U);
+    TEST_ASSERT(c->recovery_backoff_deadline_ms == now_ms - 1U);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_UNKNOWN);
+    TEST_ASSERT(c->shadow_transition_count == 0U);
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+
+    /* ---------- (e3) desync: TTL stepdown, stale shadow ---------- */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = now_ms;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    c->recovery_eligible = true; /* real-path invariant */
+    c->recovery_deadline_ms = 1U; /* expired */
+    c->recovery_cooldown_until_ms = 0U;
+    c->recovery_cluster_id = 7U;
+    c->next_advertise_ms = now_ms + 1000U; /* skip the advertise branch */
+    c->shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_OBSERVE; /* stale */
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_HEAD);
+    ucn_cluster_test_transition_asserts_set(false);
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_ERR_STATE);
+    ucn_cluster_test_transition_asserts_set(true);
+    /* ZERO site writes: still RECOVERY_HEAD, cooldown NOT armed. */
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD);
+    TEST_ASSERT(c->recovery_cooldown_until_ms == 0U);
+    TEST_ASSERT(c->recovery_cluster_id == 7U);
+    TEST_ASSERT(c->recovery_deadline_ms == 1U);
+    TEST_ASSERT(c->recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_UNKNOWN);
+    TEST_ASSERT(c->shadow_transition_count == 0U);
+    TEST_ASSERT(test_derive_phase(c, now_ms) ==
+                UCN_CLUSTER_PHASE_RECOVERY_HEAD);
+    return 0;
+}
+
 static int cluster_test_stable_switchback(void)
 {
     cluster_test_network_t network;
@@ -8451,6 +8691,11 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_recovery_forms_cluster() == 0);
     TEST_ASSERT(cluster_test_recovery_requires_peers() == 0);
     TEST_ASSERT(cluster_test_recovery_conflict_resolved() == 0);
+    /* CLV2-01-04f (f1): the recovery STEP sites (arm backoff / declare /
+     * TTL stepdown) commit through the single transition entry point,
+     * with the non-quorum re-arm phase-preserving and a fail-closed
+     * shadow-desync sibling for each transition. */
+    TEST_ASSERT(cluster_test_recovery_step_transitions() == 0);
     TEST_ASSERT(cluster_test_stable_switchback() == 0);
     TEST_ASSERT(cluster_test_backup_challenge() == 0);
     TEST_ASSERT(cluster_test_timing_profiles() == 0);

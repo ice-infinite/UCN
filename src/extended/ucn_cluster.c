@@ -5601,11 +5601,65 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
             /* Still cooling down after a Recovery stepdown: wait. */
         } else if (cluster->recovery_eligible) {
             if (cluster->recovery_backoff_deadline_ms == 0U) {
+                /* CLV2-01-04f: arming the backoff IS the
+                 * RECOVERY_OBSERVE -> RECOVERY_ELECTION transition - call
+                 * it FIRST, UNCONDITIONALLY, fail closed (Shadow-Guard:
+                 * the legacy event decides WHICH transition, the shadow is
+                 * only validated here).  apply_legacy(RECOVERY_ELECTION)
+                 * writes role=DETACHED + eligible=true ONLY; the caller-
+                 * provided recovery_nonce / backoff_deadline writes stay
+                 * in start_recovery_backoff() (CLV2-01-04a.1 Item 4: never
+                 * auto-mint the backoff). */
+                if (cluster_transition(
+                        cluster, UCN_CLUSTER_PHASE_RECOVERY_OBSERVE,
+                        UCN_CLUSTER_PHASE_RECOVERY_ELECTION,
+                        UCN_CLUSTER_REASON_RECOVERY_BACKOFF,
+                        now_ms) != UCN_OK) {
+                    /* Fail closed: do NOT arm the backoff on a rejected
+                     * transition (shadow mismatch / illegal pair /
+                     * pre-mutated phase fields); the node stays observing
+                     * and the next Step re-visits the deadline. */
+                    return UCN_ERR_STATE;
+                }
                 start_recovery_backoff(cluster, now_ms);
+#if !defined(NDEBUG)
+                /* CLV2-01-04f post-commit derive assert: after the
+                 * transition AND the site-owned nonce/deadline writes the
+                 * node must derive RECOVERY_ELECTION (role DETACHED +
+                 * eligible + armed backoff). */
+                assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                       UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+#endif
             } else if (ucn_deadline_expired(
                            now_ms, cluster->recovery_backoff_deadline_ms)) {
                 if (recovery_quorum_met(cluster)) {
+                    /* CLV2-01-04f: expired backoff + quorum IS the
+                     * RECOVERY_ELECTION -> RECOVERY_HEAD transition - call
+                     * it FIRST, UNCONDITIONALLY, fail closed.
+                     * apply_legacy(RECOVERY_HEAD) writes role=RECOVERY_HEAD
+                     * only; the site's recovery_cluster_id/cluster_id/term/
+                     * head_node_id/score/role_since/election_deadline/
+                     * backoff=0/ack counters/recovery_deadline/
+                     * next_advertise/send/stats stay site-owned in original
+                     * order. */
+                    if (cluster_transition(
+                            cluster, UCN_CLUSTER_PHASE_RECOVERY_ELECTION,
+                            UCN_CLUSTER_PHASE_RECOVERY_HEAD,
+                            UCN_CLUSTER_REASON_RECOVERY_WIN,
+                            now_ms) != UCN_OK) {
+                        /* Fail closed: do NOT declare on a rejected
+                         * transition; the node stays in the election
+                         * path and the next Step re-visits the deadline. */
+                        return UCN_ERR_STATE;
+                    }
                     declare_recovery_head(cluster, now_ms);
+#if !defined(NDEBUG)
+                    /* CLV2-01-04f post-commit derive assert: after the
+                     * transition AND every site effect the node must
+                     * derive RECOVERY_HEAD (role == RECOVERY_HEAD). */
+                    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                           UCN_CLUSTER_PHASE_RECOVERY_HEAD);
+#endif
                 } else {
                     /* C07.7 P0-2: no visible quorum (fully isolated node):
                      * do NOT self-declare; retry after another bounded
@@ -5635,7 +5689,33 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
             (void)send_recovery_declare(cluster);
         }
         if (ucn_deadline_expired(now_ms, cluster->recovery_deadline_ms)) {
+            /* CLV2-01-04f: the expired TTL IS the RECOVERY_HEAD ->
+             * RECOVERY_OBSERVE transition - call it FIRST, UNCONDITIONALLY,
+             * fail closed.  apply_legacy(RECOVERY_OBSERVE) writes role=
+             * DETACHED + eligible=true + backoff=0 + grace=0 +
+             * known_backup=0; stepdown_recovery_head()'s cooldown/clears +
+             * set_detached() (role rewrite redundant-but-harmless, b.6/c.5
+             * precedent) stay site-owned in original order.  stepdown keeps
+             * recovery_eligible=true, so the end state derives
+             * RECOVERY_OBSERVE exactly as the shadow committed. */
+            if (cluster_transition(cluster, UCN_CLUSTER_PHASE_RECOVERY_HEAD,
+                                   UCN_CLUSTER_PHASE_RECOVERY_OBSERVE,
+                                   UCN_CLUSTER_REASON_RECOVERY_TTL_EXPIRED,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: do NOT count the TTL expiry or run the
+                 * stepdown on a rejected transition (shadow mismatch /
+                 * illegal pair / pre-mutated phase fields); the node stays
+                 * RECOVERY_HEAD and the next Step re-visits the deadline. */
+                return UCN_ERR_STATE;
+            }
             stepdown_recovery_head(cluster, now_ms);
+#if !defined(NDEBUG)
+            /* CLV2-01-04f post-commit derive assert: after the transition
+             * AND every site effect the node must derive RECOVERY_OBSERVE
+             * (role == DETACHED, eligible, no backoff, cooldown armed). */
+            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                   UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+#endif
             return UCN_OK;
         }
     }
