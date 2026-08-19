@@ -1459,8 +1459,15 @@ ucn_cluster_role_t ucn_cluster_get_role(const ucn_cluster_t *cluster)
  * UNCHANGED - the struct keeps the three scalar fields (struct size /
  * cluster_bytes frozen), this accessor is the single read point.  03-03+
  * will drive Head-Offer / Merge / Higher-Authority decisions through
- * ucn_cluster_epoch_compare() on this value.  Returns {0,0,0} when not
- * attached to a live epoch (DETACHED); does NOT validate (03-01). */
+ * ucn_cluster_epoch_compare() on this value.
+ *
+ * CONTRACT (03-02 MINOR cleanup, human audit): {0,0,0} for NULL; for a
+ * non-NULL object this is a RAW READ PROJECTION of the three scalars -
+ * no role inspection, no liveness/validity check (comparator !=
+ * validator, 03-01).  A DETACHED node exposes {0,0,0} only because
+ * set_detached() clears the three fields (a state invariant), NOT
+ * because this getter enforces it. */
+
 ucn_cluster_epoch_t ucn_cluster_active_epoch_get(const ucn_cluster_t *cluster)
 {
     ucn_cluster_epoch_t epoch;
