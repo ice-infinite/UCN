@@ -1028,6 +1028,8 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
     [UCN_CLUSTER_PHASE_RECOVERY_ELECTION] =
         /* quorum, declare: declare_recovery_head() L3598 (role=RECOVERY_HEAD L3603) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_HEAD) |
+        /* no-quorum backoff re-arm stays RECOVERY_ELECTION (self-write,
+         * phase-preserving, 01-04f.1) - no direct edge needed */
         /* Head offer: cluster_transition() via consider_head_offer() RECOVERY_* (01-04f) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
         /* recovery Head join: handle_recovery_declare() L3637 */
