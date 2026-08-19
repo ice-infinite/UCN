@@ -1122,8 +1122,13 @@ static bool cluster_transition_is_allowed(ucn_cluster_phase_t old_phase,
  * ready/syncing/deadlines/takeover but NOT members[] or backup_generation
  * - so the special exits stay at the SITES during 01-04b..f wiring.  Only
  * after every inbound site of a phase is migrated may a common cleanup be
- * re-merged into a single entry action here.  Fields a site writes AFTER
- * the call are fine: the end-of-step/RX shadow sync re-aligns.
+ * re-merged into a single entry action here.  CLV2-01-04e.7 (human NIT):
+ * the former "fields a site writes after the call are fine: the
+ * end-of-step/RX shadow sync re-aligns" is DELETED - a migrated phase
+ * change must NEVER depend on shadow_sync() minting (the validate-side
+ * comment states the precise principle: migrated sites may perform
+ * caller-owned post-transition writes only when they preserve the
+ * committed new phase).
  *
  * Entering a HEAD_BACKUP_* / HEAD_STABLE sub-phase requires the caller to
  * have the matching backup_* state (assign_pending / ready / node_id), as
@@ -1256,9 +1261,12 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         break;
     case UCN_CLUSTER_PHASE_BACKUP_SYNCING:
         /* handle_backup_assign() (e.1 transition, role=BACKUP, syncing=true,
-         * ready=false) and handle_backup_member_sync() BEGIN/gap (e.2 no
-         * transition) both write role+syncing+ready; takeover is never set
-         * on an inbound edge of this phase. */
+         * ready=false) and handle_backup_member_sync() re-entry (e.7
+         * EXPLICIT READY->SYNCING transition for fresh SYNC_BEGIN / DELTA
+         * gap / snapshot seq gap; the SYNCING/TAKEOVER pre-states run no
+         * transition - self / M01.0.2 takeover precedence) both write
+         * role+syncing+ready; takeover is never set on an inbound edge of
+         * this phase. */
         cluster->role = UCN_CLUSTER_ROLE_BACKUP;
         cluster->backup_ready = false;
         cluster->backup_syncing = true;
