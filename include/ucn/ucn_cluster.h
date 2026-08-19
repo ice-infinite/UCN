@@ -593,9 +593,18 @@ const ucn_cluster_stats_t *ucn_cluster_get_stats(const ucn_cluster_t *cluster);
  * the single read point for the active epoch, and 03-03+ will drive
  * Head-Offer / Merge / Higher-Authority decisions through
  * ucn_cluster_epoch_compare() on it instead of hand-written combined
- * comparisons.  Returns {0,0,0} when the cluster is not attached to a
- * live epoch (e.g. DETACHED).  This is a READ accessor - it does not
- * validate the epoch (comparator != validator, 03-01). */
+ * comparisons.
+ *
+ * CONTRACT (03-02 MINOR cleanup, human audit): returns {0,0,0} for NULL.
+ * For a non-NULL object this is a RAW READ PROJECTION of cluster_id /
+ * term / head_node_id - it does NOT inspect the role and does NOT
+ * validate liveness or validity (comparator != validator, 03-01).  Under
+ * normal Cluster invariants a DETACHED node exposes {0,0,0} because
+ * set_detached() clears those three fields - that is a STATE INVARIANT,
+ * not a guarantee enforced by this getter.  Callers (03-03+) must not
+ * treat "getter returned non-zero" as "this is a valid Active Epoch";
+ * they call it from a Role/state that already has legitimate active
+ * authority, or define validity at the call site. */
 ucn_cluster_epoch_t ucn_cluster_active_epoch_get(const ucn_cluster_t *cluster);
 
 #ifdef __cplusplus

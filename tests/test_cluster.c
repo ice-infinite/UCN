@@ -10195,10 +10195,15 @@ static int cluster_test_epoch_property_sanity(void)
  * unification of the node's current cluster_id / term / head_node_id.
  * BEHAVIOR-EQUIVALENT: the physical storage is unchanged (the struct
  * still holds the three scalars; cluster_bytes is frozen), so the getter
- * must return EXACTLY the stored fields, and {0,0,0} for NULL / a
- * detached node.  03-03+ will feed this value into
- * ucn_cluster_epoch_compare() for the Head-Offer / Merge / Authority
- * decisions. */
+ * must return EXACTLY the stored fields for every non-NULL object.
+ * CONTRACT (03-02 MINOR cleanup): {0,0,0} is guaranteed for NULL only;
+ * a normally initialized DETACHED node has zero fields BY INVARIANT
+ * (set_detached() clears the three scalars), not by a getter-enforced
+ * rule.  The staged 9/12/4 case below is a RAW PROJECTION test - it
+ * proves the getter mirrors the stored scalars verbatim, it is not
+ * asserting that (9,12,4) is a valid Active Epoch.  03-03+ will feed
+ * this value into ucn_cluster_epoch_compare() for the Head-Offer /
+ * Merge / Authority decisions. */
 static int cluster_test_active_epoch_access(void)
 {
     cluster_test_network_t network;
