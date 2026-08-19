@@ -1,0 +1,569 @@
+/* UCN CLV2-M02 (02-06): Cluster merge / head-offer module.
+ *
+ * STRUCTURAL REFACTOR ONLY (M02 mandate): the candidate table, score
+ * comparison, ordered stepdown and the head-offer / score-switch logic
+ * moved verbatim from the former single ucn_cluster.c.  Every function
+ * body is UNCHANGED; M01 froze the FSM semantics.  Do NOT
+ * "optimize" anything here.
+ *
+ * Cross-module (via ucn_cluster_internal.h, all de-static only):
+ *   - calls into fsm / membership / backup / ucn_cluster.c core.
+ */
+
+#include "ucn/ucn_cluster.h"
+
+#include <assert.h>
+#include <string.h>
+
+#include "ucn/ucn_time.h"
+
+#include "ucn_cluster_internal.h"
+
+/* CLV2-M02 (02-06): intra-module forward declarations - the extracted
+ * function order differs from the former single file, so the helpers
+ * used before their definitions are declared here (bodies untouched). */
+bool score_improves_by(uint16_t candidate_score, uint16_t current_score,
+                              uint8_t percent);
+void send_head_stepdown(ucn_cluster_t *cluster);
+
+ucn_result_t backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms)
+{
+    ucn_cluster_phase_t pre_phase;
+
+    /* CLV2-01-04e.7: derive the pre-phase from the PRE-CALL legacy state
+     * (never from the shadow mirror) and commit the transition through
+     * the single entry point BEFORE any site write.  apply_legacy
+     * (ELECTION) writes role=CANDIDATE ONLY - every mirror/primary/
+     * deadline clear below stays caller-owned at the site in original
+     * order (members[]/backup_generation survive a challenge, exactly as
+     * the real site leaves them). */
+    pre_phase = cluster_phase_from_legacy_state(cluster, now_ms);
+    if (cluster_transition(cluster, pre_phase,
+                           UCN_CLUSTER_PHASE_ELECTION,
+                           UCN_CLUSTER_REASON_ELECTION_STARTED,
+                           now_ms) != UCN_OK) {
+        /* Fail closed: a rejected transition (shadow mismatch / illegal
+         * pair / pre-mutated phase fields) leaves every field untouched -
+         * the score challenge is skipped (the Backup keeps its mirror and
+         * the next same-primary ADVERTISE re-visits the challenge). */
+        return UCN_ERR_STATE;
+    }
+    cluster->backup_ready = false;
+    cluster->backup_syncing = false;
+    cluster->backup_primary_node_id = 0U;
+    cluster->backup_primary_deadline_ms = 0U;
+    cluster->backup_primary_lease_deadline_ms = 0U;
+    cluster->backup_missed_heartbeats = 0U;
+    cluster->backup_takeover_active = false;
+    cluster->stats.head_switches++;
+    /* Re-enter election in the SAME Cluster (keep cluster_id, bump Term) so
+     * the current Head can observe the higher score and yield to us.  The
+     * site's role write is idempotent with apply_legacy(ELECTION) (kept in
+     * original order for the not-yet-migrated callers). */
+    cluster->role = UCN_CLUSTER_ROLE_CANDIDATE;
+    cluster->term = cluster->term == UINT32_MAX ? 1U : cluster->term + 1U;
+    cluster->head_node_id = cluster->config.local_node_id;
+    cluster->current_head_score = cluster->config.head_score;
+    cluster->role_since_ms = now_ms;
+    cluster->election_deadline_ms =
+        ucn_deadline_from_now(now_ms, cluster->config.election_window_ms);
+    cluster->next_advertise_ms = now_ms;
+    cluster->stats.elections_started++;
+#if !defined(NDEBUG)
+    /* CLV2-01-04e.7 post-commit derive assert: after the transition AND
+     * every site write the node must derive ELECTION (role == CANDIDATE
+     * with the mirror cleared). */
+    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+           UCN_CLUSTER_PHASE_ELECTION);
+#endif
+    return UCN_OK;
+}
+
+void begin_ordered_stepdown(ucn_cluster_t *cluster,
+                                    const ucn_cluster_candidate_t *candidate,
+                                    uint32_t now_ms)
+{
+    /* CLV2-01-04d.6 (HEAD_* sources) + CLV2-01-04f (RECOVERY_HEAD offer
+     * source, SITE B): a Head source yields through the entry point BEFORE
+     * any phase-relevant write - the transition (STEPDOWN_ORDERED) commits
+     * first and apply_legacy(STEPPING_DOWN) owns the role write; the site
+     * keeps eligible=false / backoff=0 / stepdown_deadline in their
+     * original order.  The legacy reclaim event decides THAT the stepdown
+     * runs; cluster_transition() validates whether the shadow agrees (a
+     * caller NEVER uses the shadow to decide whether to SKIP the call). */
+    if (cluster->role == UCN_CLUSTER_ROLE_HEAD ||
+        cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+        ucn_cluster_phase_t old_phase =
+            cluster_phase_from_legacy_state(cluster, now_ms);
+
+        if (old_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP ||
+            old_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING ||
+            old_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING ||
+            old_phase == UCN_CLUSTER_PHASE_HEAD_STABLE ||
+            old_phase == UCN_CLUSTER_PHASE_RECOVERY_HEAD) {
+            if (cluster_transition(cluster, old_phase,
+                                   UCN_CLUSTER_PHASE_STEPPING_DOWN,
+                                   UCN_CLUSTER_REASON_STEPDOWN_ORDERED,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: a rejected transition (shadow mismatch /
+                 * illegal pair / pre-mutated phase fields) leaves every
+                 * field untouched - do NOT yield or notify members. */
+                return;
+            }
+        }
+    }
+    /* Yielding to a stable Head abandons any Recovery candidacy. */
+    cluster->recovery_eligible = false;
+    cluster->recovery_backoff_deadline_ms = 0U;
+    (void)send_head_stepdown(cluster);
+    cluster->role = UCN_CLUSTER_ROLE_STEPPING_DOWN;
+    cluster->role_since_ms = now_ms;
+    cluster->stepdown_deadline_ms =
+        ucn_deadline_from_now(now_ms, cluster->config.keepalive_interval_ms);
+    cluster->pending_head_node_id = candidate->head_node_id;
+    cluster->pending_cluster_id = candidate->cluster_id;
+    cluster->pending_term = candidate->term;
+    cluster->pending_head_score = candidate->head_score;
+    cluster->stats.head_switches++;
+#if !defined(NDEBUG)
+    /* CLV2-01-04d.6/01-04f post-commit derive assert: after the
+     * transition AND every site effect the node must derive STEPPING_DOWN
+     * (the role write at the site is idempotent with
+     * apply_legacy(STEPPING_DOWN), so the assert holds for both the
+     * HEAD_* and RECOVERY_HEAD sources). */
+    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+           UCN_CLUSTER_PHASE_STEPPING_DOWN);
+#endif
+}
+
+bool candidate_better(
+    uint16_t candidate_score,
+    ucn_node_id_t candidate_node,
+    uint16_t current_score,
+    ucn_node_id_t current_node)
+{
+    return candidate_score > current_score ||
+           (candidate_score == current_score && candidate_node < current_node);
+}
+
+void consider_head_offer(
+    ucn_cluster_t *cluster,
+    ucn_cluster_candidate_t *candidate,
+    uint32_t now_ms)
+{
+    if (candidate->head_node_id == cluster->config.local_node_id) {
+        return;
+    }
+    /* A full Head must keep refreshing existing members.  Capacity zero only
+     * rejects new joins; treating it as an unavailable current Head causes
+     * valid members to expire their lease and create a split brain. */
+    if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+        candidate->head_node_id == cluster->head_node_id &&
+        candidate->cluster_id == cluster->cluster_id &&
+        candidate->term == cluster->term) {
+        /* CLV2-01-04c.2: a same-cluster same-term Head offer while the
+         * node is in takeover grace IS the MEMBER_TAKEOVER_GRACE ->
+         * MEMBER_ACTIVE lease-renewal transition: run it FIRST (fail
+         * closed) and keep the site's lease refresh + grace=0 writes in
+         * original order.  A MEMBER_ACTIVE node performs no transition
+         * (the grace=0 write is then a no-op); apply_legacy writes
+         * role+grace=0 for the GRACE inbound. */
+        if (cluster->head_grace_deadline_ms != 0U) {
+            if (cluster_transition(cluster,
+                                   UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE,
+                                   UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                                   UCN_CLUSTER_REASON_HEAD_LEASE_RENEWED,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: a rejected transition (shadow mismatch /
+                 * illegal pair / pre-mutated phase fields) leaves every
+                 * field untouched - do NOT refresh the lease. */
+                return;
+            }
+        }
+        cluster->head_lease_expires_at_ms =
+            ucn_deadline_from_now(now_ms, cluster->config.lease_ms);
+        cluster->head_grace_deadline_ms = 0U;
+        cluster->current_head_score = candidate->head_score;
+        candidate->better_samples = 0U;
+#if !defined(NDEBUG)
+        /* CLV2-01-04c.2 post-commit derive assert: after the transition
+         * (when applicable) and every site write the legacy state must
+         * still derive MEMBER_ACTIVE (role == MEMBER, no armed grace). */
+        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+               UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
+#endif
+        return;
+    }
+    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
+        if (candidate->head_node_id == cluster->backup_primary_node_id &&
+            candidate->cluster_id == cluster->cluster_id &&
+            candidate->term == cluster->term) {
+            /* A protected Head ADVERTISE is independent liveness evidence
+             * in addition to the direct Primary heartbeat.  Refreshing the
+             * lease here prevents a Backup from falsely taking over merely
+             * because several heartbeat unicasts were lost on a live link. */
+            cluster->backup_primary_lease_deadline_ms =
+                ucn_deadline_from_now(now_ms, cluster->config.lease_ms);
+            /* §8.3: a Backup that is significantly better than its live
+             * Primary (after minimum tenure) challenges by re-entering
+             * election; this must not be gated by Primary capacity.
+             * CLV2-01-04e.7: the challenge is fail-closed inside
+             * backup_challenge() (the score-improvement event decides,
+             * the entry point validates).  consider_head_offer is void
+             * and its RX caller ignores the result, so a rejected
+             * transition (shadow desync) silently skips the challenge -
+             * the lease refresh above already ran and the next
+             * same-primary ADVERTISE re-visits it. */
+            if (score_improves_by(cluster->config.head_score,
+                                  candidate->head_score,
+                                  cluster->config.switch_improvement_percent) &&
+                ucn_elapsed_at_least(now_ms, cluster->role_since_ms,
+                                     cluster->config.head_min_tenure_ms)) {
+                (void)backup_challenge(cluster, now_ms);
+            }
+        } else if (candidate->cluster_id == cluster->cluster_id &&
+                   candidate->term > cluster->term) {
+            /* C07.7 P1: only a same-Cluster, legitimately newer-Term Head
+             * interrupts a pending takeover; the Backup abandons it and
+             * joins the newer Head instead of risking split brain.  A
+             * different Cluster's term is NOT comparable (Target §8.3):
+             * cross-Cluster convergence is owned by Head-to-Head Merge,
+             * never by a Backup jumping at a foreign term. */
+            /* CLV2-01-04e.7 (human audit MAJOR 2.B): this is a BACKUP exit
+             * site, NOT a Recovery site.  The higher-Term Head event decides
+             * the BACKUP_SYNCING/READY/TAKEOVER -> JOIN_PENDING transition
+             * (JOIN_INITIATED) - commit it through the single entry point
+             * BEFORE any site write, UNCONDITIONALLY (Shadow-Guard RULE: the
+             * legacy/event decides WHICH transition; cluster_transition()
+             * validates whether the shadow agrees; the caller never uses
+             * shadow_phase to decide whether to SKIP the call).  On rejection
+             * (shadow desync / illegal pair / pre-mutated phase fields) fail
+             * closed: NO site write runs - the takeover stays armed, the
+             * backup identity stays, no join - and a later well-formed offer
+             * may still be accepted.  The pre-phase is derived from the
+             * legacy state (takeover_active -> BACKUP_TAKEOVER, ready ->
+             * BACKUP_READY, else -> BACKUP_SYNCING); the M01.0.2 combo
+             * (takeover_active && backup_syncing) stays expressible and the
+             * late-Type12 case is never rejected for phase reasons. */
+            {
+                const ucn_cluster_phase_t pre_phase =
+                    cluster_phase_from_legacy_state(cluster, now_ms);
+
+                if (cluster_transition(cluster, pre_phase,
+                                       UCN_CLUSTER_PHASE_JOIN_PENDING,
+                                       UCN_CLUSTER_REASON_JOIN_INITIATED,
+                                       now_ms) != UCN_OK) {
+                    return;
+                }
+            }
+            cluster->backup_takeover_active = false;
+            backup_clear_sync(cluster, now_ms);
+            begin_join(cluster, candidate, now_ms);
+#if !defined(NDEBUG)
+            /* CLV2-01-04e.7 post-commit derive assert: after the transition
+             * (apply_legacy wrote role=JOIN_PENDING + recovery_eligible=false
+             * + backoff=0) and every site write (backup_clear_sync()'s
+             * set_detached() rewrote DETACHED, then begin_join() rewrote
+             * JOIN_PENDING - redundant-but-harmless) the legacy state must
+             * still derive JOIN_PENDING, exactly what the shadow committed. */
+            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                   UCN_CLUSTER_PHASE_JOIN_PENDING);
+#endif
+        }
+        return;
+    }
+    /* Packet loss can let two candidates finish the same local election.  A
+     * worse Head must eventually yield, otherwise that transient split brain
+     * becomes permanent.  The deterministic score/Node-ID ordering, repeated
+     * samples and minimum tenure keep this convergence bounded without making
+     * a single RSSI sample flap an established Head.  Member notification is
+     * deliberately lease-based in this first stage; C07 owns coordinated
+     * backup/merge/stepdown signalling. */
+    if (cluster->role == UCN_CLUSTER_ROLE_HEAD) {
+        if (candidate->term > cluster->term) {
+            /* A newer-generation Head wins immediately (§5.3: the older
+             * Head must defer rather than reclaim by raw score). */
+            begin_ordered_stepdown(cluster, candidate, now_ms);
+            return;
+        }
+        if (candidate->term < cluster->term) {
+            /* A stale Head must not be followed, even with a high score. */
+            return;
+        }
+        if (!score_improves_by(candidate->head_score,
+                               cluster->config.head_score,
+                               cluster->config.switch_improvement_percent)) {
+            candidate->better_samples = 0U;
+            return;
+        }
+        if (candidate->better_samples < UINT8_MAX) {
+            candidate->better_samples++;
+        }
+        if (candidate->better_samples >=
+                cluster->config.switch_required_samples &&
+            ucn_elapsed_at_least(now_ms, cluster->role_since_ms,
+                                 cluster->config.head_min_tenure_ms)) {
+            begin_ordered_stepdown(cluster, candidate, now_ms);
+            candidate->better_samples = 0U;
+        }
+        return;
+    }
+    if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+        /* A stable Head reclaims the domain from a temporary Recovery
+         * Head; ordered stepdown switches back to the original Cluster. */
+        begin_ordered_stepdown(cluster, candidate, now_ms);
+        return;
+    }
+    if (cluster->role == UCN_CLUSTER_ROLE_DETACHED ||
+        cluster->role == UCN_CLUSTER_ROLE_CANDIDATE) {
+        /* C07.7 P1: available_capacity == 0 gates new JOINs only; it must
+         * never block epoch convergence between existing Heads (handled
+         * above), so the capacity check lives here at the join point. */
+        if (candidate->available_capacity == 0U) {
+            return;
+        }
+        /* CLV2-01-04b.3 (DETACHED_OBSERVE/ELECTION) + CLV2-01-04f SITE A
+         * (RECOVERY_*): a detached/election node accepting a stable Head
+         * offer performs the -> JOIN_PENDING transition through the single
+         * entry point BEFORE any phase-relevant legacy mutation (the role
+         * write is owned by apply_legacy); the remaining begin_join()
+         * field payload follows at the site via begin_join_prepare_fields().
+         * The legacy stable-Head offer event decides THAT the join runs;
+         * cluster_transition() validates whether the shadow agrees (a
+         * caller NEVER uses the shadow to decide whether to SKIP the
+         * call). */
+        if (!cluster->recovery_eligible) {
+            ucn_cluster_phase_t old_phase =
+                (cluster->role == UCN_CLUSTER_ROLE_CANDIDATE)
+                    ? UCN_CLUSTER_PHASE_ELECTION
+                    : UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
+
+            if (cluster_transition(cluster, old_phase,
+                                   UCN_CLUSTER_PHASE_JOIN_PENDING,
+                                   UCN_CLUSTER_REASON_JOIN_INITIATED,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: a rejected transition (shadow mismatch /
+                 * illegal pair / pre-mutated phase fields) leaves every
+                 * field untouched - do not apply the join payload. */
+                return;
+            }
+            begin_join_prepare_fields(cluster, candidate, now_ms);
+#if !defined(NDEBUG)
+            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                   UCN_CLUSTER_PHASE_JOIN_PENDING);
+#endif
+            return;
+        }
+        /* CLV2-01-04f SITE A: a RECOVERY_OBSERVE / RECOVERY_ELECTION node
+         * (role DETACHED + recovery_eligible; the armed backoff decides the
+         * sub-phase) accepting a stable-Head offer commits RECOVERY_* ->
+         * JOIN_PENDING (JOIN_INITIATED) through the single entry point
+         * BEFORE any site write; apply_legacy(JOIN_PENDING) writes role +
+         * eligible=false + backoff=0, then the begin_join() field payload
+         * follows at the site. */
+        {
+            ucn_cluster_phase_t old_phase =
+                cluster_phase_from_legacy_state(cluster, now_ms);
+
+            if (cluster_transition(cluster, old_phase,
+                                   UCN_CLUSTER_PHASE_JOIN_PENDING,
+                                   UCN_CLUSTER_REASON_JOIN_INITIATED,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: a rejected transition (shadow mismatch /
+                 * illegal pair / pre-mutated phase fields) leaves every
+                 * field untouched - do not apply the join payload. */
+                return;
+            }
+            begin_join_prepare_fields(cluster, candidate, now_ms);
+#if !defined(NDEBUG)
+            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                   UCN_CLUSTER_PHASE_JOIN_PENDING);
+#endif
+            return;
+        }
+    }
+    if (cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING) {
+        /* Re-target a stale pending Head (e.g. after a takeover): switch
+         * only when the observed Head differs or has a higher Term. */
+        if (candidate->head_node_id != cluster->pending_head_node_id ||
+            candidate->term > cluster->pending_term) {
+            begin_join(cluster, candidate, now_ms);
+        }
+        return;
+    }
+    if (cluster->role != UCN_CLUSTER_ROLE_MEMBER) {
+        return;
+    }
+    if (!score_improves_by(candidate->head_score,
+                           cluster->current_head_score,
+                           cluster->config.switch_improvement_percent)) {
+        candidate->better_samples = 0U;
+        return;
+    }
+    if (candidate->better_samples < UINT8_MAX) {
+        candidate->better_samples++;
+    }
+    if (candidate->better_samples >= cluster->config.switch_required_samples) {
+        /* CLV2-01-04c.4 (human-ordered): the LEAVE notice to the old Head
+         * stays FIRST, then stats.head_switches++, THEN the transition
+         * (MEMBER_ACTIVE or MEMBER_TAKEOVER_GRACE -> JOIN_PENDING) runs
+         * fail-closed, and only afterwards is the begin_join() field
+         * payload applied through begin_join_prepare_fields() (apply_legacy
+         * owns the role write).  Neither the LEAVE send nor head_switches++
+         * is a phase-relevant mutation, so the pre-transition derive check
+         * still passes. */
+        (void)send_message(cluster, cluster->head_node_id,
+                           UCN_CLUSTER_MSG_LEAVE, UCN_CLUSTER_ROLE_MEMBER,
+                           cluster->cluster_id, cluster->term,
+                           cluster->head_node_id, cluster->current_head_score, 0U);
+        cluster->stats.head_switches++;
+        if (cluster->head_grace_deadline_ms != 0U) {
+            if (cluster_transition(cluster,
+                                   UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE,
+                                   UCN_CLUSTER_PHASE_JOIN_PENDING,
+                                   UCN_CLUSTER_REASON_JOIN_INITIATED,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: a rejected transition (shadow mismatch /
+                 * illegal pair / pre-mutated phase fields) leaves every
+                 * field untouched - do NOT apply the join payload. */
+                return;
+            }
+        } else {
+            if (cluster_transition(cluster,
+                                   UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                                   UCN_CLUSTER_PHASE_JOIN_PENDING,
+                                   UCN_CLUSTER_REASON_JOIN_INITIATED,
+                                   now_ms) != UCN_OK) {
+                /* Fail closed: see the GRACE branch above. */
+                return;
+            }
+        }
+        begin_join_prepare_fields(cluster, candidate, now_ms);
+#if !defined(NDEBUG)
+        /* CLV2-01-04c.4 post-commit derive assert: after the transition
+         * and the site join payload the legacy state must still derive
+         * JOIN_PENDING. */
+        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+               UCN_CLUSTER_PHASE_JOIN_PENDING);
+#endif
+    }
+}
+
+/* C07.2 Backup state machine helpers. */
+
+ucn_result_t send_cluster_message(
+    ucn_cluster_t *cluster,
+    ucn_node_id_t destination,
+    const ucn_cluster_message_t *message)
+{
+    uint8_t payload[UCN_CLUSTER_MESSAGE_BYTES];
+    ucn_result_t result = ucn_cluster_message_encode(message, payload);
+
+    if (result != UCN_OK) {
+        return result;
+    }
+    return cluster_transmit(cluster, destination, message, payload);
+}
+
+/* Allocate a Backup mirror slot ignoring the product soft member_capacity;
+ * only the compile-time physical table bound applies. */
+
+/* C07.5 RECOVERY_HEAD: a short-lived emergency Head formed only after both
+ * the Primary and Backup are lost.  The recovery Cluster ID is the
+ * declaring node ID, so it never impersonates the lost Cluster. */
+
+
+ucn_cluster_candidate_t *find_candidate(
+    ucn_cluster_t *cluster,
+    ucn_node_id_t head_node_id)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_CLUSTER_MAX_CANDIDATES; ++index) {
+        if (cluster->candidates[index].occupied &&
+            cluster->candidates[index].head_node_id == head_node_id) {
+            return &cluster->candidates[index];
+        }
+    }
+    return NULL;
+}
+
+ucn_cluster_candidate_t *allocate_candidate(
+    ucn_cluster_t *cluster,
+    ucn_node_id_t head_node_id,
+    uint32_t now_ms)
+{
+    size_t index;
+    ucn_cluster_candidate_t *candidate = find_candidate(cluster, head_node_id);
+
+    if (candidate != NULL) {
+        return candidate;
+    }
+    for (index = 0U; index < UCN_CLUSTER_MAX_CANDIDATES; ++index) {
+        if (!cluster->candidates[index].occupied ||
+            ucn_deadline_expired(now_ms,
+                                 cluster->candidates[index].expires_at_ms)) {
+            (void)memset(&cluster->candidates[index], 0,
+                         sizeof(cluster->candidates[index]));
+            cluster->candidates[index].occupied = true;
+            cluster->candidates[index].head_node_id = head_node_id;
+            return &cluster->candidates[index];
+        }
+    }
+    return NULL;
+}
+
+ucn_result_t observe_candidate(
+    ucn_cluster_t *cluster,
+    ucn_node_id_t source,
+    const ucn_cluster_message_t *message,
+    uint32_t now_ms)
+{
+    ucn_cluster_candidate_t *candidate =
+        allocate_candidate(cluster, source, now_ms);
+
+    if (candidate == NULL) {
+        return UCN_ERR_NO_SPACE;
+    }
+    if (candidate->last_nonce != 0U &&
+        candidate->cluster_id == message->cluster_id &&
+        candidate->term == message->term &&
+        message->nonce <= candidate->last_nonce) {
+        cluster->stats.stale_messages++;
+        return UCN_ERR_REPLAY;
+    }
+    candidate->head_node_id = source;
+    candidate->cluster_id = message->cluster_id;
+    candidate->term = message->term;
+    candidate->head_score = message->head_score;
+    candidate->available_capacity = message->available_capacity;
+    candidate->expires_at_ms = ucn_deadline_from_now(now_ms, message->lease_ms);
+    candidate->last_nonce = message->nonce;
+    candidate->role = message->role;
+    return UCN_OK;
+}
+
+bool score_improves_by(
+    uint16_t candidate_score,
+    uint16_t current_score,
+    uint8_t percent)
+{
+    uint32_t required = (uint32_t)current_score * (100U + percent);
+
+    return (uint32_t)candidate_score * 100U >= required;
+}
+
+void send_head_stepdown(ucn_cluster_t *cluster)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+        if (cluster->members[index].occupied) {
+            (void)send_message(cluster, cluster->members[index].node_id,
+                               UCN_CLUSTER_MSG_HEAD_STEPDOWN,
+                               UCN_CLUSTER_ROLE_HEAD, cluster->cluster_id,
+                               cluster->term, cluster->config.local_node_id,
+                               cluster->config.head_score, 0U);
+        }
+    }
+}
