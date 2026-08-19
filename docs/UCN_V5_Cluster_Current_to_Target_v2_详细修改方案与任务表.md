@@ -13,7 +13,7 @@
 > |---|---|---|---|
 > | M00 冻结基线 | DONE | 6bea852 + M00.1(6206ce2) + M00.2(2b222b7) | 用户正式签字 PASS（2026-08-15），授权进入 M01 |
 > | M01 显式 Phase | DONE | 01-01..01-04f 全部闭环（OP-203..210） | 用户正式签字 PASS（2026-08-16，ab53b31）：01-01~03 + 01-04a..f 全序列 PASS；全文件断言达成（无正常路径 phase change 绕过 cluster_transition()）；Shadow-Guard 纪律全站成立；M01.0.2 组合保留；Golden 等价；observed 35/0；cluster_bytes 1096。授权进入 M02（纯结构性重构，不得顺手优化 FSM） |
-> | M02 模块拆分 | TODO | — | — |
+> | M02 模块拆分 | DONE | 02-01..02-08 全部闭环（OP-211..216） | ucn_cluster.c 6216→1667 行；6 模块 + internal header（codec/fsm/membership/backup/recovery/merge）；字节级等价（函数体未动，仅 de-static + 前向声明）；FULL/ASan/LITE/NANO 全绿；observed 35/0；golden 逐字节不变；cluster_bytes 1096；Core 不反向依赖；EXCLUDE_FROM_ALL 按需链接验证；02-07 opaque 化留待 API 收口阶段（纯结构外） |
 > | M03 Epoch 分类 | TODO | — | — |
 > | M04 Persistence | TODO | — | — |
 > | M05 Wire v4 | TODO | — | — |
