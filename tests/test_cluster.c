@@ -5265,14 +5265,19 @@ static int cluster_test_head_offer_join_wiring(void)
     TEST_ASSERT(detached->cluster.pending_term == 1U);
     TEST_ASSERT(detached->cluster.recovery_eligible == false);
 
-    /* Scenario C: a recovery-eligible node keeps the legacy begin_join()
-     * (RECOVERY_* sources stay legacy until 01-04f) - the join still
-     * completes with the full field payload, and the end-of-RX shadow
-     * sync derives JOIN_PENDING from the legacy state. */
+    /* Scenario C (CLV2-01-04f): a recovery-eligible node (RECOVERY_OBSERVE:
+     * role DETACHED + eligible + no backoff) accepts the same offer ->
+     * RECOVERY_* -> JOIN_PENDING through the single entry point, shadow
+     * committed FIRST with reason JOIN_INITIATED, then the site field
+     * payload.  The mirror is aligned so the end-of-RX sync sees no phase
+     * change and mints nothing. */
     recovery = &network.nodes[3];
     recovery->cluster.role = UCN_CLUSTER_ROLE_DETACHED;
     recovery->cluster.recovery_eligible = true;
     recovery->cluster.recovery_backoff_deadline_ms = 0U;
+    recovery->cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_OBSERVE;
+    recovery->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    recovery->cluster.shadow_transition_count = 0U;
     message.nonce = 3U;
     TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
     TEST_ASSERT(ucn_cluster_receive(&recovery->cluster,
@@ -5288,6 +5293,7 @@ static int cluster_test_head_offer_join_wiring(void)
                 UCN_CLUSTER_PHASE_JOIN_PENDING);
     TEST_ASSERT(recovery->cluster.transition_reason ==
                 UCN_CLUSTER_REASON_JOIN_INITIATED);
+    TEST_ASSERT(recovery->cluster.shadow_transition_count == 1U);
 
     /* Scenario D (fail closed): a node whose legacy state (CANDIDATE) does
      * NOT derive the claimed old phase from the shadow mirror (stale
@@ -6173,6 +6179,8 @@ static int cluster_test_head_stepdown_transition_wiring(void)
     cluster_test_node_t *recovery;
     ucn_cluster_message_t message;
     uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    ucn_cluster_candidate_t candidate;
+    ucn_result_t result;
     uint32_t nonce;
 
     TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
@@ -6236,18 +6244,22 @@ static int cluster_test_head_stepdown_transition_wiring(void)
     TEST_ASSERT(head->cluster.backup_node_id == network.nodes[2].node_id);
     TEST_ASSERT(head->cluster.backup_ready == true);
 
-    /* (d) RECOVERY_HEAD offer source: the CURRENT legacy path stays
-     * untouched - no entry-point transition.  The shadow is deliberately
-     * desynced (shadow != RECOVERY_HEAD): the legacy body ignores the
-     * mirror, so the stepdown still completes - a wrongly-wired
-     * transition would have failed the shadow==old check fail-closed and
-     * left the role untouched. */
+    /* (d) RECOVERY_HEAD + stable-Head reclaim offer (end-to-end RX,
+     * CLV2-01-04f SITE B): the RECOVERY_HEAD -> STEPPING_DOWN transition
+     * commits FIRST through the single entry point (shadow +
+     * STEPDOWN_ORDERED + count), then the site yields (eligible=false,
+     * backoff=0, stepdown deadline armed, pending Head identity,
+     * head_switches).  The shadow is aligned (RECOVERY_HEAD) so the
+     * end-of-RX sync sees no phase change and mints nothing. */
     recovery = &network.nodes[3];
     recovery->cluster.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
     recovery->cluster.cluster_id = 1U;
     recovery->cluster.term = 1U;
     recovery->cluster.head_node_id = recovery->node_id;
-    recovery->cluster.shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
+    recovery->cluster.recovery_eligible = true;
+    recovery->cluster.recovery_backoff_deadline_ms = 0U;
+    recovery->cluster.stepdown_deadline_ms = 0U;
+    recovery->cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_HEAD;
     recovery->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
     recovery->cluster.shadow_transition_count = 0U;
     message.nonce = 10U;
@@ -6258,6 +6270,9 @@ static int cluster_test_head_stepdown_transition_wiring(void)
     TEST_ASSERT(recovery->cluster.role == UCN_CLUSTER_ROLE_STEPPING_DOWN);
     TEST_ASSERT(recovery->cluster.shadow_phase ==
                 UCN_CLUSTER_PHASE_STEPPING_DOWN);
+    TEST_ASSERT(recovery->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_STEPDOWN_ORDERED);
+    TEST_ASSERT(recovery->cluster.shadow_transition_count == 1U);
     TEST_ASSERT(recovery->cluster.pending_head_node_id ==
                 network.nodes[1].node_id);
     TEST_ASSERT(recovery->cluster.pending_cluster_id == 1U);
@@ -6265,7 +6280,99 @@ static int cluster_test_head_stepdown_transition_wiring(void)
     TEST_ASSERT(recovery->cluster.pending_head_score == 200U);
     TEST_ASSERT(recovery->cluster.recovery_eligible == false);
     TEST_ASSERT(recovery->cluster.recovery_backoff_deadline_ms == 0U);
-    TEST_ASSERT(recovery->cluster.stepdown_deadline_ms != 0U);
+    TEST_ASSERT(recovery->cluster.stepdown_deadline_ms ==
+                ucn_deadline_from_now(60U,
+                    recovery->cluster.config.keepalive_interval_ms));
+    TEST_ASSERT(recovery->cluster.stats.head_switches == 1U);
+
+    /* (e) RECOVERY_HEAD + stable-Head reclaim offer (direct hook, no
+     * end-of-RX sync): the same explicit RECOVERY_HEAD -> STEPPING_DOWN
+     * transition commits FIRST (shadow + STEPDOWN_ORDERED + count) - the
+     * discriminator that would fail if the entry-point call were removed
+     * (the legacy body alone cannot produce shadow/reason/count). */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 60U;
+    recovery = &network.nodes[3];
+    recovery->cluster.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    recovery->cluster.cluster_id = 1U;
+    recovery->cluster.term = 1U;
+    recovery->cluster.head_node_id = recovery->node_id;
+    recovery->cluster.recovery_eligible = true;
+    recovery->cluster.recovery_backoff_deadline_ms = 0U;
+    recovery->cluster.stepdown_deadline_ms = 0U;
+    recovery->cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_HEAD;
+    recovery->cluster.transition_reason = UCN_CLUSTER_REASON_RECOVERY_WIN;
+    recovery->cluster.shadow_transition_count = 0U;
+    (void)memset(&candidate, 0, sizeof(candidate));
+    candidate.head_node_id = 2U; /* the stable reclaiming Head */
+    candidate.cluster_id = 1U;
+    candidate.term = 1U;
+    candidate.head_score = 200U;
+    TEST_ASSERT(test_derive_phase(&recovery->cluster, 60U) ==
+                UCN_CLUSTER_PHASE_RECOVERY_HEAD);
+    result = ucn_cluster_test_begin_ordered_stepdown(&recovery->cluster,
+                                                     &candidate, 60U);
+    TEST_ASSERT(result == UCN_OK);
+    TEST_ASSERT(recovery->cluster.role == UCN_CLUSTER_ROLE_STEPPING_DOWN);
+    TEST_ASSERT(recovery->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_STEPPING_DOWN);
+    TEST_ASSERT(recovery->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_STEPDOWN_ORDERED);
+    TEST_ASSERT(recovery->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(recovery->cluster.recovery_eligible == false);
+    TEST_ASSERT(recovery->cluster.recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(recovery->cluster.stepdown_deadline_ms ==
+                ucn_deadline_from_now(60U,
+                    recovery->cluster.config.keepalive_interval_ms));
+    TEST_ASSERT(recovery->cluster.pending_head_node_id == 2U);
+    TEST_ASSERT(recovery->cluster.pending_cluster_id == 1U);
+    TEST_ASSERT(recovery->cluster.pending_term == 1U);
+    TEST_ASSERT(recovery->cluster.pending_head_score == 200U);
+    TEST_ASSERT(recovery->cluster.stats.head_switches == 1U);
+    TEST_ASSERT(test_derive_phase(&recovery->cluster, 60U) ==
+                UCN_CLUSTER_PHASE_STEPPING_DOWN);
+
+    /* (f) shadow-desync (CLV2-01-04f SITE B): a stale shadow fails closed
+     * with UCN_ERR_STATE, ZERO site writes and no stepdown (recovery
+     * fields + pending_* + stepdown deadline untouched) - driven via the
+     * test hook so no end-of-RX sync can re-align the mirror afterwards. */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 60U;
+    recovery = &network.nodes[3];
+    recovery->cluster.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    recovery->cluster.cluster_id = 1U;
+    recovery->cluster.term = 1U;
+    recovery->cluster.head_node_id = recovery->node_id;
+    recovery->cluster.recovery_eligible = true;
+    recovery->cluster.recovery_backoff_deadline_ms = 0U;
+    recovery->cluster.stepdown_deadline_ms = 0U;
+    recovery->cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_OBSERVE; /* stale */
+    recovery->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    recovery->cluster.shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(&recovery->cluster, 60U) ==
+                UCN_CLUSTER_PHASE_RECOVERY_HEAD);
+    ucn_cluster_test_transition_asserts_set(false);
+    result = ucn_cluster_test_begin_ordered_stepdown(&recovery->cluster,
+                                                     &candidate, 60U);
+    ucn_cluster_test_transition_asserts_set(true);
+    TEST_ASSERT(result == UCN_ERR_STATE);
+    /* NOTHING of the stepdown site body ran (fail closed). */
+    TEST_ASSERT(recovery->cluster.role == UCN_CLUSTER_ROLE_RECOVERY_HEAD);
+    TEST_ASSERT(recovery->cluster.recovery_eligible == true);
+    TEST_ASSERT(recovery->cluster.recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(recovery->cluster.stepdown_deadline_ms == 0U);
+    TEST_ASSERT(recovery->cluster.pending_head_node_id == 0U);
+    TEST_ASSERT(recovery->cluster.pending_cluster_id == 0U);
+    TEST_ASSERT(recovery->cluster.pending_term == 0U);
+    TEST_ASSERT(recovery->cluster.pending_head_score == 0U);
+    TEST_ASSERT(recovery->cluster.stats.head_switches == 0U);
+    /* The shadow mirror is untouched (no transition, no sync mint). */
+    TEST_ASSERT(recovery->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    TEST_ASSERT(recovery->cluster.transition_reason == UCN_CLUSTER_REASON_INIT);
+    TEST_ASSERT(recovery->cluster.shadow_transition_count == 0U);
+    TEST_ASSERT(test_derive_phase(&recovery->cluster, 60U) ==
+                UCN_CLUSTER_PHASE_RECOVERY_HEAD);
     return 0;
 }
 
@@ -7316,6 +7423,145 @@ static int cluster_test_stable_switchback(void)
     TEST_ASSERT(head->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
     TEST_ASSERT(head->cluster.pending_head_node_id ==
                 network.nodes[1].node_id);
+    return 0;
+}
+
+/* CLV2-01-04f (f3, SITE A): consider_head_offer() RECOVERY_* -> JOIN_PENDING
+ * wiring.  A RECOVERY_OBSERVE / RECOVERY_ELECTION node (role DETACHED +
+ * recovery_eligible; the armed backoff decides the sub-phase) accepting a
+ * stable-Head offer commits RECOVERY_* -> JOIN_PENDING (JOIN_INITIATED)
+ * through the single entry point UNCONDITIONALLY (the legacy event - the
+ * stable Head offer - decides THAT the join runs; cluster_transition()
+ * validates whether the shadow agrees), BEFORE any site write (apply_legacy
+ * owns the role write), then the begin_join() field payload follows at the
+ * site via begin_join_prepare_fields() + the post-commit derive assert.
+ *
+ *  (a) RECOVERY_OBSERVE source (no backoff): explicit transition, shadow ==
+ *      JOIN_PENDING, reason == JOIN_INITIATED, count == 1, join payload
+ *      applied (pending_* + role_since/next_join_retry), role JOIN_PENDING.
+ *  (b) RECOVERY_ELECTION source (backoff armed): the same explicit
+ *      transition; the armed backoff is cleared by apply_legacy(JOIN_PENDING)
+ *      and the site (idempotent).
+ *  (c) shadow-desync: a stale shadow fails closed with UCN_ERR_STATE, ZERO
+ *      site writes and no join (pending_* untouched) - driven via the test
+ *      hook so no end-of-RX sync can re-align the mirror afterwards. */
+static int cluster_test_recovery_offer_join_wiring(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *node;
+    ucn_cluster_candidate_t candidate;
+    ucn_result_t result;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 100U;
+    node = &network.nodes[2];
+    (void)memset(&candidate, 0, sizeof(candidate));
+    candidate.head_node_id = node->node_id + 1U; /* a stable foreign Head */
+    candidate.cluster_id = 1U;
+    candidate.term = 2U;
+    candidate.head_score = 9000U;
+    candidate.available_capacity = 3U;
+
+    /* ============ (a) RECOVERY_OBSERVE + stable-Head offer ============ */
+    node->cluster.role = UCN_CLUSTER_ROLE_DETACHED;
+    node->cluster.recovery_eligible = true;
+    node->cluster.recovery_backoff_deadline_ms = 0U;
+    node->cluster.recovery_cooldown_until_ms = 0U;
+    node->cluster.role_since_ms = 0U;
+    node->cluster.next_join_retry_ms = 0U;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_OBSERVE;
+    node->cluster.transition_reason = UCN_CLUSTER_REASON_RECOVERY_TTL_EXPIRED;
+    node->cluster.shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(&node->cluster, 100U) ==
+                UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    result = ucn_cluster_test_consider_head_offer(&node->cluster, &candidate,
+                                                  100U);
+    TEST_ASSERT(result == UCN_OK);
+    TEST_ASSERT(node->cluster.shadow_phase == UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(node->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_JOIN_INITIATED);
+    TEST_ASSERT(node->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(node->cluster.recovery_eligible == false);
+    TEST_ASSERT(node->cluster.recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(node->cluster.pending_head_node_id == candidate.head_node_id);
+    TEST_ASSERT(node->cluster.pending_cluster_id == 1U);
+    TEST_ASSERT(node->cluster.pending_term == 2U);
+    TEST_ASSERT(node->cluster.pending_head_score == 9000U);
+    TEST_ASSERT(node->cluster.role_since_ms == 100U);
+    TEST_ASSERT(node->cluster.next_join_retry_ms == 100U);
+    TEST_ASSERT(test_derive_phase(&node->cluster, 100U) ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+
+    /* ============ (b) RECOVERY_ELECTION source (backoff armed) ============ */
+    node->cluster.role = UCN_CLUSTER_ROLE_DETACHED;
+    node->cluster.recovery_eligible = true;
+    node->cluster.recovery_backoff_deadline_ms = 1U; /* armed backoff */
+    node->cluster.recovery_cooldown_until_ms = 0U;
+    node->cluster.role_since_ms = 0U;
+    node->cluster.next_join_retry_ms = 0U;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
+    node->cluster.transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    node->cluster.shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(&node->cluster, 100U) ==
+                UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+    result = ucn_cluster_test_consider_head_offer(&node->cluster, &candidate,
+                                                  100U);
+    TEST_ASSERT(result == UCN_OK);
+    TEST_ASSERT(node->cluster.shadow_phase == UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(node->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_JOIN_INITIATED);
+    TEST_ASSERT(node->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(node->cluster.recovery_eligible == false);
+    TEST_ASSERT(node->cluster.recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(node->cluster.pending_head_node_id == candidate.head_node_id);
+    TEST_ASSERT(node->cluster.pending_cluster_id == 1U);
+    TEST_ASSERT(node->cluster.pending_term == 2U);
+    TEST_ASSERT(node->cluster.pending_head_score == 9000U);
+    TEST_ASSERT(node->cluster.role_since_ms == 100U);
+    TEST_ASSERT(node->cluster.next_join_retry_ms == 100U);
+    TEST_ASSERT(test_derive_phase(&node->cluster, 100U) ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+
+    /* ============ (c) shadow-desync: fail closed, ZERO site writes ============ */
+    node->cluster.role = UCN_CLUSTER_ROLE_DETACHED;
+    node->cluster.recovery_eligible = true;
+    node->cluster.recovery_backoff_deadline_ms = 0U;
+    node->cluster.recovery_cooldown_until_ms = 0U;
+    node->cluster.role_since_ms = 7U;
+    node->cluster.next_join_retry_ms = 9U;
+    node->cluster.pending_head_node_id = 0U;
+    node->cluster.pending_cluster_id = 0U;
+    node->cluster.pending_term = 0U;
+    node->cluster.pending_head_score = 0U;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION; /* stale */
+    node->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    node->cluster.shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(&node->cluster, 100U) ==
+                UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    ucn_cluster_test_transition_asserts_set(false);
+    result = ucn_cluster_test_consider_head_offer(&node->cluster, &candidate,
+                                                  100U);
+    ucn_cluster_test_transition_asserts_set(true);
+    TEST_ASSERT(result == UCN_ERR_STATE);
+    /* NOTHING of the join payload ran (fail closed). */
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(node->cluster.recovery_eligible == true);
+    TEST_ASSERT(node->cluster.recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(node->cluster.pending_head_node_id == 0U);
+    TEST_ASSERT(node->cluster.pending_cluster_id == 0U);
+    TEST_ASSERT(node->cluster.pending_term == 0U);
+    TEST_ASSERT(node->cluster.pending_head_score == 0U);
+    TEST_ASSERT(node->cluster.role_since_ms == 7U);
+    TEST_ASSERT(node->cluster.next_join_retry_ms == 9U);
+    /* The shadow mirror is untouched (no transition, no sync mint). */
+    TEST_ASSERT(node->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
+    TEST_ASSERT(node->cluster.transition_reason == UCN_CLUSTER_REASON_INIT);
+    TEST_ASSERT(node->cluster.shadow_transition_count == 0U);
+    TEST_ASSERT(test_derive_phase(&node->cluster, 100U) ==
+                UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
     return 0;
 }
 
@@ -9142,6 +9388,12 @@ int test_cluster(void)
      * shadow-desync sibling for each transition. */
     TEST_ASSERT(cluster_test_recovery_step_transitions() == 0);
     TEST_ASSERT(cluster_test_stable_switchback() == 0);
+    /* CLV2-01-04f (f3 SITE A): consider_head_offer() RECOVERY_* sources
+     * (RECOVERY_OBSERVE / RECOVERY_ELECTION) now commit RECOVERY_* ->
+     * JOIN_PENDING through the single entry point before the join payload
+     * (the legacy stable-Head offer event decides THAT the join runs;
+     * cluster_transition() validates whether the shadow agrees). */
+    TEST_ASSERT(cluster_test_recovery_offer_join_wiring() == 0);
     TEST_ASSERT(cluster_test_backup_challenge() == 0);
     TEST_ASSERT(cluster_test_timing_profiles() == 0);
     TEST_ASSERT(cluster_test_phase_mapping_static() == 0);
@@ -9160,10 +9412,11 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_head_offer_join_wiring() == 0);
     TEST_ASSERT(cluster_test_member_offer_grace_refresh_wiring() == 0);
     TEST_ASSERT(cluster_test_member_better_head_switch_wiring() == 0);
-    /* CLV2-01-04d.5/.6: backup_resync() (HEAD_STABLE -> HEAD_BACKUP_
-     * SYNCING, RESYNC_STARTED) and begin_ordered_stepdown() (HEAD_* ->
-     * STEPPING_DOWN, STEPDOWN_ORDERED; RECOVERY_HEAD offer stays legacy)
-     * wired through the single transition entry point. */
+    /* CLV2-01-04d.5/.6 + 01-04f (f3 SITE B): backup_resync()
+     * (HEAD_STABLE -> HEAD_BACKUP_SYNCING, RESYNC_STARTED) and
+     * begin_ordered_stepdown() (HEAD_* -> STEPPING_DOWN and RECOVERY_HEAD
+     * -> STEPPING_DOWN, STEPDOWN_ORDERED) wired through the single
+     * transition entry point. */
     TEST_ASSERT(cluster_test_resync_transition_wiring() == 0);
     TEST_ASSERT(cluster_test_head_stepdown_transition_wiring() == 0);
     TEST_ASSERT(cluster_test_head_ladder_closure() == 0);
