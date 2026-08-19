@@ -143,6 +143,8 @@ add_library(ucn_cluster STATIC EXCLUDE_FROM_ALL
     src/extended/ucn_cluster.c
     # CLV2-M02 (02-02): the 32-byte Wire v5 codec is a separate module.
     src/extended/cluster/ucn_cluster_codec_v3.c
+    # CLV2-M02 (02-03): the explicit-phase transition framework.
+    src/extended/cluster/ucn_cluster_fsm.c
 )
 target_link_libraries(ucn_cluster PUBLIC ucn_core)
 target_compile_options(ucn_cluster PRIVATE
@@ -279,6 +281,11 @@ if(UCN_BUILD_TESTS)
     # the test's ucn_cluster.c links against the same codec definitions.
     target_sources(ucn_tests PRIVATE
         src/extended/cluster/ucn_cluster_codec_v3.c
+    )
+    # CLV2-M02 (02-03): ... and its own FSM copy (the test hooks live there
+    # under UCN_CLUSTER_ENABLE_TEST_HOOKS).
+    target_sources(ucn_tests PRIVATE
+        src/extended/cluster/ucn_cluster_fsm.c
     )
 
     if(UCN_FEATURE_SERVICE)
