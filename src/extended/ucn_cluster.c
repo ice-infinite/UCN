@@ -3875,8 +3875,11 @@ static ucn_result_t handle_head_takeover(ucn_cluster_t *cluster,
      * known_backup_*) and the epoch refresh stay AT THE SITE below in
      * original order (F1 anchor).  A plain MEMBER_ACTIVE inbound (role ==
      * MEMBER, no armed grace) performs NO transition - no self-loop
-     * exists - and the JOIN_PENDING / RECOVERY_HEAD inbound edges stay
-     * with their 01-04b/f sites (the end-of-RX shadow sync re-aligns). */
+     * exists.  CLV2-01-04f.5: the RECOVERY_HEAD inbound edge is migrated
+     * HERE (RECOVERY_YIELDED, the same DIRECT edge as the f.4
+     * handle_recovery_declare yield path); the JOIN_PENDING inbound stays
+     * with its 01-04b join-accept site (do NOT wire it - the end-of-RX
+     * shadow sync re-aligns that source). */
     if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
         ucn_cluster_phase_t old_phase = cluster->backup_takeover_active
                                             ? UCN_CLUSTER_PHASE_BACKUP_TAKEOVER
@@ -3904,8 +3907,33 @@ static ucn_result_t handle_head_takeover(ucn_cluster_t *cluster,
              * transition; the node stays in grace. */
             return UCN_ERR_STATE;
         }
+    } else if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+        /* CLV2-01-04f.5: a Recovery Head defers to the stable higher-Term
+         * Head immediately - the RECOVERY_HEAD -> MEMBER_ACTIVE edge
+         * (RECOVERY_YIELDED, the same DIRECT edge the f.4
+         * handle_recovery_declare yield path commits) runs FIRST through
+         * the single entry point, BEFORE any site write.  apply_legacy
+         * (MEMBER_ACTIVE) writes role=MEMBER + grace=0 + eligible=false;
+         * the site's recovery clears (eligible/cluster_id/deadline_ms),
+         * the idempotent role write, the epoch refresh and the
+         * known_backup/pending clears stay site-owned below in original
+         * order.  Fail closed: a rejected transition (shadow desync /
+         * illegal pair / pre-mutated phase fields) returns UCN_ERR_STATE
+         * with NOTHING touched - the Recovery Head keeps its role and
+         * recovery state, and a later well-formed HEAD_TAKEOVER may still
+         * be accepted (the end-of-RX sync only re-aligns to the unchanged
+         * RECOVERY_HEAD phase). */
+        if (cluster_transition(cluster, UCN_CLUSTER_PHASE_RECOVERY_HEAD,
+                               UCN_CLUSTER_PHASE_MEMBER_ACTIVE,
+                               UCN_CLUSTER_REASON_RECOVERY_YIELDED,
+                               now_ms) != UCN_OK) {
+            return UCN_ERR_STATE;
+        }
     }
-    /* A Recovery Head defers to the stable higher-Term Head immediately. */
+    /* A Recovery Head defers to the stable higher-Term Head immediately
+     * (the transition above committed RECOVERY_HEAD -> MEMBER_ACTIVE; the
+     * writes below are the site-owned clears + epoch refresh, idempotent
+     * after apply_legacy). */
     cluster->recovery_eligible = false;
     cluster->recovery_cluster_id = 0U;
     cluster->recovery_deadline_ms = 0U;
