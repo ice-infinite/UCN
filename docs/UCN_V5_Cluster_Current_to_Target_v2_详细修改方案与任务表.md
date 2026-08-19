@@ -12,7 +12,7 @@
 > | 里程碑 | 状态 | 完成提交 | 审计 |
 > |---|---|---|---|
 > | M00 冻结基线 | DONE | 6bea852 + M00.1(6206ce2) + M00.2(2b222b7) | 用户正式签字 PASS（2026-08-15），授权进入 M01 |
-> | M01 显式 Phase | IN_PROGRESS | 01-01~03 已审计关闭；01-04a 完成待审计 | Shadow Phase 已落地：枚举+映射+reason 推断；Phase 未驱动协议；01-04a cluster_transition 框架+迁移矩阵（67 允许/22 排除，T-A 实测 35 对）已过双评审待终审 |
+> | M01 显式 Phase | DONE | 01-01..01-04f 全部闭环（OP-203..210） | 用户正式签字 PASS（2026-08-16，ab53b31）：01-01~03 + 01-04a..f 全序列 PASS；全文件断言达成（无正常路径 phase change 绕过 cluster_transition()）；Shadow-Guard 纪律全站成立；M01.0.2 组合保留；Golden 等价；observed 35/0；cluster_bytes 1096。授权进入 M02（纯结构性重构，不得顺手优化 FSM） |
 > | M02 模块拆分 | TODO | — | — |
 > | M03 Epoch 分类 | TODO | — | — |
 > | M04 Persistence | TODO | — | — |
