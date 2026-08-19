@@ -122,12 +122,71 @@ void assign_backup(ucn_cluster_t *cluster, uint32_t now_ms);
 void queue_backup_assignment_for_member(ucn_cluster_t *cluster,
                                         ucn_node_id_t member_node_id,
                                         uint32_t now_ms);
+void backup_clear_sync(ucn_cluster_t *cluster, uint32_t now_ms);
+const ucn_cluster_peer_t *find_peer(const ucn_cluster_t *cluster,
+                                    ucn_node_id_t node_id);
+ucn_cluster_candidate_t *find_candidate(ucn_cluster_t *cluster,
+                                        ucn_node_id_t node_id);
+void set_detached(ucn_cluster_t *cluster, uint32_t now_ms,
+                  uint32_t observation_ms);
+void consider_head_offer(ucn_cluster_t *cluster,
+                         ucn_cluster_candidate_t *candidate,
+                         uint32_t now_ms);
+
+/* == Backup/Takeover module boundary (02-05, this OP) ==
+ * ucn_cluster_backup.c owns the Backup selection / assignment / snapshot /
+ * delta / heartbeat / reject / resync and the Takeover prepare / ACK /
+ * complete lifecycle.  Exposed here (de-static only) for the remaining
+ * ucn_cluster.c modules (receive dispatch, step). */
+ucn_result_t send_backup_assign(ucn_cluster_t *cluster,
+                                ucn_node_id_t destination);
+ucn_result_t send_backup_ready(ucn_cluster_t *cluster);
+ucn_result_t send_backup_resync_req(ucn_cluster_t *cluster);
+ucn_result_t send_backup_reject(ucn_cluster_t *cluster, uint8_t reason);
+ucn_result_t handle_backup_assign(ucn_cluster_t *cluster,
+                                  ucn_node_id_t source,
+                                  const ucn_cluster_message_t *message,
+                                  uint32_t now_ms);
+ucn_result_t handle_backup_ready(ucn_cluster_t *cluster,
+                                 ucn_node_id_t source,
+                                 const ucn_cluster_message_t *message,
+                                 uint32_t now_ms);
+ucn_result_t handle_backup_member_sync(ucn_cluster_t *cluster,
+                                       ucn_node_id_t source,
+                                       const ucn_cluster_message_t *message,
+                                       uint32_t now_ms);
+ucn_result_t handle_primary_heartbeat(ucn_cluster_t *cluster,
+                                      ucn_node_id_t source,
+                                      const ucn_cluster_message_t *message,
+                                      uint32_t now_ms);
+ucn_result_t handle_backup_resync_req(ucn_cluster_t *cluster,
+                                      ucn_node_id_t source,
+                                      const ucn_cluster_message_t *message);
+ucn_result_t handle_backup_reject(ucn_cluster_t *cluster,
+                                  ucn_node_id_t source,
+                                  const ucn_cluster_message_t *message,
+                                  uint32_t now_ms);
+ucn_result_t handle_takeover_prepare(ucn_cluster_t *cluster,
+                                     ucn_node_id_t source,
+                                     const ucn_cluster_message_t *message,
+                                     uint32_t now_ms);
+ucn_result_t handle_takeover_ack(ucn_cluster_t *cluster,
+                                 ucn_node_id_t source,
+                                 const ucn_cluster_message_t *message,
+                                 uint32_t now_ms);
+ucn_result_t handle_head_takeover(ucn_cluster_t *cluster,
+                                  ucn_node_id_t source,
+                                  const ucn_cluster_message_t *message,
+                                  uint32_t now_ms);
+void complete_takeover(ucn_cluster_t *cluster, uint32_t now_ms);
+void start_takeover(ucn_cluster_t *cluster, uint32_t now_ms);
+void start_backup_assignment_cycle(ucn_cluster_t *cluster, uint32_t now_ms);
+void send_backup_assignment_step(ucn_cluster_t *cluster, uint32_t now_ms);
+void send_backup_heartbeat(ucn_cluster_t *cluster, uint32_t now_ms);
+void send_backup_delta_step(ucn_cluster_t *cluster);
+void send_backup_snapshot_step(ucn_cluster_t *cluster);
 
 /* == Module layout for the remaining OPs (append here) ==
- * 02-05  ucn_cluster_backup.c     Backup selection / assignment /
- *                                 snapshot / delta / heartbeat / reject /
- *                                 resync.
- *        ucn_cluster_takeover.c   Takeover prepare / ACK / complete.
  * 02-06  ucn_cluster_recovery.c   Recovery quorum / declaration /
  *                                 arbitration / TTL.
  *        ucn_cluster_merge.c      Head offer / stepdown / score switch.
