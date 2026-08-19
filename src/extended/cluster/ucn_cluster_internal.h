@@ -186,10 +186,27 @@ void send_backup_heartbeat(ucn_cluster_t *cluster, uint32_t now_ms);
 void send_backup_delta_step(ucn_cluster_t *cluster);
 void send_backup_snapshot_step(ucn_cluster_t *cluster);
 
+/* == Recovery module boundary (02-06, this OP) ==
+ * ucn_cluster_recovery.c owns the RECOVERY_HEAD quorum / declaration /
+ * arbitration / TTL lifecycle.  Exposed here (de-static only) for the
+ * remaining ucn_cluster.c modules (receive dispatch, step). */
+uint32_t compute_recovery_backoff(const ucn_cluster_t *cluster);
+bool recovery_quorum_met(const ucn_cluster_t *cluster);
+void start_recovery_backoff(ucn_cluster_t *cluster, uint32_t now_ms);
+void declare_recovery_head(ucn_cluster_t *cluster, uint32_t now_ms);
+void stepdown_recovery_head(ucn_cluster_t *cluster, uint32_t now_ms);
+void send_recovery_declare(ucn_cluster_t *cluster);
+ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
+                                     ucn_node_id_t source,
+                                     const ucn_cluster_message_t *message,
+                                     uint32_t now_ms);
+ucn_result_t handle_recovery_ack(ucn_cluster_t *cluster,
+                                 ucn_node_id_t source,
+                                 const ucn_cluster_message_t *message,
+                                 uint32_t now_ms);
+
 /* == Module layout for the remaining OPs (append here) ==
- * 02-06  ucn_cluster_recovery.c   Recovery quorum / declaration /
- *                                 arbitration / TTL.
- *        ucn_cluster_merge.c      Head offer / stepdown / score switch.
+ * 02-06  ucn_cluster_merge.c      Head offer / stepdown / score switch.
  */
 
 #ifdef __cplusplus
