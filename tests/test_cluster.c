@@ -6269,6 +6269,411 @@ static int cluster_test_head_stepdown_transition_wiring(void)
     return 0;
 }
 
+/* CLV2-01-04f.2 (site A): the BACKUP missed-heartbeat eligible path in
+ * ucn_cluster_step_inner().  The limit hit IS the BACKUP_SYNCING ->
+ * RECOVERY_OBSERVE transition (PRIMARY_LOST - the primary's heartbeat
+ * stream failed; NOT TAKEOVER_TIMEOUT - no takeover here) and must be
+ * committed through the single entry point FIRST, UNCONDITIONALLY, fail
+ * closed; apply_legacy(RECOVERY_OBSERVE) owns role=DETACHED +
+ * eligible=true + backoff/grace/known_backup=0, and the Current-order
+ * site writes (stats++ / redundant-but-harmless eligible=true /
+ * idempotent backup_clear_sync()) stay after it.  Sub-cases:
+ *  (A1) SYNCING + missed-heartbeat limit + expired primary deadline ->
+ *       BACKUP_SYNCING -> RECOVERY_OBSERVE (PRIMARY_LOST), stats++,
+ *       eligible=true, backup fields cleared, role DETACHED;
+ *  (A2) shadow-desync sibling: a stale shadow (BACKUP_READY) while the
+ *       legacy derives BACKUP_SYNCING rejects the transition fail-closed
+ *       -> step returns UCN_ERR_STATE with ZERO phase-relevant writes
+ *       (backup fields untouched, stats unchanged, eligible stays false,
+ *       mirror not minted - ucn_cluster_step syncs only on UCN_OK, so
+ *       the stale shadow stays untouched like the e.5 sibling); the next
+ *       step re-visits the still-expired deadline and fails again;
+ *  (A3) M01.0.2 preservation: (a) a takeover-active Backup (M01.0.2
+ *       takeover && syncing combo) with missed heartbeats still takes the
+ *       e.5 takeover-timeout path (BACKUP_TAKEOVER -> DETACHED_OBSERVE,
+ *       TAKEOVER_TIMEOUT), never this eligible path; (b/c) the READY +
+ *       !takeover precedence (L5538) is unchanged: READY + lease expired
+ *       starts takeover (BACKUP_READY -> BACKUP_TAKEOVER, TAKEOVER_STARTED)
+ *       and READY + lease NOT expired keeps waiting (stays BACKUP_READY). */
+static int cluster_test_backup_miss_eligible_wiring(void)
+{
+    cluster_test_network_t network;
+    ucn_cluster_t *c;
+    ucn_result_t result;
+    uint32_t before;
+    uint32_t baseline;
+
+    /* ============ (A1) eligible happy path: BACKUP_SYNCING -> RECOVERY_OBSERVE ============ */
+    TEST_ASSERT(cluster_test_network_init(&network, 1U) == 0);
+    network.now_ms = 100U;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_BACKUP;
+    c->cluster_id = 1U;
+    c->term = 5U;
+    c->head_node_id = 1U;
+    c->backup_primary_node_id = 1U;
+    c->backup_generation = 7U;
+    c->backup_ready = false;
+    c->backup_syncing = true;
+    c->backup_takeover_active = false;
+    c->backup_primary_deadline_ms = 10U; /* expired at now == 100 */
+    c->backup_missed_heartbeats =
+        UCN_CLUSTER_BACKUP_MISS_LIMIT - 1U; /* this step reaches the limit */
+    c->known_backup_node_id = 1U;
+    c->known_backup_generation = 7U;
+    c->recovery_eligible = false;
+    c->membership_sequence = 4U;
+    (void)memset(c->members, 0, sizeof(c->members));
+    c->members[0].occupied = true;
+    c->members[0].node_id = 2U;
+    c->shadow_phase = UCN_CLUSTER_PHASE_BACKUP_SYNCING;
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, 100U) ==
+                UCN_CLUSTER_PHASE_BACKUP_SYNCING);
+    before = c->stats.head_leases_expired;
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_OK);
+    /* explicit BACKUP_SYNCING -> RECOVERY_OBSERVE, PRIMARY_LOST, count+1. */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_PRIMARY_LOST);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
+    TEST_ASSERT(c->stats.head_leases_expired == before + 1U);
+    /* apply_legacy + site effects in original order. */
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(c->recovery_eligible == true);
+    TEST_ASSERT(c->recovery_backoff_deadline_ms == 0U);
+    TEST_ASSERT(c->head_grace_deadline_ms == 0U);
+    TEST_ASSERT(c->known_backup_node_id == 0U);
+    TEST_ASSERT(c->known_backup_generation == 0U);
+    /* backup_clear_sync() site effects (idempotent cleanup). */
+    TEST_ASSERT(c->backup_syncing == false);
+    TEST_ASSERT(c->backup_ready == false);
+    TEST_ASSERT(c->backup_primary_node_id == 0U);
+    TEST_ASSERT(c->backup_generation == 0U);
+    TEST_ASSERT(c->membership_sequence == 0U);
+    TEST_ASSERT(c->backup_primary_deadline_ms == 0U);
+    TEST_ASSERT(c->backup_missed_heartbeats == 0U);
+    TEST_ASSERT(c->members[0].occupied == false);
+    TEST_ASSERT(test_derive_phase(c, 100U) ==
+                UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+
+    /* ============ (A2) desync sibling: stale shadow -> UCN_ERR_STATE, zero phase-relevant writes ============ */
+    TEST_ASSERT(cluster_test_network_init(&network, 1U) == 0);
+    network.now_ms = 100U;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_BACKUP;
+    c->cluster_id = 1U;
+    c->term = 5U;
+    c->head_node_id = 1U;
+    c->backup_primary_node_id = 1U;
+    c->backup_generation = 7U;
+    c->backup_ready = false;
+    c->backup_syncing = true;
+    c->backup_takeover_active = false;
+    c->backup_primary_deadline_ms = 10U; /* expired */
+    c->backup_missed_heartbeats =
+        UCN_CLUSTER_BACKUP_MISS_LIMIT - 1U;
+    c->known_backup_node_id = 1U;
+    c->known_backup_generation = 7U;
+    c->recovery_eligible = false;
+    c->membership_sequence = 4U;
+    (void)memset(c->members, 0, sizeof(c->members));
+    c->members[0].occupied = true;
+    c->members[0].node_id = 2U;
+    c->shadow_phase = UCN_CLUSTER_PHASE_BACKUP_READY; /* stale */
+    c->transition_reason = UCN_CLUSTER_REASON_INIT;
+    c->shadow_transition_count = 0U;
+    before = c->stats.head_leases_expired;
+    ucn_cluster_test_transition_asserts_set(false);
+    result = ucn_cluster_step(c);
+    ucn_cluster_test_transition_asserts_set(true);
+    TEST_ASSERT(result == UCN_ERR_STATE);
+    /* The deadline-expired counter increment runs BEFORE the transition
+     * (Current order: it gates the limit check); it is not phase-relevant
+     * and the fail-closed return never reaches the deadline re-arm. */
+    TEST_ASSERT(c->backup_missed_heartbeats ==
+                UCN_CLUSTER_BACKUP_MISS_LIMIT);
+    /* ZERO phase-relevant writes: no stats++, no detach, mirror intact. */
+    TEST_ASSERT(c->stats.head_leases_expired == before);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(c->recovery_eligible == false);
+    TEST_ASSERT(c->backup_syncing == true);
+    TEST_ASSERT(c->backup_ready == false);
+    TEST_ASSERT(c->backup_takeover_active == false);
+    TEST_ASSERT(c->backup_primary_node_id == 1U);
+    TEST_ASSERT(c->backup_generation == 7U);
+    TEST_ASSERT(c->membership_sequence == 4U);
+    TEST_ASSERT(c->backup_primary_deadline_ms == 10U); /* not re-armed */
+    TEST_ASSERT(c->known_backup_node_id == 1U);
+    TEST_ASSERT(c->known_backup_generation == 7U);
+    TEST_ASSERT(c->members[0].occupied == true);
+    /* ucn_cluster_step syncs only on UCN_OK, so the stale shadow stays
+     * untouched (e.5 sibling convention). */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_BACKUP_READY);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_INIT);
+    TEST_ASSERT(c->shadow_transition_count == 0U);
+    /* The next step re-visits the still-expired deadline: same fail-closed
+     * outcome, still zero phase-relevant writes. */
+    ucn_cluster_test_transition_asserts_set(false);
+    result = ucn_cluster_step(c);
+    ucn_cluster_test_transition_asserts_set(true);
+    TEST_ASSERT(result == UCN_ERR_STATE);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(c->recovery_eligible == false);
+    TEST_ASSERT(c->stats.head_leases_expired == before);
+
+    /* ============ (A3a) M01.0.2: takeover-active (&& syncing combo) still takes the e.5 timeout path ============ */
+    TEST_ASSERT(cluster_test_network_init(&network, 1U) == 0);
+    network.now_ms = 100U;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_BACKUP;
+    c->cluster_id = 1U;
+    c->term = 5U;
+    c->head_node_id = 1U;
+    c->backup_primary_node_id = 1U;
+    c->backup_generation = 7U;
+    c->backup_ready = false;
+    c->backup_syncing = true; /* M01.0.2 combo */
+    c->backup_takeover_active = true;
+    c->backup_takeover_deadline_ms = 10U; /* expired: e.5 path */
+    c->backup_primary_deadline_ms = 10U;  /* expired */
+    c->backup_missed_heartbeats = UCN_CLUSTER_BACKUP_MISS_LIMIT;
+    c->recovery_eligible = false;
+    c->membership_sequence = 4U;
+    c->shadow_phase = UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, 100U) ==
+                UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
+    before = c->stats.head_leases_expired;
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_OK);
+    /* e.5 path (TAKEOVER_TIMEOUT), never the missed-heartbeat eligible
+     * path (no RECOVERY_OBSERVE, no PRIMARY_LOST). */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_TAKEOVER_TIMEOUT);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
+    TEST_ASSERT(c->stats.head_leases_expired == before + 1U);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(c->recovery_eligible == false);
+    TEST_ASSERT(c->backup_syncing == false);
+    /* backup_clear_sync() never clears takeover_active: the flag lingers
+     * after detach (Current behavior - the e.5 test pins the same set). */
+    TEST_ASSERT(c->backup_takeover_active == true);
+    TEST_ASSERT(c->backup_primary_node_id == 0U);
+    TEST_ASSERT(c->backup_generation == 0U);
+    TEST_ASSERT(c->backup_missed_heartbeats == 0U);
+    TEST_ASSERT(c->backup_primary_deadline_ms == 0U);
+    TEST_ASSERT(test_derive_phase(c, 100U) ==
+                UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
+
+    /* ============ (A3b) READY + !takeover precedence: lease expired -> takeover ============ */
+    TEST_ASSERT(cluster_test_network_init(&network, 1U) == 0);
+    network.now_ms = 100U;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_BACKUP;
+    c->cluster_id = 1U;
+    c->term = 5U;
+    c->head_node_id = 1U;
+    c->backup_primary_node_id = 1U;
+    c->backup_generation = 7U;
+    c->backup_ready = true;
+    c->backup_syncing = false;
+    c->backup_takeover_active = false;
+    c->backup_primary_deadline_ms = 10U;            /* expired */
+    c->backup_primary_lease_deadline_ms = 10U;      /* expired: §5.1 satisfied */
+    c->backup_missed_heartbeats = UCN_CLUSTER_BACKUP_MISS_LIMIT;
+    c->recovery_eligible = false;
+    (void)memset(c->members, 0, sizeof(c->members));
+    c->members[0].occupied = true;
+    c->members[0].node_id = c->config.local_node_id; /* self vote */
+    c->shadow_phase = UCN_CLUSTER_PHASE_BACKUP_READY;
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, 100U) ==
+                UCN_CLUSTER_PHASE_BACKUP_READY);
+    baseline = c->shadow_transition_count;
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_OK);
+    /* READY-takeover precedence unchanged: BACKUP_READY -> BACKUP_TAKEOVER,
+     * never RECOVERY_OBSERVE. */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_TAKEOVER_STARTED);
+    TEST_ASSERT(c->shadow_transition_count == baseline + 1U);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(c->backup_takeover_active == true);
+    TEST_ASSERT(c->recovery_eligible == false);
+    /* M01.0.2: start_takeover never clears ready/syncing. */
+    TEST_ASSERT(c->backup_ready == true);
+    TEST_ASSERT(c->backup_syncing == false);
+
+    /* ============ (A3c) READY + !takeover + lease NOT expired -> keep waiting ============ */
+    TEST_ASSERT(cluster_test_network_init(&network, 1U) == 0);
+    network.now_ms = 100U;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_BACKUP;
+    c->cluster_id = 1U;
+    c->term = 5U;
+    c->head_node_id = 1U;
+    c->backup_primary_node_id = 1U;
+    c->backup_generation = 7U;
+    c->backup_ready = true;
+    c->backup_syncing = false;
+    c->backup_takeover_active = false;
+    c->backup_primary_deadline_ms = 10U;        /* expired */
+    c->backup_primary_lease_deadline_ms = 500U; /* NOT expired */
+    c->backup_missed_heartbeats = UCN_CLUSTER_BACKUP_MISS_LIMIT;
+    c->recovery_eligible = false;
+    c->shadow_phase = UCN_CLUSTER_PHASE_BACKUP_READY;
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_OK);
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_BACKUP_READY);
+    TEST_ASSERT(c->shadow_transition_count == 0U);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_BACKUP);
+    TEST_ASSERT(c->backup_takeover_active == false);
+    TEST_ASSERT(c->recovery_eligible == false);
+    TEST_ASSERT(c->backup_primary_deadline_ms ==
+                ucn_deadline_from_now(
+                    100U, c->config.keepalive_interval_ms)); /* re-armed */
+    return 0;
+}
+
+/* CLV2-01-04f.2 (site B): the STEPPING_DOWN deadline in
+ * ucn_cluster_step_inner().  The expired stepdown deadline IS the
+ * STEPPING_DOWN -> JOIN_PENDING transition (STEPDOWN_COMPLETE - the
+ * ordered switchback completed and the node rejoins the better Head) and
+ * must be committed through the single entry point FIRST, UNCONDITIONALLY,
+ * fail closed; apply_legacy(JOIN_PENDING) owns role=JOIN_PENDING +
+ * eligible=false + backoff=0, and the Current-order site effects
+ * (clear_members() + idempotent role write + role_since/next_join_retry/
+ * stepdown_deadline timers) stay after it.  The pending Head identity is
+ * preserved.  Sub-cases:
+ *  (B1) deadline expired -> STEPPING_DOWN -> JOIN_PENDING (STEPDOWN_
+ *       COMPLETE), members cleared, role JOIN_PENDING, timers updated,
+ *       pending fields preserved;
+ *  (B2) shadow-desync sibling: a stale shadow (RECOVERY_OBSERVE) while
+ *       the legacy derives STEPPING_DOWN rejects the transition fail-
+ *       closed -> step returns UCN_ERR_STATE with ZERO writes (members
+ *       intact, role stays STEPPING_DOWN, deadline/timers/pending
+ *       untouched, mirror not minted - no sync on error); the next step
+ *       re-visits and fails again. */
+static int cluster_test_stepdown_deadline_wiring(void)
+{
+    cluster_test_network_t network;
+    ucn_cluster_t *c;
+    ucn_result_t result;
+
+    /* ============ (B1) happy path: STEPPING_DOWN -> JOIN_PENDING ============ */
+    TEST_ASSERT(cluster_test_network_init(&network, 1U) == 0);
+    network.now_ms = 100U;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_STEPPING_DOWN;
+    c->cluster_id = 1U;
+    c->term = 5U;
+    c->head_node_id = 1U;
+    c->stepdown_deadline_ms = 10U; /* expired at now == 100 */
+    c->role_since_ms = 90U;
+    c->next_join_retry_ms = 500U;
+    c->pending_head_node_id = 2U;
+    c->pending_cluster_id = 1U;
+    c->pending_term = 5U;
+    c->pending_head_score = 9000U;
+    c->recovery_eligible = true;         /* apply_legacy must clear it */
+    c->recovery_backoff_deadline_ms = 77U; /* apply_legacy must clear it */
+    (void)memset(c->members, 0, sizeof(c->members));
+    c->members[0].occupied = true;
+    c->members[0].node_id = 2U;
+    c->members[0].lease_expires_at_ms = 60U;
+    c->shadow_phase = UCN_CLUSTER_PHASE_STEPPING_DOWN;
+    c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
+    c->shadow_transition_count = 0U;
+    TEST_ASSERT(test_derive_phase(c, 100U) ==
+                UCN_CLUSTER_PHASE_STEPPING_DOWN);
+    TEST_ASSERT(ucn_cluster_step(c) == UCN_OK);
+    /* explicit STEPPING_DOWN -> JOIN_PENDING, STEPDOWN_COMPLETE, count+1. */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_STEPDOWN_COMPLETE);
+    TEST_ASSERT(c->shadow_transition_count == 1U);
+    /* apply_legacy(JOIN_PENDING) writes. */
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(c->recovery_eligible == false);
+    TEST_ASSERT(c->recovery_backoff_deadline_ms == 0U);
+    /* Current-order site effects. */
+    TEST_ASSERT(c->members[0].occupied == false); /* clear_members */
+    TEST_ASSERT(c->role_since_ms == 100U);
+    /* The JOIN_PENDING block in the SAME step sees the freshly-armed
+     * retry deadline (== now) and immediately sends the first join
+     * request, which re-arms next_join_retry_ms (Current behavior). */
+    TEST_ASSERT(c->next_join_retry_ms ==
+                ucn_deadline_from_now(100U, c->config.join_retry_ms));
+    TEST_ASSERT(c->stepdown_deadline_ms == 0U);
+    /* pending Head identity preserved. */
+    TEST_ASSERT(c->pending_head_node_id == 2U);
+    TEST_ASSERT(c->pending_cluster_id == 1U);
+    TEST_ASSERT(c->pending_term == 5U);
+    TEST_ASSERT(c->pending_head_score == 9000U);
+    TEST_ASSERT(test_derive_phase(c, 100U) ==
+                UCN_CLUSTER_PHASE_JOIN_PENDING);
+
+    /* ============ (B2) desync sibling: stale shadow -> UCN_ERR_STATE, zero writes ============ */
+    TEST_ASSERT(cluster_test_network_init(&network, 1U) == 0);
+    network.now_ms = 100U;
+    c = &network.nodes[0].cluster;
+    c->role = UCN_CLUSTER_ROLE_STEPPING_DOWN;
+    c->cluster_id = 1U;
+    c->term = 5U;
+    c->head_node_id = 1U;
+    c->stepdown_deadline_ms = 10U; /* expired */
+    c->role_since_ms = 90U;
+    c->next_join_retry_ms = 500U;
+    c->pending_head_node_id = 2U;
+    c->pending_cluster_id = 1U;
+    c->pending_term = 5U;
+    c->pending_head_score = 9000U;
+    c->recovery_eligible = true;
+    c->recovery_backoff_deadline_ms = 77U;
+    (void)memset(c->members, 0, sizeof(c->members));
+    c->members[0].occupied = true;
+    c->members[0].node_id = 2U;
+    c->members[0].lease_expires_at_ms = 60U;
+    c->shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_OBSERVE; /* stale */
+    c->transition_reason = UCN_CLUSTER_REASON_INIT;
+    c->shadow_transition_count = 0U;
+    ucn_cluster_test_transition_asserts_set(false);
+    result = ucn_cluster_step(c);
+    ucn_cluster_test_transition_asserts_set(true);
+    TEST_ASSERT(result == UCN_ERR_STATE);
+    /* ZERO writes: members intact, role stays STEPPING_DOWN, timers and
+     * pending identity untouched, apply_legacy never ran. */
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_STEPPING_DOWN);
+    TEST_ASSERT(c->members[0].occupied == true);
+    TEST_ASSERT(c->members[0].node_id == 2U);
+    TEST_ASSERT(c->members[0].lease_expires_at_ms == 60U);
+    TEST_ASSERT(c->stepdown_deadline_ms == 10U); /* not disarmed */
+    TEST_ASSERT(c->role_since_ms == 90U);
+    TEST_ASSERT(c->next_join_retry_ms == 500U);
+    TEST_ASSERT(c->pending_head_node_id == 2U);
+    TEST_ASSERT(c->pending_cluster_id == 1U);
+    TEST_ASSERT(c->pending_term == 5U);
+    TEST_ASSERT(c->pending_head_score == 9000U);
+    TEST_ASSERT(c->recovery_eligible == true); /* apply_legacy never ran */
+    TEST_ASSERT(c->recovery_backoff_deadline_ms == 77U);
+    /* ucn_cluster_step syncs only on UCN_OK, so the stale shadow stays
+     * untouched (e.5 sibling convention). */
+    TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+    TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_INIT);
+    TEST_ASSERT(c->shadow_transition_count == 0U);
+    /* The next step re-visits the still-expired deadline: same fail-closed
+     * outcome, still zero writes. */
+    ucn_cluster_test_transition_asserts_set(false);
+    result = ucn_cluster_step(c);
+    ucn_cluster_test_transition_asserts_set(true);
+    TEST_ASSERT(result == UCN_ERR_STATE);
+    TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_STEPPING_DOWN);
+    TEST_ASSERT(c->members[0].occupied == true);
+    TEST_ASSERT(c->stepdown_deadline_ms == 10U);
+    return 0;
+}
+
 static int cluster_test_capacity_is_bounded(void)
 {
     cluster_test_network_t network;
@@ -8481,6 +8886,14 @@ int test_cluster(void)
      * complete_takeover / takeover timeout / handle_head_takeover) are
      * wired through the single transition entry point. */
     TEST_ASSERT(cluster_test_takeover_lifecycle_wiring() == 0);
+    /* CLV2-01-04f.2: the LAST two non-Recovery residual step-side mints -
+     * the BACKUP missed-heartbeat eligible path (BACKUP_SYNCING ->
+     * RECOVERY_OBSERVE, PRIMARY_LOST) and the STEPPING_DOWN deadline
+     * (STEPPING_DOWN -> JOIN_PENDING, STEPDOWN_COMPLETE) - now commit
+     * explicitly through the single entry point, fail closed on a shadow
+     * desync, and preserve M01.0.2 (takeover-active precedence). */
+    TEST_ASSERT(cluster_test_backup_miss_eligible_wiring() == 0);
+    TEST_ASSERT(cluster_test_stepdown_deadline_wiring() == 0);
     TEST_ASSERT(cluster_test_capacity_is_bounded() == 0);
     TEST_ASSERT(cluster_test_neighbor_summary_api() == 0);
     TEST_ASSERT(cluster_test_remove_member_backup_loss() == 0);

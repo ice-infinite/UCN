@@ -5545,9 +5545,41 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                 }
                 /* else: keep waiting for the lease; stay BACKUP. */
             } else if (!cluster->backup_takeover_active) {
+                /* CLV2-01-04f.2: the missed-heartbeat limit hit IS the
+                 * BACKUP_SYNCING -> RECOVERY_OBSERVE transition (the
+                 * eligible branch only fires when !ready && !takeover) -
+                 * call it FIRST, UNCONDITIONALLY, fail closed.
+                 * apply_legacy(RECOVERY_OBSERVE) writes role=DETACHED +
+                 * recovery_eligible=true + backoff/grace/known_backup_*=0,
+                 * so the site's recovery_eligible=true below is
+                 * redundant-but-harmless; backup_clear_sync() then
+                 * re-applies the mirror clears + set_detached() in
+                 * original order.  Reason PRIMARY_LOST (the primary's
+                 * heartbeat stream failed), NOT TAKEOVER_TIMEOUT (no
+                 * takeover here).  On a rejected transition NOTHING of
+                 * the branch runs - the backup stays, and the next step
+                 * re-visits the still-expired deadline. */
+                if (cluster_transition(cluster,
+                                       UCN_CLUSTER_PHASE_BACKUP_SYNCING,
+                                       UCN_CLUSTER_PHASE_RECOVERY_OBSERVE,
+                                       UCN_CLUSTER_REASON_PRIMARY_LOST,
+                                       now_ms) != UCN_OK) {
+                    /* Fail closed: do NOT count the expiry or clear the
+                     * mirror on a rejected transition (shadow mismatch /
+                     * illegal pair / pre-mutated phase fields). */
+                    return UCN_ERR_STATE;
+                }
                 cluster->stats.head_leases_expired++;
                 cluster->recovery_eligible = true;
                 backup_clear_sync(cluster, now_ms);
+#if !defined(NDEBUG)
+                /* CLV2-01-04f.2 post-commit derive assert: after the
+                 * transition AND every site effect the node must derive
+                 * RECOVERY_OBSERVE (role == DETACHED, eligible, no
+                 * backoff). */
+                assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                       UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
+#endif
                 return UCN_OK;
             }
         }
@@ -5641,6 +5673,24 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
     }
     if (cluster->role == UCN_CLUSTER_ROLE_STEPPING_DOWN &&
         ucn_deadline_expired(now_ms, cluster->stepdown_deadline_ms)) {
+        /* CLV2-01-04f.2: the expired stepdown deadline IS the
+         * STEPPING_DOWN -> JOIN_PENDING transition - call it FIRST,
+         * UNCONDITIONALLY, fail closed.  apply_legacy(JOIN_PENDING)
+         * writes role=JOIN_PENDING + recovery_eligible=false +
+         * backoff=0; the site's clear_members() + timer writes then run
+         * in original order (the role write below is idempotent).  On a
+         * rejected transition NOTHING runs - the members stay intact,
+         * the role stays STEPPING_DOWN, and the next step re-visits the
+         * deadline. */
+        if (cluster_transition(cluster, UCN_CLUSTER_PHASE_STEPPING_DOWN,
+                               UCN_CLUSTER_PHASE_JOIN_PENDING,
+                               UCN_CLUSTER_REASON_STEPDOWN_COMPLETE,
+                               now_ms) != UCN_OK) {
+            /* Fail closed: do NOT clear the members or touch the timers
+             * on a rejected transition (shadow mismatch / illegal pair /
+             * pre-mutated phase fields). */
+            return UCN_ERR_STATE;
+        }
         /* Ordered switchback completes: leave members, join the better
          * Head that was already announced via HEAD_STEPDOWN. */
         clear_members(cluster);
@@ -5648,6 +5698,12 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
         cluster->role_since_ms = now_ms;
         cluster->next_join_retry_ms = now_ms;
         cluster->stepdown_deadline_ms = 0U;
+#if !defined(NDEBUG)
+        /* CLV2-01-04f.2 post-commit derive assert: after the transition
+         * AND every site effect the node must derive JOIN_PENDING. */
+        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+               UCN_CLUSTER_PHASE_JOIN_PENDING);
+#endif
     }
     if (cluster->role == UCN_CLUSTER_ROLE_CANDIDATE &&
         (cluster->next_advertise_ms == 0U ||
