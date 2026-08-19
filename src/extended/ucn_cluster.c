@@ -1454,6 +1454,27 @@ ucn_cluster_role_t ucn_cluster_get_role(const ucn_cluster_t *cluster)
     return cluster == NULL ? UCN_CLUSTER_ROLE_DISABLED : cluster->role;
 }
 
+/* CLV2-M03 (03-02): the active epoch is the logical unification of the
+ * node's current cluster_id / term / head_node_id.  PHYSICAL STORAGE IS
+ * UNCHANGED - the struct keeps the three scalar fields (struct size /
+ * cluster_bytes frozen), this accessor is the single read point.  03-03+
+ * will drive Head-Offer / Merge / Higher-Authority decisions through
+ * ucn_cluster_epoch_compare() on this value.  Returns {0,0,0} when not
+ * attached to a live epoch (DETACHED); does NOT validate (03-01). */
+ucn_cluster_epoch_t ucn_cluster_active_epoch_get(const ucn_cluster_t *cluster)
+{
+    ucn_cluster_epoch_t epoch;
+
+    (void)memset(&epoch, 0, sizeof(epoch));
+    if (cluster == NULL) {
+        return epoch;
+    }
+    epoch.cluster_id = cluster->cluster_id;
+    epoch.term = cluster->term;
+    epoch.head_node_id = cluster->head_node_id;
+    return epoch;
+}
+
 size_t ucn_cluster_member_count(const ucn_cluster_t *cluster)
 {
     return cluster == NULL ? 0U : member_count_u16(cluster);

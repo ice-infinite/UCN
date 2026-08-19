@@ -10137,16 +10137,96 @@ static int cluster_test_epoch_comparator(void)
     return 0;
 }
 
-/* CLV2-M03.1 (03-03 forward): property sanity - the comparator is
- * antisymmetric on the comparable domain and symmetric on CONFLICT /
- * FOREIGN.  Full property tests (03-09) will add random-seed coverage. */
+/* CLV2-M03.1 (03-01 NIT-1 closure, human audit): deterministic property
+ * sanity - the comparator is antisymmetric on the comparable domain
+ * (LOWER/HIGHER swap, SAME stable) and symmetric on CONFLICT / FOREIGN.
+ * 03-09 adds the full random-seed property suite; these cheap assertions
+ * pin the algebraic skeleton now. */
 static int cluster_test_epoch_property_sanity(void)
 {
-    /* CONFLICT and FOREIGN are symmetric by construction; SAME/LOWER/
-     * HIGHER on same-cluster pairs are antisymmetric.  Pinned explicitly
-     * here so a future regression of the domain-truncation rule is
-     * caught by the (d) FOREIGN case above. */
-    TEST_ASSERT(true); /* structure documented; assertions in (a)-(f) */
+    ucn_cluster_epoch_t a;
+    ucn_cluster_epoch_t b;
+
+    /* LOWER/HIGHER are antisymmetric: compare(a,b)==LOWER implies
+     * compare(b,a)==HIGHER. */
+    a.cluster_id = 1U; a.term = 3U; a.head_node_id = 2U;
+    b.cluster_id = 1U; b.term = 5U; b.head_node_id = 2U;
+    TEST_ASSERT(ucn_cluster_epoch_compare(&a, &b) ==
+                UCN_CLUSTER_EPOCH_RELATION_LOWER);
+    TEST_ASSERT(ucn_cluster_epoch_compare(&b, &a) ==
+                UCN_CLUSTER_EPOCH_RELATION_HIGHER);
+
+    /* SAME is antisymmetric (both directions SAME). */
+    a.cluster_id = 2U; a.term = 4U; a.head_node_id = 1U;
+    b.cluster_id = 2U; b.term = 4U; b.head_node_id = 1U;
+    TEST_ASSERT(ucn_cluster_epoch_compare(&a, &b) ==
+                UCN_CLUSTER_EPOCH_RELATION_SAME);
+    TEST_ASSERT(ucn_cluster_epoch_compare(&b, &a) ==
+                UCN_CLUSTER_EPOCH_RELATION_SAME);
+
+    /* CONFLICT is symmetric: different head, same cluster + term. */
+    a.cluster_id = 3U; a.term = 7U; a.head_node_id = 1U;
+    b.cluster_id = 3U; b.term = 7U; b.head_node_id = 2U;
+    TEST_ASSERT(ucn_cluster_epoch_compare(&a, &b) ==
+                UCN_CLUSTER_EPOCH_RELATION_CONFLICT);
+    TEST_ASSERT(ucn_cluster_epoch_compare(&b, &a) ==
+                UCN_CLUSTER_EPOCH_RELATION_CONFLICT);
+
+    /* FOREIGN is symmetric and term-independent: same term, diff cluster. */
+    a.cluster_id = 4U; a.term = 9U; a.head_node_id = 1U;
+    b.cluster_id = 5U; b.term = 9U; b.head_node_id = 2U;
+    TEST_ASSERT(ucn_cluster_epoch_compare(&a, &b) ==
+                UCN_CLUSTER_EPOCH_RELATION_FOREIGN);
+    TEST_ASSERT(ucn_cluster_epoch_compare(&b, &a) ==
+                UCN_CLUSTER_EPOCH_RELATION_FOREIGN);
+
+    /* A single direction rule must never hold across clusters: even when
+     * b's term is far higher, the relation stays FOREIGN (domain-first). */
+    a.cluster_id = 6U; a.term = 2U; a.head_node_id = 1U;
+    b.cluster_id = 7U; b.term = 100U; b.head_node_id = 1U;
+    TEST_ASSERT(ucn_cluster_epoch_compare(&a, &b) ==
+                UCN_CLUSTER_EPOCH_RELATION_FOREIGN);
+    TEST_ASSERT(ucn_cluster_epoch_compare(&b, &a) ==
+                UCN_CLUSTER_EPOCH_RELATION_FOREIGN);
+    return 0;
+}
+
+/* CLV2-M03 (03-02): ucn_cluster_active_epoch_get() is the logical
+ * unification of the node's current cluster_id / term / head_node_id.
+ * BEHAVIOR-EQUIVALENT: the physical storage is unchanged (the struct
+ * still holds the three scalars; cluster_bytes is frozen), so the getter
+ * must return EXACTLY the stored fields, and {0,0,0} for NULL / a
+ * detached node.  03-03+ will feed this value into
+ * ucn_cluster_epoch_compare() for the Head-Offer / Merge / Authority
+ * decisions. */
+static int cluster_test_active_epoch_access(void)
+{
+    cluster_test_network_t network;
+    ucn_cluster_t *c;
+    ucn_cluster_epoch_t epoch;
+
+    /* NULL -> {0,0,0}. */
+    epoch = ucn_cluster_active_epoch_get(NULL);
+    TEST_ASSERT(epoch.cluster_id == 0U);
+    TEST_ASSERT(epoch.term == 0U);
+    TEST_ASSERT(epoch.head_node_id == 0U);
+
+    /* A fresh node is DETACHED: active epoch is {0,0,0}. */
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    c = &network.nodes[0].cluster;
+    epoch = ucn_cluster_active_epoch_get(c);
+    TEST_ASSERT(epoch.cluster_id == 0U);
+    TEST_ASSERT(epoch.term == 0U);
+    TEST_ASSERT(epoch.head_node_id == 0U);
+
+    /* Staged cluster: getter returns exactly the stored fields. */
+    c->cluster_id = 9U;
+    c->term = 12U;
+    c->head_node_id = 4U;
+    epoch = ucn_cluster_active_epoch_get(c);
+    TEST_ASSERT(epoch.cluster_id == 9U);
+    TEST_ASSERT(epoch.term == 12U);
+    TEST_ASSERT(epoch.head_node_id == 4U);
     return 0;
 }
 
@@ -10155,6 +10235,8 @@ int test_cluster(void)
     /* CLV2-M03 (03-01): Epoch comparator boundary tests (pure infra). */
     TEST_ASSERT(cluster_test_epoch_comparator() == 0);
     TEST_ASSERT(cluster_test_epoch_property_sanity() == 0);
+    /* CLV2-M03 (03-02): active_epoch read accessor (behavior-equivalent). */
+    TEST_ASSERT(cluster_test_active_epoch_access() == 0);
     TEST_ASSERT(cluster_test_codec_and_security() == 0);
     TEST_ASSERT(cluster_test_v3_codec() == 0);
     TEST_ASSERT(cluster_test_backup_sync() == 0);
