@@ -259,6 +259,9 @@ ucn_result_t handle_join_accept(
     cluster->cluster_id = message->cluster_id;
     cluster->term = message->term;
     cluster->head_node_id = source;
+    cluster_history_note_stable_epoch(cluster, cluster->cluster_id,
+                                      cluster->term,
+                                      cluster->head_node_id);
     cluster->current_head_score = message->head_score;
     cluster->head_lease_expires_at_ms =
         ucn_deadline_from_now(now_ms, message->lease_ms);

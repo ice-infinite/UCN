@@ -366,10 +366,11 @@ if(UCN_BUILD_TESTS)
 
             add_test(NAME ucn_cluster_${UCN_CLUSTER_SIM_NODES}_impaired
                 COMMAND ucn_cluster_sim --nodes ${UCN_CLUSTER_SIM_NODES}
-                    --scenario impaired --seed 1592594996)
+                    --scenario impaired --seed 1592594996
+                    --expect-m03-isolation)
             set_tests_properties(ucn_cluster_${UCN_CLUSTER_SIM_NODES}_impaired
                 PROPERTIES PASS_REGULAR_EXPRESSION
-                    "CLUSTER_SIM nodes=${UCN_CLUSTER_SIM_NODES} scenario=impaired.*converged_ms=[1-9].*dropped=[1-9].*delayed=[1-9].*duplicated=[1-9].*asymmetric=[1-9]")
+                    "CLUSTER_SIM nodes=${UCN_CLUSTER_SIM_NODES} scenario=impaired.*dropped=[1-9].*delayed=[1-9].*duplicated=[1-9].*asymmetric=[1-9].*m03_isolation=passed")
         endforeach()
 
         foreach(UCN_CLUSTER_SIM_SCENARIO head-failover mobility score-shift)
@@ -388,12 +389,17 @@ if(UCN_BUILD_TESTS)
             PROPERTIES PASS_REGULAR_EXPRESSION
                 "CLUSTER_SIM nodes=64 scenario=head-failover profile=fast-fixed.*recovery_ms=[1-3][0-9][0-9][0-9]")
 
-        add_test(NAME ucn_cluster_64_fast_impaired
-            COMMAND ucn_cluster_sim --nodes 64 --scenario impaired
-                --profile fast-fixed --seed 1592594996)
-        set_tests_properties(ucn_cluster_64_fast_impaired
-            PROPERTIES PASS_REGULAR_EXPRESSION
-                "CLUSTER_SIM nodes=64 scenario=impaired profile=fast-fixed.*converged_ms=[1-9].*dropped=[1-9].*delayed=[1-9].*duplicated=[1-9].*asymmetric=[1-9]")
+        foreach(UCN_CLUSTER_SIM_GROUP 2 4 8)
+            add_test(NAME ucn_cluster_64_fast_impaired_group_${UCN_CLUSTER_SIM_GROUP}
+                COMMAND ucn_cluster_sim --nodes 64 --scenario impaired
+                    --profile fast-fixed --seed 1592594996
+                    --group ${UCN_CLUSTER_SIM_GROUP}
+                    --expect-m03-isolation)
+            set_tests_properties(
+                ucn_cluster_64_fast_impaired_group_${UCN_CLUSTER_SIM_GROUP}
+                PROPERTIES PASS_REGULAR_EXPRESSION
+                    "CLUSTER_SIM nodes=64 scenario=impaired profile=fast-fixed.*dropped=[1-9].*delayed=[1-9].*duplicated=[1-9].*asymmetric=[1-9].*m03_isolation=passed")
+        endforeach()
     endif()
 
     # This focused executable gives the preset resolver a direct product-header

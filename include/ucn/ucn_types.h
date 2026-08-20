@@ -124,7 +124,11 @@ typedef enum ucn_result {
     /* CLV2-01-04: fail-closed rejection of an illegal FSM transition.
      * Added for the single cluster_transition() entry point; the caller
      * may not assume any state changed. */
-    UCN_ERR_STATE = -16
+    UCN_ERR_STATE = -16,
+    /* A bounded protocol serial reached its configured no-wrap threshold.
+     * Callers must rotate/rekey or otherwise establish a new identity;
+     * retrying within the same identity is intentionally fail-closed. */
+    UCN_ERR_EXHAUSTED = -17
 } ucn_result_t;
 
 typedef enum ucn_traffic_class {

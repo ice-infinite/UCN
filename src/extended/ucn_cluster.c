@@ -40,6 +40,111 @@ uint32_t next_nonce(ucn_cluster_t *cluster)
     return nonce;
 }
 
+/* CLV2-M03 (03-07): this is the one checked increment primitive for
+ * Cluster safety serials.  Zero is an uninitialized value, so it may start
+ * at one; once a serial has reached the configured rotation threshold, it
+ * has no successor in this Cluster identity.  M13 replaces EXHAUSTED with
+ * a committed Rekey. */
+ucn_result_t cluster_serial_next_checked(uint32_t current, uint32_t *next)
+{
+    if (next == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (current >= UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD) {
+        return UCN_ERR_EXHAUSTED;
+    }
+    *next = current + 1U;
+    return UCN_OK;
+}
+
+static uint32_t cluster_id_mix(uint32_t value)
+{
+    value ^= value >> 16U;
+    value *= UINT32_C(0x7FEB352D);
+    value ^= value >> 15U;
+    value *= UINT32_C(0x846CA68B);
+    value ^= value >> 16U;
+    return value;
+}
+
+static bool cluster_id_is_valid(uint32_t cluster_id,
+                                uint32_t parent_cluster_id)
+{
+    return cluster_id != 0U && cluster_id != UCN_NODE_BROADCAST &&
+           (parent_cluster_id == 0U || cluster_id != parent_cluster_id);
+}
+
+/* The no-provider default keeps the first-ever stable election identity at
+ * local_node_id for migration continuity.  Every later round, or any
+ * non-zero application incarnation, derives a deterministic new value.
+ * Recovery always derives a distinct ID because it has a parent domain. */
+static uint32_t cluster_default_next_id(const ucn_cluster_id_request_t *request)
+{
+    uint32_t candidate;
+    uint32_t attempt;
+
+    if (request->purpose == UCN_CLUSTER_ID_PURPOSE_ELECTION &&
+        request->incarnation == 0U && request->parent_cluster_id == 0U &&
+        request->round == 1U) {
+        return request->local_node_id;
+    }
+    candidate = UINT32_C(0xA511E9B3) ^ request->local_node_id ^
+                request->parent_cluster_id ^ request->parent_term ^
+                request->incarnation ^ request->round ^
+                ((uint32_t)request->purpose << 24U);
+    for (attempt = 0U; attempt < 4U; ++attempt) {
+        candidate = cluster_id_mix(candidate +
+                                   UINT32_C(0x9E3779B9) + attempt);
+        if (cluster_id_is_valid(candidate, request->parent_cluster_id)) {
+            return candidate;
+        }
+    }
+    return 0U;
+}
+
+ucn_result_t cluster_make_next_id(ucn_cluster_t *cluster,
+                                  ucn_cluster_id_purpose_t purpose,
+                                  uint32_t parent_cluster_id,
+                                  uint32_t parent_term,
+                                  uint32_t *cluster_id)
+{
+    ucn_cluster_id_request_t request;
+    uint32_t next_round;
+    uint32_t candidate = 0U;
+    ucn_result_t result;
+
+    if (cluster == NULL || cluster_id == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = cluster_serial_next_checked(cluster->cluster_id_round,
+                                         &next_round);
+    if (result != UCN_OK) {
+        return result;
+    }
+    (void)memset(&request, 0, sizeof(request));
+    request.purpose = purpose;
+    request.local_node_id = cluster->config.local_node_id;
+    request.parent_cluster_id = parent_cluster_id;
+    request.parent_term = parent_term;
+    request.incarnation = cluster->config.cluster_id_incarnation;
+    request.round = next_round;
+    if (cluster->config.make_cluster_id != NULL) {
+        result = cluster->config.make_cluster_id(
+            cluster->config.cluster_id_context, &request, &candidate);
+        if (result != UCN_OK) {
+            return result;
+        }
+    } else {
+        candidate = cluster_default_next_id(&request);
+    }
+    if (!cluster_id_is_valid(candidate, parent_cluster_id)) {
+        return UCN_ERR_CONFIG;
+    }
+    cluster->cluster_id_round = next_round;
+    *cluster_id = candidate;
+    return UCN_OK;
+}
+
 /* C07.5 control-plane Token Bucket.  One aggregate pool bounds the total
  * control rate to the Cluster window budget (burst + refill rate per 1 s). */
 static void token_bucket_refill(ucn_cluster_token_bucket_t *bucket,
@@ -417,6 +522,18 @@ void set_detached(
     uint32_t now_ms,
     uint32_t observation_ms)
 {
+    /* CLV2-M03 (03-06): Active/Pending identity is intentionally cleared
+     * below, but the most recent stable epoch survives in RAM so an old
+     * same-Cluster offer cannot re-enter after a detach/rejoin cycle.  A
+     * Recovery domain is not a stable Cluster and therefore must not erase
+     * the remembered stable domain.  M04 persists this boundary across boot. */
+    if (cluster->role != UCN_CLUSTER_ROLE_CANDIDATE &&
+        (cluster->recovery_cluster_id == 0U ||
+         cluster->recovery_cluster_id != cluster->cluster_id)) {
+        cluster_history_note_stable_epoch(cluster, cluster->cluster_id,
+                                          cluster->term,
+                                          cluster->head_node_id);
+    }
     cluster->role = UCN_CLUSTER_ROLE_DETACHED;
     cluster->cluster_id = 0U;
     cluster->term = 0U;
@@ -439,6 +556,61 @@ void set_detached(
     cluster->role_since_ms = now_ms;
     cluster->observation_deadline_ms =
         ucn_deadline_from_now(now_ms, observation_ms);
+}
+
+void cluster_history_note_stable_epoch(
+    ucn_cluster_t *cluster,
+    uint32_t cluster_id,
+    uint32_t term,
+    ucn_node_id_t head_node_id)
+{
+    if (cluster == NULL || cluster_id == 0U || term == 0U ||
+        head_node_id == 0U || head_node_id == UCN_NODE_BROADCAST) {
+        return;
+    }
+    if (cluster->last_cluster_id != cluster_id ||
+        term > cluster->max_seen_term) {
+        cluster->last_cluster_id = cluster_id;
+        cluster->max_seen_term = term;
+        cluster->last_stable_head = head_node_id;
+        return;
+    }
+    if (term == cluster->max_seen_term &&
+        cluster->last_stable_head == 0U) {
+        /* A partially initialized legacy/test state may lack the Head
+         * companion.  Fill it only for the exact highest observed Term;
+         * never replace a remembered Head with a same-Term challenger. */
+        cluster->last_stable_head = head_node_id;
+    }
+}
+
+bool cluster_history_offer_is_stale(
+    const ucn_cluster_t *cluster,
+    const ucn_cluster_candidate_t *candidate)
+{
+    ucn_cluster_epoch_t local_epoch;
+
+    if (cluster == NULL || candidate == NULL ||
+        cluster->last_cluster_id == 0U || cluster->max_seen_term == 0U ||
+        candidate->cluster_id != cluster->last_cluster_id) {
+        return false;
+    }
+    if (candidate->term < cluster->max_seen_term) {
+        return true;
+    }
+    if (candidate->term != cluster->max_seen_term ||
+        cluster->last_stable_head == 0U ||
+        candidate->head_node_id == cluster->last_stable_head) {
+        return false;
+    }
+    /* An active node seeing a second Head for its own current highest
+     * epoch must take the 03-05 TERM_CONFLICT path, not silently classify it
+     * as an old offer.  Detached/Candidate/Join states have no such active
+     * authority and reject the incompatible remembered identity. */
+    local_epoch = ucn_cluster_active_epoch_get(cluster);
+    return local_epoch.cluster_id != candidate->cluster_id ||
+           local_epoch.term != candidate->term ||
+           local_epoch.head_node_id == candidate->head_node_id;
 }
 
 /* CLV2-01-04b.3: begin_join()'s field payload WITHOUT the role write.
@@ -553,6 +725,18 @@ static ucn_result_t ucn_cluster_receive_inner(
     }
     now_ms = cluster_now(cluster);
     cluster->stats.messages_received++;
+    /* CLV2-M03 (03-05): once a local epoch is in TERM_CONFLICT_WAIT, no
+     * ordinary lifecycle/voting/control message may revive or mutate it.
+     * Only a normal protected Head offer is admitted to the two epoch gates
+     * below: same-Term conflict is idempotently silent and a strictly higher
+     * same-Cluster Term can start the controlled JOIN_PENDING recovery.
+     * M08 later replaces this temporary Current-FSM hold with persisted
+     * fencing and quorum-based convergence. */
+    if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT &&
+        message.type != UCN_CLUSTER_MSG_ADVERTISE &&
+        message.type != UCN_CLUSTER_MSG_HEAD_DECLARE) {
+        return UCN_ERR_STATE;
+    }
     switch (message.type) {
         case UCN_CLUSTER_MSG_ADVERTISE:
         case UCN_CLUSTER_MSG_HEAD_DECLARE:
@@ -566,11 +750,32 @@ static ucn_result_t ucn_cluster_receive_inner(
             }
             candidate = find_candidate(cluster, source);
             if (candidate != NULL && message.role == UCN_CLUSTER_ROLE_HEAD) {
+                /* CLV2-M03 (03-06): candidate replay admission above is
+                 * deliberately retained, then volatile detached-history
+                 * rejects an older same-Cluster Term before it reaches any
+                 * role-local score/join handler.  An active same-Term second
+                 * Head remains eligible for the 03-05 conflict gate. */
+                if (cluster_history_offer_is_stale(cluster, candidate)) {
+                    cluster->stats.stale_messages++;
+                    return UCN_ERR_REPLAY;
+                }
                 if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
                     candidate->cluster_id == cluster->cluster_id &&
                     candidate->term < cluster->term) {
                     cluster->stats.stale_messages++;
                     return UCN_ERR_REPLAY;
+                }
+                /* CLV2-M03 (03-04): priority after parser/security/source
+                 * validation and candidate replay admission, but BEFORE the
+                 * normal role-specific offer handler.  The helper uses the
+                 * Epoch comparator, so a foreign Cluster can never arrive
+                 * here merely because its numeric Term is larger. */
+                /* Same-Term conflicting Head identity has a higher safety
+                 * priority than ordinary score handling, and higher-Term
+                 * authority comes next.  Both helpers are terminal. */
+                if (process_term_conflict(cluster, candidate, now_ms) ||
+                    process_higher_authority(cluster, candidate, now_ms)) {
+                    return UCN_OK;
                 }
                 consider_head_offer(cluster, candidate, now_ms);
             }
@@ -837,8 +1042,25 @@ ucn_result_t ucn_cluster_receive(
     return result;
 }
 
-static void start_election(ucn_cluster_t *cluster, uint32_t now_ms)
+static ucn_result_t start_election(ucn_cluster_t *cluster, uint32_t now_ms)
 {
+    uint32_t election_cluster_id;
+    uint32_t election_base_term;
+    uint32_t next_term;
+    ucn_result_t result;
+
+    result = cluster_make_next_id(cluster, UCN_CLUSTER_ID_PURPOSE_ELECTION,
+                                  cluster->last_cluster_id,
+                                  cluster->max_seen_term,
+                                  &election_cluster_id);
+    if (result != UCN_OK) {
+        return result;
+    }
+    election_base_term = cluster->term;
+    result = cluster_serial_next_checked(election_base_term, &next_term);
+    if (result != UCN_OK) {
+        return result;
+    }
     /* CLV2-01-04b.1: the role write IS the DETACHED_OBSERVE -> ELECTION
      * transition.  The ONLY call site is ucn_cluster_step_inner()'s
      * DETACHED + !recovery_eligible branch (L5075), so the claimed old
@@ -853,13 +1075,10 @@ static void start_election(ucn_cluster_t *cluster, uint32_t now_ms)
          * leaves every field untouched, so do NOT run the election side
          * effects on a non-CANDIDATE node.  The next Step re-visits the
          * DETACHED observation branch. */
-        return;
+        return UCN_ERR_STATE;
     }
-    cluster->cluster_id = cluster->config.local_node_id;
-    cluster->term = cluster->term == UINT32_MAX ? 1U : cluster->term + 1U;
-    if (cluster->term == 0U) {
-        cluster->term = 1U;
-    }
+    cluster->cluster_id = election_cluster_id;
+    cluster->term = next_term;
     cluster->head_node_id = cluster->config.local_node_id;
     cluster->current_head_score = cluster->config.head_score;
     cluster->role_since_ms = now_ms;
@@ -874,6 +1093,7 @@ static void start_election(ucn_cluster_t *cluster, uint32_t now_ms)
     assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
            UCN_CLUSTER_PHASE_ELECTION);
 #endif
+    return UCN_OK;
 }
 
 static void complete_election(ucn_cluster_t *cluster, uint32_t now_ms)
@@ -942,6 +1162,9 @@ static void complete_election(ucn_cluster_t *cluster, uint32_t now_ms)
     cluster->role_since_ms = now_ms;
     cluster->election_deadline_ms = 0U;
     cluster->next_advertise_ms = now_ms;
+    cluster_history_note_stable_epoch(cluster, cluster->cluster_id,
+                                      cluster->term,
+                                      cluster->head_node_id);
     cluster->stats.elections_won++;
 #if !defined(NDEBUG)
     assert(cluster_phase_from_legacy_state(cluster, now_ms) == target_phase);
@@ -1014,6 +1237,7 @@ static void send_next_advertisement(ucn_cluster_t *cluster, uint32_t now_ms)
 static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
 {
     uint32_t now_ms;
+    ucn_result_t result;
 
     if (cluster == NULL) {
         return UCN_ERR_ARGUMENT;
@@ -1022,6 +1246,13 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
         return UCN_OK;
     }
     now_ms = cluster_now(cluster);
+    /* CLV2-M03 (03-05): this is a local-only safety wait.  It publishes no
+     * Head/Member/Backup control traffic, starts no election/takeover and
+     * cannot leave on same-Term traffic; only the RX higher-authority gate
+     * may transition it to JOIN_PENDING. */
+    if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
+        return UCN_OK;
+    }
     if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
         ucn_deadline_expired(now_ms, cluster->head_lease_expires_at_ms)) {
         /* Grace period: a Backup may be mid-takeover exactly when the
@@ -1111,11 +1342,17 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                                   cluster->next_backup_assign_ms))) {
             start_backup_assignment_cycle(cluster, now_ms);
         }
-        send_backup_delta_step(cluster);
+        result = send_backup_delta_step(cluster);
+        if (result != UCN_OK) {
+            return result;
+        }
         send_backup_heartbeat(cluster, now_ms);
         send_takeover_announce_step(cluster);
         send_backup_assignment_step(cluster, now_ms);
-        send_backup_snapshot_step(cluster);
+        result = send_backup_snapshot_step(cluster);
+        if (result != UCN_OK) {
+            return result;
+        }
         /* Bounded snapshot retransmit: if a frame was dropped the Backup
          * never becomes READY, so resend the snapshot on a fixed timer. */
         if (cluster->backup_node_id != 0U && !cluster->backup_ready &&
@@ -1297,6 +1534,15 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
             } else if (ucn_deadline_expired(
                            now_ms, cluster->recovery_backoff_deadline_ms)) {
                 if (recovery_quorum_met(cluster)) {
+                    uint32_t recovery_cluster_id;
+
+                    result = cluster_make_next_id(
+                        cluster, UCN_CLUSTER_ID_PURPOSE_RECOVERY,
+                        cluster->last_cluster_id, cluster->max_seen_term,
+                        &recovery_cluster_id);
+                    if (result != UCN_OK) {
+                        return result;
+                    }
                     /* CLV2-01-04f: expired backoff + quorum IS the
                      * RECOVERY_ELECTION -> RECOVERY_HEAD transition - call
                      * it FIRST, UNCONDITIONALLY, fail closed.
@@ -1316,7 +1562,8 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                          * path and the next Step re-visits the deadline. */
                         return UCN_ERR_STATE;
                     }
-                    declare_recovery_head(cluster, now_ms);
+                    declare_recovery_head(cluster, recovery_cluster_id,
+                                          now_ms);
 #if !defined(NDEBUG)
                     /* CLV2-01-04f post-commit derive assert: after the
                      * transition AND every site effect the node must
@@ -1334,7 +1581,10 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                 }
             }
         } else {
-            start_election(cluster, now_ms);
+            result = start_election(cluster, now_ms);
+            if (result != UCN_OK) {
+                return result;
+            }
         }
     }
     if (cluster->role == UCN_CLUSTER_ROLE_CANDIDATE &&
@@ -1499,6 +1749,10 @@ ucn_result_t ucn_cluster_get_view(const ucn_cluster_t *cluster,
     view->cluster_id = cluster->cluster_id;
     view->term = cluster->term;
     view->head_node_id = cluster->head_node_id;
+    view->last_cluster_id = cluster->last_cluster_id;
+    view->max_seen_term = cluster->max_seen_term;
+    view->last_stable_head = cluster->last_stable_head;
+    view->cluster_id_round = cluster->cluster_id_round;
     view->current_head_score = cluster->current_head_score;
     return UCN_OK;
 }
@@ -1631,15 +1885,10 @@ ucn_result_t ucn_cluster_test_start_takeover(ucn_cluster_t *cluster,
 ucn_result_t ucn_cluster_test_complete_takeover(ucn_cluster_t *cluster,
                                                 uint32_t now_ms)
 {
-    uint32_t before;
-
     if (cluster == NULL) {
         return UCN_ERR_ARGUMENT;
     }
-    before = cluster->shadow_transition_count;
-    complete_takeover(cluster, now_ms);
-    return cluster->shadow_transition_count == before ? UCN_ERR_STATE
-                                                      : UCN_OK;
+    return complete_takeover(cluster, now_ms);
 }
 
 /* CLV2-01-04e.7: test-only view of the static score-challenge site

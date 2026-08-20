@@ -430,6 +430,59 @@ static bool sim_is_converged(
     return true;
 }
 
+/* M03's impaired topology deliberately keeps groups physically isolated.
+ * This is not a convergence-to-one-Cluster assertion: during the M03/M11
+ * transition several local Heads may exist.  It is instead a concrete
+ * safety invariant: no active node may carry authority from another group,
+ * and every Member/Backup must point at a live Head inside its own group. */
+static bool sim_m03_isolation_holds(const cluster_sim_network_t *network)
+{
+    size_t group_start;
+
+    for (group_start = 0U; group_start < network->node_count;
+         group_start += network->group_size) {
+        bool has_local_head = false;
+        size_t index;
+
+        for (index = group_start; index < group_start + network->group_size;
+             ++index) {
+            const cluster_sim_node_t *node = &network->nodes[index];
+
+            if (!node->alive) {
+                continue;
+            }
+            if (node->cluster.role == UCN_CLUSTER_ROLE_HEAD) {
+                if (node->cluster.cluster_id == 0U || node->cluster.term == 0U ||
+                    node->cluster.head_node_id != (ucn_node_id_t)(index + 1U)) {
+                    return false;
+                }
+                has_local_head = true;
+            } else if (node->cluster.role == UCN_CLUSTER_ROLE_MEMBER ||
+                       node->cluster.role == UCN_CLUSTER_ROLE_BACKUP) {
+                size_t head_index;
+
+                if (node->cluster.cluster_id == 0U || node->cluster.term == 0U ||
+                    node->cluster.head_node_id == 0U ||
+                    node->cluster.head_node_id > network->node_count) {
+                    return false;
+                }
+                head_index = (size_t)(node->cluster.head_node_id - 1U);
+                if (head_index < group_start ||
+                    head_index >= group_start + network->group_size ||
+                    !network->nodes[head_index].alive ||
+                    network->nodes[head_index].cluster.role !=
+                        UCN_CLUSTER_ROLE_HEAD) {
+                    return false;
+                }
+            }
+        }
+        if (!has_local_head) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static int sim_init(
     cluster_sim_network_t *network,
     size_t node_count,
@@ -577,7 +630,8 @@ static int run_simulation(
     size_t group_size,
     cluster_sim_scenario_t scenario,
     ucn_cluster_timing_profile_t timing_profile,
-    uint32_t seed)
+    uint32_t seed,
+    bool expect_m03_isolation)
 {
     cluster_sim_network_t network;
     uint32_t now_ms;
@@ -594,6 +648,7 @@ static int run_simulation(
     uint64_t messages_sent;
     uint64_t head_switches;
     uint32_t max_control_window;
+    bool m03_isolation_passed;
     size_t index;
 
     if (sim_init(&network, node_count, group_size, scenario, timing_profile,
@@ -632,6 +687,8 @@ static int run_simulation(
     }
     count_final_state(&network, &heads, &members, &alive_nodes,
                       &messages_sent, &head_switches, &max_control_window);
+    m03_isolation_passed = expect_m03_isolation &&
+                           sim_m03_isolation_holds(&network);
     expected_members = alive_nodes - groups;
     recovery_ms = final_converged_ms >= final_phase_ms ?
                       final_converged_ms - final_phase_ms : 0U;
@@ -639,7 +696,8 @@ static int run_simulation(
            "members=%zu converged_ms=%lu initial_ms=%lu recovery_ms=%lu "
            "sent=%llu tx=%llu delivered=%llu rejected=%llu dropped=%llu "
            "unreachable=%llu delayed=%llu duplicated=%llu asymmetric=%llu "
-           "head_switches=%llu max_tx_1s=%lu object_bytes=%zu\n",
+           "head_switches=%llu max_tx_1s=%lu object_bytes=%zu"
+           " m03_isolation=%s\n",
             node_count, scenario_name(scenario), timing_profile_name(timing_profile),
             groups, heads, members,
            (unsigned long)final_converged_ms,
@@ -655,9 +713,16 @@ static int run_simulation(
            (unsigned long long)network.duplicated_messages,
            (unsigned long long)network.transient_asymmetric_drops,
            (unsigned long long)head_switches,
-           (unsigned long)max_control_window, sizeof(ucn_cluster_t));
-    if (final_converged_ms == 0U || heads != groups ||
-        members != expected_members ||
+           (unsigned long)max_control_window, sizeof(ucn_cluster_t),
+           expect_m03_isolation ?
+               (m03_isolation_passed ? "passed" : "failed") :
+               "not_requested");
+    if ((!expect_m03_isolation &&
+         (final_converged_ms == 0U || heads != groups ||
+          members != expected_members)) ||
+        (expect_m03_isolation &&
+         (!m03_isolation_passed || heads < groups ||
+          heads + members != alive_nodes)) ||
          max_control_window > control_window_limit(timing_profile) ||
          ((scenario == CLUSTER_SIM_SCENARIO_HEAD_FAILOVER ||
            scenario == CLUSTER_SIM_SCENARIO_MOBILITY) &&
@@ -683,7 +748,7 @@ static void print_usage(void)
              "usage: ucn_cluster_sim [--nodes N] "
              "[--scenario clean|impaired|head-failover|mobility|score-shift] "
              "[--profile default|fast-fixed] [--group 2|4|8] "
-             "[--seed N]\n");
+             "[--seed N] [--expect-m03-isolation]\n");
 }
 
 int main(int argc, char **argv)
@@ -694,6 +759,7 @@ int main(int argc, char **argv)
     ucn_cluster_timing_profile_t timing_profile =
         UCN_CLUSTER_TIMING_PROFILE_DEFAULT;
     uint32_t seed = UINT32_C(0x5EED1234);
+    bool expect_m03_isolation = false;
     int argument_index;
 
     for (argument_index = 1; argument_index < argc; ++argument_index) {
@@ -734,6 +800,9 @@ int main(int argc, char **argv)
                 return 2;
             }
             seed = (uint32_t)parsed;
+        } else if (strcmp(argv[argument_index],
+                          "--expect-m03-isolation") == 0) {
+            expect_m03_isolation = true;
         } else if (strcmp(argv[argument_index], "--profile") == 0 &&
                    argument_index + 1 < argc) {
             if (!parse_timing_profile(argv[++argument_index],
@@ -752,6 +821,11 @@ int main(int argc, char **argv)
                 "--nodes must be a multiple of --group (2/4/8)\n");
         return 2;
     }
+    if (expect_m03_isolation && scenario != CLUSTER_SIM_SCENARIO_IMPAIRED) {
+        fprintf(stderr,
+                "--expect-m03-isolation requires --scenario impaired\n");
+        return 2;
+    }
     return run_simulation(node_count, group_size, scenario, timing_profile,
-                           seed);
+                          seed, expect_m03_isolation);
 }

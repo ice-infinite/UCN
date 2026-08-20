@@ -1140,12 +1140,18 @@ BACKUP:
     backup_primary_node_id
 ```
 
-所有节点先记录：
+接收方先按当前角色选择的 Active / Pending Epoch 校验：
 
 ```text
-known_backup_node_id = message.sync_token
-known_backup_generation = message.backup_generation
+MEMBER / BACKUP:
+    message.cluster_id / term == active Epoch
+
+JOIN_PENDING:
+    message.cluster_id / term == pending Epoch
 ```
+
+`backup_generation` 必须非零且未到 serial rotation 阈值。校验失败时不写入
+`known_backup_*`，直接按 REPLAY 拒绝。
 
 如果：
 
@@ -1153,7 +1159,7 @@ known_backup_generation = message.backup_generation
 sync_token != local_node_id
 ```
 
-只记录，不切 Role。
+仅在全部校验通过后记录 `known_backup_node_id/generation`，不切 Role。
 
 如果本机是 Backup：
 
@@ -1169,7 +1175,8 @@ head_capable == true
 sync_token == local
 ```
 
-则：
+则先完成合法的 `JOIN_PENDING/MEMBER -> BACKUP` transition；**仅当
+transition 成功**才一起提交：
 
 ```text
 role = BACKUP
@@ -1186,6 +1193,10 @@ backup_generation = message.backup_generation
 
 membership_sequence = 0
 ```
+
+并清理上一轮 Backup takeover 的 deadline、ACK、announce cursor 和 active
+标志。若 transition 失败，不提交任何 Assignment 结果；这保证重入和失败路径
+不会留下半更新的 known-backup 或 takeover 状态。
 
 ---
 
@@ -1258,7 +1269,7 @@ sequence/cursor 不推进
 
 ## SYNC_BEGIN
 
-当前：
+当前先校验 incoming sequence 非零且未到 rotation 阈值，然后：
 
 ```text
 clear_members()
@@ -1283,10 +1294,10 @@ refresh primary heartbeat/lease deadline
 ```text
 incoming membership_sequence
 ==
-local membership_sequence + 1
+cluster_serial_next_checked(local membership_sequence)
 ```
 
-否则：
+不允许用裸 `+ 1` 产生或接受回绕值。校验失败时：
 
 ```text
 backup_syncing = true
@@ -1299,13 +1310,12 @@ return REPLAY
 
 ## SYNC_END
 
-先：
+`SYNC_END` 使用其已通过 checked-next 验证的 incoming sequence；接收方不再
+自行执行 `membership_sequence++`。发送方同样先通过
+`cluster_serial_next_checked()` 生成下一序列，并且只在物理发送成功后提交
+该 sequence/cursor。
 
-```text
-membership_sequence++
-```
-
-然后：
+随后：
 
 ```text
 backup_covers_all_members()
@@ -1836,13 +1846,9 @@ RECOVERY_HEAD
 message.cluster_id == current cluster_id
 ```
 
-但：
-
-```text
-RECOVERY_HEAD
-```
-
-跳过这个 cluster_id 相等要求。
+`RECOVERY_HEAD` 的例外也不是任意 foreign Cluster：仅当 incoming
+`cluster_id == last_cluster_id`、`last_stable_head != 0` 时，才进入该已记录
+稳定历史域。
 
 所有 Role 都还要求：
 
@@ -1856,8 +1862,15 @@ known_backup_generation
 以及：
 
 ```text
-message.term > current term
+same active identity:
+    message.term > current term
+
+Recovery historical identity:
+    message.term > max_seen_term
 ```
+
+因此 foreign Cluster 的 Term 永不与 Recovery local Term 直接比较；同时
+`message.head_node_id` 必须等于来源节点。
 
 成功后直接：
 
@@ -2373,14 +2386,17 @@ node_id % max
 
 # 59. declare_recovery_head()
 
-Backoff 到期直接：
+Backoff 到期且 quorum 满足时，先向 Cluster ID Provider 申请一个新的
+Recovery identity；Provider 拒绝或返回保留/父簇 ID 时保持在 Recovery
+Election 并返回错误。成功后：
 
 ```text
 role = RECOVERY_HEAD
 
-recovery_cluster_id = local_node_id
+recovery_cluster_id = make_cluster_id(
+    RECOVERY, parent_cluster_id, parent_term, incarnation, round)
 
-cluster_id = local_node_id
+cluster_id = recovery_cluster_id
 term = 1
 head_node_id = local_node_id
 current_head_score = local score
@@ -2574,21 +2590,24 @@ RECOVERY_HEAD
 role == RECOVERY_HEAD
 ```
 
-而且对 Recovery Head：
+而且 Recovery Head 只允许接收其已记录的稳定历史：
 
 ```text
-不要求 incoming cluster_id
-==
-recovery cluster_id
+incoming cluster_id == last_cluster_id
+last_stable_head != 0
 ```
 
-但仍要求：
+随后仍要求：
 
 ```text
 source == known_backup_node_id
 backup_generation == known_backup_generation
-incoming term > recovery term
+incoming term > max_seen_term
 ```
+
+普通 active identity 仍是同 Cluster 的 `incoming term > current term`。
+两种域均要求 `message.head_node_id == source`；任意其它 Cluster identity
+一律拒绝，不能用数值更大的 foreign Term 触发 takeover。
 
 成功：
 
@@ -2611,7 +2630,7 @@ RECOVERY_HEAD -> MEMBER
 | HEAD | 比 Term/score/tenure，可能 Stepdown |
 | BACKUP/current Primary | 刷 Primary lease；可能 score challenge |
 | BACKUP/other Head | ignore |
-| STEPPING_DOWN | ignore |
+| STEPPING_DOWN | 对原 pending Head 的重复/更旧 offer 保持 ordered grace；同簇更高 Term 重新定向 pending Epoch 并进入 JOIN_PENDING |
 | RECOVERY_HEAD | capacity>0 时 ordered stepdown |
 
 ---
@@ -3038,37 +3057,39 @@ backup_generation = 0
 
 ---
 
-# 78. 当前 Recovery Cluster ID
+# 78. 当前 Cluster / Recovery Cluster ID
 
 Recovery Head：
 
 ```text
-recovery_cluster_id = local_node_id
-cluster_id = local_node_id
+recovery_cluster_id = Provider / default derived ID
+cluster_id = recovery_cluster_id
 term = 1
 ```
 
-普通 Election 也：
+普通 Election 在默认 `incarnation == 0` 的**第一轮**仍保持：
 
 ```text
 cluster_id = local_node_id
 ```
 
-因此同一个节点后续普通 Cluster 与 Recovery Cluster 的 `cluster_id` 来源都是：
+之后的普通 Election、所有 Recovery，以及配置了非零 incarnation 的首轮
+Election，均通过同一 Provider/default generator 分配不同 ID：
 
 ```text
-local_node_id
+make_cluster_id(purpose, parent_cluster_id, parent_term,
+                incarnation, round)
 ```
 
-当前没有：
+Core 拒绝 `0`、broadcast 与父簇 ID 重用。默认生成器只保证同一个对象内的
+round 不复用；产品若要求跨重启也不复用，必须提供：
 
 ```text
 boot incarnation
-recovery round
-random generation
+持久化 boot counter / RNG / 自定义 Provider
 ```
 
-参与 cluster_id。
+M04 才会把这些承诺持久化；当前并不宣称掉电后保持 identity lineage。
 
 ---
 
@@ -3256,6 +3277,7 @@ head_node_id
 | BACKUP | takeover majority | `complete_takeover()` | HEAD |
 | BACKUP | takeover timeout | clear sync | DETACHED |
 | BACKUP | valid HEAD_TAKEOVER | switch | MEMBER |
+| STEPPING_DOWN | same Cluster higher-Term Head | retarget pending Epoch | JOIN_PENDING |
 | STEPPING_DOWN | deadline | clear members, pending target preserved | JOIN_PENDING |
 | RECOVERY_HEAD | TTL | stepdown recovery | DETACHED |
 | RECOVERY_HEAD | stable Head advertise | ordered stepdown | STEPPING_DOWN |

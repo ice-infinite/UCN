@@ -14,8 +14,8 @@
 > | M00 冻结基线 | DONE | 6bea852 + M00.1(6206ce2) + M00.2(2b222b7) | 用户正式签字 PASS（2026-08-15），授权进入 M01 |
 > | M01 显式 Phase | DONE | 01-01..01-04f 全部闭环（OP-203..210） | 用户正式签字 PASS（2026-08-16，ab53b31）：01-01~03 + 01-04a..f 全序列 PASS；全文件断言达成（无正常路径 phase change 绕过 cluster_transition()）；Shadow-Guard 纪律全站成立；M01.0.2 组合保留；Golden 等价；observed 35/0；cluster_bytes 1096。授权进入 M02（纯结构性重构，不得顺手优化 FSM） |
 > | M02 模块拆分 | DONE | 02-01..02-06 + approved scope adjustments 02-07/08（OP-211..216 + M02.1 对齐） | ucn_cluster.c 6216→1667 行；6 模块 + internal header（codec/fsm/membership/backup[+takeover 合并]/recovery/merge）；字节级等价（函数体未动，仅 de-static + 前向声明）；FULL/ASan/LITE/NANO 全绿；observed 35/0；golden 逐字节不变；cluster_bytes 1096；Core 不反向依赖；whole-Cluster EXCLUDE_FROM_ALL 按需链接（per-module trim deferred）；02-07 internal storage contract DONE / opaque split → CLV2-14-02 |
-> | M03 Epoch 分类 | TODO | — | — |
-> | M04 Persistence | TODO | — | — |
+> | M03 Epoch 分类 | DONE | 03-01..03-09 + R01..R08（M03 候选提交） | 2026-08-21 功能审计 GO：Epoch 域截断、同簇 authority、运行期历史、serial fail-closed、Provider/incarnation、复审整改和隔离门禁均通过；M11 Merge/Handover、M14 物理 active-epoch 收拢仍按原计划后置。 |
+> | M04 Persistence | IN PROGRESS | 04-01 | 先冻结与实现 Platform-agnostic Persistence Provider 公共契约；严格执行 persist-before-promise，未持久化成功不得发送 Advertise/ACK/Commit。 |
 > | M05 Wire v4 | TODO | — | — |
 > | M06 Provisional | TODO | — | — |
 > | M07 Joint Config | TODO | — | — |
@@ -352,7 +352,7 @@ duplicate/replay/reorder
 | 任务 ID | 优先级 | 依赖 | 主要文件/位置 | 具体修改任务 | 完成定义 / 测试 |
 |---|---:|---|---|---|---|
 | `CLV2-03-01` | P0 | M02 | ucn_cluster_epoch.[ch] | 新增 `ucn_cluster_epoch_t {cluster_id,term,head_id}`、`ucn_cluster_epoch_relation_t` 和纯函数 comparator。 | 边界测试覆盖 same/lower/higher/conflict/foreign。 |
-| `CLV2-03-02` | P0 | 03-01 | Cluster state | 把散落的 `cluster_id/term/head_node_id` 收拢为 `active_epoch`；保留兼容访问宏只作为过渡，禁止新代码继续直接组合比较。 | grep 不再出现手写 `cluster_id == ... && term > ...` 的业务判定。 |
+| `CLV2-03-02` | P0 | 03-01 | Cluster state | 本阶段建立 `ucn_cluster_active_epoch_get()` 读边界，新的比较逻辑禁止继续手写 `cluster_id/term/head_node_id` 组合；物理存储收拢与唯一写入口属于 `CLV2-14-02` opaque split，不能在 M03 临时改变公共对象布局。 | Epoch 比较路径经 accessor；物理收拢在 M14 以兼容性审计和完整迁移单独验收。 |
 | `CLV2-03-03` | P0 | 03-01 | `consider_head_offer` | 拆成：`classify_same_cluster_authority()` 与 `classify_foreign_cluster_merge()`；当前 HEAD 跨簇直接按 Term 让位的行为必须删除。 | 新增测试：Cluster A Term 2 不因 Cluster B Term 100 自动让位。 |
 | `CLV2-03-04` | P0 | 03-01 | Global RX pre-dispatch | 任意 Active Phase 收到 same-cluster higher Term 时走统一 `process_higher_authority()`；不要在 Member、Backup、Head 各写一套。 | 每个 Phase 的 higher-term 测试均走同一 reason/code path。 |
 | `CLV2-03-05` | P0 | 03-01 | Term conflict | same cluster + same term + different head 标记 `TERM_CONFLICT`；当前阶段先停止相关优化和投票，进入安全等待状态，M08 再接入正式 Fence。 | 冲突时不得按 score 覆盖 Head。 |
@@ -360,6 +360,34 @@ duplicate/replay/reorder
 | `CLV2-03-07` | P0 | 03-01 | serial helper | 新增 `cluster_serial_next_checked()` 和 `UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD`；替换 `MAX ? 1 : +1`。在 Rekey 未实现前，达到阈值返回 EXHAUSTED 并 fail-closed，绝不回绕。 | CI grep 禁止 Cluster 代码出现 `UINT32_MAX ? 1`。 |
 | `CLV2-03-08` | P1 | 03-06 | Cluster ID provider interface | 新增可选 `make_cluster_id`/incarnation hook；普通新簇、Recovery、Rekey 不再永久假设 `cluster_id == local_node_id`。本阶段可提供确定性 Host 默认实现。 | 同一节点不同 boot/round 可生成不同 ID；0 和 broadcast 永远非法。 |
 | `CLV2-03-09` | P0 | 03-03..08 | tests | 新增 Epoch property test：随机 cluster/term/head 组合满足反对称、传递性和 foreign-term 不可比；加入 serial exhaustion 测试。 | 所有性质通过固定 seed 与随机 seed。 |
+
+## M03 当前执行进度（2026-08-20）
+
+- **已完成（工作区待提交，等待 M03 审阅）**：`03-01` Epoch comparator、`03-02` active epoch 访问器、`03-03` HEAD foreign-domain 截断、`03-04` global higher-authority pre-dispatch、`03-05` same-Term conflict 安全等待、`03-06` Detach 安全历史、`03-07` checked serial exhaustion、`03-08` Cluster ID Provider/incarnation、`03-09` reproducible property gate。
+- **03-04 语义**：受认证、已准入来源的 `ADVERTISE/HEAD_DECLARE` 在候选 replay 接纳后，若 `compare(local, remote) == LOWER`（同簇且远端 Term 更高），统一进入 `process_higher_authority()`；Head/Recovery Head 有序让位，Member/Backup 进入 Join Pending，全部以 `HIGHER_AUTHORITY` 记录原因。FOREIGN、SAME、CONFLICT 不进入该入口；`HEAD_TAKEOVER` 保留其独立的已知 Backup / generation 证明处理，不以普通 Head offer 降级处理。
+- **03-05 语义**：若 `compare(local, remote) == CONFLICT`（同 `cluster_id`、同 Term、不同 Head），普通受保护 Head offer 在全局 RX gate 先进入本地 `TERM_CONFLICT_WAIT`。此本地角色绝不编码到 v3 wire：停止 advertise/keepalive/join/election/takeover，拒绝普通控制帧；同 Term 的重复 offer 只保持等待，只有同簇更高 Term 的正常 Head offer 才转 `JOIN_PENDING`。因此 Score 与 Node ID 不再能裁决此类 split-brain；M08 将以持久化 Fence/Quorum 取代当前的保守等待。
+- **03-06 语义**：新增 RAM-only 的 `last_cluster_id/max_seen_term/last_stable_head`，并在 Election 胜出、Join Accept、Backup Assign/Takeover、受认证的同簇 higher-Term offer 等稳定 Epoch 确认点单调记录。`set_detached()` 仅清 Active/Pending；它只可补记当前稳定 Epoch，绝不将已观察的更高 Term 覆盖回旧值。对最近历史簇，低于 `max_seen_term` 的 offer、以及相同 Term 但不同 Head 的 detached offer 均在普通 handler 前以 `UCN_ERR_REPLAY` 拒绝；仅当前仍活跃于同 Epoch 的双 Head 例外放行到 03-05 `TERM_CONFLICT_WAIT`。跨簇 Term 仍不可比。该历史在掉电后不保证保留，M04 Provider 将接管持久化承诺。
+- **03-07 语义**：新增 `UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD`（默认 `UINT32_MAX - 1024`）与唯一的 `cluster_serial_next_checked()`。当当前 serial 已达到阈值，函数返回新公开的 `UCN_ERR_EXHAUSTED`，不再生成**同一 Cluster identity** 中的后继值；Term 选举、Backup 分数挑战、quorum takeover、Backup generation 和 membership sequence 均经此入口，Cluster 代码不存在 `UINT32_MAX ? 1 : ...` 回绕路径。03-08 后，Detach 后的普通新簇会先取得不同 Cluster ID，再从 Term 1 开始；这不是同 identity Term 回退，也不是 M13 Rekey。仍在同一 identity 内的各条 Term 路径到阈值即返回错误且不 transition/不发送，generation 不分配新 Backup，membership mirror step 不发送 wrapped 帧。
+- **03-08 语义**：公共配置追加可选 `make_cluster_id(context, request, out)`、`cluster_id_context` 与 `cluster_id_incarnation`，不破坏旧位置初始化。请求固定携带 purpose（Election/Recovery/Rekey）、本地 Node ID、父簇 `(cluster_id, term)`、产品 incarnation 与本对象单调 round；回调和 Host 默认值都由 Core 统一拒绝 `0`、广播 ID 与非零父簇 ID 重用，验证失败不消耗 round、不改变 FSM。零 incarnation 的默认策略只保留**首个**普通 Election 使用 `local_node_id` 的旧行为；之后每一个 round、Recovery 或非零 incarnation 都派生确定性新 ID。产品若要求跨重启也不同，必须提供 boot counter/RNG/安全存储 incarnation 或 Provider；M04 才提供 persist-before-promise。Recovery 在 transition 前申请新 ID，声明/成员加入均使用该 ID；M13 的 quorum Rekey 尚未实现，当前 `REKEY` purpose 只是预留接口，不能误称已支持 rekey。
+- **03-09 语义**：以一个固定 master seed 派生 8 条独立 xorshift 流，每流 1024 组随机 Epoch 对和三元严格 Term 链，验证同簇 LOWER/HIGHER 的反对称、SAME/CONFLICT 的对称、同域严格顺序传递、以及任意 foreign cluster 的 Term 永不参与比较。另以 8×96 组随机 parent/term/provider 输出走**公开 Step 路径**，验证 `0`、broadcast、parent-reuse 必然返回 `UCN_ERR_CONFIG` 且不消耗 round/不 transition，合法输出得到 Candidate/Term 1；03-07 的五类 serial exhaustion 回归保留为同一门禁的一部分。所有随机流均为常量 seed，可逐例重放。
+- **已验证（含 2026-08-21 复审整改）**：03-04 的 10 个成员/权威 Phase 均经真实 decode → replay admission → pre-dispatch 路径覆盖；03-05 进一步覆盖 12 个本地活跃 Phase；03-06 新增真实 `HEAD_STEPDOWN → Detach → ADVERTISE` 回归；03-07 覆盖 Election/Challenge/Takeover/generation/sequence 的耗尽边界；03-08 覆盖 Provider 请求参数、父簇继承、无历史的第二轮 Election、`0`/broadcast/parent ID 拒绝且不改状态、以及 Recovery 两轮新 ID；03-09 覆盖 8192 组随机 Epoch 链与 768 组随机 Provider 输入。复审新增 Assignment atomicity/Epoch fencing、Recovery historical takeover、Type 12 无回绕、Locator cache 单调性和 `STEPPING_DOWN` higher-authority 回归；fixed-seed fast impaired 的 group=2/4/8 均以真实逐组断言输出 `m03_isolation=passed`。当前 GCC Full、Lite、Nano 均为 14/14，配置契约 27/27，WSL ASan/UBSan 24/24，WSL GCC `-fanalyzer` 24/24；`cluster_bytes == 1136`（相对 03-07 固定 +32 B，无动态分配）。跨簇受损规模场景不再错误要求立即合并为单 Head，而检查 M03 隔离语义和控制预算；跨簇实际 Merge/Handover 仍归 M11。
+- **里程碑结论（2026-08-21）**：功能审计确认 `GO`。`CLV2-03-R01..R07` 已闭环，`R08` 按已批准的 M14 边界保留逻辑读访问器实现；M03 正式标记 `DONE`。后续进入 `CLV2-04-01` Persistence Provider 公共接口，任何 M04 代码不得绕过 persist-before-promise 门禁。
+
+## M03 复审整改任务（2026-08-21）
+
+> 来源：`UCN_V5_Cluster_M03与理想协议架构对照复审报告_2026-08-21.md`。各项均已按当前源码和可复现命令核实；R01..R07 已修复并通过门禁，R08 依既定 M14 边界保留。
+
+| 任务 ID | 优先级 | 核实结果 | 修改任务 | 完成定义 / 测试 |
+|---|---|---|---|---|
+| `CLV2-03-R01` | P0 | 已修复、验证通过 | 修复 `BACKUP_ASSIGN(self)` 从旧 Backup/Takeover 遗留状态再入时的 `backup_takeover_active` 污染；Transition 成功后才提交全部 Assignment 结果。 | 固定 seed `fast-fixed/impaired/group=2` 不再断言；单测覆盖遗留 takeover 标志的重新分配。 |
+| `CLV2-03-R02` | P0 | 已修复、验证通过 | `HEAD_TAKEOVER` 仅在同 active Cluster，或 Recovery 的已记录稳定历史 Cluster 内比较 Term；foreign Cluster 不得与 Recovery local Term 直接比较。 | 历史域内较新 takeover 接纳；foreign Cluster 高 Term 拒绝；旧历史 Term replay。 |
+| `CLV2-03-R03` | P1 | 已修复、验证通过 | Type 12 接收侧对 `membership_sequence` 增加非零/阈值和 checked-next 校验，禁止 `+1` 回绕。 | DELTA、普通 snapshot、SYNC_BEGIN 的 0、越阈值、阈值边界全部回归。 |
+| `CLV2-03-R04` | P1 | 已修复、验证通过 | `BACKUP_ASSIGN` 按 Member/Join Pending/Backup 当前 Epoch 校验；所有接收者仅在校验成功后更新 known-backup；self 分配 Transition 失败时零 Assignment 写入。 | stale/foreign assignment 与 shadow 拒绝均保持完整字段不变。 |
+| `CLV2-03-R05` | P1 | 已修复、验证通过 | Federation Locator cache 对未过期条目实行同 identity 的 `(term, record_nonce)` 单调更新；不同 identity 必须等待 cache lease 到期。 | 延迟旧 Reply 不得回滚 locator 或 next-cluster；过期后可接受新 identity。 |
+| `CLV2-03-R06` | P1 | 已修复、验证通过 | 模拟器实现逐 Group 的实际 M03 isolation invariant，并将 fixed-seed fast impaired 的 group=2/4/8 纳入 CTest。 | 输出只在 invariant 真通过时为 `m03_isolation=passed`；任一跨 Group authority 指向失败。 |
+| `CLV2-03-R07` | P2 | 已修复、验证通过 | `STEPPING_DOWN` 收到同 Cluster 更高 Term 时直接进入已有 `JOIN_PENDING` 目标并重定向 pending Epoch。 | 该 Phase 走 `HIGHER_AUTHORITY` 单测，不再等待旧 pending Head。 |
+| `CLV2-03-R08` | P2 | 已确认、暂不改代码 | `active_epoch` 当前是 M03 的逻辑读边界，不修改 public `ucn_cluster_t` 布局；统一 commit/clear 和物理 opaque storage 收拢移交 `CLV2-14-02`，M04 再以持久化提交路径约束关键写入。 | M14 前不得宣称已完成物理收拢；本表与 API 注释保持一致。 |
+| `CLV2-03-R09` | P2 | 已确认、发布动作 | M03 修复和全量门禁通过后形成候选提交，再进行最终审计签字。 | 本轮不擅自提交；由用户要求后执行 Git 提交/推送。 |
 
 ## 本里程碑禁止事项
 - 禁止 foreign cluster 直接比较 Term。
@@ -375,6 +403,11 @@ duplicate/replay/reorder
 **依赖：** M03
 
 **里程碑门禁：** persist-before-promise 已成为强制路径；存储失败时不发送 Advertise/ACK/Commit。
+
+## M04 当前执行进度（2026-08-21）
+
+- **进行中**：`CLV2-04-01`。先完成与 Flash、文件系统、RTOS 均解耦的 Provider 公共契约及 Host fake 对接点；在 04-01 尚未冻结前，不改写 Election、Takeover、ACK 或 Advertise 的生产承诺路径。
+- **不变门禁**：对外可见的 Advertise、TAKEOVER_ACK、Commit，必须由已成功完成的持久化动作授权；`PENDING` 只允许保留本地事务，不允许发送承诺帧；`ERROR` 必须 fail-closed。
 
 | 任务 ID | 优先级 | 依赖 | 主要文件/位置 | 具体修改任务 | 完成定义 / 测试 |
 |---|---:|---|---|---|---|

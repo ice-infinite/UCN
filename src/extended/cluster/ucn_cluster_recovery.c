@@ -91,7 +91,7 @@ void send_recovery_declare(ucn_cluster_t *cluster)
     (void)memset(&message, 0, sizeof(message));
     message.type = UCN_CLUSTER_MSG_RECOVERY_DECLARE;
     message.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
-    message.cluster_id = cluster->config.local_node_id;
+    message.cluster_id = cluster->cluster_id;
     message.term = 1U;
     message.head_node_id = cluster->config.local_node_id;
     message.recovery_nonce = cluster->recovery_nonce;
@@ -112,13 +112,14 @@ void start_recovery_backoff(ucn_cluster_t *cluster, uint32_t now_ms)
         now_ms, compute_recovery_backoff(cluster));
 }
 
-void declare_recovery_head(ucn_cluster_t *cluster, uint32_t now_ms)
+void declare_recovery_head(ucn_cluster_t *cluster, uint32_t recovery_cluster_id,
+                           uint32_t now_ms)
 {
     if (cluster->recovery_nonce == 0U) {
         cluster->recovery_nonce = next_nonce(cluster);
     }
     cluster->role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
-    cluster->recovery_cluster_id = cluster->config.local_node_id;
+    cluster->recovery_cluster_id = recovery_cluster_id;
     cluster->cluster_id = cluster->recovery_cluster_id;
     cluster->term = 1U;
     cluster->head_node_id = cluster->config.local_node_id;
@@ -255,10 +256,10 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
     }
     cluster->accepted_recovery_nonce = message->recovery_nonce;
     cluster->known_recovery_source = source;
-    /* C07.7 P0-1: actually join the recovery Cluster.  The recovery
-     * Cluster ID is the declaring node ID; it never impersonates the
-     * lost Cluster.  The member keeps its role_since/lease so the
-     * recovery domain has a live membership. */
+    /* C07.7 P0-1: actually join the recovery Cluster.  Its fresh ID was
+     * allocated by the declaring node's M03-08 provider; it never
+     * impersonates the lost Cluster.  The member keeps its role_since/lease
+     * so the recovery domain has a live membership. */
     if (cluster->role != UCN_CLUSTER_ROLE_MEMBER ||
         cluster->recovery_cluster_id != message->cluster_id) {
         cluster->recovery_cluster_id = message->cluster_id;

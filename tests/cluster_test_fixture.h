@@ -101,7 +101,8 @@ void ucn_cluster_test_queue_backup_assignment_for_member(
  * BACKUP_READY -> BACKUP_TAKEOVER and BACKUP_TAKEOVER -> HEAD_NO_BACKUP
  * transitions directly and verify the full site-side field effects (and
  * the fail-closed rejection with zero writes).  Return UCN_OK when the
- * transition committed, UCN_ERR_STATE when it was rejected (fail closed). */
+ * transition committed, UCN_ERR_STATE on a rejected transition, or
+ * UCN_ERR_EXHAUSTED when the next Term would violate the no-wrap gate. */
 ucn_result_t ucn_cluster_test_start_takeover(ucn_cluster_t *cluster,
                                              uint32_t now_ms);
 ucn_result_t ucn_cluster_test_complete_takeover(ucn_cluster_t *cluster,

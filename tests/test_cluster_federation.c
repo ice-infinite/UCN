@@ -648,6 +648,84 @@ static int federation_runtime_register_remote(
     return 0;
 }
 
+/* CLV2-03-R05: a protected Directory reply can still arrive late.  A live
+ * client cache must therefore reject older same-identity records and all
+ * incomparable foreign identities; only expiry may open a new identity. */
+static int federation_test_locator_cache_monotonicity(void)
+{
+    federation_runtime_network_t network;
+    federation_runtime_node_t *client;
+    ucn_cluster_federation_locator_cache_entry_t *cache;
+    ucn_cluster_federation_pending_query_t *pending;
+    ucn_cluster_federation_message_t message;
+    const ucn_cluster_locator_t *locator;
+    uint8_t payload[UCN_CLUSTER_FEDERATION_LOCATOR_BYTES];
+    size_t payload_length = 0U;
+
+    (void)memset(&network, 0, sizeof(network));
+    client = &network.nodes[0];
+    TEST_ASSERT(federation_runtime_init_node(
+                    client, &network, FEDERATION_CLIENT_HEAD,
+                    UINT32_C(0x1001), 3U, 0U, false, false,
+                    FEDERATION_CLIENT_AUTHORITIES,
+                    sizeof(FEDERATION_CLIENT_AUTHORITIES) /
+                        sizeof(FEDERATION_CLIENT_AUTHORITIES[0])) == 0);
+    network.now_ms = 10U;
+    cache = &client->federation.locator_cache[0];
+    cache->occupied = true;
+    cache->locator.node_id = FEDERATION_REMOTE_MEMBER;
+    cache->locator.cluster_id = UINT32_C(0x1003);
+    cache->locator.head_node_id = FEDERATION_REMOTE_HEAD;
+    cache->locator.term = 7U;
+    cache->locator.lease_ms = 90U;
+    cache->locator.record_nonce = 5U;
+    cache->expires_at_ms = 100U;
+    pending = &client->federation.pending[0];
+    pending->occupied = true;
+    pending->transaction_id = UINT32_C(0x10203040);
+    pending->target_node_id = FEDERATION_REMOTE_MEMBER;
+    pending->authority_node_id = FEDERATION_AUTHORITY_HEAD;
+    pending->deadline_ms = 200U;
+
+    federation_test_common(&message, UCN_CLUSTER_FED_KIND_LOCATOR_REPLY);
+    message.body.locator.node_id = FEDERATION_REMOTE_MEMBER;
+    message.body.locator.cluster_id = UINT32_C(0x1003);
+    message.body.locator.head_node_id = FEDERATION_REMOTE_HEAD;
+    message.body.locator.term = 6U;
+    message.body.locator.lease_ms = 90U;
+    message.body.locator.record_nonce = 99U;
+    TEST_ASSERT(ucn_cluster_federation_message_encode(
+                    &message, payload, sizeof(payload), &payload_length) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_federation_receive(
+                    &client->federation, FEDERATION_AUTHORITY_HEAD, true,
+                    payload, payload_length) == UCN_ERR_REPLAY);
+    TEST_ASSERT(cache->locator.term == 7U && cache->locator.record_nonce == 5U);
+
+    message.body.locator.cluster_id = UINT32_C(0x2003);
+    message.body.locator.head_node_id = FEDERATION_CLIENT_HEAD;
+    message.body.locator.term = 1U;
+    message.body.locator.record_nonce = 1U;
+    TEST_ASSERT(ucn_cluster_federation_message_encode(
+                    &message, payload, sizeof(payload), &payload_length) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_federation_receive(
+                    &client->federation, FEDERATION_AUTHORITY_HEAD, true,
+                    payload, payload_length) == UCN_ERR_REPLAY);
+    TEST_ASSERT(cache->locator.cluster_id == UINT32_C(0x1003));
+
+    /* The old lease has expired; the same authorized reply may now establish
+     * the new Cluster identity and update the next-cluster projection. */
+    network.now_ms = 101U;
+    TEST_ASSERT(ucn_cluster_federation_receive(
+                    &client->federation, FEDERATION_AUTHORITY_HEAD, true,
+                    payload, payload_length) == UCN_OK);
+    locator = ucn_cluster_federation_find_locator(&client->federation,
+                                                  FEDERATION_REMOTE_MEMBER);
+    TEST_ASSERT(locator != NULL && locator->cluster_id == UINT32_C(0x2003) &&
+                locator->head_node_id == FEDERATION_CLIENT_HEAD &&
+                locator->term == 1U);
+    return 0;
+}
+
 static int federation_test_directory_runtime(void)
 {
     federation_runtime_network_t network;
@@ -1187,6 +1265,7 @@ int test_cluster_federation(void)
     TEST_ASSERT(federation_test_locator_and_query() == 0);
     TEST_ASSERT(federation_test_tunnel_messages() == 0);
     TEST_ASSERT(federation_test_malformed_and_cluster_view() == 0);
+    TEST_ASSERT(federation_test_locator_cache_monotonicity() == 0);
     TEST_ASSERT(federation_test_directory_runtime() == 0);
     TEST_ASSERT(federation_test_handover_runtime() == 0);
     TEST_ASSERT(federation_test_handover_autopublish() == 0);

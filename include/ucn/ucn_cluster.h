@@ -74,6 +74,18 @@ extern "C" {
 #define UCN_CLUSTER_FAST_HEAD_MIN_TENURE_MS UINT32_C(10000)
 #endif
 
+/* CLV2-M03 (03-07): Cluster control serials must never silently wrap in
+ * the same Cluster identity.  M13 will replace this fail-closed guard with
+ * a quorum-committed Rekey; until then, callers must stop before the
+ * threshold rather than reuse a serial value. */
+#ifndef UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD
+#define UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD \
+    (UINT32_MAX - UINT32_C(1024))
+#endif
+typedef char ucn_cluster_serial_rotation_threshold_must_leave_valid_range[
+    UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD > 1U &&
+            UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD < UINT32_MAX ? 1 : -1];
+
 #define UCN_CLUSTER_FORMAT_VERSION ((uint8_t)3U)
 
 /* C07.2 Backup sync control. */
@@ -108,8 +120,8 @@ extern "C" {
 #endif
 
 /* C07.5 RECOVERY_HEAD: short-lived emergency Head TTL and declaration
- * backoff.  The recovery Cluster ID is the declaring node ID (a fresh
- * domain, never impersonating the lost Cluster). */
+ * backoff.  M03-08 allocates a fresh recovery Cluster ID through the
+ * identity provider (never impersonating the lost Cluster). */
 #ifndef UCN_CLUSTER_RECOVERY_HEAD_TTL_MS
 #define UCN_CLUSTER_RECOVERY_HEAD_TTL_MS UINT32_C(30000)
 #endif
@@ -163,7 +175,12 @@ typedef enum ucn_cluster_role {
     UCN_CLUSTER_ROLE_HEAD = 5,
     UCN_CLUSTER_ROLE_BACKUP = 6,
     UCN_CLUSTER_ROLE_STEPPING_DOWN = 7,
-    UCN_CLUSTER_ROLE_RECOVERY_HEAD = 8
+    UCN_CLUSTER_ROLE_RECOVERY_HEAD = 8,
+    /* CLV2-M03 (03-05): local-only safe wait after observing two different
+     * Head identities for the same stable (cluster_id, term).  It is never
+     * advertised on the v3 wire; a higher-Term authority is required to
+     * leave it. */
+    UCN_CLUSTER_ROLE_TERM_CONFLICT = 9
 } ucn_cluster_role_t;
 
 /* DEFAULT is deliberately conservative and remains selected unless a product
@@ -197,7 +214,8 @@ typedef enum ucn_cluster_phase {
     UCN_CLUSTER_PHASE_RECOVERY_OBSERVE = 14,
     UCN_CLUSTER_PHASE_RECOVERY_ELECTION = 15,
     UCN_CLUSTER_PHASE_RECOVERY_HEAD = 16,
-    UCN_CLUSTER_PHASE_COUNT = 17
+    UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT = 17,
+    UCN_CLUSTER_PHASE_COUNT = 18
 } ucn_cluster_phase_t;
 
 /* CLV2-01-03 (M01 shadow phase): why the last shadow phase transition
@@ -238,15 +256,23 @@ typedef enum ucn_cluster_transition_reason {
      * joined the winner.  Deliberately distinct from RECOVERY_WIN, which
      * only names the node that won. */
     UCN_CLUSTER_REASON_RECOVERY_YIELDED = 29,
-    UCN_CLUSTER_REASON_COUNT = 30
+    /* CLV2-M03 (03-04): a protected same-Cluster Head authority proof
+     * carried a strictly higher Term.  This is intentionally distinct from
+     * a score-driven JOIN_INITIATED or a peer-requested STEPDOWN_ORDERED so
+     * every active phase can be audited as one global RX rule. */
+    UCN_CLUSTER_REASON_HIGHER_AUTHORITY = 30,
+    /* CLV2-M03 (03-05): same Cluster + same Term + different Head is a
+     * safety conflict, never a score/Node-ID arbitration input. */
+    UCN_CLUSTER_REASON_TERM_CONFLICT = 31,
+    UCN_CLUSTER_REASON_COUNT = 32
 } ucn_cluster_transition_reason_t;
 
 /* CLV2-01-01: compile-time fences so an accidental enum extension is
  * caught at build time, not in a test run (C99-compatible assertion). */
-typedef char ucn_cluster_phase_count_must_be_17[
-    UCN_CLUSTER_PHASE_COUNT == 17 ? 1 : -1];
-typedef char ucn_cluster_reason_count_must_be_30[
-    UCN_CLUSTER_REASON_COUNT == 30 ? 1 : -1];
+typedef char ucn_cluster_phase_count_must_be_18[
+    UCN_CLUSTER_PHASE_COUNT == 18 ? 1 : -1];
+typedef char ucn_cluster_reason_count_must_be_32[
+    UCN_CLUSTER_REASON_COUNT == 32 ? 1 : -1];
 
 typedef enum ucn_cluster_message_type {
     UCN_CLUSTER_MSG_ADVERTISE = 1,
@@ -334,6 +360,32 @@ typedef ucn_result_t (*ucn_cluster_send_fn)(
     uint16_t payload_length);
 typedef uint32_t (*ucn_cluster_now_ms_fn)(void *context);
 
+/* CLV2-M03 (03-08): a product may own Cluster identity generation without
+ * making the Cluster core depend on a filesystem, Flash SDK or OS RNG.
+ * `incarnation` is application supplied (normally a boot counter); `round`
+ * is monotonically allocated by this Cluster object for each new identity.
+ * The callback must return a non-zero, non-broadcast ID distinct from
+ * `parent_cluster_id` when that parent is non-zero. */
+typedef enum ucn_cluster_id_purpose {
+    UCN_CLUSTER_ID_PURPOSE_ELECTION = 1,
+    UCN_CLUSTER_ID_PURPOSE_RECOVERY = 2,
+    UCN_CLUSTER_ID_PURPOSE_REKEY = 3
+} ucn_cluster_id_purpose_t;
+
+typedef struct ucn_cluster_id_request {
+    ucn_cluster_id_purpose_t purpose;
+    ucn_node_id_t local_node_id;
+    uint32_t parent_cluster_id;
+    uint32_t parent_term;
+    uint32_t incarnation;
+    uint32_t round;
+} ucn_cluster_id_request_t;
+
+typedef ucn_result_t (*ucn_cluster_make_id_fn)(
+    void *context,
+    const ucn_cluster_id_request_t *request,
+    uint32_t *cluster_id);
+
 typedef struct ucn_cluster_config {
     ucn_node_id_t local_node_id;
     bool enabled;
@@ -364,6 +416,13 @@ typedef struct ucn_cluster_config {
      * profile default). */
     uint32_t recovery_head_ttl_ms;
     uint32_t recovery_backoff_max_ms;
+    /* Optional identity provider.  With NULL, UCN uses a deterministic Host
+     * default derived from this request.  Set incarnation from a product's
+     * boot counter/RNG/secure store when distinct IDs across reboot matter;
+     * M04 later makes that value persistence-backed. */
+    ucn_cluster_make_id_fn make_cluster_id;
+    void *cluster_id_context;
+    uint32_t cluster_id_incarnation;
 } ucn_cluster_config_t;
 
 typedef struct ucn_cluster_peer {
@@ -402,6 +461,14 @@ typedef struct ucn_cluster_view {
     uint32_t cluster_id;
     uint32_t term;
     ucn_node_id_t head_node_id;
+    /* Volatile history snapshot for diagnostics and safe rejoin decisions.
+     * It is RAM-only until the M04 persistence provider is enabled. */
+    uint32_t last_cluster_id;
+    uint32_t max_seen_term;
+    ucn_node_id_t last_stable_head;
+    /* Monotonic allocation round for optional Cluster ID generation.  It is
+     * RAM-only until M04 persistence; never reuse within this object. */
+    uint32_t cluster_id_round;
     uint16_t current_head_score;
 } ucn_cluster_view_t;
 
@@ -434,6 +501,15 @@ typedef struct ucn_cluster {
     uint32_t cluster_id;
     uint32_t term;
     ucn_node_id_t head_node_id;
+    /* CLV2-M03 (03-06): volatile safety history intentionally survives
+     * set_detached().  It guards one most-recent stable Cluster domain until
+     * M04 replaces this RAM-only state with a persistence-backed record. */
+    uint32_t last_cluster_id;
+    uint32_t max_seen_term;
+    ucn_node_id_t last_stable_head;
+    /* Monotonic allocation round for optional Cluster ID generation.  It is
+     * RAM-only until M04 persistence; never reuse within this object. */
+    uint32_t cluster_id_round;
     uint16_t current_head_score;
     uint32_t observation_deadline_ms;
     uint32_t role_since_ms;

@@ -117,6 +117,13 @@ ucn_result_t send_message(ucn_cluster_t *cluster,
                           uint32_t term, ucn_node_id_t head_node_id,
                           uint16_t head_score, uint16_t capacity);
 uint32_t next_nonce(ucn_cluster_t *cluster);
+ucn_result_t cluster_serial_next_checked(uint32_t current,
+                                         uint32_t *next);
+ucn_result_t cluster_make_next_id(ucn_cluster_t *cluster,
+                                  ucn_cluster_id_purpose_t purpose,
+                                  uint32_t parent_cluster_id,
+                                  uint32_t parent_term,
+                                  uint32_t *cluster_id);
 void backup_resync(ucn_cluster_t *cluster);
 void assign_backup(ucn_cluster_t *cluster, uint32_t now_ms);
 void queue_backup_assignment_for_member(ucn_cluster_t *cluster,
@@ -129,9 +136,21 @@ ucn_cluster_candidate_t *find_candidate(ucn_cluster_t *cluster,
                                         ucn_node_id_t node_id);
 void set_detached(ucn_cluster_t *cluster, uint32_t now_ms,
                   uint32_t observation_ms);
+void cluster_history_note_stable_epoch(ucn_cluster_t *cluster,
+                                       uint32_t cluster_id,
+                                       uint32_t term,
+                                       ucn_node_id_t head_node_id);
+bool cluster_history_offer_is_stale(const ucn_cluster_t *cluster,
+                                    const ucn_cluster_candidate_t *candidate);
 void consider_head_offer(ucn_cluster_t *cluster,
-                         ucn_cluster_candidate_t *candidate,
-                         uint32_t now_ms);
+                          ucn_cluster_candidate_t *candidate,
+                          uint32_t now_ms);
+bool process_higher_authority(ucn_cluster_t *cluster,
+                               const ucn_cluster_candidate_t *candidate,
+                               uint32_t now_ms);
+bool process_term_conflict(ucn_cluster_t *cluster,
+                           const ucn_cluster_candidate_t *candidate,
+                           uint32_t now_ms);
 
 /* == Backup/Takeover module boundary (02-05, this OP) ==
  * ucn_cluster_backup.c owns the Backup selection / assignment / snapshot /
@@ -178,13 +197,13 @@ ucn_result_t handle_head_takeover(ucn_cluster_t *cluster,
                                   ucn_node_id_t source,
                                   const ucn_cluster_message_t *message,
                                   uint32_t now_ms);
-void complete_takeover(ucn_cluster_t *cluster, uint32_t now_ms);
+ucn_result_t complete_takeover(ucn_cluster_t *cluster, uint32_t now_ms);
 void start_takeover(ucn_cluster_t *cluster, uint32_t now_ms);
 void start_backup_assignment_cycle(ucn_cluster_t *cluster, uint32_t now_ms);
 void send_backup_assignment_step(ucn_cluster_t *cluster, uint32_t now_ms);
 void send_backup_heartbeat(ucn_cluster_t *cluster, uint32_t now_ms);
-void send_backup_delta_step(ucn_cluster_t *cluster);
-void send_backup_snapshot_step(ucn_cluster_t *cluster);
+ucn_result_t send_backup_delta_step(ucn_cluster_t *cluster);
+ucn_result_t send_backup_snapshot_step(ucn_cluster_t *cluster);
 
 /* == Recovery module boundary (02-06, this OP) ==
  * ucn_cluster_recovery.c owns the RECOVERY_HEAD quorum / declaration /
@@ -193,7 +212,8 @@ void send_backup_snapshot_step(ucn_cluster_t *cluster);
 uint32_t compute_recovery_backoff(const ucn_cluster_t *cluster);
 bool recovery_quorum_met(const ucn_cluster_t *cluster);
 void start_recovery_backoff(ucn_cluster_t *cluster, uint32_t now_ms);
-void declare_recovery_head(ucn_cluster_t *cluster, uint32_t now_ms);
+void declare_recovery_head(ucn_cluster_t *cluster, uint32_t recovery_cluster_id,
+                           uint32_t now_ms);
 void stepdown_recovery_head(ucn_cluster_t *cluster, uint32_t now_ms);
 void send_recovery_declare(ucn_cluster_t *cluster);
 ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,

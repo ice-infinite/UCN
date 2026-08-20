@@ -37,6 +37,11 @@ void send_head_stepdown(ucn_cluster_t *cluster);
 ucn_result_t backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms)
 {
     ucn_cluster_phase_t pre_phase;
+    uint32_t next_term;
+
+    if (cluster_serial_next_checked(cluster->term, &next_term) != UCN_OK) {
+        return UCN_ERR_EXHAUSTED;
+    }
 
     /* CLV2-01-04e.7: derive the pre-phase from the PRE-CALL legacy state
      * (never from the shadow mirror) and commit the transition through
@@ -69,7 +74,7 @@ ucn_result_t backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms)
      * site's role write is idempotent with apply_legacy(ELECTION) (kept in
      * original order for the not-yet-migrated callers). */
     cluster->role = UCN_CLUSTER_ROLE_CANDIDATE;
-    cluster->term = cluster->term == UINT32_MAX ? 1U : cluster->term + 1U;
+    cluster->term = next_term;
     cluster->head_node_id = cluster->config.local_node_id;
     cluster->current_head_score = cluster->config.head_score;
     cluster->role_since_ms = now_ms;
@@ -87,9 +92,11 @@ ucn_result_t backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms)
     return UCN_OK;
 }
 
-void begin_ordered_stepdown(ucn_cluster_t *cluster,
-                                    const ucn_cluster_candidate_t *candidate,
-                                    uint32_t now_ms)
+static void begin_ordered_stepdown_with_reason(
+    ucn_cluster_t *cluster,
+    const ucn_cluster_candidate_t *candidate,
+    uint32_t now_ms,
+    ucn_cluster_transition_reason_t reason)
 {
     /* CLV2-01-04d.6 (HEAD_* sources) + CLV2-01-04f (RECOVERY_HEAD offer
      * source, SITE B): a Head source yields through the entry point BEFORE
@@ -111,7 +118,7 @@ void begin_ordered_stepdown(ucn_cluster_t *cluster,
             old_phase == UCN_CLUSTER_PHASE_RECOVERY_HEAD) {
             if (cluster_transition(cluster, old_phase,
                                    UCN_CLUSTER_PHASE_STEPPING_DOWN,
-                                   UCN_CLUSTER_REASON_STEPDOWN_ORDERED,
+                                    reason,
                                    now_ms) != UCN_OK) {
                 /* Fail closed: a rejected transition (shadow mismatch /
                  * illegal pair / pre-mutated phase fields) leaves every
@@ -142,6 +149,14 @@ void begin_ordered_stepdown(ucn_cluster_t *cluster,
     assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
            UCN_CLUSTER_PHASE_STEPPING_DOWN);
 #endif
+}
+
+void begin_ordered_stepdown(ucn_cluster_t *cluster,
+                            const ucn_cluster_candidate_t *candidate,
+                            uint32_t now_ms)
+{
+    begin_ordered_stepdown_with_reason(cluster, candidate, now_ms,
+                                       UCN_CLUSTER_REASON_STEPDOWN_ORDERED);
 }
 
 bool candidate_better(
@@ -221,12 +236,197 @@ static void classify_foreign_cluster_merge(
     (void)now_ms;
 }
 
+/* CLV2-M03 (03-04): all active local roles consume a protected,
+ * same-Cluster, strictly newer stable-Head offer before ordinary RX dispatch.
+ * The Epoch comparator is the only authority classifier here: FOREIGN,
+ * SAME, HIGHER (remote stale) and CONFLICT deliberately fall through to the
+ * normal handler.  CONFLICT is owned by 03-05, never resolved here.
+ *
+ * This remains a Current-FSM migration, not an early implementation of
+ * Target fencing/persistence: HEAD/RECOVERY_HEAD retain the existing ordered
+ * stepdown behavior, while MEMBER/BACKUP start the existing join procedure.
+ * What changes is that all those paths are selected once, at RX priority,
+ * and their Phase transition carries the same HIGHER_AUTHORITY reason. */
+static bool begin_higher_authority_join(
+    ucn_cluster_t *cluster,
+    const ucn_cluster_candidate_t *candidate,
+    uint32_t now_ms)
+{
+    ucn_cluster_phase_t old_phase;
+
+    if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
+        /* TERM_CONFLICT_WAIT is deliberately sticky for same-Term traffic.
+         * A strictly higher same-Cluster Term is the first permitted exit in
+         * this Current-FSM stage; M08 later supplies permanent fencing. */
+        if (cluster_transition(cluster,
+                               UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT,
+                               UCN_CLUSTER_PHASE_JOIN_PENDING,
+                               UCN_CLUSTER_REASON_HIGHER_AUTHORITY,
+                               now_ms) == UCN_OK) {
+            begin_join_prepare_fields(cluster, candidate, now_ms);
+        }
+        return true;
+    }
+    if (cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING) {
+        /* The phase is already JOIN_PENDING.  Retarget its pending epoch
+         * without manufacturing a self-transition. */
+        begin_join(cluster, candidate, now_ms);
+        return true;
+    }
+    if (cluster->role == UCN_CLUSTER_ROLE_STEPPING_DOWN) {
+        /* Duplicate offers for the Head already selected by the ordered
+         * yield must not collapse its grace window.  A strictly newer pending
+         * Term, however, supersedes the old target immediately. */
+        if (candidate->cluster_id == cluster->pending_cluster_id &&
+            candidate->term <= cluster->pending_term) {
+            return true;
+        }
+        /* The old ordered-yield target is no longer authoritative once a
+         * protected newer Term of the same Cluster arrives.  Reuse the
+         * existing STEPPING_DOWN -> JOIN_PENDING edge and replace the pending
+         * epoch immediately instead of waiting for the obsolete deadline. */
+        if (cluster_transition(cluster, UCN_CLUSTER_PHASE_STEPPING_DOWN,
+                               UCN_CLUSTER_PHASE_JOIN_PENDING,
+                               UCN_CLUSTER_REASON_HIGHER_AUTHORITY,
+                               now_ms) == UCN_OK) {
+            begin_join_prepare_fields(cluster, candidate, now_ms);
+        }
+        return true;
+    }
+    if (cluster->role == UCN_CLUSTER_ROLE_MEMBER) {
+        old_phase = cluster_phase_from_legacy_state(cluster, now_ms);
+        if (cluster_transition(cluster, old_phase,
+                               UCN_CLUSTER_PHASE_JOIN_PENDING,
+                               UCN_CLUSTER_REASON_HIGHER_AUTHORITY,
+                               now_ms) == UCN_OK) {
+            begin_join_prepare_fields(cluster, candidate, now_ms);
+        }
+        /* A rejected transition is fail-closed.  It was still the terminal
+         * higher-authority event; normal score routing must not run after it. */
+        return true;
+    }
+    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
+        old_phase = cluster_phase_from_legacy_state(cluster, now_ms);
+        if (cluster_transition(cluster, old_phase,
+                               UCN_CLUSTER_PHASE_JOIN_PENDING,
+                               UCN_CLUSTER_REASON_HIGHER_AUTHORITY,
+                               now_ms) != UCN_OK) {
+            return true;
+        }
+        /* Preserve the existing Backup abandonment ordering: clear the
+         * mirror only after its phase has committed, then seed the pending
+         * target.  M09 later replaces this Current mirror with staging. */
+        cluster->backup_takeover_active = false;
+        backup_clear_sync(cluster, now_ms);
+        begin_join(cluster, candidate, now_ms);
+        return true;
+    }
+    return false;
+}
+
+bool process_term_conflict(
+    ucn_cluster_t *cluster,
+    const ucn_cluster_candidate_t *candidate,
+    uint32_t now_ms)
+{
+    ucn_cluster_epoch_t local_epoch;
+    ucn_cluster_epoch_t remote_epoch;
+    ucn_cluster_phase_t old_phase;
+
+    if (cluster == NULL || candidate == NULL ||
+        candidate->head_node_id == cluster->config.local_node_id) {
+        return false;
+    }
+    local_epoch = ucn_cluster_active_epoch_get(cluster);
+    remote_epoch.cluster_id = candidate->cluster_id;
+    remote_epoch.term = candidate->term;
+    remote_epoch.head_node_id = candidate->head_node_id;
+    if (ucn_cluster_epoch_compare(&local_epoch, &remote_epoch) !=
+        UCN_CLUSTER_EPOCH_RELATION_CONFLICT) {
+        return false;
+    }
+    if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
+        /* Idempotent: additional advertisements from either same-Term Head
+         * cannot re-enable control actions or manufacture transitions. */
+        return true;
+    }
+    old_phase = cluster_phase_from_legacy_state(cluster, now_ms);
+    if (old_phase == UCN_CLUSTER_PHASE_DISABLED ||
+        old_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE ||
+        old_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE ||
+        old_phase == UCN_CLUSTER_PHASE_RECOVERY_ELECTION) {
+        return false;
+    }
+    /* Safety dominates score, Node ID and ordinary lifecycle handlers.  A
+     * rejection remains terminal so no normal handler can continue after a
+     * shadow/legacy mismatch. */
+    (void)cluster_transition(cluster, old_phase,
+                             UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT,
+                             UCN_CLUSTER_REASON_TERM_CONFLICT, now_ms);
+    return true;
+}
+
+bool process_higher_authority(
+    ucn_cluster_t *cluster,
+    const ucn_cluster_candidate_t *candidate,
+    uint32_t now_ms)
+{
+    ucn_cluster_epoch_t local_epoch;
+    ucn_cluster_epoch_t remote_epoch;
+
+    if (cluster == NULL || candidate == NULL ||
+        candidate->head_node_id == cluster->config.local_node_id) {
+        return false;
+    }
+    local_epoch = ucn_cluster_active_epoch_get(cluster);
+    remote_epoch.cluster_id = candidate->cluster_id;
+    remote_epoch.term = candidate->term;
+    remote_epoch.head_node_id = candidate->head_node_id;
+    /* compare(local, remote) == LOWER means exactly that remote has the
+     * higher same-Cluster Term.  Do not spell this as raw term arithmetic:
+     * the comparator cuts FOREIGN domains before any Term comparison. */
+    if (ucn_cluster_epoch_compare(&local_epoch, &remote_epoch) !=
+        UCN_CLUSTER_EPOCH_RELATION_LOWER) {
+        return false;
+    }
+    /* A protected, replay-admitted higher same-Cluster Term is a safety
+     * observation even when the following Current-FSM transition later
+     * rejects on a shadow mismatch.  Keep it before any role-local cleanup
+     * so a subsequent detach cannot accept the older epoch again. */
+    cluster_history_note_stable_epoch(cluster, candidate->cluster_id,
+                                      candidate->term,
+                                      candidate->head_node_id);
+    if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
+        return begin_higher_authority_join(cluster, candidate, now_ms);
+    }
+    if (cluster->role == UCN_CLUSTER_ROLE_HEAD ||
+        cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+        begin_ordered_stepdown_with_reason(
+            cluster, candidate, now_ms,
+            UCN_CLUSTER_REASON_HIGHER_AUTHORITY);
+        return true;
+    }
+    return begin_higher_authority_join(cluster, candidate, now_ms);
+}
+
 void consider_head_offer(
     ucn_cluster_t *cluster,
     ucn_cluster_candidate_t *candidate,
     uint32_t now_ms)
 {
     if (candidate->head_node_id == cluster->config.local_node_id) {
+        return;
+    }
+    if (cluster_history_offer_is_stale(cluster, candidate)) {
+        cluster->stats.stale_messages++;
+        return;
+    }
+    /* RX calls this only after its global pre-dispatch.  Keep the same
+     * terminal gate here as well because the test hook deliberately invokes
+     * this helper directly.  This prevents a second role-local higher-Term
+     * implementation from drifting away from process_higher_authority(). */
+    if (process_term_conflict(cluster, candidate, now_ms) ||
+        process_higher_authority(cluster, candidate, now_ms)) {
         return;
     }
     /* A full Head must keep refreshing existing members.  Capacity zero only
@@ -296,54 +496,6 @@ void consider_head_offer(
                                      cluster->config.head_min_tenure_ms)) {
                 (void)backup_challenge(cluster, now_ms);
             }
-        } else if (candidate->cluster_id == cluster->cluster_id &&
-                   candidate->term > cluster->term) {
-            /* C07.7 P1: only a same-Cluster, legitimately newer-Term Head
-             * interrupts a pending takeover; the Backup abandons it and
-             * joins the newer Head instead of risking split brain.  A
-             * different Cluster's term is NOT comparable (Target §8.3):
-             * cross-Cluster convergence is owned by Head-to-Head Merge,
-             * never by a Backup jumping at a foreign term. */
-            /* CLV2-01-04e.7 (human audit MAJOR 2.B): this is a BACKUP exit
-             * site, NOT a Recovery site.  The higher-Term Head event decides
-             * the BACKUP_SYNCING/READY/TAKEOVER -> JOIN_PENDING transition
-             * (JOIN_INITIATED) - commit it through the single entry point
-             * BEFORE any site write, UNCONDITIONALLY (Shadow-Guard RULE: the
-             * legacy/event decides WHICH transition; cluster_transition()
-             * validates whether the shadow agrees; the caller never uses
-             * shadow_phase to decide whether to SKIP the call).  On rejection
-             * (shadow desync / illegal pair / pre-mutated phase fields) fail
-             * closed: NO site write runs - the takeover stays armed, the
-             * backup identity stays, no join - and a later well-formed offer
-             * may still be accepted.  The pre-phase is derived from the
-             * legacy state (takeover_active -> BACKUP_TAKEOVER, ready ->
-             * BACKUP_READY, else -> BACKUP_SYNCING); the M01.0.2 combo
-             * (takeover_active && backup_syncing) stays expressible and the
-             * late-Type12 case is never rejected for phase reasons. */
-            {
-                const ucn_cluster_phase_t pre_phase =
-                    cluster_phase_from_legacy_state(cluster, now_ms);
-
-                if (cluster_transition(cluster, pre_phase,
-                                       UCN_CLUSTER_PHASE_JOIN_PENDING,
-                                       UCN_CLUSTER_REASON_JOIN_INITIATED,
-                                       now_ms) != UCN_OK) {
-                    return;
-                }
-            }
-            cluster->backup_takeover_active = false;
-            backup_clear_sync(cluster, now_ms);
-            begin_join(cluster, candidate, now_ms);
-#if !defined(NDEBUG)
-            /* CLV2-01-04e.7 post-commit derive assert: after the transition
-             * (apply_legacy wrote role=JOIN_PENDING + recovery_eligible=false
-             * + backoff=0) and every site write (backup_clear_sync()'s
-             * set_detached() rewrote DETACHED, then begin_join() rewrote
-             * JOIN_PENDING - redundant-but-harmless) the legacy state must
-             * still derive JOIN_PENDING, exactly what the shadow committed. */
-            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
-                   UCN_CLUSTER_PHASE_JOIN_PENDING);
-#endif
         }
         return;
     }
@@ -538,8 +690,8 @@ ucn_result_t send_cluster_message(
  * only the compile-time physical table bound applies. */
 
 /* C07.5 RECOVERY_HEAD: a short-lived emergency Head formed only after both
- * the Primary and Backup are lost.  The recovery Cluster ID is the
- * declaring node ID, so it never impersonates the lost Cluster. */
+ * the Primary and Backup are lost.  Its provider-allocated Cluster ID is
+ * fresh, so it never impersonates the lost Cluster. */
 
 
 ucn_cluster_candidate_t *find_candidate(

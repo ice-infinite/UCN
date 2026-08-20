@@ -103,6 +103,8 @@ ucn_cluster_phase_t cluster_phase_from_legacy_state(
         return UCN_CLUSTER_PHASE_STEPPING_DOWN;
     case UCN_CLUSTER_ROLE_RECOVERY_HEAD:
         return UCN_CLUSTER_PHASE_RECOVERY_HEAD;
+    case UCN_CLUSTER_ROLE_TERM_CONFLICT:
+        return UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT;
     default:
         return UCN_CLUSTER_PHASE_DISABLED;
     }
@@ -118,6 +120,13 @@ ucn_cluster_phase_t cluster_phase_from_legacy_state(
 static ucn_cluster_transition_reason_t cluster_reason_from_diff(
     ucn_cluster_phase_t old_phase, ucn_cluster_phase_t new_phase)
 {
+    if (new_phase == UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT) {
+        return UCN_CLUSTER_REASON_TERM_CONFLICT;
+    }
+    if (old_phase == UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT &&
+        new_phase == UCN_CLUSTER_PHASE_JOIN_PENDING) {
+        return UCN_CLUSTER_REASON_HIGHER_AUTHORITY;
+    }
     switch (old_phase) {
     case UCN_CLUSTER_PHASE_JOIN_PENDING:
         if (new_phase == UCN_CLUSTER_PHASE_MEMBER_ACTIVE) {
@@ -457,6 +466,9 @@ void cluster_shadow_sync(ucn_cluster_t *cluster,
 #define CLV2_01_04_UNUSED
 #endif
 
+#define CLUSTER_TERM_CONFLICT_EDGE \
+    (UINT32_C(1) << UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT)
+
 /* =====================================================================
  * CLV2-01-04a.1 Framework Closure: TWO legality tables.
  *
@@ -533,6 +545,10 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
 
     [UCN_CLUSTER_PHASE_ELECTION] =
 
+        /* CLV2-M03 03-05: any active local epoch that sees a same-Term
+         * conflicting Head must stop its election/authority actions. */
+        CLUSTER_TERM_CONFLICT_EDGE |
+
         /* win: complete_election() L4094 (win dispatch L4142); the HEAD
 
          * sub-phase is dispatched from the pre-call backup_* state. */
@@ -548,6 +564,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE),
 
     [UCN_CLUSTER_PHASE_JOIN_PENDING] =
+        CLUSTER_TERM_CONFLICT_EDGE |
         /* exact JOIN_ACCEPT: handle_join_accept() L2239 (transition L2273);
          * apply_legacy writes role + grace=0 (CLV2-01-04b.4) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
@@ -561,6 +578,8 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
 
     [UCN_CLUSTER_PHASE_MEMBER_ACTIVE] =
 
+        CLUSTER_TERM_CONFLICT_EDGE |
+
         /* Head lease expired: ucn_cluster_step_inner() L4899 (grace armed L4935) */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE) |
@@ -573,6 +592,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING),
 
     [UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE] =
+        CLUSTER_TERM_CONFLICT_EDGE |
         /* Head lease renewed: cluster_transition() L2458 via consider_head_offer() L2435
          * refresh (grace=0 site write) / handle_head_takeover() L3504 (grace=0 L3578) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
@@ -590,6 +610,8 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
 
     [UCN_CLUSTER_PHASE_HEAD_NO_BACKUP] =
 
+        CLUSTER_TERM_CONFLICT_EDGE |
+
         /* Backup selected: assign_backup() L2768 (transition 01-04d.1
          * before node_id L2829; apply_legacy arms assign_pending) +
          * start_backup_assignment_cycle() L4241 (idempotent pending) */
@@ -599,6 +621,8 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 
     [UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING] =
+
+        CLUSTER_TERM_CONFLICT_EDGE |
 
         /* assignment sweep done: send_backup_assignment_step() L4369 (transition 01-04d.2 before pending=false) */
 
@@ -611,6 +635,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 
     [UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING] =
+        CLUSTER_TERM_CONFLICT_EDGE |
         /* snapshot READY: handle_backup_ready() L2970 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_STABLE) |
 
@@ -623,6 +648,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 
     [UCN_CLUSTER_PHASE_HEAD_STABLE] =
+        CLUSTER_TERM_CONFLICT_EDGE |
         /* Backup lost: remove_member() L2111 / expire_members() L4783 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
 
@@ -638,6 +664,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
 
     [UCN_CLUSTER_PHASE_BACKUP_SYNCING] =
+        CLUSTER_TERM_CONFLICT_EDGE |
         /* snapshot READY: handle_backup_member_sync() SYNC_END (CLV2-01-04e.2
          * transition before syncing=false/ready=true; line numbers best-effort) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_READY) |
@@ -649,12 +676,14 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) |
         /* score challenge: backup_challenge() L2412 (role=CANDIDATE L2424) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION) |
-        /* newer-Term Head: consider_head_offer() L2435 (takeover=false L2511) + backup_clear_sync() L2736 + begin_join() L2059 */
+        /* newer-Term Head: process_higher_authority() + backup_clear_sync()
+         * + begin_join() (CLV2-M03 03-04 RX pre-dispatch). */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
         /* HEAD_TAKEOVER / recovery: handle_head_takeover() L3504 (role=MEMBER L3571) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
 
     [UCN_CLUSTER_PHASE_BACKUP_READY] =
+        CLUSTER_TERM_CONFLICT_EDGE |
         /* Primary lease lapsed: start_takeover() L3293 (takeover=true L3315) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_TAKEOVER) |
         /* DELTA gap / resync: handle_backup_member_sync() DELTA-gap /
@@ -665,7 +694,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING) |
         /* score challenge: backup_challenge() L2412 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION) |
-        /* newer-Term Head: consider_head_offer() L2435 */
+        /* newer-Term Head: process_higher_authority() (CLV2-M03 03-04). */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
         /* Primary lost / stepdown: HEAD_STEPDOWN -> backup_clear_sync() L2736 -> set_detached() L2006 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
@@ -673,13 +702,14 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
 
     [UCN_CLUSTER_PHASE_BACKUP_TAKEOVER] =
+        CLUSTER_TERM_CONFLICT_EDGE |
         /* majority reached: complete_takeover() L3226 (role=HEAD L3247, node_id=0 L3257) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) |
 
         /* timeout / stepdown: step L5156 -> backup_clear_sync() L2738 -> set_detached() L2008 */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
-        /* newer-Term Head: consider_head_offer() L2435 */
+        /* newer-Term Head: process_higher_authority() (CLV2-M03 03-04). */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
         /* HEAD_TAKEOVER / recovery: handle_head_takeover() L3504 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
@@ -687,6 +717,8 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION),
 
     [UCN_CLUSTER_PHASE_STEPPING_DOWN] =
+
+        CLUSTER_TERM_CONFLICT_EDGE |
 
         /* stepdown deadline: ucn_cluster_step_inner() L4899 (role=JOIN_PENDING L5103) */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING),
@@ -711,6 +743,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE),
 
     [UCN_CLUSTER_PHASE_RECOVERY_HEAD] =
+        CLUSTER_TERM_CONFLICT_EDGE |
         /* TTL expired (cooldown): stepdown_recovery_head() L3621 -> set_detached() L2006 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) |
         /* lost arbitration / HEAD_TAKEOVER: handle_recovery_declare() L3637 /
@@ -718,53 +751,11 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
         /* stable Head reclaims: begin_ordered_stepdown() L2356 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_STEPPING_DOWN),
-};
 
-/* OBSERVED table: DIRECT union the tick-granularity COMPOUND pairs the
- * T-A collector observes.  NOT callable - wiring must realize them via
- * their DIRECT constituent edges in sequence. */
-static const uint32_t CLUSTER_TRANSITION_OBSERVED_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
-    CLV2_01_04_UNUSED = {
-    [UCN_CLUSTER_PHASE_DETACHED_OBSERVE] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_DETACHED_OBSERVE],
-    [UCN_CLUSTER_PHASE_ELECTION] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_ELECTION],
-    [UCN_CLUSTER_PHASE_JOIN_PENDING] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_JOIN_PENDING],
-    [UCN_CLUSTER_PHASE_MEMBER_ACTIVE] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_MEMBER_ACTIVE],
-    [UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE],
-    [UCN_CLUSTER_PHASE_HEAD_NO_BACKUP] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_HEAD_NO_BACKUP],
-    [UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING],
-    [UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING],
-    [UCN_CLUSTER_PHASE_HEAD_STABLE] =
-        /* CLV2-01-04d.7 (ITEM 5): STABLE->ASSIGNING moved to DIRECT (real
-         * site: backup_resync with an armed sweep) - the observed set is
-         * unchanged (the pair stays observed, just classified direct). */
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_HEAD_STABLE],
-    [UCN_CLUSTER_PHASE_BACKUP_SYNCING] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_BACKUP_SYNCING],
-    [UCN_CLUSTER_PHASE_BACKUP_READY] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_BACKUP_READY] |
-        /* compound: takeover started + completed in one tick (T-A, golden t=179) */
-        (UINT32_C(1) << UCN_CLUSTER_PHASE_HEAD_NO_BACKUP),
-    [UCN_CLUSTER_PHASE_BACKUP_TAKEOVER] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_BACKUP_TAKEOVER],
-    [UCN_CLUSTER_PHASE_STEPPING_DOWN] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_STEPPING_DOWN] |
-        /* compounds: deadline -> JOIN_PENDING -> JOIN_ACCEPT / JOIN_REJECT in one tick (T-A) */
-        (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
-        (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE),
-    [UCN_CLUSTER_PHASE_RECOVERY_OBSERVE] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_RECOVERY_OBSERVE],
-    [UCN_CLUSTER_PHASE_RECOVERY_ELECTION] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_RECOVERY_ELECTION],
-    [UCN_CLUSTER_PHASE_RECOVERY_HEAD] =
-        CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_RECOVERY_HEAD],
+    [UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT] =
+        /* Only a proven higher-Term normal Head offer can re-open a join.
+         * M08 later replaces this Current safe wait with permanent fencing. */
+        (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING),
 };
 
 /* Bounds-checked lookup into the DIRECT legality table (single-site
@@ -999,6 +990,24 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
     case UCN_CLUSTER_PHASE_RECOVERY_HEAD:
         cluster->role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
         break;
+    case UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT:
+        /* Preserve the conflicting epoch for comparison and diagnostics, but
+         * revoke all role-driven control activity.  This role has no v3 wire
+         * representation and cannot be reactivated by a same-Term message. */
+        cluster->role = UCN_CLUSTER_ROLE_TERM_CONFLICT;
+        cluster->role_since_ms = now_ms;
+        cluster->next_advertise_ms = 0U;
+        cluster->next_keepalive_ms = 0U;
+        cluster->next_join_retry_ms = 0U;
+        cluster->election_deadline_ms = 0U;
+        cluster->stepdown_deadline_ms = 0U;
+        cluster->head_grace_deadline_ms = 0U;
+        cluster->backup_takeover_active = false;
+        cluster->backup_takeover_announce_active = false;
+        cluster->backup_takeover_announce_remaining = 0U;
+        cluster->recovery_eligible = false;
+        cluster->recovery_backoff_deadline_ms = 0U;
+        break;
     default:
         break;
     }
@@ -1188,10 +1197,11 @@ ucn_cluster_transition_reason_t ucn_cluster_test_reason_from_diff(
     return cluster_reason_from_diff(old_phase, new_phase);
 }
 
-/* CLV2-01-04b NIT-1: test-only view of the PRODUCTION OBSERVED table
- * (CLUSTER_TRANSITION_OBSERVED_ALLOWED = DIRECT union the tick-
- * granularity compounds), so the T-A observed-pairs gate checks the
- * SINGLE production table instead of duplicating it in the tests. */
+/* CLV2-01-04b NIT-1: test-only observed-pair view.  It is the DIRECT
+ * legality table plus the three tick-granularity compound observations that
+ * the T-A collector can see.  Keep this as a function, rather than a static
+ * table initialized from another static table: the latter is accepted by GCC
+ * as an extension but rejected by MSVC as a non-constant initializer. */
 bool ucn_cluster_test_observed_pair_allowed(ucn_cluster_phase_t old_phase,
                                             ucn_cluster_phase_t new_phase)
 {
@@ -1199,9 +1209,17 @@ bool ucn_cluster_test_observed_pair_allowed(ucn_cluster_phase_t old_phase,
         (unsigned int)new_phase >= (unsigned int)UCN_CLUSTER_PHASE_COUNT) {
         return false;
     }
-    return (CLUSTER_TRANSITION_OBSERVED_ALLOWED[old_phase] &
-            (UINT32_C(1) << (unsigned int)new_phase)) != 0U;
+    if ((CLUSTER_TRANSITION_DIRECT_ALLOWED[old_phase] &
+         (UINT32_C(1) << (unsigned int)new_phase)) != 0U) {
+        return true;
+    }
+    return (old_phase == UCN_CLUSTER_PHASE_BACKUP_READY &&
+            new_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP) ||
+           (old_phase == UCN_CLUSTER_PHASE_STEPPING_DOWN &&
+            (new_phase == UCN_CLUSTER_PHASE_MEMBER_ACTIVE ||
+             new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE));
 }
 #endif
 
 #undef CLV2_01_04_UNUSED
+#undef CLUSTER_TERM_CONFLICT_EDGE

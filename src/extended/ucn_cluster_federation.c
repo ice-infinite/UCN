@@ -934,16 +934,35 @@ static ucn_result_t cache_locator(ucn_cluster_federation_t *federation,
                                   const ucn_cluster_locator_t *locator)
 {
     ucn_cluster_locator_t bounded;
-    ucn_cluster_federation_locator_cache_entry_t *cache =
-        find_locator_cache(federation, locator->node_id);
+    ucn_cluster_federation_locator_cache_entry_t *cache;
     ucn_cluster_federation_next_cluster_entry_t *next;
 
-    if (locator == NULL || !locator_is_valid(locator, false)) {
+    if (federation == NULL || locator == NULL ||
+        !locator_is_valid(locator, false)) {
         return UCN_ERR_ARGUMENT;
     }
+    cache = find_locator_cache(federation, locator->node_id);
     bounded = *locator;
     if (bounded.lease_ms > federation->config.directory_lease_ms) {
         bounded.lease_ms = federation->config.directory_lease_ms;
+    }
+    /* A Directory reply is authenticated, but it may still be delayed behind
+     * a later reply for the same target.  While a cache lease is live, only
+     * a strictly newer record in the SAME Cluster identity can replace it.
+     * Terms of distinct Cluster identities are intentionally incomparable;
+     * their handover is accepted after the old cache lease expires. */
+    if (cache != NULL &&
+        !ucn_deadline_expired(federation->now_ms, cache->expires_at_ms)) {
+        bool same_identity =
+            cache->locator.cluster_id == bounded.cluster_id &&
+            cache->locator.head_node_id == bounded.head_node_id;
+
+        if (!same_identity || bounded.term < cache->locator.term ||
+            (bounded.term == cache->locator.term &&
+             bounded.record_nonce <= cache->locator.record_nonce)) {
+            federation->stats.replay_rejected++;
+            return UCN_ERR_REPLAY;
+        }
     }
     if (cache == NULL) {
         cache = allocate_locator_cache(federation);
