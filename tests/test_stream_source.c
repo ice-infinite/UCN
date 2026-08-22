@@ -2,6 +2,7 @@
 
 #include "test_support.h"
 #include "ucn/adapters/ucn_stream_source.h"
+#include "ucn/ucn_cluster_wire_v4.h"
 #include "ucn/ucn_frame.h"
 #include "ucn/ucn_node.h"
 
@@ -22,6 +23,9 @@ typedef struct stream_fake_port {
 
 typedef struct stream_receive_state {
     uint32_t count;
+    uint16_t last_payload_length;
+    bool last_payload_captured;
+    uint8_t last_payload[UCN_CLUSTER_WIRE_MAX_MESSAGE_BYTES];
     uint8_t last_value;
 } stream_receive_state_t;
 
@@ -114,6 +118,14 @@ static void stream_receive(void *context, const ucn_frame_t *frame)
     stream_receive_state_t *state = (stream_receive_state_t *)context;
 
     state->count++;
+    state->last_payload_length = frame->payload_length;
+    state->last_payload_captured =
+        frame->payload_length <= sizeof(state->last_payload) &&
+        (frame->payload_length == 0U || frame->payload != NULL);
+    if (state->last_payload_captured && frame->payload_length != 0U) {
+        (void)memcpy(state->last_payload, frame->payload,
+                     frame->payload_length);
+    }
     state->last_value = frame->payload_length == 0U ? 0U : frame->payload[0];
 }
 
@@ -198,18 +210,21 @@ static ucn_result_t stream_fixture_init(stream_fixture_t *fixture,
         0U, 0U);
 }
 
-static ucn_result_t stream_make_carrier(uint32_t sequence,
-                                        uint8_t value,
-                                        uint8_t *wire,
-                                        size_t wire_capacity,
-                                        size_t *wire_length)
+static ucn_result_t stream_make_carrier_payload(uint32_t sequence,
+                                                const uint8_t *payload,
+                                                size_t payload_length,
+                                                uint8_t *wire,
+                                                size_t wire_capacity,
+                                                size_t *wire_length)
 {
-    const uint8_t payload[] = { value, 0U, (uint8_t)(value ^ UINT8_C(0xA5)) };
     ucn_frame_t frame;
     uint8_t encoded[UCN_MAX_FRAME_BYTES];
     size_t encoded_length = 0U;
     ucn_result_t result;
 
+    if (payload == NULL || payload_length > UINT16_MAX) {
+        return UCN_ERR_ARGUMENT;
+    }
     (void)memset(&frame, 0, sizeof(frame));
     frame.message_type = STREAM_ENDPOINT;
     frame.wire_profile = UCN_WIRE_PROFILE_W0_LOCAL;
@@ -221,7 +236,7 @@ static ucn_result_t stream_make_carrier(uint32_t sequence,
     frame.sequence = sequence;
     frame.session_id = 1U;
     frame.payload = payload;
-    frame.payload_length = (uint16_t)sizeof(payload);
+    frame.payload_length = (uint16_t)payload_length;
     result = ucn_frame_encode(&frame, encoded, sizeof(encoded),
                               &encoded_length);
     if (result != UCN_OK) {
@@ -229,6 +244,18 @@ static ucn_result_t stream_make_carrier(uint32_t sequence,
     }
     return ucn_stream_carrier_encode(encoded, encoded_length, wire,
                                      wire_capacity, wire_length);
+}
+
+static ucn_result_t stream_make_carrier(uint32_t sequence,
+                                        uint8_t value,
+                                        uint8_t *wire,
+                                        size_t wire_capacity,
+                                        size_t *wire_length)
+{
+    const uint8_t payload[] = { value, 0U, (uint8_t)(value ^ UINT8_C(0xA5)) };
+
+    return stream_make_carrier_payload(sequence, payload, sizeof(payload),
+                                       wire, wire_capacity, wire_length);
 }
 
 static int stream_drain(stream_fixture_t *fixture, size_t limit)
@@ -281,6 +308,39 @@ static int test_stream_carrier_encode_contract(void)
                 UCN_OK);
     TEST_ASSERT(wire_length == sizeof(frame) + 2U &&
                 wire[wire_length - 1U] == 0U);
+    return 0;
+}
+
+/* CLV2-05-09: this is a generic Stream carrier regression.  It does not
+ * decode or send a v4 Cluster message through the production Cluster FSM. */
+static int test_stream_cluster_v4_sized_payload_transport(void)
+{
+    stream_fixture_t fixture;
+    uint8_t payload[UCN_CLUSTER_WIRE_MAX_MESSAGE_BYTES];
+    uint8_t wire[UCN_STREAM_CARRIER_MAX_WIRE_BYTES(UCN_MAX_FRAME_BYTES)];
+    size_t index;
+    size_t wire_length = 0U;
+
+    TEST_ASSERT(UCN_CLUSTER_MESSAGE_BYTES ==
+                UCN_CLUSTER_WIRE_V3_MESSAGE_BYTES);
+    TEST_ASSERT(UCN_CLUSTER_WIRE_MAX_MESSAGE_BYTES ==
+                UCN_CLUSTER_WIRE_V4_MESSAGE_BYTES);
+    for (index = 0U; index < sizeof(payload); ++index) {
+        payload[index] = (uint8_t)(UINT8_C(0x90) + (uint8_t)index);
+    }
+    TEST_ASSERT(stream_fixture_init(&fixture, 8U, 4U) == UCN_OK);
+    TEST_ASSERT(stream_make_carrier_payload(
+                    91U, payload, sizeof(payload), wire, sizeof(wire),
+                    &wire_length) == UCN_OK);
+    TEST_ASSERT(ucn_stream_source_write(&fixture.source, wire, wire_length) ==
+                UCN_OK);
+    TEST_ASSERT(stream_drain(&fixture, 8U) == 0);
+    TEST_ASSERT(fixture.received.count == 1U &&
+                fixture.received.last_payload_length == sizeof(payload) &&
+                fixture.received.last_payload_captured &&
+                memcmp(fixture.received.last_payload, payload,
+                       sizeof(payload)) == 0 &&
+                fixture.received.last_value == payload[0]);
     return 0;
 }
 
@@ -517,6 +577,7 @@ int test_stream_source(void)
     TEST_ASSERT(ucn_stream_source_reset(&source) == UCN_ERR_ARGUMENT);
     TEST_ASSERT(ucn_stream_source_get_stats(&source) == NULL);
     TEST_ASSERT(test_stream_carrier_encode_contract() == 0);
+    TEST_ASSERT(test_stream_cluster_v4_sized_payload_transport() == 0);
     TEST_ASSERT(test_stream_split_wrap_isr_and_reset() == 0);
     TEST_ASSERT(test_stream_backpressure_and_multi_source() == 0);
     TEST_ASSERT(test_stream_error_recovery_and_gap_order() == 0);

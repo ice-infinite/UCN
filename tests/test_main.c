@@ -64,6 +64,8 @@ int main(void)
     result |= test_node_storage_header();
     result |= test_transfer();
     result |= test_cluster();
+    result |= test_cluster_wire_v4_encoder_closed();
+    result |= test_cluster_persist();
     result |= test_cluster_fuzz();
     result |= test_cluster_federation();
 

@@ -1,8 +1,21 @@
 #include <stddef.h>
+#include <string.h>
 
 #include "ucn/ucn_adapter.h"
 #include "ucn/ucn_cluster.h"
+#include "ucn/ucn_cluster_config_state.h"
+#include "ucn/ucn_cluster_config_tx.h"
+#include "ucn/ucn_cluster_config_proposal.h"
+#include "ucn/ucn_cluster_config_quorum.h"
+#include "ucn/ucn_cluster_config_store.h"
+#include "ucn/ucn_cluster_config_persistence.h"
+#include "ucn/ucn_cluster_config_backup.h"
+#include "ucn/ucn_cluster_config_joint.h"
+#include "ucn/ucn_cluster_authority.h"
+#include "ucn/ucn_cluster_membership.h"
+#include "ucn/ucn_cluster_wire_v4.h"
 #include "ucn/ucn_cluster_federation.h"
+#include "ucn/ucn_cluster_persist.h"
 #include "ucn/ucn_node.h"
 #include "ucn/ucn_path.h"
 #include "ucn/ucn_standard_adapter.h"
@@ -29,6 +42,49 @@ static uint32_t public_header_now_ms(void *context)
     return 0U;
 }
 
+static ucn_result_t public_persist_load(
+    void *context,
+    ucn_cluster_persist_load_result_t *result)
+{
+    (void)context;
+    if (result == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    (void)memset(result, 0, sizeof(*result));
+    result->state = UCN_CLUSTER_PERSIST_LOAD_FACTORY_EMPTY;
+    return UCN_OK;
+}
+
+static ucn_cluster_persist_completion_t public_persist_submit(
+    void *context,
+    const ucn_cluster_persist_request_t *request)
+{
+    ucn_cluster_persist_completion_t completion;
+
+    (void)context;
+    completion.state = request == NULL ? UCN_CLUSTER_PERSIST_FAILED :
+                                        UCN_CLUSTER_PERSIST_COMMITTED;
+    completion.token = UCN_CLUSTER_PERSIST_TOKEN_NONE;
+    completion.failure = request == NULL ? UCN_ERR_ARGUMENT : UCN_OK;
+    return completion;
+}
+
+static ucn_cluster_persist_completion_t public_persist_poll(
+    void *context,
+    ucn_cluster_persist_token_t token)
+{
+    ucn_cluster_persist_completion_t completion;
+
+    (void)context;
+    completion.state = token == UCN_CLUSTER_PERSIST_TOKEN_NONE ?
+                           UCN_CLUSTER_PERSIST_FAILED :
+                           UCN_CLUSTER_PERSIST_COMMITTED;
+    completion.token = UCN_CLUSTER_PERSIST_TOKEN_NONE;
+    completion.failure = token == UCN_CLUSTER_PERSIST_TOKEN_NONE ?
+                             UCN_ERR_ARGUMENT : UCN_OK;
+    return completion;
+}
+
 int test_public_headers(void)
 {
     ucn_node_t *node = NULL;
@@ -45,6 +101,29 @@ int test_public_headers(void)
         .struct_size = (uint16_t)sizeof(ucn_port_ops_t),
         .api_version = UCN_PORT_OPS_API_VERSION,
         .now_ms = public_header_now_ms
+    };
+    const ucn_cluster_persist_provider_t persist_provider_v1 = {
+        .struct_size = (uint16_t)sizeof(ucn_cluster_persist_provider_t),
+        .api_version = UCN_CLUSTER_PERSIST_PROVIDER_API_VERSION,
+        .load = public_persist_load,
+        .submit = public_persist_submit,
+        .poll = public_persist_poll
+    };
+    ucn_cluster_persist_request_t persist_request = {
+        .operation_id = 1U,
+        .operation = UCN_CLUSTER_PERSIST_OPERATION_EPOCH_COMMIT,
+        .next_state = {
+            .has_active_epoch = true,
+            .active_epoch = { 1U, 2U, 3U },
+            .has_max_epoch = true,
+            .max_epoch = { 1U, 2U, 3U },
+            .config_transaction = {
+                .phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE
+            },
+            .rekey_transaction = {
+                .phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE
+            }
+        }
     };
     const ucn_transfer_config_t transfer_config_v2 = {
         .node = node,
@@ -67,6 +146,24 @@ int test_public_headers(void)
     ucn_result_t (*path_install_capable_fn)(
         ucn_path_state_t *, const ucn_path_forward_config_t *,
         const ucn_path_capability_t *) = ucn_path_install_capable;
+    bool (*member_record_valid_fn)(const ucn_cluster_member_t *) =
+        ucn_cluster_member_record_is_valid;
+    bool (*member_table_valid_fn)(const ucn_cluster_member_table_t *) =
+        ucn_cluster_member_table_is_valid;
+    size_t (*member_table_count_fn)(const ucn_cluster_member_table_t *) =
+        ucn_cluster_member_table_count;
+    bool (*voter_set_valid_fn)(const ucn_cluster_voter_set_t *) =
+        ucn_cluster_voter_set_is_valid;
+    bool (*voter_set_build_fn)(ucn_cluster_voter_set_t *, uint32_t,
+                               const ucn_node_id_t *, size_t) =
+        ucn_cluster_voter_set_build;
+    bool (*voter_set_contains_fn)(const ucn_cluster_voter_set_t *,
+                                  ucn_node_id_t) = ucn_cluster_voter_set_contains;
+    uint8_t (*voter_set_quorum_fn)(const ucn_cluster_voter_set_t *) =
+        ucn_cluster_voter_set_quorum;
+    bool (*voter_set_bitmap_fn)(const ucn_cluster_voter_set_t *,
+                                ucn_node_id_t, uint64_t *) =
+        ucn_cluster_voter_set_bitmap_for_node;
     ucn_result_t (*bare_metal_init_fn)(
         ucn_bare_metal_port_t *, const ucn_protocol_owner_config_t *) =
         ucn_bare_metal_port_init;
@@ -134,6 +231,9 @@ int test_public_headers(void)
     ucn_result_t (*cluster_member_at_fn)(const ucn_cluster_t *, size_t,
                                          ucn_cluster_member_summary_t *) =
         ucn_cluster_get_member_summary_at;
+    ucn_result_t (*cluster_member_capacity_fn)(
+        const ucn_cluster_t *, ucn_cluster_member_capacity_view_t *) =
+        ucn_cluster_get_member_capacity_view;
     size_t (*federation_size_fn)(const ucn_cluster_federation_message_t *) =
         ucn_cluster_federation_message_encoded_size;
     ucn_result_t (*federation_decode_fn)(
@@ -163,9 +263,21 @@ int test_public_headers(void)
         ucn_cluster_federation_find_next_cluster;
     const ucn_cluster_federation_stats_t *(*federation_stats_fn)(
         const ucn_cluster_federation_t *) = ucn_cluster_federation_get_stats;
+    ucn_cluster_persist_completion_t persist_completion;
+
+    if (ucn_cluster_persist_request_finalize(&persist_request) != UCN_OK) {
+        return 1;
+    }
+    persist_completion = persist_provider_v1.submit(
+        persist_provider_v1.context, &persist_request);
 
     return node == NULL && step_fn != NULL && stats_fn != NULL && preset_fn != NULL &&
            isr_enqueue_fn != NULL && path_install_capable_fn != NULL &&
+           member_record_valid_fn != NULL && member_table_valid_fn != NULL &&
+           member_table_count_fn != NULL &&
+           voter_set_valid_fn != NULL && voter_set_build_fn != NULL &&
+           voter_set_contains_fn != NULL && voter_set_quorum_fn != NULL &&
+           voter_set_bitmap_fn != NULL &&
            bare_metal_init_fn != NULL && freertos_init_fn != NULL &&
            zephyr_init_fn != NULL && nuttx_init_fn != NULL &&
            rtthread_init_fn != NULL && host_fake_init_fn != NULL &&
@@ -182,13 +294,30 @@ int test_public_headers(void)
             neighbor_summary_fn != NULL && cluster_init_fn != NULL &&
             cluster_step_fn != NULL && cluster_score_fn != NULL &&
              cluster_view_fn != NULL && cluster_members_fn != NULL &&
-             cluster_member_at_fn != NULL && federation_size_fn != NULL &&
+             cluster_member_at_fn != NULL && cluster_member_capacity_fn != NULL &&
+             federation_size_fn != NULL &&
              federation_decode_fn != NULL && federation_init_fn != NULL &&
              federation_receive_fn != NULL && federation_step_fn != NULL &&
              federation_query_fn != NULL && federation_send_fn != NULL &&
-             federation_find_fn != NULL &&
-             federation_next_fn != NULL && federation_stats_fn != NULL &&
+            federation_find_fn != NULL &&
+            federation_next_fn != NULL && federation_stats_fn != NULL &&
             ucn_port_ops_is_compatible(&port_ops_v2) &&
+            ucn_cluster_persist_provider_is_compatible(&persist_provider_v1) &&
+            ucn_cluster_persist_provider_supports_async(&persist_provider_v1) &&
+            ucn_cluster_persist_completion_is_valid(&persist_completion) &&
+            ucn_cluster_persist_request_is_valid(&persist_request) &&
+            public_persist_load(NULL, NULL) == UCN_ERR_ARGUMENT &&
+            ucn_cluster_persist_completion_is_valid(
+                &(ucn_cluster_persist_completion_t){
+                    UCN_CLUSTER_PERSIST_PENDING, 1U, UCN_OK }) &&
+            ucn_cluster_persist_completion_is_valid(
+                &(ucn_cluster_persist_completion_t){
+                    UCN_CLUSTER_PERSIST_FAILED, 0U, UCN_ERR_STATE }) &&
+            !ucn_cluster_persist_completion_is_valid(
+                &(ucn_cluster_persist_completion_t){
+                    UCN_CLUSTER_PERSIST_PENDING, 0U, UCN_OK }) &&
+            !ucn_cluster_persist_completion_is_valid(
+                &(ucn_cluster_persist_completion_t){ 0 }) &&
             transfer_config_v2.max_retries == 3U &&
             transfer_config_v2.ack_timeout_ms == UINT32_C(100) &&
             transfer_config_v2.fallback_rx_handler == NULL &&
@@ -205,7 +334,11 @@ int test_public_headers(void)
             legacy_path.egress_link == &legacy_link &&
             legacy_path.expires_at_ms == UINT32_C(1000) &&
             path_install_capable_fn(NULL, NULL, &capability) == UCN_ERR_ARGUMENT &&
+            !member_record_valid_fn(NULL) &&
+            !member_table_valid_fn(NULL) && member_table_count_fn(NULL) == 0U &&
+            !voter_set_valid_fn(NULL) && voter_set_quorum_fn(NULL) == 0U &&
             cluster_member_at_fn(NULL, 0U, NULL) == UCN_ERR_ARGUMENT &&
+            cluster_member_capacity_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&
             federation_init_fn(NULL, NULL) == UCN_ERR_ARGUMENT &&
             federation_receive_fn(NULL, 1U, false, NULL, 0U) == UCN_ERR_ARGUMENT &&
             federation_step_fn(NULL) == UCN_ERR_ARGUMENT &&

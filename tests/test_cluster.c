@@ -6,6 +6,9 @@
 #include "cluster_test_fixture.h"
 #include "ucn/ucn_cluster.h"
 #include "ucn/ucn_cluster_epoch.h"
+#include "ucn/ucn_cluster_persist.h"
+
+#include "ucn_cluster_internal.h"
 
 #define CLUSTER_TEST_NODES ((size_t)4U)
 #define CLUSTER_TEST_QUEUE ((size_t)512U)
@@ -45,6 +48,75 @@ typedef struct cluster_test_id_provider {
     size_t count;
     ucn_result_t result;
 } cluster_test_id_provider_t;
+
+typedef struct cluster_test_persistence_probe {
+    uint32_t load_calls;
+    uint32_t submit_calls;
+    ucn_result_t load_result;
+    ucn_cluster_persist_load_result_t loaded;
+} cluster_test_persistence_probe_t;
+
+static ucn_result_t cluster_test_persist_load(
+    void *context,
+    ucn_cluster_persist_load_result_t *result)
+{
+    cluster_test_persistence_probe_t *probe =
+        (cluster_test_persistence_probe_t *)context;
+
+    if (probe == NULL || result == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    probe->load_calls++;
+    if (probe->load_result != UCN_OK) {
+        return probe->load_result;
+    }
+    *result = probe->loaded;
+    return UCN_OK;
+}
+
+static ucn_cluster_persist_completion_t cluster_test_persist_submit(
+    void *context,
+    const ucn_cluster_persist_request_t *request)
+{
+    cluster_test_persistence_probe_t *probe =
+        (cluster_test_persistence_probe_t *)context;
+    ucn_cluster_persist_completion_t completion;
+
+    completion.state = request == NULL || probe == NULL ||
+                       !ucn_cluster_persist_request_is_valid(request) ?
+                           UCN_CLUSTER_PERSIST_FAILED :
+                           UCN_CLUSTER_PERSIST_COMMITTED;
+    completion.token = UCN_CLUSTER_PERSIST_TOKEN_NONE;
+    completion.failure = completion.state == UCN_CLUSTER_PERSIST_FAILED ?
+                             UCN_ERR_ARGUMENT : UCN_OK;
+    if (completion.state == UCN_CLUSTER_PERSIST_COMMITTED) {
+        probe->submit_calls++;
+        probe->loaded.state = UCN_CLUSTER_PERSIST_LOAD_READY;
+        probe->loaded.snapshot = request->next_state;
+    }
+    return completion;
+}
+
+static void cluster_test_persist_set_factory(
+    cluster_test_persistence_probe_t *probe)
+{
+    (void)memset(&probe->loaded, 0, sizeof(probe->loaded));
+    probe->load_result = UCN_OK;
+    probe->loaded.state = UCN_CLUSTER_PERSIST_LOAD_FACTORY_EMPTY;
+}
+
+static bool cluster_test_bytes_are_zero(const void *input, size_t length)
+{
+    const uint8_t *bytes = (const uint8_t *)input;
+    size_t index;
+
+    for (index = 0U; index < length; ++index) {
+        if (bytes[index] != 0U) {
+            return false;
+        }
+    }
+    return true;
+}
 
 static ucn_result_t cluster_test_make_id(
     void *context,
@@ -914,6 +986,7 @@ static int cluster_test_network_init(
         (void)memset(&config, 0, sizeof(config));
         config.local_node_id = node->node_id;
         config.enabled = true;
+        config.persistence_mode = UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
         config.head_capable = index < 2U;
         config.require_protected_control = true;
         config.head_score = scores[index];
@@ -1211,10 +1284,10 @@ static int cluster_test_takeover_self_vote(void)
     backup->cluster.backup_generation = 1U;
     backup->cluster.backup_ready = true;
     /* Mirror: Backup itself + one member. */
-    backup->cluster.members[0].occupied = true;
-    backup->cluster.members[0].node_id = backup->node_id;
-    backup->cluster.members[1].occupied = true;
-    backup->cluster.members[1].node_id = member->node_id;
+    backup->cluster.primary_members.slots[0].occupied = true;
+    backup->cluster.primary_members.slots[0].node_id = backup->node_id;
+    backup->cluster.primary_members.slots[1].occupied = true;
+    backup->cluster.primary_members.slots[1].node_id = member->node_id;
     backup->cluster.backup_primary_deadline_ms = 1U;
     backup->cluster.backup_missed_heartbeats = UCN_CLUSTER_BACKUP_MISS_LIMIT;
     backup->cluster.backup_primary_lease_deadline_ms = 1U;
@@ -1786,10 +1859,10 @@ static int cluster_test_backup_reject_switches_candidate(void)
     head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
     head->cluster.shadow_transition_count = 0U;
     /* Mirror: node2 (rejected, score 3000) and node3 (score 2000). */
-    head->cluster.members[0].occupied = true;
-    head->cluster.members[0].node_id = rejected->node_id;
-    head->cluster.members[1].occupied = true;
-    head->cluster.members[1].node_id = network.nodes[2].node_id;
+    head->cluster.primary_members.slots[0].occupied = true;
+    head->cluster.primary_members.slots[0].node_id = rejected->node_id;
+    head->cluster.primary_members.slots[1].occupied = true;
+    head->cluster.primary_members.slots[1].node_id = network.nodes[2].node_id;
     /* Both are head-capable candidates with advertisements observed. */
     head->cluster.candidates[0].occupied = true;
     head->cluster.candidates[0].head_node_id = rejected->node_id;
@@ -2066,8 +2139,8 @@ static int cluster_test_backup_assign_transition(void)
     node->cluster.head_node_id = network.nodes[0].node_id;
     node->cluster.config.head_capable = true;
     node->cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
-    c->members[0].occupied = true; /* stale mirror must be cleared */
-    c->members[0].node_id = 3U;
+    c->primary_members.slots[0].occupied = true; /* stale mirror must be cleared */
+    c->primary_members.slots[0].node_id = 3U;
     TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
                 UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
     TEST_ASSERT(ucn_cluster_receive(c, network.nodes[0].node_id, true,
@@ -2084,7 +2157,7 @@ static int cluster_test_backup_assign_transition(void)
     TEST_ASSERT(c->backup_primary_deadline_ms != 0U);
     TEST_ASSERT(c->backup_primary_lease_deadline_ms != 0U);
     TEST_ASSERT(c->backup_missed_heartbeats == 0U);
-    TEST_ASSERT(c->members[0].occupied == false); /* cleared */
+    TEST_ASSERT(c->primary_members.slots[0].occupied == false); /* cleared */
     TEST_ASSERT(c->known_backup_node_id == node->node_id);
     TEST_ASSERT(c->known_backup_generation == 1U);
     TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
@@ -2548,9 +2621,9 @@ static int cluster_test_backup_stepdown_shadow_transition(void)
     c->known_backup_generation = 7U;
     c->recovery_eligible = false;
     c->last_stepdown_nonce = 0U;
-    (void)memset(c->members, 0, sizeof(c->members));
-    c->members[0].occupied = true;
-    c->members[0].node_id = 9U;
+    (void)memset(c->primary_members.slots, 0, sizeof(c->primary_members.slots));
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = 9U;
     TEST_ASSERT(test_legacy_state_valid(c) == true);
     TEST_ASSERT(test_derive_phase(c, network.now_ms) ==
                 UCN_CLUSTER_PHASE_BACKUP_READY);
@@ -2579,7 +2652,7 @@ static int cluster_test_backup_stepdown_shadow_transition(void)
     TEST_ASSERT(c->membership_sequence == 0U);
     TEST_ASSERT(c->backup_primary_deadline_ms == 0U);
     TEST_ASSERT(c->backup_missed_heartbeats == 0U);
-    TEST_ASSERT(c->members[0].occupied == false);
+    TEST_ASSERT(c->primary_members.slots[0].occupied == false);
     TEST_ASSERT(c->known_backup_node_id == 0U);
     TEST_ASSERT(c->known_backup_generation == 0U);
     TEST_ASSERT(c->cluster_id == 0U);
@@ -2718,9 +2791,9 @@ static int cluster_test_backup_stepdown_shadow_transition(void)
     c->known_backup_generation = 7U;
     c->recovery_eligible = false;
     c->last_stepdown_nonce = 3U;
-    (void)memset(c->members, 0, sizeof(c->members));
-    c->members[0].occupied = true;
-    c->members[0].node_id = 9U;
+    (void)memset(c->primary_members.slots, 0, sizeof(c->primary_members.slots));
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = 9U;
     ucn_cluster_test_transition_asserts_set(false); /* survive the knob assert */
     {
         uint32_t before_nonce = c->last_stepdown_nonce;
@@ -2765,7 +2838,7 @@ static int cluster_test_backup_stepdown_shadow_transition(void)
         TEST_ASSERT(c->cluster_id == before_cid);
         TEST_ASSERT(c->term == before_term);
         TEST_ASSERT(c->head_node_id == before_head);
-        TEST_ASSERT(c->members[0].occupied == true);
+        TEST_ASSERT(c->primary_members.slots[0].occupied == true);
         /* The phase did NOT migrate: the end-of-RX shadow sync re-aligns
          * the mirror to the UNCHANGED legacy (derive==BACKUP_READY) - it
          * never advanced to DETACHED_OBSERVE through the entry point. */
@@ -3303,7 +3376,7 @@ static int cluster_test_phase_mapping_static(void)
     ucn_cluster_config_t config;
     const uint32_t now = 1000U;
 
-    TEST_ASSERT(UCN_CLUSTER_PHASE_COUNT == 18);
+    TEST_ASSERT(UCN_CLUSTER_PHASE_COUNT == 21);
     TEST_ASSERT(UCN_CLUSTER_REASON_COUNT == 32);
     TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
     c = &network.nodes[0].cluster;
@@ -3733,6 +3806,7 @@ static int cluster_test_timing_profiles(void)
     (void)memset(&config, 0, sizeof(config));
     config.local_node_id = node.node_id;
     config.enabled = true;
+    config.persistence_mode = UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
     config.head_capable = true;
     config.head_score = 9000U;
     config.member_capacity = 1U;
@@ -3749,6 +3823,134 @@ static int cluster_test_timing_profiles(void)
     config.member_capacity = 1U;
     config.keepalive_interval_ms = config.lease_ms;
     TEST_ASSERT(ucn_cluster_init(&node.cluster, &config) == UCN_ERR_CONFIG);
+    return 0;
+}
+
+/* CLV2-M04 (04-03/04-04): configuration is fail-closed by default and a
+ * REQUIRED Provider loads before Cluster state exists.  The test deliberately
+ * stops before any promise-bearing FSM transition. */
+static int cluster_test_persistence_init_restore(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t node;
+    cluster_test_persistence_probe_t probe;
+    ucn_cluster_config_t config;
+    ucn_cluster_persist_provider_t provider;
+    ucn_cluster_view_t view;
+    const ucn_cluster_stats_t *stats;
+
+    (void)memset(&network, 0, sizeof(network));
+    (void)memset(&node, 0, sizeof(node));
+    (void)memset(&probe, 0, sizeof(probe));
+    cluster_test_persist_set_factory(&probe);
+    node.network = &network;
+    node.node_id = 1U;
+    node.alive = true;
+
+    (void)memset(&config, 0, sizeof(config));
+    config.local_node_id = node.node_id;
+    config.enabled = true;
+    config.head_capable = false;
+    config.now_ms = cluster_test_now;
+    config.now_context = &node;
+    config.send = cluster_test_send;
+    config.send_context = &node;
+
+    /* The zero/default mode is REQUIRED, so legacy no-provider setup cannot
+     * silently operate as a reboot-safe Cluster. */
+    TEST_ASSERT(ucn_cluster_init(&node.cluster, &config) == UCN_ERR_CONFIG);
+    config.persistence_mode = (ucn_cluster_persistence_mode_t)99;
+    TEST_ASSERT(ucn_cluster_init(&node.cluster, &config) == UCN_ERR_CONFIG);
+
+    config.persistence_mode = UCN_CLUSTER_PERSISTENCE_REQUIRED;
+    (void)memset(&provider, 0, sizeof(provider));
+    config.persistence_provider = &provider;
+    TEST_ASSERT(ucn_cluster_init(&node.cluster, &config) == UCN_ERR_CONFIG);
+
+    provider.struct_size = (uint16_t)sizeof(provider);
+    provider.api_version = UCN_CLUSTER_PERSIST_PROVIDER_API_VERSION;
+    provider.load = cluster_test_persist_load;
+    provider.submit = cluster_test_persist_submit;
+    provider.context = &probe;
+    TEST_ASSERT(ucn_cluster_init(&node.cluster, &config) == UCN_OK);
+    TEST_ASSERT(probe.load_calls == 3U && probe.submit_calls == 1U);
+    TEST_ASSERT(network.queue_count == 0U);
+    TEST_ASSERT(ucn_cluster_get_view(&node.cluster, &view) == UCN_OK);
+    TEST_ASSERT(view.persistence_mode == UCN_CLUSTER_PERSISTENCE_REQUIRED);
+    TEST_ASSERT(view.persistence_restore_state ==
+                UCN_CLUSTER_PERSISTENCE_RESTORE_FACTORY_EMPTY);
+    stats = ucn_cluster_get_stats(&node.cluster);
+    TEST_ASSERT(stats != NULL &&
+                stats->persistence_mode == UCN_CLUSTER_PERSISTENCE_REQUIRED &&
+                stats->persistence_restore_state ==
+                    UCN_CLUSTER_PERSISTENCE_RESTORE_FACTORY_EMPTY);
+
+    /* A READY record restores only the existing Current-FSM safety inputs,
+     * including its three-field vote replay key (not the full persisted
+     * VoteId). Config/Rekey/Tombstone remain validated Provider authority
+     * until their later owners attach, so this init cannot create an outward
+     * promise. */
+    (void)memset(&probe.loaded, 0, sizeof(probe.loaded));
+    probe.load_result = UCN_OK;
+    probe.loaded.state = UCN_CLUSTER_PERSIST_LOAD_READY;
+    ucn_cluster_persist_state_init_empty(&probe.loaded.snapshot);
+    probe.loaded.snapshot.has_active_epoch = true;
+    probe.loaded.snapshot.active_epoch.cluster_id = 7U;
+    probe.loaded.snapshot.active_epoch.term = 9U;
+    probe.loaded.snapshot.active_epoch.head_node_id = 5U;
+    probe.loaded.snapshot.has_max_epoch = true;
+    probe.loaded.snapshot.max_epoch = probe.loaded.snapshot.active_epoch;
+    probe.loaded.snapshot.last_vote.valid = true;
+    probe.loaded.snapshot.last_vote.epoch = probe.loaded.snapshot.active_epoch;
+    probe.loaded.snapshot.last_vote.voted_for_node_id = 6U;
+    probe.loaded.snapshot.last_vote.backup_generation = 2U;
+    probe.loaded.snapshot.boot_incarnation = 11U;
+    config.cluster_id_incarnation = 3U;
+    TEST_ASSERT(ucn_cluster_init(&node.cluster, &config) == UCN_OK);
+    TEST_ASSERT(probe.load_calls == 6U && probe.submit_calls == 2U &&
+                network.queue_count == 0U);
+    TEST_ASSERT(node.cluster.role == UCN_CLUSTER_ROLE_DETACHED);
+    TEST_ASSERT(node.cluster.cluster_id == 0U && node.cluster.term == 0U);
+    TEST_ASSERT(node.cluster.last_cluster_id == 7U &&
+                node.cluster.max_seen_term == 9U &&
+                node.cluster.last_stable_head == 5U);
+    TEST_ASSERT(node.cluster.member_voted_cluster_id == 7U &&
+                node.cluster.member_voted_term == 9U &&
+                node.cluster.member_voted_generation == 2U);
+    TEST_ASSERT(node.cluster.config.cluster_id_incarnation == 12U);
+    TEST_ASSERT(ucn_cluster_get_view(&node.cluster, &view) == UCN_OK &&
+                view.persistence_restore_state ==
+                    UCN_CLUSTER_PERSISTENCE_RESTORE_READY);
+
+    /* A transport/CRC failure and an impossible success result both leave no
+     * partially initialized Cluster object behind. */
+    probe.load_result = UCN_ERR_CRC;
+    (void)memset(&node.cluster, 0xA5, sizeof(node.cluster));
+    TEST_ASSERT(ucn_cluster_init(&node.cluster, &config) == UCN_ERR_CRC);
+    TEST_ASSERT(cluster_test_bytes_are_zero(&node.cluster,
+                                            sizeof(node.cluster)));
+    probe.load_result = UCN_OK;
+    (void)memset(&probe.loaded, 0, sizeof(probe.loaded));
+    (void)memset(&node.cluster, 0xA5, sizeof(node.cluster));
+    TEST_ASSERT(ucn_cluster_init(&node.cluster, &config) == UCN_ERR_CONFIG);
+    TEST_ASSERT(cluster_test_bytes_are_zero(&node.cluster,
+                                            sizeof(node.cluster)));
+
+    config.persistence_mode = UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
+    config.persistence_provider = NULL;
+    TEST_ASSERT(ucn_cluster_init(&node.cluster, &config) == UCN_OK);
+    TEST_ASSERT(probe.load_calls == 8U);
+    TEST_ASSERT(ucn_cluster_get_view(&node.cluster, &view) == UCN_OK);
+    TEST_ASSERT(view.persistence_mode ==
+                UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST &&
+                view.persistence_restore_state ==
+                    UCN_CLUSTER_PERSISTENCE_RESTORE_NOT_APPLICABLE);
+    stats = ucn_cluster_get_stats(&node.cluster);
+    TEST_ASSERT(stats != NULL &&
+                stats->persistence_mode ==
+                    UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST &&
+                stats->persistence_restore_state ==
+                    UCN_CLUSTER_PERSISTENCE_RESTORE_NOT_APPLICABLE);
     return 0;
 }
 
@@ -4929,8 +5131,8 @@ static int cluster_test_backup_member_sync_detach(void)
     TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
     TEST_ASSERT(cluster_test_stage_backup_syncing(&network) == 0);
     backup = &network.nodes[1];
-    backup->cluster.members[1].occupied = true; /* uncoverable */
-    backup->cluster.members[1].node_id = 5U;
+    backup->cluster.primary_members.slots[1].occupied = true; /* uncoverable */
+    backup->cluster.primary_members.slots[1].node_id = 5U;
     stats_prev = backup->cluster.stats.joins_rejected;
     (void)memset(&message, 0, sizeof(message));
     message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
@@ -4960,8 +5162,8 @@ static int cluster_test_backup_member_sync_detach(void)
     TEST_ASSERT(backup->cluster.backup_generation == 0U);
     TEST_ASSERT(backup->cluster.membership_sequence == 0U);
     TEST_ASSERT(backup->cluster.backup_primary_deadline_ms == 0U);
-    TEST_ASSERT(backup->cluster.members[0].occupied == false);
-    TEST_ASSERT(backup->cluster.members[1].occupied == false);
+    TEST_ASSERT(backup->cluster.primary_members.slots[0].occupied == false);
+    TEST_ASSERT(backup->cluster.primary_members.slots[1].occupied == false);
     TEST_ASSERT(test_derive_phase(&backup->cluster, network.now_ms) ==
                 UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
     network.queue_count = 0U;
@@ -4974,8 +5176,8 @@ static int cluster_test_backup_member_sync_detach(void)
     TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
     TEST_ASSERT(cluster_test_stage_backup_syncing(&network) == 0);
     backup = &network.nodes[1];
-    backup->cluster.members[1].occupied = true; /* uncoverable */
-    backup->cluster.members[1].node_id = 5U;
+    backup->cluster.primary_members.slots[1].occupied = true; /* uncoverable */
+    backup->cluster.primary_members.slots[1].node_id = 5U;
     backup->cluster.shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE; /* desync */
     stats_prev = backup->cluster.stats.joins_rejected;
     ucn_cluster_test_transition_asserts_set(false);
@@ -5004,7 +5206,7 @@ static int cluster_test_backup_member_sync_detach(void)
     TEST_ASSERT(backup->cluster.transition_reason !=
                 UCN_CLUSTER_REASON_PRIMARY_LOST);
     TEST_ASSERT(backup->cluster.shadow_transition_count == 1U); /* re-align mint */
-    TEST_ASSERT(backup->cluster.members[1].occupied == true); /* mirror intact */
+    TEST_ASSERT(backup->cluster.primary_members.slots[1].occupied == true); /* mirror intact */
     TEST_ASSERT(test_derive_phase(&backup->cluster, network.now_ms) ==
                 UCN_CLUSTER_PHASE_BACKUP_SYNCING);
     network.queue_count = 0U;
@@ -5019,8 +5221,8 @@ static int cluster_test_backup_member_sync_detach(void)
         size_t i;
 
         for (i = 0U; i < UCN_CLUSTER_MAX_MEMBERS; ++i) {
-            backup->cluster.members[i].occupied = true;
-            backup->cluster.members[i].node_id = (ucn_node_id_t)(10U + i);
+            backup->cluster.primary_members.slots[i].occupied = true;
+            backup->cluster.primary_members.slots[i].node_id = (ucn_node_id_t)(10U + i);
         }
     }
     stats_prev = backup->cluster.stats.joins_rejected;
@@ -5070,8 +5272,8 @@ static int cluster_test_backup_member_sync_detach(void)
         size_t i;
 
         for (i = 0U; i < UCN_CLUSTER_MAX_MEMBERS; ++i) {
-            backup->cluster.members[i].occupied = true;
-            backup->cluster.members[i].node_id = (ucn_node_id_t)(10U + i);
+            backup->cluster.primary_members.slots[i].occupied = true;
+            backup->cluster.primary_members.slots[i].node_id = (ucn_node_id_t)(10U + i);
         }
     }
     backup->cluster.shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE; /* desync */
@@ -5127,8 +5329,8 @@ static int cluster_test_backup_member_sync_detach(void)
     TEST_ASSERT(test_legacy_state_valid(&backup->cluster) == true);
     TEST_ASSERT(test_derive_phase(&backup->cluster, network.now_ms) ==
                 UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
-    backup->cluster.members[1].occupied = true; /* uncoverable */
-    backup->cluster.members[1].node_id = 5U;
+    backup->cluster.primary_members.slots[1].occupied = true; /* uncoverable */
+    backup->cluster.primary_members.slots[1].node_id = 5U;
     stats_prev = backup->cluster.stats.joins_rejected;
     (void)memset(&message, 0, sizeof(message));
     message.type = UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC;
@@ -5228,6 +5430,7 @@ static int cluster_test_election_join_and_failover(void)
 {
     cluster_test_network_t network;
     uint32_t now_ms;
+    size_t index;
     ucn_cluster_phase_t prev_phase[3] = {
         UCN_CLUSTER_PHASE_DISABLED,
         UCN_CLUSTER_PHASE_DISABLED,
@@ -5296,6 +5499,23 @@ static int cluster_test_election_join_and_failover(void)
     TEST_ASSERT(network.nodes[0].cluster.role == UCN_CLUSTER_ROLE_HEAD);
     TEST_ASSERT(network.nodes[0].cluster.cluster_id == UINT32_C(1));
     TEST_ASSERT(ucn_cluster_member_count(&network.nodes[0].cluster) == 3U);
+    /* CLV2-06-01: the existing v3 Join producer now writes explicit legacy
+     * metadata, but these values remain observational in this milestone. */
+    for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+        const ucn_cluster_member_t *member =
+            &network.nodes[0].cluster.primary_members.slots[index];
+
+        if (!member->occupied) {
+            continue;
+        }
+        TEST_ASSERT(ucn_cluster_member_record_is_valid(member));
+        TEST_ASSERT(member->status == UCN_CLUSTER_MEMBER_STATUS_COMMITTED);
+        TEST_ASSERT(member->voting);
+        TEST_ASSERT(member->wire_version == UCN_CLUSTER_MEMBER_WIRE_VERSION_V3);
+        TEST_ASSERT(member->capabilities == 0U);
+        TEST_ASSERT(member->joined_at_ms <= now_ms);
+        TEST_ASSERT(member->last_keepalive_at_ms <= now_ms);
+    }
     TEST_ASSERT((network.nodes[1].cluster.role == UCN_CLUSTER_ROLE_MEMBER ||
                  network.nodes[1].cluster.role == UCN_CLUSTER_ROLE_BACKUP) &&
                 network.nodes[1].cluster.head_node_id == UINT32_C(1));
@@ -5311,6 +5531,21 @@ static int cluster_test_election_join_and_failover(void)
     TEST_ASSERT(network.nodes[1].cluster.cluster_id == UINT32_C(1));
     TEST_ASSERT(network.nodes[1].cluster.term == 2U);
     TEST_ASSERT(ucn_cluster_member_count(&network.nodes[1].cluster) == 2U);
+    /* The existing Backup snapshot/delta producer uses the same bridge; a
+     * failover must not silently re-create an unclassified mirror record. */
+    for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+        const ucn_cluster_member_t *member =
+            &network.nodes[1].cluster.primary_members.slots[index];
+
+        if (!member->occupied) {
+            continue;
+        }
+        TEST_ASSERT(ucn_cluster_member_record_is_valid(member));
+        TEST_ASSERT(member->status == UCN_CLUSTER_MEMBER_STATUS_COMMITTED);
+        TEST_ASSERT(member->voting);
+        TEST_ASSERT(member->wire_version == UCN_CLUSTER_MEMBER_WIRE_VERSION_V3);
+        TEST_ASSERT(member->capabilities == 0U);
+    }
     TEST_ASSERT(network.nodes[2].cluster.role == UCN_CLUSTER_ROLE_MEMBER &&
                 network.nodes[2].cluster.head_node_id == UINT32_C(2));
     TEST_ASSERT(network.nodes[3].cluster.role == UCN_CLUSTER_ROLE_MEMBER &&
@@ -5744,11 +5979,11 @@ static int cluster_test_takeover_lifecycle_wiring(void)
     c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
     c->shadow_transition_count = 0U;
     /* The mirror contains the Backup itself (C07.7 P1 self-vote path). */
-    (void)memset(c->members, 0, sizeof(c->members));
-    c->members[0].occupied = true;
-    c->members[0].node_id = node->node_id;
-    c->members[1].occupied = true;
-    c->members[1].node_id = 3U;
+    (void)memset(c->primary_members.slots, 0, sizeof(c->primary_members.slots));
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = node->node_id;
+    c->primary_members.slots[1].occupied = true;
+    c->primary_members.slots[1].node_id = 3U;
     TEST_ASSERT(test_derive_phase(c, 100U) == UCN_CLUSTER_PHASE_BACKUP_READY);
     TEST_ASSERT(ucn_cluster_test_start_takeover(c, 100U) == UCN_OK);
     TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
@@ -5828,15 +6063,15 @@ static int cluster_test_takeover_lifecycle_wiring(void)
     c->shadow_phase = UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
     c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
     c->shadow_transition_count = 0U;
-    (void)memset(c->members, 0, sizeof(c->members));
-    c->members[0].occupied = true;
-    c->members[0].node_id = node->node_id; /* self */
-    c->members[0].lease_expires_at_ms = 50U;
-    c->members[0].last_nonce = 11U;
-    c->members[1].occupied = true;
-    c->members[1].node_id = 3U;
-    c->members[1].lease_expires_at_ms = 60U;
-    c->members[1].last_nonce = 22U;
+    (void)memset(c->primary_members.slots, 0, sizeof(c->primary_members.slots));
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = node->node_id; /* self */
+    c->primary_members.slots[0].lease_expires_at_ms = 50U;
+    c->primary_members.slots[0].last_nonce = 11U;
+    c->primary_members.slots[1].occupied = true;
+    c->primary_members.slots[1].node_id = 3U;
+    c->primary_members.slots[1].lease_expires_at_ms = 60U;
+    c->primary_members.slots[1].last_nonce = 22U;
     baseline_won = c->stats.elections_won;
     baseline_switches = c->stats.head_switches;
     TEST_ASSERT(test_derive_phase(c, 100U) == UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
@@ -5864,9 +6099,9 @@ static int cluster_test_takeover_lifecycle_wiring(void)
     /* backup_generation is caller-owned and untouched (review C G1). */
     TEST_ASSERT(c->backup_generation == 7U);
     /* The new Head is not its own member; the peer lease is renewed. */
-    TEST_ASSERT(c->members[0].occupied == false);
-    TEST_ASSERT(c->members[1].occupied == true);
-    TEST_ASSERT(c->members[1].lease_expires_at_ms == ucn_deadline_from_now(
+    TEST_ASSERT(c->primary_members.slots[0].occupied == false);
+    TEST_ASSERT(c->primary_members.slots[1].occupied == true);
+    TEST_ASSERT(c->primary_members.slots[1].lease_expires_at_ms == ucn_deadline_from_now(
                     100U, c->config.lease_ms));
     /* Announce bookkeeping reset to the post-clear mirror count. */
     TEST_ASSERT(c->backup_takeover_announce_cursor == 0U);
@@ -5936,9 +6171,9 @@ static int cluster_test_takeover_lifecycle_wiring(void)
     c->shadow_phase = UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
     c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
     c->shadow_transition_count = 0U;
-    (void)memset(c->members, 0, sizeof(c->members));
-    c->members[0].occupied = true;
-    c->members[0].node_id = 2U;
+    (void)memset(c->primary_members.slots, 0, sizeof(c->primary_members.slots));
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = 2U;
     TEST_ASSERT(test_derive_phase(c, 100U) == UCN_CLUSTER_PHASE_BACKUP_TAKEOVER);
     before = c->stats.head_leases_expired;
     TEST_ASSERT(ucn_cluster_step(c) == UCN_OK);
@@ -5958,7 +6193,7 @@ static int cluster_test_takeover_lifecycle_wiring(void)
     TEST_ASSERT(c->membership_sequence == 0U);
     TEST_ASSERT(c->backup_primary_deadline_ms == 0U);
     TEST_ASSERT(c->backup_missed_heartbeats == 0U);
-    TEST_ASSERT(c->members[0].occupied == false);
+    TEST_ASSERT(c->primary_members.slots[0].occupied == false);
     TEST_ASSERT(c->known_backup_node_id == 0U);
     TEST_ASSERT(c->known_backup_generation == 0U);
     TEST_ASSERT(c->head_grace_deadline_ms == 0U);
@@ -6573,9 +6808,9 @@ static int cluster_test_backup_miss_eligible_wiring(void)
     c->known_backup_generation = 7U;
     c->recovery_eligible = false;
     c->membership_sequence = 4U;
-    (void)memset(c->members, 0, sizeof(c->members));
-    c->members[0].occupied = true;
-    c->members[0].node_id = 2U;
+    (void)memset(c->primary_members.slots, 0, sizeof(c->primary_members.slots));
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = 2U;
     c->shadow_phase = UCN_CLUSTER_PHASE_BACKUP_SYNCING;
     c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
     c->shadow_transition_count = 0U;
@@ -6603,7 +6838,7 @@ static int cluster_test_backup_miss_eligible_wiring(void)
     TEST_ASSERT(c->membership_sequence == 0U);
     TEST_ASSERT(c->backup_primary_deadline_ms == 0U);
     TEST_ASSERT(c->backup_missed_heartbeats == 0U);
-    TEST_ASSERT(c->members[0].occupied == false);
+    TEST_ASSERT(c->primary_members.slots[0].occupied == false);
     TEST_ASSERT(test_derive_phase(c, 100U) ==
                 UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
 
@@ -6627,9 +6862,9 @@ static int cluster_test_backup_miss_eligible_wiring(void)
     c->known_backup_generation = 7U;
     c->recovery_eligible = false;
     c->membership_sequence = 4U;
-    (void)memset(c->members, 0, sizeof(c->members));
-    c->members[0].occupied = true;
-    c->members[0].node_id = 2U;
+    (void)memset(c->primary_members.slots, 0, sizeof(c->primary_members.slots));
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = 2U;
     c->shadow_phase = UCN_CLUSTER_PHASE_BACKUP_READY; /* stale */
     c->transition_reason = UCN_CLUSTER_REASON_INIT;
     c->shadow_transition_count = 0U;
@@ -6656,7 +6891,7 @@ static int cluster_test_backup_miss_eligible_wiring(void)
     TEST_ASSERT(c->backup_primary_deadline_ms == 10U); /* not re-armed */
     TEST_ASSERT(c->known_backup_node_id == 1U);
     TEST_ASSERT(c->known_backup_generation == 7U);
-    TEST_ASSERT(c->members[0].occupied == true);
+    TEST_ASSERT(c->primary_members.slots[0].occupied == true);
     /* ucn_cluster_step syncs only on UCN_OK, so the stale shadow stays
      * untouched (e.5 sibling convention). */
     TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_BACKUP_READY);
@@ -6733,9 +6968,9 @@ static int cluster_test_backup_miss_eligible_wiring(void)
     c->backup_primary_lease_deadline_ms = 10U;      /* expired: §5.1 satisfied */
     c->backup_missed_heartbeats = UCN_CLUSTER_BACKUP_MISS_LIMIT;
     c->recovery_eligible = false;
-    (void)memset(c->members, 0, sizeof(c->members));
-    c->members[0].occupied = true;
-    c->members[0].node_id = c->config.local_node_id; /* self vote */
+    (void)memset(c->primary_members.slots, 0, sizeof(c->primary_members.slots));
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = c->config.local_node_id; /* self vote */
     c->shadow_phase = UCN_CLUSTER_PHASE_BACKUP_READY;
     c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
     c->shadow_transition_count = 0U;
@@ -6829,10 +7064,10 @@ static int cluster_test_stepdown_deadline_wiring(void)
     c->pending_head_score = 9000U;
     c->recovery_eligible = true;         /* apply_legacy must clear it */
     c->recovery_backoff_deadline_ms = 77U; /* apply_legacy must clear it */
-    (void)memset(c->members, 0, sizeof(c->members));
-    c->members[0].occupied = true;
-    c->members[0].node_id = 2U;
-    c->members[0].lease_expires_at_ms = 60U;
+    (void)memset(c->primary_members.slots, 0, sizeof(c->primary_members.slots));
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = 2U;
+    c->primary_members.slots[0].lease_expires_at_ms = 60U;
     c->shadow_phase = UCN_CLUSTER_PHASE_STEPPING_DOWN;
     c->transition_reason = UCN_CLUSTER_REASON_UNKNOWN;
     c->shadow_transition_count = 0U;
@@ -6848,7 +7083,7 @@ static int cluster_test_stepdown_deadline_wiring(void)
     TEST_ASSERT(c->recovery_eligible == false);
     TEST_ASSERT(c->recovery_backoff_deadline_ms == 0U);
     /* Current-order site effects. */
-    TEST_ASSERT(c->members[0].occupied == false); /* clear_members */
+    TEST_ASSERT(c->primary_members.slots[0].occupied == false); /* clear_members */
     TEST_ASSERT(c->role_since_ms == 100U);
     /* The JOIN_PENDING block in the SAME step sees the freshly-armed
      * retry deadline (== now) and immediately sends the first join
@@ -6881,10 +7116,10 @@ static int cluster_test_stepdown_deadline_wiring(void)
     c->pending_head_score = 9000U;
     c->recovery_eligible = true;
     c->recovery_backoff_deadline_ms = 77U;
-    (void)memset(c->members, 0, sizeof(c->members));
-    c->members[0].occupied = true;
-    c->members[0].node_id = 2U;
-    c->members[0].lease_expires_at_ms = 60U;
+    (void)memset(c->primary_members.slots, 0, sizeof(c->primary_members.slots));
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = 2U;
+    c->primary_members.slots[0].lease_expires_at_ms = 60U;
     c->shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_OBSERVE; /* stale */
     c->transition_reason = UCN_CLUSTER_REASON_INIT;
     c->shadow_transition_count = 0U;
@@ -6895,9 +7130,9 @@ static int cluster_test_stepdown_deadline_wiring(void)
     /* ZERO writes: members intact, role stays STEPPING_DOWN, timers and
      * pending identity untouched, apply_legacy never ran. */
     TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_STEPPING_DOWN);
-    TEST_ASSERT(c->members[0].occupied == true);
-    TEST_ASSERT(c->members[0].node_id == 2U);
-    TEST_ASSERT(c->members[0].lease_expires_at_ms == 60U);
+    TEST_ASSERT(c->primary_members.slots[0].occupied == true);
+    TEST_ASSERT(c->primary_members.slots[0].node_id == 2U);
+    TEST_ASSERT(c->primary_members.slots[0].lease_expires_at_ms == 60U);
     TEST_ASSERT(c->stepdown_deadline_ms == 10U); /* not disarmed */
     TEST_ASSERT(c->role_since_ms == 90U);
     TEST_ASSERT(c->next_join_retry_ms == 500U);
@@ -6919,7 +7154,7 @@ static int cluster_test_stepdown_deadline_wiring(void)
     ucn_cluster_test_transition_asserts_set(true);
     TEST_ASSERT(result == UCN_ERR_STATE);
     TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_STEPPING_DOWN);
-    TEST_ASSERT(c->members[0].occupied == true);
+    TEST_ASSERT(c->primary_members.slots[0].occupied == true);
     TEST_ASSERT(c->stepdown_deadline_ms == 10U);
     return 0;
 }
@@ -7144,13 +7379,29 @@ static int cluster_test_recovery_forms_cluster(void)
     TEST_ASSERT(peer->cluster.term == 1U);
     /* The Recovery Head tracks the member. */
     for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
-        if (candidate->cluster.members[index].occupied &&
-            candidate->cluster.members[index].node_id == peer->node_id) {
+        if (candidate->cluster.primary_members.slots[index].occupied &&
+            candidate->cluster.primary_members.slots[index].node_id == peer->node_id) {
             found = true;
             break;
         }
     }
     TEST_ASSERT(found);
+    for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+        const ucn_cluster_member_t *member =
+            &candidate->cluster.primary_members.slots[index];
+
+        if (!member->occupied || member->node_id != peer->node_id) {
+            continue;
+        }
+        TEST_ASSERT(ucn_cluster_member_record_is_valid(member));
+        TEST_ASSERT(member->status == UCN_CLUSTER_MEMBER_STATUS_COMMITTED);
+        TEST_ASSERT(member->voting);
+        TEST_ASSERT(member->wire_version == UCN_CLUSTER_MEMBER_WIRE_VERSION_V3);
+        TEST_ASSERT(member->capabilities == 0U);
+        TEST_ASSERT(member->joined_at_ms <= now_ms);
+        TEST_ASSERT(member->last_keepalive_at_ms <= now_ms);
+        break;
+    }
     /* Lease keeps the member attached across the Recovery Head's
      * periodic advertisement. */
     for (now_ms = 41U; now_ms <= 80U; ++now_ms) {
@@ -7976,8 +8227,8 @@ static int cluster_test_recovery_declare_wiring(void)
         bool found = false;
 
         for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
-            if (c->members[index].occupied &&
-                c->members[index].node_id == 4U) {
+            if (c->primary_members.slots[index].occupied &&
+                c->primary_members.slots[index].node_id == 4U) {
                 found = true;
                 break;
             }
@@ -8934,8 +9185,8 @@ static int cluster_test_serial_exhaustion_fails_closed(void)
     cluster->backup_generation = UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD;
     cluster->shadow_phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster->transition_reason = UCN_CLUSTER_REASON_INIT;
-    cluster->members[0].occupied = true;
-    cluster->members[0].node_id = network.nodes[1].node_id;
+    cluster->primary_members.slots[0].occupied = true;
+    cluster->primary_members.slots[0].node_id = network.nodes[1].node_id;
     cluster->candidates[0].occupied = true;
     cluster->candidates[0].head_node_id = network.nodes[1].node_id;
     cluster->candidates[0].head_score = 7000U;
@@ -8965,9 +9216,9 @@ static int cluster_test_serial_exhaustion_fails_closed(void)
     cluster->next_backup_delta_ms = 1U;
     cluster->shadow_phase = UCN_CLUSTER_PHASE_HEAD_STABLE;
     cluster->transition_reason = UCN_CLUSTER_REASON_INIT;
-    cluster->members[0].occupied = true;
-    cluster->members[0].node_id = network.nodes[1].node_id;
-    cluster->members[0].lease_expires_at_ms = 1000U;
+    cluster->primary_members.slots[0].occupied = true;
+    cluster->primary_members.slots[0].node_id = network.nodes[1].node_id;
+    cluster->primary_members.slots[0].lease_expires_at_ms = 1000U;
     TEST_ASSERT(ucn_cluster_step(cluster) == UCN_ERR_EXHAUSTED);
     TEST_ASSERT(cluster->membership_sequence ==
                 UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD);
@@ -10582,9 +10833,9 @@ static int cluster_test_transition_apply(void)
     c->backup_takeover_active = false;
     c->backup_primary_node_id = 1U;
     c->backup_generation = 5U;
-    c->members[0].occupied = true;
-    c->members[0].node_id = 4U;
-    c->members[0].last_nonce = 9U;
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = 4U;
+    c->primary_members.slots[0].last_nonce = 9U;
     TEST_ASSERT(test_derive_phase(c, now_ms) == UCN_CLUSTER_PHASE_BACKUP_SYNCING);
     TEST_ASSERT(ucn_cluster_test_transition(
                     c, UCN_CLUSTER_PHASE_BACKUP_SYNCING,
@@ -10593,15 +10844,15 @@ static int cluster_test_transition_apply(void)
     TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_ELECTION);
     TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_CANDIDATE);
     /* members[] and backup_generation survive (no mirror wipe). */
-    TEST_ASSERT(c->members[0].occupied == true);
-    TEST_ASSERT(c->members[0].node_id == 4U);
+    TEST_ASSERT(c->primary_members.slots[0].occupied == true);
+    TEST_ASSERT(c->primary_members.slots[0].node_id == 4U);
     TEST_ASSERT(c->backup_generation == 5U);
     TEST_ASSERT(ucn_cluster_test_transition(
                     c, UCN_CLUSTER_PHASE_ELECTION,
                     UCN_CLUSTER_PHASE_JOIN_PENDING,
                     UCN_CLUSTER_REASON_JOIN_INITIATED, now_ms) == UCN_OK);
     TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_JOIN_PENDING);
-    TEST_ASSERT(c->members[0].occupied == true); /* begin_join keeps it */
+    TEST_ASSERT(c->primary_members.slots[0].occupied == true); /* begin_join keeps it */
     TEST_ASSERT(c->backup_generation == 5U);
     TEST_ASSERT(test_derive_phase(c, now_ms) == UCN_CLUSTER_PHASE_JOIN_PENDING);
 
@@ -10634,12 +10885,12 @@ static int cluster_test_assign_backup_transition(void)
     c->backup_ready = false;
     c->backup_assign_pending = false;
     c->backup_syncing = false;
-    c->members[0].occupied = true;
-    c->members[0].node_id = network.nodes[1].node_id;
-    c->members[0].lease_expires_at_ms = 100U;
-    c->members[1].occupied = true;
-    c->members[1].node_id = network.nodes[2].node_id;
-    c->members[1].lease_expires_at_ms = 100U;
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = network.nodes[1].node_id;
+    c->primary_members.slots[0].lease_expires_at_ms = 100U;
+    c->primary_members.slots[1].occupied = true;
+    c->primary_members.slots[1].node_id = network.nodes[2].node_id;
+    c->primary_members.slots[1].lease_expires_at_ms = 100U;
     c->candidates[0].occupied = true;
     c->candidates[0].head_node_id = network.nodes[1].node_id;
     c->candidates[0].head_score = 3000U;
@@ -10692,9 +10943,9 @@ static int cluster_test_backup_assignment_sweep_transition(void)
     c->backup_assign_cursor = 0U;
     c->backup_assign_remaining = 1U;
     c->backup_syncing = false;
-    c->members[0].occupied = true;
-    c->members[0].node_id = network.nodes[1].node_id;
-    c->members[0].lease_expires_at_ms = 100U;
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = network.nodes[1].node_id;
+    c->primary_members.slots[0].lease_expires_at_ms = 100U;
     c->candidates[0].occupied = true;
     c->candidates[0].head_node_id = network.nodes[1].node_id;
     c->candidates[0].head_score = 3000U;
@@ -10756,12 +11007,12 @@ static int cluster_test_remove_member_backup_loss(void)
 
         cluster_test_transition_reset(c, &pristine, phase);
         cluster_test_seed_legacy(c, phase, now_ms);
-        c->members[0].occupied = true;
-        c->members[0].node_id = 2U; /* the Backup */
-        c->members[0].last_nonce = 7U;
-        c->members[1].occupied = true;
-        c->members[1].node_id = 3U; /* ordinary member */
-        c->members[1].last_nonce = 9U;
+        c->primary_members.slots[0].occupied = true;
+        c->primary_members.slots[0].node_id = 2U; /* the Backup */
+        c->primary_members.slots[0].last_nonce = 7U;
+        c->primary_members.slots[1].occupied = true;
+        c->primary_members.slots[1].node_id = 3U; /* ordinary member */
+        c->primary_members.slots[1].last_nonce = 9U;
         TEST_ASSERT(test_derive_phase(c, now_ms) == phase);
 
         ucn_cluster_test_remove_member(c, 2U, now_ms);
@@ -10770,9 +11021,9 @@ static int cluster_test_remove_member_backup_loss(void)
         TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_BACKUP_LOST);
         TEST_ASSERT(c->shadow_transition_count == 1U);
         TEST_ASSERT(c->role == UCN_CLUSTER_ROLE_HEAD);
-        TEST_ASSERT(c->members[0].occupied == false); /* slot freed */
-        TEST_ASSERT(c->members[1].occupied == true);  /* other member lives */
-        TEST_ASSERT(c->members[1].node_id == 3U);
+        TEST_ASSERT(c->primary_members.slots[0].occupied == false); /* slot freed */
+        TEST_ASSERT(c->primary_members.slots[1].occupied == true);  /* other member lives */
+        TEST_ASSERT(c->primary_members.slots[1].node_id == 3U);
         TEST_ASSERT(c->backup_node_id == 0U);
         TEST_ASSERT(c->backup_ready == false);
         TEST_ASSERT(test_derive_phase(c, now_ms) ==
@@ -10785,12 +11036,12 @@ static int cluster_test_remove_member_backup_loss(void)
 
         cluster_test_transition_reset(c, &pristine, phase);
         cluster_test_seed_legacy(c, phase, now_ms);
-        c->members[0].occupied = true;
-        c->members[0].node_id = 2U; /* the Backup, expired */
-        c->members[0].lease_expires_at_ms = now_ms - 1U;
-        c->members[1].occupied = true;
-        c->members[1].node_id = 3U; /* live member */
-        c->members[1].lease_expires_at_ms = now_ms + 1000U;
+        c->primary_members.slots[0].occupied = true;
+        c->primary_members.slots[0].node_id = 2U; /* the Backup, expired */
+        c->primary_members.slots[0].lease_expires_at_ms = now_ms - 1U;
+        c->primary_members.slots[1].occupied = true;
+        c->primary_members.slots[1].node_id = 3U; /* live member */
+        c->primary_members.slots[1].lease_expires_at_ms = now_ms + 1000U;
         TEST_ASSERT(test_derive_phase(c, now_ms) == phase);
 
         ucn_cluster_test_expire_members(c, now_ms);
@@ -10798,8 +11049,8 @@ static int cluster_test_remove_member_backup_loss(void)
         TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
         TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_BACKUP_LOST);
         TEST_ASSERT(c->shadow_transition_count == 1U);
-        TEST_ASSERT(c->members[0].occupied == false); /* backup evicted */
-        TEST_ASSERT(c->members[1].occupied == true);  /* live member stays */
+        TEST_ASSERT(c->primary_members.slots[0].occupied == false); /* backup evicted */
+        TEST_ASSERT(c->primary_members.slots[1].occupied == true);  /* live member stays */
         TEST_ASSERT(c->backup_node_id == 0U);
         TEST_ASSERT(c->backup_ready == false);
         TEST_ASSERT(c->stats.member_leases_expired == 1U);
@@ -10812,18 +11063,18 @@ static int cluster_test_remove_member_backup_loss(void)
      * d.5 merged that resync is itself a STABLE->SYNCING transition. */
     cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_HEAD_STABLE);
     cluster_test_seed_legacy(c, UCN_CLUSTER_PHASE_HEAD_STABLE, now_ms);
-    c->members[0].occupied = true;
-    c->members[0].node_id = 2U; /* the Backup */
-    c->members[1].occupied = true;
-    c->members[1].node_id = 3U;
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = 2U; /* the Backup */
+    c->primary_members.slots[1].occupied = true;
+    c->primary_members.slots[1].node_id = 3U;
     ucn_cluster_test_remove_member(c, 3U, now_ms);
     /* the backup-loss path was NOT taken (reason must not be BACKUP_LOST);
      * the resync transition (d.5) is the correct Current semantics. */
     TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
     TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_RESYNC_STARTED);
     TEST_ASSERT(c->shadow_transition_count == 1U);
-    TEST_ASSERT(c->members[1].occupied == false); /* evicted */
-    TEST_ASSERT(c->members[0].occupied == true);  /* backup survives */
+    TEST_ASSERT(c->primary_members.slots[1].occupied == false); /* evicted */
+    TEST_ASSERT(c->primary_members.slots[0].occupied == true);  /* backup survives */
     TEST_ASSERT(c->backup_node_id == 2U);
     /* legacy backup_resync() ran: ready cleared, snapshot reset. */
     TEST_ASSERT(c->backup_ready == false);
@@ -10833,18 +11084,18 @@ static int cluster_test_remove_member_backup_loss(void)
      * the legacy resync (d.5) still transitions STABLE->SYNCING. */
     cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_HEAD_STABLE);
     cluster_test_seed_legacy(c, UCN_CLUSTER_PHASE_HEAD_STABLE, now_ms);
-    c->members[0].occupied = true;
-    c->members[0].node_id = 2U; /* the Backup, live */
-    c->members[0].lease_expires_at_ms = now_ms + 1000U;
-    c->members[1].occupied = true;
-    c->members[1].node_id = 3U; /* expired */
-    c->members[1].lease_expires_at_ms = now_ms - 1U;
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = 2U; /* the Backup, live */
+    c->primary_members.slots[0].lease_expires_at_ms = now_ms + 1000U;
+    c->primary_members.slots[1].occupied = true;
+    c->primary_members.slots[1].node_id = 3U; /* expired */
+    c->primary_members.slots[1].lease_expires_at_ms = now_ms - 1U;
     ucn_cluster_test_expire_members(c, now_ms);
     TEST_ASSERT(c->shadow_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING);
     TEST_ASSERT(c->transition_reason == UCN_CLUSTER_REASON_RESYNC_STARTED);
     TEST_ASSERT(c->shadow_transition_count == 1U);
-    TEST_ASSERT(c->members[1].occupied == false);
-    TEST_ASSERT(c->members[0].occupied == true);
+    TEST_ASSERT(c->primary_members.slots[1].occupied == false);
+    TEST_ASSERT(c->primary_members.slots[0].occupied == true);
     TEST_ASSERT(c->backup_node_id == 2U);
     TEST_ASSERT(c->stats.member_leases_expired == 1U);
 
@@ -10852,10 +11103,10 @@ static int cluster_test_remove_member_backup_loss(void)
      * rejects and NOTHING is touched (memcmp zero-write proof). */
     cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_HEAD_STABLE);
     cluster_test_seed_legacy(c, UCN_CLUSTER_PHASE_HEAD_STABLE, now_ms);
-    c->members[0].occupied = true;
-    c->members[0].node_id = 2U;
-    c->members[1].occupied = true;
-    c->members[1].node_id = 3U;
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = 2U;
+    c->primary_members.slots[1].occupied = true;
+    c->primary_members.slots[1].node_id = 3U;
     c->shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE; /* desync */
     {
         ucn_cluster_t before = *c;
@@ -10869,12 +11120,12 @@ static int cluster_test_remove_member_backup_loss(void)
      * (the whole pass aborts before any write). */
     cluster_test_transition_reset(c, &pristine, UCN_CLUSTER_PHASE_HEAD_STABLE);
     cluster_test_seed_legacy(c, UCN_CLUSTER_PHASE_HEAD_STABLE, now_ms);
-    c->members[0].occupied = true;
-    c->members[0].node_id = 2U;
-    c->members[0].lease_expires_at_ms = now_ms - 1U;
-    c->members[1].occupied = true;
-    c->members[1].node_id = 3U;
-    c->members[1].lease_expires_at_ms = now_ms - 1U; /* also expired */
+    c->primary_members.slots[0].occupied = true;
+    c->primary_members.slots[0].node_id = 2U;
+    c->primary_members.slots[0].lease_expires_at_ms = now_ms - 1U;
+    c->primary_members.slots[1].occupied = true;
+    c->primary_members.slots[1].node_id = 3U;
+    c->primary_members.slots[1].lease_expires_at_ms = now_ms - 1U; /* also expired */
     c->shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE; /* desync */
     {
         ucn_cluster_t before = *c;
@@ -10926,8 +11177,8 @@ static int cluster_test_head_ladder_closure(void)
     head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
     head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
     head->cluster.shadow_transition_count = 0U;
-    head->cluster.members[0].occupied = true;
-    head->cluster.members[0].node_id = network.nodes[1].node_id;
+    head->cluster.primary_members.slots[0].occupied = true;
+    head->cluster.primary_members.slots[0].node_id = network.nodes[1].node_id;
     ucn_cluster_test_start_backup_assignment_cycle(&head->cluster, now_ms);
     TEST_ASSERT(head->cluster.shadow_phase ==
                 UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING);
@@ -10960,10 +11211,10 @@ static int cluster_test_head_ladder_closure(void)
     head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_STABLE;
     head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
     head->cluster.shadow_transition_count = 0U;
-    head->cluster.members[0].occupied = true;
-    head->cluster.members[0].node_id = network.nodes[1].node_id;
-    head->cluster.members[1].occupied = true;
-    head->cluster.members[1].node_id = network.nodes[2].node_id;
+    head->cluster.primary_members.slots[0].occupied = true;
+    head->cluster.primary_members.slots[0].node_id = network.nodes[1].node_id;
+    head->cluster.primary_members.slots[1].occupied = true;
+    head->cluster.primary_members.slots[1].node_id = network.nodes[2].node_id;
     head->cluster.candidates[0].occupied = true;
     head->cluster.candidates[0].head_node_id = network.nodes[1].node_id;
     head->cluster.candidates[0].head_score = 3000U;
@@ -11055,8 +11306,8 @@ static int cluster_test_head_ladder_closure(void)
     head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_STABLE; /* desync */
     head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
     head->cluster.shadow_transition_count = 0U;
-    head->cluster.members[0].occupied = true;
-    head->cluster.members[0].node_id = network.nodes[1].node_id;
+    head->cluster.primary_members.slots[0].occupied = true;
+    head->cluster.primary_members.slots[0].node_id = network.nodes[1].node_id;
     network.queue_count = 0U;
     ucn_cluster_test_transition_asserts_set(false);
     ucn_cluster_test_send_backup_assignment_step(&head->cluster, now_ms);
@@ -11097,8 +11348,8 @@ static int cluster_test_head_ladder_closure(void)
     head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_STABLE; /* desync */
     head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
     head->cluster.shadow_transition_count = 0U;
-    head->cluster.members[0].occupied = true;
-    head->cluster.members[0].node_id = network.nodes[1].node_id;
+    head->cluster.primary_members.slots[0].occupied = true;
+    head->cluster.primary_members.slots[0].node_id = network.nodes[1].node_id;
     ucn_cluster_test_start_backup_assignment_cycle(&head->cluster, now_ms);
     TEST_ASSERT(head->cluster.backup_assign_pending == false); /* NOT armed */
     TEST_ASSERT(head->cluster.backup_assign_remaining == 9U);
@@ -11124,8 +11375,8 @@ static int cluster_test_head_ladder_closure(void)
         UCN_CLUSTER_PHASE_DETACHED_OBSERVE; /* desync */
     head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
     head->cluster.shadow_transition_count = 0U;
-    head->cluster.members[0].occupied = true;
-    head->cluster.members[0].node_id = network.nodes[1].node_id;
+    head->cluster.primary_members.slots[0].occupied = true;
+    head->cluster.primary_members.slots[0].node_id = network.nodes[1].node_id;
     ucn_cluster_test_queue_backup_assignment_for_member(
         &head->cluster, network.nodes[1].node_id, now_ms);
     TEST_ASSERT(head->cluster.backup_assign_pending == false); /* NOT armed */
@@ -11152,8 +11403,8 @@ static int cluster_test_head_ladder_closure(void)
     head->cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_STABLE; /* desync */
     head->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
     head->cluster.shadow_transition_count = 0U;
-    head->cluster.members[0].occupied = true;
-    head->cluster.members[0].node_id = network.nodes[1].node_id;
+    head->cluster.primary_members.slots[0].occupied = true;
+    head->cluster.primary_members.slots[0].node_id = network.nodes[1].node_id;
     head->cluster.candidates[0].occupied = true;
     head->cluster.candidates[0].head_node_id = network.nodes[1].node_id;
     head->cluster.candidates[0].head_score = 3000U;
@@ -11561,6 +11812,22 @@ static int cluster_test_active_epoch_access(void)
     return 0;
 }
 
+static int cluster_test_m06_legacy_auto_commit_bridge(void)
+{
+    ucn_cluster_member_t member;
+
+    (void)memset(&member, 0xA5, sizeof(member));
+    TEST_ASSERT(member_initialize_legacy(&member, 19U, 100U, 50U));
+    TEST_ASSERT(member.occupied);
+    TEST_ASSERT(member.status == UCN_CLUSTER_MEMBER_STATUS_COMMITTED);
+    TEST_ASSERT(member.voting);
+    TEST_ASSERT(member.wire_version == UCN_CLUSTER_MEMBER_WIRE_VERSION_V3);
+    TEST_ASSERT(!member.provisional_deadline_armed);
+    TEST_ASSERT(member.provisional_deadline_ms == 0U);
+    TEST_ASSERT(ucn_cluster_member_record_is_valid(&member));
+    return 0;
+}
+
 int test_cluster(void)
 {
     /* CLV2-M03 (03-01): Epoch comparator boundary tests (pure infra). */
@@ -11570,6 +11837,11 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_provider_property_random() == 0);
     /* CLV2-M03 (03-02): active_epoch read accessor (behavior-equivalent). */
     TEST_ASSERT(cluster_test_active_epoch_access() == 0);
+    /* CLV2-M06 (06-09): this assertion executes only in the ucn_tests
+     * self-compiled membership copy with UCN_CLUSTER_ENABLE_TEST_HOOKS.
+     * The independent membership model target proves the production archive
+     * takes the opposite v3-provisional branch. */
+    TEST_ASSERT(cluster_test_m06_legacy_auto_commit_bridge() == 0);
     TEST_ASSERT(cluster_test_codec_and_security() == 0);
     TEST_ASSERT(cluster_test_v3_codec() == 0);
     TEST_ASSERT(cluster_test_backup_sync() == 0);
@@ -11659,6 +11931,7 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_recovery_offer_join_wiring() == 0);
     TEST_ASSERT(cluster_test_backup_challenge() == 0);
     TEST_ASSERT(cluster_test_timing_profiles() == 0);
+    TEST_ASSERT(cluster_test_persistence_init_restore() == 0);
     TEST_ASSERT(cluster_test_phase_mapping_static() == 0);
     TEST_ASSERT(cluster_test_shadow_lifecycle() == 0);
     TEST_ASSERT(cluster_test_shadow_grace_timeout() == 0);

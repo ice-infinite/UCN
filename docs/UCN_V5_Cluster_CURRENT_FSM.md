@@ -3089,7 +3089,57 @@ boot incarnation
 持久化 boot counter / RNG / 自定义 Provider
 ```
 
-M04 才会把这些承诺持久化；当前并不宣称掉电后保持 identity lineage。
+M04 04-01/02 Provider/Record v1 与 04-03 `REQUIRED`/显式
+`VOLATILE_TEST` 门禁已通过独立复审。04-04..10 与最终外部审计整改 R17..R23
+现已通过外部复审，**M04 软件范围 DONE，可进入 M05**：
+`REQUIRED` 先在建立计时器、角色和任何
+发送路径**之前**同步 `load()`，再以 `REPLAY_INCARNATION` 建立本次 boot
+replay 域。Factory Empty 只允许形成 Detached 初始状态；READY 只把已验证的
+max Epoch 映射为 M03 安全历史。完整 VoteId、Config、Rekey 与 Tombstone
+始终由 Provider authoritative Record 保持，不在 Current FSM 伪造不完整
+RAM mirror。
+
+运行期所有 M04 承诺写入遵循同一 Bridge：
+
+```text
+current Record -> finalize/admit -> submit
+    -> PENDING: 冻结 Cluster progress + TX
+    -> COMMITTED: 再 load，并匹配 (operation id, operation, fingerprint)
+                    才执行 FSM continuation / 发送承诺帧
+    -> FAILED、非法 completion、reload 不可见: sticky fail-closed
+```
+
+已接线的 continuation 是 Election/Recovery 新 Epoch、Backup challenge、
+Takeover Head promotion 和 Member `TAKEOVER_ACK`。Config/Rekey 的 Prepare
+reset recovery、Commit 与 runtime continuation 分别属于 M07/M13；在它们实现
+前，四个公共 Hook 都于 Provider I/O 前返回 `UCN_ERR_CONFIG`，不得留下新的
+orphaned `PREPARED`，更不能以通用 `ACTION_NONE` 解冻仍携带旧
+contract/retired Epoch 的 Current FSM。R23 同时处理 R20 前已落盘的合法
+Record v1 `PREPARED`：controlled REQUIRED boot 只能用
+`LEGACY_PREPARED_ABORT` 在一个 durable Record 中清除唯一 Prepared payload 并
+严格递增 boot incarnation；Epoch/Vote/Config/Rekey/Tombstone 的其他字段必须逐字
+保持，迁移写入/PENDING/load proof 失败仍 fail-closed。它不是 Config/Rekey 的
+Resume/Commit 协议。M07/M13 在开放新的 `PREPARED` 前必须先完成
+`CLV2-07-00` 的 Record 来源区分；启动迁移只能匹配 legacy Record，绝不能清除
+未来的 Config/Rekey transaction。每次 Provider `load/submit/poll` 在**调用前**建立
+`persistence_io_active`；回调内重入的 `step/RX/poll` 只能返回 `UCN_ERR_STATE`，
+不允许继续推进或发送旧 Epoch。已 durable Vote 的首次 `TAKEOVER_ACK` 若仅因
+本地队列 `UCN_ERR_NO_SPACE` 或直接 bearer `UCN_ERR_LINK_DOWN` 失败，则保留
+retry continuation、冻结其它 Control traffic，在下一次 Step reload/prove 同一
+Vote 后重发；新 Vote 和重启恢复的相同 Vote 均走此 dispatcher。这不是
+persistence fault。
+Head 或 Recovery Head 在持久化失败时进入既有的 wire-silent
+`TERM_CONFLICT_WAIT`；Member 禁止投票，Backup 禁止完成 Takeover。发送
+总入口 `cluster_transmit()` 在 token bucket 之前检查该门，故 pending/fault
+以及 I/O/retry fence 不会消耗控制面 token 或泄露 Control 帧。
+
+明确不在 M04 范围内的内容：板级 Flash Provider、真实掉电实测、M05 Join
+Epoch install、M07/M13 的 Config/Rekey wire FSM。Recovery Head 的创建虽已
+持久化，但接收端 Recovery Join/`RECOVERY_ACK` 仍是 M05 前的 RAM 路径，不能
+误述为全部 Recovery 已持久化。因而 REQUIRED Member
+收到的 RAM authority 尚未与 durable active Epoch 匹配时，会拒绝
+`TAKEOVER_ACK`；这是 M04 的 safety-first 可用性降级，而不是已完成的 Join
+持久化。
 
 ---
 

@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "ucn/ucn_cluster_authority.h"
 #include "ucn/ucn_time.h"
 
 #define FED_VERSION_OFFSET ((size_t)0U)
@@ -614,7 +615,26 @@ static bool federation_get_local_head_view(
            ucn_cluster_get_view(federation->config.cluster, view) == UCN_OK &&
            view->enabled && view->role == UCN_CLUSTER_ROLE_HEAD &&
            view->head_node_id == federation->config.local_node_id &&
-           view->cluster_id != 0U && view->term != 0U;
+           view->cluster_id != 0U && view->term != 0U &&
+           /* M08 only changes explicitly managed Authority experiments.
+            * Unmanaged legacy instances stay readable while M05 retains its
+            * top-level hold; once an Owner is installed, no role==HEAD
+            * shortcut may publish/renew a directory record. */
+           (!ucn_cluster_authority_is_managed(federation->config.cluster) ||
+            view->authority_active);
+}
+
+/* M08: every Federation authority-output entry refreshes the bound Owner at
+ * Federation's current clock.  This prevents a locator or handover from
+ * consuming an Authority cached by an earlier Cluster step. */
+static ucn_result_t federation_preflight_local_authority(
+    ucn_cluster_federation_t *federation)
+{
+    if (federation == NULL || federation->config.cluster == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    return ucn_cluster_authority_runtime_preflight(
+        federation->config.cluster->authority_runtime, federation->now_ms);
 }
 
 static ucn_cluster_federation_directory_record_t *find_directory_record(
@@ -1792,16 +1812,16 @@ static void sync_local_locators(ucn_cluster_federation_t *federation)
     ucn_cluster_view_t view;
     size_t index;
 
+    /* Do not turn a fenced Head's known records into Withdraw writes.  The
+     * old lease expires naturally; Grace/Fenced must perform no Directory
+     * Authority write or renewal. */
+    if (!federation_get_local_head_view(federation, &view)) {
+        return;
+    }
     for (index = 0U; index < UCN_CLUSTER_FED_MAX_LOCAL_LOCATORS; ++index) {
         if (federation->local_locators[index].occupied) {
             federation->local_locators[index].observed = false;
         }
-    }
-    if (ucn_cluster_get_view(federation->config.cluster, &view) != UCN_OK ||
-        !view.enabled || view.role != UCN_CLUSTER_ROLE_HEAD ||
-        view.cluster_id == 0U || view.term == 0U ||
-        view.head_node_id != federation->config.local_node_id) {
-        return;
     }
     observe_local_locator(federation, &view, federation->config.local_node_id);
     for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
@@ -1840,6 +1860,7 @@ static size_t publishable_local_locator_count(
 
 static ucn_result_t publish_one_locator(ucn_cluster_federation_t *federation)
 {
+    ucn_cluster_view_t view;
     size_t examined;
     size_t work_count = publishable_local_locator_count(federation);
     size_t entry_index = 0U;
@@ -1850,6 +1871,9 @@ static ucn_result_t publish_one_locator(ucn_cluster_federation_t *federation)
     uint32_t slice_ms;
     ucn_result_t result;
 
+    if (!federation_get_local_head_view(federation, &view)) {
+        return UCN_ERR_NOT_FOUND;
+    }
     /* A zero publish deadline is the explicit cold-start "publish now"
      * state.  ucn_deadline_expired() deliberately treats zero as no deadline. */
     if (work_count == 0U ||
@@ -1980,6 +2004,11 @@ ucn_result_t ucn_cluster_federation_publish_handover(
 
     if (federation == NULL || !federation->config.enabled) {
         return UCN_ERR_ARGUMENT;
+    }
+    federation->now_ms = federation_now(federation);
+    result = federation_preflight_local_authority(federation);
+    if (result != UCN_OK) {
+        return result;
     }
     if (!federation_get_local_head_view(federation, &view)) {
         return UCN_ERR_ACCESS;
@@ -2116,6 +2145,10 @@ ucn_result_t ucn_cluster_federation_receive(
         return UCN_ERR_SECURITY;
     }
     federation->now_ms = federation_now(federation);
+    result = federation_preflight_local_authority(federation);
+    if (result != UCN_OK) {
+        return result;
+    }
     expire_federation_state(federation);
     result = ucn_cluster_federation_message_decode(payload, payload_length,
                                                     &message);
@@ -2169,6 +2202,10 @@ ucn_result_t ucn_cluster_federation_step(
         return UCN_OK;
     }
     federation->now_ms = federation_now(federation);
+    result = federation_preflight_local_authority(federation);
+    if (result != UCN_OK) {
+        return result;
+    }
     expire_federation_state(federation);
     retry_expired_pending_queries(federation);
     sync_local_locators(federation);
@@ -2190,6 +2227,10 @@ ucn_result_t ucn_cluster_federation_query_locator(
         return UCN_ERR_ARGUMENT;
     }
     federation->now_ms = federation_now(federation);
+    result = federation_preflight_local_authority(federation);
+    if (result != UCN_OK) {
+        return result;
+    }
     expire_federation_state(federation);
     retry_expired_pending_queries(federation);
     if (ucn_cluster_federation_find_locator(federation, target_node_id) != NULL) {

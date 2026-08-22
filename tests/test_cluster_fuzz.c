@@ -135,6 +135,7 @@ static int cluster_test_codec_fuzz(void)
     (void)memset(&config, 0, sizeof(config));
     config.local_node_id = 9U;
     config.enabled = true;
+    config.persistence_mode = UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
     config.head_capable = false;
     config.require_protected_control = true;
     config.head_score = 1000U;

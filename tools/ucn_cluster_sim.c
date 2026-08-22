@@ -373,8 +373,19 @@ static int sim_deliver(cluster_sim_network_t *network)
                    result == UCN_ERR_REPLAY || result == UCN_ERR_NOT_FOUND) {
             network->rejected_messages++;
         } else {
-            fprintf(stderr, "unexpected cluster receive result=%d\n",
-                    (int)result);
+            ucn_cluster_message_t diagnostic;
+
+            (void)memset(&diagnostic, 0, sizeof(diagnostic));
+            (void)ucn_cluster_message_decode(packet.payload,
+                                             sizeof(packet.payload),
+                                             &diagnostic);
+            fprintf(stderr,
+                    "unexpected cluster receive result=%d source=%lu destination=%lu type=%u role=%u cluster=%lu term=%lu\n",
+                    (int)result, (unsigned long)(packet.source + 1U),
+                    (unsigned long)(packet.destination + 1U),
+                    (unsigned)diagnostic.type, (unsigned)diagnostic.role,
+                    (unsigned long)diagnostic.cluster_id,
+                    (unsigned long)diagnostic.term);
             return 1;
         }
     }
@@ -518,6 +529,9 @@ static int sim_init(
         (void)memset(&config, 0, sizeof(config));
         config.local_node_id = (ucn_node_id_t)(index + 1U);
         config.enabled = true;
+        /* Simulations deliberately exercise Current-FSM behavior only; they
+         * do not provide an M04 durable store. */
+        config.persistence_mode = UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
         config.head_capable = group_position < 2U;
         config.require_protected_control = true;
         config.head_score = group_position == 0U ? 9000U :

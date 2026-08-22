@@ -1,4 +1,6 @@
 #include "ucn/ucn_cluster.h"
+#include "ucn/ucn_cluster_authority.h"
+#include "ucn/ucn_cluster_persist.h"
 
 #include <assert.h>
 #include <string.h>
@@ -199,7 +201,32 @@ ucn_result_t cluster_transmit(
 {
     ucn_result_t result;
 
-    (void)message;
+    if (cluster == NULL || message == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    /* M04: a REQUIRED Provider owns the authority boundary.  Do this before
+     * taking a token so a pending/failed write cannot silently consume the
+     * control budget while suppressing its own outbound promise. */
+    if (!cluster_persistence_outbound_allowed(cluster)) {
+        return cluster != NULL && cluster->persistence_faulted ?
+                   cluster->persistence_failure : UCN_ERR_STATE;
+    }
+    /* M08 freshness must be evaluated at the actual send boundary, not only
+     * at a previous ucn_cluster_step().  This is before the token bucket so
+     * stale Authority cannot consume control capacity. */
+    result = ucn_cluster_authority_runtime_preflight(
+        cluster->authority_runtime, cluster_now(cluster));
+    if (result != UCN_OK) {
+        return result;
+    }
+    /* CLV2-08-05: an explicitly installed M08 Authority Owner owns the
+     * Head write gate.  Unmanaged legacy instances retain their existing
+     * path until M05 authorizes production-v4 integration; managed Grace or
+     * Fenced instances are denied before spending a control token. */
+    if (!ucn_cluster_authority_runtime_tx_allowed(
+            cluster->authority_runtime, message->type, message->role)) {
+        return UCN_ERR_ACCESS;
+    }
     if (!token_bucket_take(cluster)) {
         return UCN_ERR_NO_SPACE;
     }
@@ -258,13 +285,157 @@ static bool config_is_valid(const ucn_cluster_config_t *config)
     }
     if (config->now_ms == NULL || config->send == NULL ||
          (config->head_capable &&
-          (config->member_capacity == 0U ||
+         (config->member_capacity == 0U ||
            config->member_capacity > UCN_CLUSTER_MAX_MEMBERS ||
-           config->member_capacity > UCN_CLUSTER_MAX_PEERS)) ||
-        (!config->head_capable && config->member_capacity != 0U)) {
+           config->member_capacity > UCN_CLUSTER_MAX_PEERS ||
+           config->voter_capacity > UCN_CLUSTER_MAX_VOTERS)) ||
+        (!config->head_capable &&
+         (config->member_capacity != 0U || config->voter_capacity != 0U))) {
         return false;
     }
     return true;
+}
+
+static bool persistence_mode_is_valid(ucn_cluster_persistence_mode_t mode)
+{
+    return mode == UCN_CLUSTER_PERSISTENCE_REQUIRED ||
+           mode == UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
+}
+
+static bool required_persistence_is_configured(
+    const ucn_cluster_config_t *config)
+{
+    return config->persistence_mode != UCN_CLUSTER_PERSISTENCE_REQUIRED ||
+           ucn_cluster_persist_provider_is_compatible(
+               config->persistence_provider);
+}
+
+/* M04-04 intentionally restores only safety inputs that the Current FSM
+ * already owns.  Config/Rekey/Tombstone are fully validated by the Provider
+ * result but have no Current-FSM storage or transition consumer yet; 04-07,
+ * M07 and M13 own their runtime integration.  Keeping them provider-owned is
+ * safer than inventing a partial in-memory mirror that an old transition
+ * could silently overwrite. */
+static void restore_current_fsm_safety_inputs(
+    ucn_cluster_t *cluster,
+    const ucn_cluster_persist_state_t *state)
+{
+    if (state->has_max_epoch) {
+        cluster->last_cluster_id = state->max_epoch.cluster_id;
+        cluster->max_seen_term = state->max_epoch.term;
+        cluster->last_stable_head = state->max_epoch.head_node_id;
+    }
+    if (state->last_vote.valid) {
+        /* Current M03 only has this replay-suppression key.  The persisted
+         * voted_for_node_id remains Provider authority until 04-06 replaces
+         * the legacy TAKEOVER_ACK path with the full durable VoteId gate. */
+        cluster->member_voted_cluster_id = state->last_vote.epoch.cluster_id;
+        cluster->member_voted_term = state->last_vote.epoch.term;
+        cluster->member_voted_generation = state->last_vote.backup_generation;
+    }
+    /* The durable boot boundary overrides an application-supplied hint after
+     * a READY load.  A Factory Empty state has no established incarnation. */
+    cluster->config.cluster_id_incarnation = state->boot_incarnation;
+}
+
+static ucn_result_t load_persistence_before_init(ucn_cluster_t *cluster)
+{
+    ucn_cluster_persist_state_t loaded;
+    bool factory_empty;
+    ucn_result_t result;
+
+    if (cluster->config.persistence_mode ==
+        UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST) {
+        return UCN_OK;
+    }
+    result = cluster_persistence_load_snapshot_ex(cluster, &loaded,
+                                                   &factory_empty);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (factory_empty) {
+        cluster->stats.persistence_restore_state =
+            UCN_CLUSTER_PERSISTENCE_RESTORE_FACTORY_EMPTY;
+        return UCN_OK;
+    }
+    restore_current_fsm_safety_inputs(cluster, &loaded);
+    cluster->stats.persistence_restore_state =
+        UCN_CLUSTER_PERSISTENCE_RESTORE_READY;
+    return UCN_OK;
+}
+
+/* A controlled boot allocates one durable replay incarnation before any role,
+ * timer or wire-visible Cluster activity exists.  It is intentionally a
+ * separate Record operation: Epoch/Vote/Config transitions may never smuggle
+ * a changed incarnation through their normal authority write. */
+static ucn_result_t establish_boot_incarnation_before_init(
+    ucn_cluster_t *cluster,
+    bool *committed)
+{
+    ucn_cluster_persist_state_t current;
+    ucn_cluster_persist_state_t next;
+    ucn_cluster_persist_state_t durable_state;
+    uint32_t next_incarnation;
+    ucn_cluster_persist_operation_t operation;
+    ucn_result_t result;
+
+    if (cluster == NULL || committed == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    *committed = true;
+    if (cluster->config.persistence_mode ==
+        UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST) {
+        return UCN_OK;
+    }
+    result = cluster_persistence_load_snapshot(cluster, &current);
+    if (result != UCN_OK) {
+        return result;
+    }
+    result = cluster_serial_next_checked(current.boot_incarnation,
+                                         &next_incarnation);
+    if (result != UCN_OK) {
+        return result;
+    }
+    next = current;
+    next.boot_incarnation = next_incarnation;
+    operation = UCN_CLUSTER_PERSIST_OPERATION_REPLAY_INCARNATION;
+    /* Only physical Record-v1 PREPARED is R23 migration input. Schema v2
+     * belongs to its owning M07/M13 transaction and may never be mistaken for
+     * a legacy abort; until that owner restores it, boot remains fail-closed. */
+    if ((current.config_transaction.phase ==
+             UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED ||
+         current.rekey_transaction.phase ==
+             UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED) &&
+        current.record_schema_version !=
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V1) {
+        return UCN_ERR_STATE;
+    }
+    if (current.config_transaction.phase ==
+            UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED &&
+        current.record_schema_version ==
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V1) {
+        (void)memset(&next.config_transaction, 0,
+                     sizeof(next.config_transaction));
+        next.config_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE;
+        operation = UCN_CLUSTER_PERSIST_OPERATION_LEGACY_PREPARED_ABORT;
+    }
+    if (current.rekey_transaction.phase ==
+            UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED &&
+        current.record_schema_version ==
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V1) {
+        (void)memset(&next.rekey_transaction, 0,
+                     sizeof(next.rekey_transaction));
+        next.rekey_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE;
+        operation = UCN_CLUSTER_PERSIST_OPERATION_LEGACY_PREPARED_ABORT;
+    }
+    result = cluster_persistence_begin_state(
+        cluster, &current, operation,
+        &next, CLUSTER_PERSIST_ACTION_BOOT_INCARNATION, 0U, committed,
+        &durable_state);
+    if (result == UCN_OK && *committed) {
+        cluster->config.cluster_id_incarnation = durable_state.boot_incarnation;
+    }
+    return result;
 }
 
 ucn_result_t ucn_cluster_config_apply_timing_profile(
@@ -284,6 +455,8 @@ ucn_result_t ucn_cluster_config_apply_timing_profile(
             config->join_retry_ms = UCN_CLUSTER_JOIN_RETRY_MS;
             config->keepalive_interval_ms = UCN_CLUSTER_KEEPALIVE_INTERVAL_MS;
             config->lease_ms = UCN_CLUSTER_LEASE_MS;
+            config->provisional_timeout_ms =
+                UCN_CLUSTER_PROVISIONAL_TIMEOUT_MS;
             config->head_min_tenure_ms = UCN_CLUSTER_HEAD_MIN_TENURE_MS;
             config->token_bucket.burst = UCN_CLUSTER_TB_BURST;
             config->token_bucket.refill_ms = UCN_CLUSTER_TB_REFILL_MS;
@@ -303,6 +476,8 @@ ucn_result_t ucn_cluster_config_apply_timing_profile(
             config->keepalive_interval_ms =
                 UCN_CLUSTER_FAST_KEEPALIVE_INTERVAL_MS;
             config->lease_ms = UCN_CLUSTER_FAST_LEASE_MS;
+            config->provisional_timeout_ms =
+                UCN_CLUSTER_FAST_PROVISIONAL_TIMEOUT_MS;
             config->head_min_tenure_ms =
                 UCN_CLUSTER_FAST_HEAD_MIN_TENURE_MS;
             config->token_bucket.burst = UCN_CLUSTER_FAST_TB_BURST;
@@ -342,6 +517,12 @@ static void apply_config_defaults(ucn_cluster_config_t *config)
     if (config->lease_ms == 0U) {
         config->lease_ms = UCN_CLUSTER_LEASE_MS;
     }
+    if (config->provisional_timeout_ms == 0U) {
+        config->provisional_timeout_ms = UCN_CLUSTER_PROVISIONAL_TIMEOUT_MS;
+    }
+    if (config->head_capable && config->voter_capacity == 0U) {
+        config->voter_capacity = (uint16_t)(config->member_capacity + 1U);
+    }
     if (config->head_min_tenure_ms == 0U) {
         config->head_min_tenure_ms = UCN_CLUSTER_HEAD_MIN_TENURE_MS;
     }
@@ -376,11 +557,15 @@ static bool normalized_config_is_valid(const ucn_cluster_config_t *config)
            ucn_duration_is_valid(config->join_retry_ms) &&
            ucn_duration_is_valid(config->keepalive_interval_ms) &&
            ucn_duration_is_valid(config->lease_ms) &&
+           ucn_duration_is_valid(config->provisional_timeout_ms) &&
            ucn_duration_is_valid(config->head_min_tenure_ms) &&
            config->advertise_interval_ms <= config->lease_ms / 3U &&
            config->keepalive_interval_ms <= config->lease_ms / 3U &&
            config->switch_improvement_percent < 100U &&
            config->switch_required_samples != 0U &&
+           ((!config->head_capable && config->voter_capacity == 0U) ||
+            (config->head_capable && config->voter_capacity >= 1U &&
+             config->voter_capacity <= UCN_CLUSTER_MAX_VOTERS)) &&
            config->token_bucket.burst != 0U &&
            ucn_duration_is_valid(config->token_bucket.refill_ms) &&
            ucn_duration_is_valid(config->recovery_head_ttl_ms) &&
@@ -392,6 +577,8 @@ ucn_result_t ucn_cluster_init(
     const ucn_cluster_config_t *config)
 {
     uint32_t now_ms = 0U;
+    ucn_result_t result;
+    bool boot_incarnation_committed;
 
     if (cluster == NULL || !config_is_valid(config)) {
         return UCN_ERR_ARGUMENT;
@@ -399,9 +586,30 @@ ucn_result_t ucn_cluster_init(
     (void)memset(cluster, 0, sizeof(*cluster));
     cluster->config = *config;
     apply_config_defaults(&cluster->config);
+    if (!persistence_mode_is_valid(cluster->config.persistence_mode) ||
+        !required_persistence_is_configured(&cluster->config)) {
+        (void)memset(cluster, 0, sizeof(*cluster));
+        return UCN_ERR_CONFIG;
+    }
     if (cluster->config.enabled && !normalized_config_is_valid(&cluster->config)) {
         (void)memset(cluster, 0, sizeof(*cluster));
         return UCN_ERR_CONFIG;
+    }
+    cluster->stats.persistence_mode = cluster->config.persistence_mode;
+    /* A REQUIRED instance cannot establish even its detached initial state
+     * until the Provider returns a valid Factory Empty or READY snapshot.
+     * No Cluster timer, role or outbound path is initialized before this
+     * synchronous gate succeeds. */
+    result = load_persistence_before_init(cluster);
+    if (result != UCN_OK) {
+        (void)memset(cluster, 0, sizeof(*cluster));
+        return result;
+    }
+    result = establish_boot_incarnation_before_init(cluster,
+                                                    &boot_incarnation_committed);
+    if (result != UCN_OK) {
+        (void)memset(cluster, 0, sizeof(*cluster));
+        return result;
     }
     if (cluster->config.enabled) {
         now_ms = cluster_now(cluster);
@@ -415,6 +623,10 @@ ucn_result_t ucn_cluster_init(
     /* Start the Token Bucket full so cold-start election is not throttled
      * below its already-bounded advertise budget. */
     cluster->token_bucket.tokens = cluster->config.token_bucket.burst;
+    /* A PENDING boot write is allowed to finish after init, but the generic
+     * persistence gate freezes every role-driven action until poll() reloads
+     * and verifies the matching REPLAY_INCARNATION journal entry. */
+    (void)boot_incarnation_committed;
     /* CLV2-01-02: seed the shadow phase mirror from the initial legacy
      * state (DETACHED_OBSERVE or DISABLED). */
     cluster->shadow_phase = cluster_phase_from_legacy_state(cluster, now_ms);
@@ -681,21 +893,66 @@ void begin_join(
  * the site clears it below - a late Type12 during takeover must never be
  * rejected for phase reasons. */
 
+static bool v3_backup_authority_frame_must_be_rejected(
+    ucn_cluster_message_type_t type)
+{
+#if defined(UCN_CLUSTER_ENABLE_TEST_HOOKS)
+    /* Historical Current-FSM fixture only.  No production target, simulator,
+     * public header or product configuration enables this test hook. */
+    (void)type;
+    return false;
+#else
+    /* M06 has no production v4 Config/CommittedVoterSet RX owner yet.  A
+     * decoded 32 B control frame is therefore necessarily legacy v3 and
+     * cannot establish or consume Backup/Takeover authority.  This fence is
+     * deliberately at the public RX owner, rather than only at Head-side
+     * Backup selection: it covers self/non-self assignment, mirror sync,
+     * liveness, voting and takeover installation before any handler writes
+     * role, known_backup_*, mirror, deadline, Head or Term state. */
+    switch (type) {
+    case UCN_CLUSTER_MSG_HEAD_TAKEOVER:
+    case UCN_CLUSTER_MSG_BACKUP_ASSIGN:
+    case UCN_CLUSTER_MSG_BACKUP_READY:
+    case UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC:
+    case UCN_CLUSTER_MSG_PRIMARY_HEARTBEAT:
+    case UCN_CLUSTER_MSG_TAKEOVER_PREPARE:
+    case UCN_CLUSTER_MSG_TAKEOVER_ACK:
+    case UCN_CLUSTER_MSG_BACKUP_RESYNC_REQ:
+    case UCN_CLUSTER_MSG_BACKUP_REJECT:
+        return true;
+    default:
+        return false;
+    }
+#endif
+}
+
 static ucn_result_t ucn_cluster_receive_inner(
     ucn_cluster_t *cluster,
     ucn_node_id_t source,
     bool protected_control,
     const uint8_t *payload,
-    size_t payload_length)
+    size_t payload_length,
+    bool *authority_fenced)
 {
     ucn_cluster_message_t message;
     ucn_cluster_candidate_t *candidate;
     uint32_t now_ms;
     ucn_result_t result;
 
+    if (authority_fenced != NULL) {
+        *authority_fenced = false;
+    }
     if (cluster == NULL || !cluster->config.enabled || source == 0U ||
         source == UCN_NODE_BROADCAST || source == cluster->config.local_node_id) {
         return UCN_ERR_ARGUMENT;
+    }
+    /* No inbound message is allowed to advance a state machine or cause an
+     * ACK while a REQUIRED persistence transaction has not been proved
+     * durable.  Parsing is intentionally skipped as well: a pending owner
+     * retains no hidden replay/peer side effect. */
+    if (cluster_persistence_progress_blocked(cluster)) {
+        return cluster->persistence_faulted ? cluster->persistence_failure :
+                                              UCN_ERR_STATE;
     }
     if (cluster->config.require_protected_control && !protected_control) {
         cluster->stats.security_rejected++;
@@ -723,7 +980,36 @@ static ucn_result_t ucn_cluster_receive_inner(
         cluster->stats.malformed_messages++;
         return UCN_ERR_MALFORMED;
     }
+    if (v3_backup_authority_frame_must_be_rejected(message.type)) {
+        /* Fail closed before time, stats, shadow or any handler state is
+         * touched.  M07 can replace this temporary gate only after a real
+         * committed-v4 Config owner validates the complete authority proof. */
+        if (authority_fenced != NULL) {
+            *authority_fenced = true;
+        }
+        return UCN_ERR_ACCESS;
+    }
     now_ms = cluster_now(cluster);
+    /* Refresh the managed Owner before any local-Head handler can allocate,
+     * renew or remove a member, or construct a reply.  A mere cached active
+     * value from an earlier Step is never a permission at this RX boundary. */
+    result = ucn_cluster_authority_runtime_preflight(
+        cluster->authority_runtime, now_ms);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (ucn_cluster_authority_is_managed(cluster) &&
+        !ucn_cluster_authority_active(cluster) &&
+        cluster->role == UCN_CLUSTER_ROLE_HEAD &&
+        (message.type == UCN_CLUSTER_MSG_JOIN_REQUEST ||
+         message.type == UCN_CLUSTER_MSG_KEEPALIVE ||
+         message.type == UCN_CLUSTER_MSG_LEAVE ||
+         message.type == UCN_CLUSTER_MSG_BACKUP_READY ||
+         message.type == UCN_CLUSTER_MSG_BACKUP_MEMBER_SYNC ||
+         message.type == UCN_CLUSTER_MSG_BACKUP_RESYNC_REQ ||
+         message.type == UCN_CLUSTER_MSG_BACKUP_REJECT)) {
+        return UCN_ERR_ACCESS;
+    }
     cluster->stats.messages_received++;
     /* CLV2-M03 (03-05): once a local epoch is in TERM_CONFLICT_WAIT, no
      * ordinary lifecycle/voting/control message may revive or mutate it.
@@ -838,7 +1124,7 @@ static ucn_result_t ucn_cluster_receive_inner(
             /* C07.7 P1: a replayed LEAVE with an old nonce must not evict
              * a member that has since re-joined and advanced its nonce. */
             {
-                ucn_cluster_member_t *member = find_member(cluster, source);
+                ucn_cluster_member_t *member = primary_member_find(cluster, source);
 
                 if (member == NULL) {
                     return UCN_ERR_NOT_FOUND;
@@ -1022,6 +1308,7 @@ ucn_result_t ucn_cluster_receive(
 {
     ucn_cluster_transition_reason_t hint = UCN_CLUSTER_REASON_UNKNOWN;
     ucn_result_t result;
+    bool authority_fenced = false;
 
     /* Peek the wire type (payload byte 1) for a best-effort reason hint;
      * the hint is only used when the exact diff table has no entry. */
@@ -1031,36 +1318,31 @@ ucn_result_t ucn_cluster_receive(
             (ucn_cluster_message_type_t)payload[1U]);
     }
     result = ucn_cluster_receive_inner(cluster, source, protected_control,
-                                       payload, payload_length);
+                                       payload, payload_length,
+                                       &authority_fenced);
     /* CLV2-01-02: keep the shadow mirror aligned after every RX that could
      * have changed state (rejections like ERR_REPLAY may still have moved
      * backup sync flags, so sync on everything except ARGUMENT). */
-    if (cluster != NULL && cluster->config.enabled &&
+    if (!authority_fenced && cluster != NULL && cluster->config.enabled &&
         result != UCN_ERR_ARGUMENT) {
         cluster_shadow_sync(cluster, hint);
     }
     return result;
 }
 
-static ucn_result_t start_election(ucn_cluster_t *cluster, uint32_t now_ms)
+static ucn_result_t start_election_after_persistence(
+    ucn_cluster_t *cluster,
+    const ucn_cluster_persist_state_t *durable_state,
+    uint32_t now_ms)
 {
-    uint32_t election_cluster_id;
-    uint32_t election_base_term;
-    uint32_t next_term;
-    ucn_result_t result;
+    const ucn_cluster_epoch_t *epoch;
 
-    result = cluster_make_next_id(cluster, UCN_CLUSTER_ID_PURPOSE_ELECTION,
-                                  cluster->last_cluster_id,
-                                  cluster->max_seen_term,
-                                  &election_cluster_id);
-    if (result != UCN_OK) {
-        return result;
+    if (cluster == NULL || durable_state == NULL ||
+        !durable_state->has_active_epoch ||
+        durable_state->active_epoch.head_node_id != cluster->config.local_node_id) {
+        return UCN_ERR_STATE;
     }
-    election_base_term = cluster->term;
-    result = cluster_serial_next_checked(election_base_term, &next_term);
-    if (result != UCN_OK) {
-        return result;
-    }
+    epoch = &durable_state->active_epoch;
     /* CLV2-01-04b.1: the role write IS the DETACHED_OBSERVE -> ELECTION
      * transition.  The ONLY call site is ucn_cluster_step_inner()'s
      * DETACHED + !recovery_eligible branch (L5075), so the claimed old
@@ -1077,8 +1359,8 @@ static ucn_result_t start_election(ucn_cluster_t *cluster, uint32_t now_ms)
          * DETACHED observation branch. */
         return UCN_ERR_STATE;
     }
-    cluster->cluster_id = election_cluster_id;
-    cluster->term = next_term;
+    cluster->cluster_id = epoch->cluster_id;
+    cluster->term = epoch->term;
     cluster->head_node_id = cluster->config.local_node_id;
     cluster->current_head_score = cluster->config.head_score;
     cluster->role_since_ms = now_ms;
@@ -1092,6 +1374,77 @@ static ucn_result_t start_election(ucn_cluster_t *cluster, uint32_t now_ms)
 #if !defined(NDEBUG)
     assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
            UCN_CLUSTER_PHASE_ELECTION);
+#endif
+    return UCN_OK;
+}
+
+static ucn_result_t start_election(ucn_cluster_t *cluster, uint32_t now_ms)
+{
+    ucn_cluster_epoch_t epoch;
+    ucn_cluster_persist_state_t durable_state;
+    uint32_t election_cluster_id;
+    uint32_t next_term;
+    bool committed;
+    ucn_result_t result;
+
+    result = cluster_make_next_id(cluster, UCN_CLUSTER_ID_PURPOSE_ELECTION,
+                                  cluster->last_cluster_id,
+                                  cluster->max_seen_term,
+                                  &election_cluster_id);
+    if (result != UCN_OK) {
+        return result;
+    }
+    result = cluster_serial_next_checked(cluster->term, &next_term);
+    if (result != UCN_OK) {
+        return result;
+    }
+    (void)memset(&epoch, 0, sizeof(epoch));
+    epoch.cluster_id = election_cluster_id;
+    epoch.term = next_term;
+    epoch.head_node_id = cluster->config.local_node_id;
+    /* Validate the irreversible FSM edge before Flash I/O.  Once the record
+     * is durable, a transition rejection must not leave a fresh epoch with no
+     * local continuation path. */
+    result = cluster_transition_preflight(cluster,
+                                          UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                                          UCN_CLUSTER_PHASE_ELECTION,
+                                          now_ms);
+    if (result != UCN_OK) {
+        return result;
+    }
+    result = cluster_persistence_begin_epoch(
+        cluster, &epoch, CLUSTER_PERSIST_ACTION_ELECTION_START, 0U,
+        &committed, &durable_state);
+    if (result != UCN_OK || !committed) {
+        return result;
+    }
+    return start_election_after_persistence(cluster, &durable_state, now_ms);
+}
+
+static ucn_result_t declare_recovery_after_persistence(
+    ucn_cluster_t *cluster,
+    const ucn_cluster_persist_state_t *durable_state,
+    uint32_t now_ms)
+{
+    const ucn_cluster_epoch_t *epoch;
+
+    if (cluster == NULL || durable_state == NULL ||
+        !durable_state->has_active_epoch ||
+        durable_state->active_epoch.term != 1U ||
+        durable_state->active_epoch.head_node_id != cluster->config.local_node_id) {
+        return UCN_ERR_STATE;
+    }
+    epoch = &durable_state->active_epoch;
+    if (cluster_transition(cluster, UCN_CLUSTER_PHASE_RECOVERY_ELECTION,
+                           UCN_CLUSTER_PHASE_RECOVERY_HEAD,
+                           UCN_CLUSTER_REASON_RECOVERY_WIN,
+                           now_ms) != UCN_OK) {
+        return UCN_ERR_STATE;
+    }
+    declare_recovery_head(cluster, epoch->cluster_id, now_ms);
+#if !defined(NDEBUG)
+    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+           UCN_CLUSTER_PHASE_RECOVERY_HEAD);
 #endif
     return UCN_OK;
 }
@@ -1171,6 +1524,56 @@ static void complete_election(ucn_cluster_t *cluster, uint32_t now_ms)
 #endif
 }
 
+/* A deferred action is applied only after the persistence runtime has loaded
+ * the record again and matched its completed-operation journal.  The pending
+ * descriptor itself never caches mutable FSM state. */
+static ucn_result_t apply_persistence_resolution(
+    ucn_cluster_t *cluster,
+    const cluster_persistence_resolution_t *resolution,
+    uint32_t now_ms)
+{
+    ucn_result_t result;
+
+    if (cluster == NULL || resolution == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    switch (resolution->action) {
+    case CLUSTER_PERSIST_ACTION_ELECTION_START:
+        return start_election_after_persistence(cluster,
+                                                &resolution->durable_state,
+                                                now_ms);
+    case CLUSTER_PERSIST_ACTION_BACKUP_CHALLENGE:
+        return backup_challenge_after_persistence(cluster,
+                                                  &resolution->durable_state,
+                                                  now_ms);
+    case CLUSTER_PERSIST_ACTION_TAKEOVER_COMMIT:
+        return complete_takeover_after_persistence(cluster,
+                                                   &resolution->durable_state,
+                                                   now_ms);
+    case CLUSTER_PERSIST_ACTION_RECOVERY_DECLARE:
+        return declare_recovery_after_persistence(cluster,
+                                                  &resolution->durable_state,
+                                                  now_ms);
+    case CLUSTER_PERSIST_ACTION_TAKEOVER_ACK:
+        result = send_takeover_ack_after_persistence(
+            cluster, resolution->destination, &resolution->durable_state);
+        return result;
+    case CLUSTER_PERSIST_ACTION_BOOT_INCARNATION:
+        if (resolution->durable_state.boot_incarnation == 0U) {
+            return UCN_ERR_STATE;
+        }
+        cluster->config.cluster_id_incarnation =
+            resolution->durable_state.boot_incarnation;
+        return UCN_OK;
+    case CLUSTER_PERSIST_ACTION_NONE:
+        return UCN_OK;
+    default:
+        /* An action is registered only after its owning continuation is
+         * compiled into this dispatcher. */
+        return UCN_ERR_STATE;
+    }
+}
+
 static size_t admitted_peer_count(const ucn_cluster_t *cluster)
 {
     size_t index;
@@ -1214,7 +1617,7 @@ static void send_next_advertisement(ucn_cluster_t *cluster, uint32_t now_ms)
                            cluster->config.local_node_id,
                            cluster->config.head_score,
                            cluster->role == UCN_CLUSTER_ROLE_HEAD ?
-                               available_capacity(cluster) :
+                               primary_member_available_capacity(cluster) :
                                cluster->config.member_capacity);
         cluster->advertise_cursor =
             (uint8_t)((index + 1U) % UCN_CLUSTER_MAX_PEERS);
@@ -1238,6 +1641,8 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
 {
     uint32_t now_ms;
     ucn_result_t result;
+    bool persistence_resolved;
+    cluster_persistence_resolution_t persistence_resolution;
 
     if (cluster == NULL) {
         return UCN_ERR_ARGUMENT;
@@ -1246,6 +1651,42 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
         return UCN_OK;
     }
     now_ms = cluster_now(cluster);
+    result = cluster_persistence_poll(cluster, &persistence_resolved,
+                                      &persistence_resolution);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (persistence_resolved) {
+        result = apply_persistence_resolution(cluster, &persistence_resolution,
+                                              now_ms);
+        if (result != UCN_OK) {
+            if (persistence_resolution.action ==
+                    CLUSTER_PERSIST_ACTION_TAKEOVER_ACK &&
+                cluster_persistence_takeover_ack_send_is_retryable(result) &&
+                cluster->persistence_retry_pending) {
+                return result;
+            }
+            cluster_persistence_fail_closed(cluster, result);
+            return result;
+        }
+    }
+    if (cluster->persistence_retry_pending) {
+        return cluster_persistence_retry_pending(cluster);
+    }
+    if (cluster_persistence_progress_blocked(cluster)) {
+        return cluster->persistence_faulted ? cluster->persistence_failure :
+                                              UCN_OK;
+    }
+    /* The M08 Owner must run before any role-driven Head send path below.
+     * Thus a loss observed in this Step revokes Authority before advertise,
+     * Directory, Backup or Join authority traffic can consume a token. */
+    if (cluster->authority_runtime != NULL) {
+        result = ucn_cluster_authority_runtime_preflight(
+            cluster->authority_runtime, now_ms);
+        if (result != UCN_OK) {
+            return result;
+        }
+    }
     /* CLV2-M03 (03-05): this is a local-only safety wait.  It publishes no
      * Head/Member/Backup control traffic, starts no election/takeover and
      * cannot leave on same-Term traffic; only the RX higher-authority gate
@@ -1356,7 +1797,7 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
         /* Bounded snapshot retransmit: if a frame was dropped the Backup
          * never becomes READY, so resend the snapshot on a fixed timer. */
         if (cluster->backup_node_id != 0U && !cluster->backup_ready &&
-            cluster->backup_sync_cursor > member_count_u16(cluster) + 1U &&
+            cluster->backup_sync_cursor > primary_member_count_u16(cluster) + 1U &&
             ucn_deadline_expired(now_ms,
                                   cluster->backup_resync_deadline_ms)) {
             /* The snapshot completed but a frame was dropped: resend it. */
@@ -1535,6 +1976,9 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                            now_ms, cluster->recovery_backoff_deadline_ms)) {
                 if (recovery_quorum_met(cluster)) {
                     uint32_t recovery_cluster_id;
+                    ucn_cluster_epoch_t recovery_epoch;
+                    ucn_cluster_persist_state_t durable_state;
+                    bool committed;
 
                     result = cluster_make_next_id(
                         cluster, UCN_CLUSTER_ID_PURPOSE_RECOVERY,
@@ -1543,34 +1987,32 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                     if (result != UCN_OK) {
                         return result;
                     }
-                    /* CLV2-01-04f: expired backoff + quorum IS the
-                     * RECOVERY_ELECTION -> RECOVERY_HEAD transition - call
-                     * it FIRST, UNCONDITIONALLY, fail closed.
-                     * apply_legacy(RECOVERY_HEAD) writes role=RECOVERY_HEAD
-                     * only; the site's recovery_cluster_id/cluster_id/term/
-                     * head_node_id/score/role_since/election_deadline/
-                     * backoff=0/ack counters/recovery_deadline/
-                     * next_advertise/send/stats stay site-owned in original
-                     * order. */
-                    if (cluster_transition(
-                            cluster, UCN_CLUSTER_PHASE_RECOVERY_ELECTION,
-                            UCN_CLUSTER_PHASE_RECOVERY_HEAD,
-                            UCN_CLUSTER_REASON_RECOVERY_WIN,
-                            now_ms) != UCN_OK) {
-                        /* Fail closed: do NOT declare on a rejected
-                         * transition; the node stays in the election
-                         * path and the next Step re-visits the deadline. */
-                        return UCN_ERR_STATE;
+                    (void)memset(&recovery_epoch, 0, sizeof(recovery_epoch));
+                    recovery_epoch.cluster_id = recovery_cluster_id;
+                    recovery_epoch.term = 1U;
+                    recovery_epoch.head_node_id = cluster->config.local_node_id;
+                    /* A recovery declaration is a new authority promise.  Its
+                     * Cluster-create record must be durable before either the
+                     * RECOVERY_HEAD phase or RECOVERY_DECLARE becomes visible. */
+                    result = cluster_transition_preflight(
+                        cluster, UCN_CLUSTER_PHASE_RECOVERY_ELECTION,
+                        UCN_CLUSTER_PHASE_RECOVERY_HEAD, now_ms);
+                    if (result != UCN_OK) {
+                        return result;
                     }
-                    declare_recovery_head(cluster, recovery_cluster_id,
-                                          now_ms);
-#if !defined(NDEBUG)
-                    /* CLV2-01-04f post-commit derive assert: after the
-                     * transition AND every site effect the node must
-                     * derive RECOVERY_HEAD (role == RECOVERY_HEAD). */
-                    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
-                           UCN_CLUSTER_PHASE_RECOVERY_HEAD);
-#endif
+                    result = cluster_persistence_begin_epoch(
+                        cluster, &recovery_epoch,
+                        CLUSTER_PERSIST_ACTION_RECOVERY_DECLARE, 0U,
+                        &committed, &durable_state);
+                    if (result != UCN_OK || !committed) {
+                        return result;
+                    }
+                    result = declare_recovery_after_persistence(
+                        cluster, &durable_state, now_ms);
+                    if (result != UCN_OK) {
+                        cluster_persistence_fail_closed(cluster, result);
+                        return result;
+                    }
                 } else {
                     /* C07.7 P0-2: no visible quorum (fully isolated node):
                      * do NOT self-declare; retry after another bounded
@@ -1639,7 +2081,7 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
          * STEPPING_DOWN -> JOIN_PENDING transition - call it FIRST,
          * UNCONDITIONALLY, fail closed.  apply_legacy(JOIN_PENDING)
          * writes role=JOIN_PENDING + recovery_eligible=false +
-         * backoff=0; the site's clear_members() + timer writes then run
+         * backoff=0; the site's primary_member_table_clear() + timer writes then run
          * in original order (the role write below is idempotent).  On a
          * rejected transition NOTHING runs - the members stay intact,
          * the role stays STEPPING_DOWN, and the next step re-visits the
@@ -1655,7 +2097,7 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
         }
         /* Ordered switchback completes: leave members, join the better
          * Head that was already announced via HEAD_STEPDOWN. */
-        clear_members(cluster);
+        primary_member_table_clear(cluster);
         cluster->role = UCN_CLUSTER_ROLE_JOIN_PENDING;
         cluster->role_since_ms = now_ms;
         cluster->next_join_retry_ms = now_ms;
@@ -1734,7 +2176,20 @@ ucn_cluster_epoch_t ucn_cluster_active_epoch_get(const ucn_cluster_t *cluster)
 
 size_t ucn_cluster_member_count(const ucn_cluster_t *cluster)
 {
-    return cluster == NULL ? 0U : member_count_u16(cluster);
+    return cluster == NULL ? 0U : primary_member_count_u16(cluster);
+}
+
+static void member_summary_fill(const ucn_cluster_t *cluster,
+                                const ucn_cluster_member_t *member,
+                                ucn_cluster_member_summary_t *summary)
+{
+    summary->node_id = member->node_id;
+    summary->lease_expires_at_ms = member->lease_expires_at_ms;
+    summary->status = member->status;
+    summary->voting = member->voting;
+    summary->config_id = ucn_cluster_voter_set_is_valid(
+                             &cluster->active_voter_set) ?
+                             cluster->active_voter_set.config_id : 0U;
 }
 
 ucn_result_t ucn_cluster_get_view(const ucn_cluster_t *cluster,
@@ -1744,6 +2199,13 @@ ucn_result_t ucn_cluster_get_view(const ucn_cluster_t *cluster,
         return UCN_ERR_ARGUMENT;
     }
     view->enabled = cluster->config.enabled;
+    view->persistence_mode = cluster->config.persistence_mode;
+    view->persistence_restore_state =
+        cluster->stats.persistence_restore_state;
+    view->persistence_pending = cluster->persistence_pending;
+    view->persistence_faulted = cluster->persistence_faulted;
+    view->persistence_retry_pending = cluster->persistence_retry_pending;
+    view->persistence_failure = cluster->persistence_failure;
     view->role = cluster->role;
     view->local_node_id = cluster->config.local_node_id;
     view->cluster_id = cluster->cluster_id;
@@ -1754,6 +2216,9 @@ ucn_result_t ucn_cluster_get_view(const ucn_cluster_t *cluster,
     view->last_stable_head = cluster->last_stable_head;
     view->cluster_id_round = cluster->cluster_id_round;
     view->current_head_score = cluster->current_head_score;
+    view->authority_active = ucn_cluster_authority_active(cluster);
+    view->authority_phase = cluster->authority_phase;
+    view->authority_fence_reason = cluster->authority_fence_reason;
     return UCN_OK;
 }
 
@@ -1769,7 +2234,7 @@ size_t ucn_cluster_copy_member_summaries(
         return 0U;
     }
     for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
-        const ucn_cluster_member_t *member = &cluster->members[index];
+        const ucn_cluster_member_t *member = &cluster->primary_members.slots[index];
 
         if (!member->occupied) {
             continue;
@@ -1781,8 +2246,7 @@ size_t ucn_cluster_copy_member_summaries(
         if (count >= capacity) {
             break;
         }
-        output[count].node_id = member->node_id;
-        output[count].lease_expires_at_ms = member->lease_expires_at_ms;
+        member_summary_fill(cluster, member, &output[count]);
         ++count;
     }
     return count;
@@ -1799,12 +2263,36 @@ ucn_result_t ucn_cluster_get_member_summary_at(
         table_index >= UCN_CLUSTER_MAX_MEMBERS) {
         return UCN_ERR_ARGUMENT;
     }
-    member = &cluster->members[table_index];
+    member = &cluster->primary_members.slots[table_index];
     if (!member->occupied) {
         return UCN_ERR_NOT_FOUND;
     }
-    summary->node_id = member->node_id;
-    summary->lease_expires_at_ms = member->lease_expires_at_ms;
+    member_summary_fill(cluster, member, summary);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_cluster_get_member_capacity_view(
+    const ucn_cluster_t *cluster,
+    ucn_cluster_member_capacity_view_t *view)
+{
+    uint16_t runtime_used;
+    uint16_t voter_used = 0U;
+
+    if (cluster == NULL || view == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    runtime_used = primary_member_count_u16(cluster);
+    if (ucn_cluster_voter_set_is_valid(&cluster->active_voter_set)) {
+        voter_used = cluster->active_voter_set.count;
+    }
+    view->runtime_capacity = cluster->config.member_capacity;
+    view->runtime_used = runtime_used;
+    view->runtime_available = runtime_used >= view->runtime_capacity ? 0U :
+                              (uint16_t)(view->runtime_capacity - runtime_used);
+    view->voter_capacity = cluster->config.voter_capacity;
+    view->voter_used = voter_used;
+    view->voter_available = voter_used >= view->voter_capacity ? 0U :
+                            (uint16_t)(view->voter_capacity - voter_used);
     return UCN_OK;
 }
 

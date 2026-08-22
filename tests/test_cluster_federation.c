@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "ucn/ucn_cluster_authority.h"
 #include "ucn/ucn_cluster_federation.h"
 
 static void federation_test_common(ucn_cluster_federation_message_t *message,
@@ -166,6 +167,7 @@ static int federation_test_malformed_and_cluster_view(void)
     (void)memset(&config, 0, sizeof(config));
     config.local_node_id = UINT32_C(0x10000001);
     config.enabled = false;
+    config.persistence_mode = UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
     TEST_ASSERT(ucn_cluster_get_view(NULL, &view) == UCN_ERR_ARGUMENT);
     TEST_ASSERT(ucn_cluster_get_view(&cluster, &view) == UCN_OK &&
@@ -175,9 +177,9 @@ static int federation_test_malformed_and_cluster_view(void)
     cluster.term = 2U;
     cluster.head_node_id = config.local_node_id;
     cluster.current_head_score = 9000U;
-    cluster.members[0].occupied = true;
-    cluster.members[0].node_id = UINT32_C(0x10000004);
-    cluster.members[0].lease_expires_at_ms = 1000U;
+    cluster.primary_members.slots[0].occupied = true;
+    cluster.primary_members.slots[0].node_id = UINT32_C(0x10000004);
+    cluster.primary_members.slots[0].lease_expires_at_ms = 1000U;
     TEST_ASSERT(ucn_cluster_get_view(&cluster, &view) == UCN_OK &&
                 view.role == UCN_CLUSTER_ROLE_HEAD && view.term == 2U);
     TEST_ASSERT(ucn_cluster_copy_member_summaries(&cluster, NULL, 0U) == 1U);
@@ -478,6 +480,7 @@ static int federation_runtime_init_cluster(ucn_cluster_t *cluster,
     (void)memset(&config, 0, sizeof(config));
     config.local_node_id = local_node_id;
     config.enabled = false;
+    config.persistence_mode = UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
     TEST_ASSERT(ucn_cluster_init(cluster, &config) == UCN_OK);
     /* Federation only consumes the documented owner-context view; this test
      * fixture intentionally bypasses election to isolate C06.2. */
@@ -487,9 +490,9 @@ static int federation_runtime_init_cluster(ucn_cluster_t *cluster,
     cluster->term = term;
     cluster->head_node_id = local_node_id;
     if (member_node_id != 0U) {
-        cluster->members[0].occupied = true;
-        cluster->members[0].node_id = member_node_id;
-        cluster->members[0].lease_expires_at_ms = UINT32_C(1000);
+        cluster->primary_members.slots[0].occupied = true;
+        cluster->primary_members.slots[0].node_id = member_node_id;
+        cluster->primary_members.slots[0].lease_expires_at_ms = UINT32_C(1000);
     }
     return 0;
 }
@@ -567,6 +570,7 @@ static int federation_runtime_init_member_node(
     (void)memset(&cluster_config, 0, sizeof(cluster_config));
     cluster_config.local_node_id = node_id;
     cluster_config.enabled = false;
+    cluster_config.persistence_mode = UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
     TEST_ASSERT(ucn_cluster_init(&node->cluster, &cluster_config) == UCN_OK);
     node->cluster.config.enabled = true;
     node->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
@@ -811,7 +815,7 @@ static int federation_test_directory_runtime(void)
         }
     }
     TEST_ASSERT(member_record_present);
-    authority->cluster.members[0].occupied = false;
+    authority->cluster.primary_members.slots[0].occupied = false;
     network.now_ms = 85U;
     TEST_ASSERT(ucn_cluster_federation_step(&authority->federation) == UCN_OK);
     network.now_ms = 101U;
@@ -886,6 +890,63 @@ static int federation_test_directory_runtime(void)
         TEST_ASSERT(result == UCN_OK);
     }
     TEST_ASSERT(table_full);
+    return 0;
+}
+
+static int federation_test_authority_fence_stops_locator_publish(void)
+{
+    static const ucn_node_id_t authority_ids[] = { FEDERATION_AUTHORITY_HEAD };
+    static const ucn_node_id_t voters[] = {
+        FEDERATION_AUTHORITY_HEAD, UINT32_C(0x10000032)
+    };
+    const ucn_cluster_timing_budget_t budget = {
+        5U, 5U, 5U, 5U, 5U, 5U
+    };
+    federation_runtime_network_t network;
+    federation_runtime_node_t *head;
+    ucn_cluster_authority_runtime_t runtime;
+    ucn_cluster_authority_timing_t timing;
+    ucn_cluster_config_state_t config_state;
+    const ucn_cluster_federation_stats_t *stats;
+    uint32_t messages_before_fence;
+    size_t index;
+
+    (void)memset(&network, 0, sizeof(network));
+    head = &network.nodes[0];
+    TEST_ASSERT(federation_runtime_init_node(
+                    head, &network, authority_ids[0], UINT32_C(0x1031), 5U,
+                    0U, true, false, authority_ids,
+                    sizeof(authority_ids) / sizeof(authority_ids[0])) == 0);
+    TEST_ASSERT(ucn_cluster_config_state_init_stable(
+                    &config_state, 9U, voters,
+                    sizeof(voters) / sizeof(voters[0])) &&
+                ucn_cluster_authority_timing_derive(&budget, &timing) ==
+                    UCN_OK &&
+                ucn_cluster_authority_runtime_init(
+                    &runtime, &head->cluster, &config_state, &timing, 0U) ==
+                    UCN_OK &&
+                ucn_cluster_authority_runtime_note_voter_keepalive(
+                    &runtime, voters[1], 0U) == UCN_OK &&
+                ucn_cluster_authority_runtime_step(&runtime, 0U) == UCN_OK &&
+                ucn_cluster_authority_active(&head->cluster));
+    TEST_ASSERT(ucn_cluster_federation_step(&head->federation) == UCN_OK);
+    stats = ucn_cluster_federation_get_stats(&head->federation);
+    messages_before_fence = stats->messages_sent;
+    TEST_ASSERT(messages_before_fence != 0U);
+    network.now_ms = 91U;
+    /* Federation-first at an expired Owner clock must run M08 preflight
+     * itself; do not manually refresh the runtime before this assertion. */
+    TEST_ASSERT(ucn_cluster_federation_publish_handover(&head->federation) ==
+                    UCN_ERR_ACCESS &&
+                !ucn_cluster_authority_active(&head->cluster) &&
+                ucn_cluster_federation_get_stats(&head->federation)
+                        ->messages_sent == messages_before_fence);
+    TEST_ASSERT(ucn_cluster_federation_step(&head->federation) == UCN_OK &&
+                ucn_cluster_federation_get_stats(&head->federation)
+                        ->messages_sent == messages_before_fence);
+    for (index = 0U; index < UCN_CLUSTER_FED_MAX_LOCAL_LOCATORS; ++index) {
+        TEST_ASSERT(!head->federation.local_locators[index].withdrawal_pending);
+    }
     return 0;
 }
 
@@ -1170,7 +1231,7 @@ static int federation_test_tunnel_runtime(void)
 
     /* H2 no longer owns C: it returns DIRECTORY_STALE via H1, which relays
      * the bounded error to A without ever falling back to a direct C Route. */
-    head_b->cluster.members[0].occupied = false;
+    head_b->cluster.primary_members.slots[0].occupied = false;
     TEST_ASSERT(ucn_cluster_federation_send(
                     &member_a->federation, FEDERATION_TUNNEL_MEMBER_C, 0x51U,
                     UCN_TRAFFIC_Q1_REALTIME, payload, sizeof(payload)) == UCN_OK);
@@ -1180,9 +1241,9 @@ static int federation_test_tunnel_runtime(void)
 
     /* A Head-to-Head route failure is surfaced as DOWNSTREAM instead of
      * causing Core retries of the same Submit. */
-    head_b->cluster.members[0].occupied = true;
-    head_b->cluster.members[0].node_id = FEDERATION_TUNNEL_MEMBER_C;
-    head_b->cluster.members[0].lease_expires_at_ms = UINT32_C(1000);
+    head_b->cluster.primary_members.slots[0].occupied = true;
+    head_b->cluster.primary_members.slots[0].node_id = FEDERATION_TUNNEL_MEMBER_C;
+    head_b->cluster.primary_members.slots[0].lease_expires_at_ms = UINT32_C(1000);
     network.drop_destination = FEDERATION_TUNNEL_HEAD_B;
     TEST_ASSERT(ucn_cluster_federation_send(
                     &member_a->federation, FEDERATION_TUNNEL_MEMBER_C, 0x52U,
@@ -1267,6 +1328,7 @@ int test_cluster_federation(void)
     TEST_ASSERT(federation_test_malformed_and_cluster_view() == 0);
     TEST_ASSERT(federation_test_locator_cache_monotonicity() == 0);
     TEST_ASSERT(federation_test_directory_runtime() == 0);
+    TEST_ASSERT(federation_test_authority_fence_stops_locator_publish() == 0);
     TEST_ASSERT(federation_test_handover_runtime() == 0);
     TEST_ASSERT(federation_test_handover_autopublish() == 0);
     TEST_ASSERT(federation_test_tunnel_runtime() == 0);

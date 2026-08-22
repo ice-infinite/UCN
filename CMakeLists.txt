@@ -143,6 +143,9 @@ add_library(ucn_cluster STATIC EXCLUDE_FROM_ALL
     src/extended/ucn_cluster.c
     # CLV2-M02 (02-02): the 32-byte Wire v5 codec is a separate module.
     src/extended/cluster/ucn_cluster_codec_v3.c
+    # CLV2-05-02: isolated RFC4 codec; no production Cluster FSM call site
+    # selects it and its encoder is default-disabled.
+    src/extended/cluster/ucn_cluster_codec_v4.c
     # CLV2-M02 (02-03): the explicit-phase transition framework.
     src/extended/cluster/ucn_cluster_fsm.c
     # CLV2-M02 (02-04): the member table + Join/Keepalive/Leave handlers.
@@ -156,6 +159,22 @@ add_library(ucn_cluster STATIC EXCLUDE_FROM_ALL
     src/extended/cluster/ucn_cluster_merge.c
     # CLV2-M03 (03-01): the Epoch value type + pure comparator (infra).
     src/extended/cluster/ucn_cluster_epoch.c
+    # CLV2-M04 (04-02): fixed, CRC-protected persistence record codec.
+    src/extended/cluster/ucn_cluster_persist.c
+    # CLV2-M04 (04-05): bounded submit/poll runtime and durable recheck.
+    src/extended/cluster/ucn_cluster_persistence_runtime.c
+    # CLV2-07-01: bounded C_old/C_joint/C_new value model only; no wire/FSM.
+    src/extended/cluster/ucn_cluster_config_state.c
+    src/extended/cluster/ucn_cluster_config_tx.c
+    src/extended/cluster/ucn_cluster_config_proposal.c
+    src/extended/cluster/ucn_cluster_config_quorum.c
+    src/extended/cluster/ucn_cluster_config_store.c
+    src/extended/cluster/ucn_cluster_config_persistence.c
+    src/extended/cluster/ucn_cluster_config_backup.c
+    src/extended/cluster/ucn_cluster_config_joint.c
+    # CLV2-M08: opt-in controlled Authority/Quorum/Fence owner.  It has no
+    # v4 wire RX/TX path and remains inert until explicitly attached.
+    src/extended/cluster/ucn_cluster_authority.c
 )
 target_link_libraries(ucn_cluster PUBLIC ucn_core)
 target_compile_options(ucn_cluster PRIVATE
@@ -175,6 +194,10 @@ target_compile_options(ucn_cluster_federation PRIVATE
 
 if(UCN_BUILD_CLUSTER_SIM)
     add_executable(ucn_cluster_sim tools/ucn_cluster_sim.c)
+    # CLV2-07-12: the simulator must use the same production archive as a
+    # product.  In particular it must not rebuild membership/RX with the
+    # retired M06 legacy auto-commit bridge: v3 joins stay provisional and
+    # v3 Backup/Takeover control remains fenced.
     target_link_libraries(ucn_cluster_sim PRIVATE ucn_cluster)
     target_compile_options(ucn_cluster_sim PRIVATE
         $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
@@ -242,6 +265,8 @@ if(UCN_BUILD_TESTS)
         tests/test_node_storage_header.c
         tests/test_transfer.c
         tests/test_cluster.c
+        tests/test_cluster_wire_v4_encoder_closed.c
+        tests/test_cluster_persist.c
         tests/test_cluster_fuzz.c
         tests/test_cluster_federation.c
         tests/cluster_test_fixture.c
@@ -335,6 +360,12 @@ if(UCN_BUILD_TESTS)
         # CLV2-01-04a: expose the test-only cluster_transition() hooks.
         UCN_CLUSTER_ENABLE_TEST_HOOKS=1
     )
+    # CLV2-06-09: only the test copy may include the internal membership
+    # bridge contract.  Production targets keep this directory private to
+    # their own source compilation and never receive the test-hook macro.
+    target_include_directories(ucn_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/extended/cluster
+    )
 
     target_link_libraries(ucn_tests PRIVATE
         ucn_core
@@ -355,6 +386,162 @@ if(UCN_BUILD_TESTS)
 
     add_test(NAME ucn_tests COMMAND ucn_tests)
 
+    # RFC4 byte-level codec gate.  This executable compiles the isolated v4
+    # codec with its test-only encoder switch enabled so its output can be
+    # compared to frozen vectors.  The production ucn_cluster library keeps
+    # UCN_CLUSTER_WIRE_V4_ENCODER_ENABLED at its default zero value.
+    add_executable(ucn_cluster_wire_v4_codec_tests
+        tests/test_cluster_wire_v4_codec.c
+        src/extended/cluster/ucn_cluster_codec_v3.c
+        src/extended/cluster/ucn_cluster_codec_v4.c
+    )
+    # CLV2-05-03: semantic payload/builders are deliberately private to the
+    # codec.  Only this focused codec test is allowed to include that header;
+    # no public include path or production Cluster call site receives it.
+    target_include_directories(ucn_cluster_wire_v4_codec_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/extended/cluster
+    )
+    target_link_libraries(ucn_cluster_wire_v4_codec_tests PRIVATE ucn_core)
+    target_compile_definitions(ucn_cluster_wire_v4_codec_tests PRIVATE
+        UCN_CLUSTER_WIRE_V4_ENCODER_ENABLED=1
+    )
+    target_compile_options(ucn_cluster_wire_v4_codec_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_cluster_wire_v4_codec_tests
+        COMMAND ucn_cluster_wire_v4_codec_tests)
+
+    # CLV2-05-12: a Host-only dual-stack compatibility gate.  It builds its
+    # own isolated codecs with the test-only encoder enabled and deliberately
+    # does not link ucn_cluster or call a Cluster runtime/FSM entry point.
+    # The normal ucn_tests target separately proves that the production
+    # default encoder remains fail-closed.
+    add_executable(ucn_cluster_wire_v4_host_dual_stack_tests
+        tests/test_cluster_wire_v4_host_dual_stack.c
+        src/extended/cluster/ucn_cluster_codec_v3.c
+        src/extended/cluster/ucn_cluster_codec_v4.c
+    )
+    target_link_libraries(ucn_cluster_wire_v4_host_dual_stack_tests PRIVATE ucn_core)
+    target_compile_definitions(ucn_cluster_wire_v4_host_dual_stack_tests PRIVATE
+        UCN_CLUSTER_WIRE_V4_ENCODER_ENABLED=1
+    )
+    target_compile_options(ucn_cluster_wire_v4_host_dual_stack_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_cluster_wire_v4_host_dual_stack_tests
+        COMMAND ucn_cluster_wire_v4_host_dual_stack_tests)
+
+    # CLV2-06-01: a data-model-only membership contract.  It links the
+    # production Cluster archive to prove that legacy-v3 members remain
+    # bounded, non-voting provisionals; it deliberately does not compile or
+    # reference the v4 wire codec.
+    add_executable(ucn_cluster_membership_model_tests
+        tests/test_cluster_membership_model.c
+    )
+    target_include_directories(ucn_cluster_membership_model_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/extended/cluster
+    )
+    target_link_libraries(ucn_cluster_membership_model_tests PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_membership_model_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_cluster_membership_model_tests
+        COMMAND ucn_cluster_membership_model_tests)
+
+    # CLV2-07-01: independent production-archive value-model gate. It has no
+    # test bridge and no v4 encoder/dispatcher definition.
+    add_executable(ucn_cluster_config_state_tests
+        tests/test_cluster_config_state.c
+    )
+    target_link_libraries(ucn_cluster_config_state_tests PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_config_state_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_cluster_config_state_tests
+        COMMAND ucn_cluster_config_state_tests)
+
+    add_executable(ucn_cluster_config_tx_tests
+        tests/test_cluster_config_tx.c
+    )
+    target_link_libraries(ucn_cluster_config_tx_tests PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_config_tx_tests PRIVATE
+        ${UCN_WARNING_OPTIONS}
+    )
+    add_test(NAME ucn_cluster_config_tx_tests
+        COMMAND ucn_cluster_config_tx_tests)
+
+    add_executable(ucn_cluster_config_proposal_tests
+        tests/test_cluster_config_proposal.c
+    )
+    target_link_libraries(ucn_cluster_config_proposal_tests PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_config_proposal_tests PRIVATE
+        ${UCN_WARNING_OPTIONS}
+    )
+    add_test(NAME ucn_cluster_config_proposal_tests
+        COMMAND ucn_cluster_config_proposal_tests)
+
+    add_executable(ucn_cluster_config_quorum_tests
+        tests/test_cluster_config_quorum.c
+    )
+    target_link_libraries(ucn_cluster_config_quorum_tests PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_config_quorum_tests PRIVATE
+        ${UCN_WARNING_OPTIONS}
+    )
+    add_test(NAME ucn_cluster_config_quorum_tests
+        COMMAND ucn_cluster_config_quorum_tests)
+
+    add_executable(ucn_cluster_config_persistence_tests
+        tests/test_cluster_config_persistence.c
+    )
+    target_link_libraries(ucn_cluster_config_persistence_tests PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_config_persistence_tests PRIVATE
+        ${UCN_WARNING_OPTIONS}
+    )
+    add_test(NAME ucn_cluster_config_persistence_tests
+        COMMAND ucn_cluster_config_persistence_tests)
+
+    add_executable(ucn_cluster_config_store_tests
+        tests/test_cluster_config_store.c
+    )
+    target_link_libraries(ucn_cluster_config_store_tests PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_config_store_tests PRIVATE
+        ${UCN_WARNING_OPTIONS}
+    )
+    add_test(NAME ucn_cluster_config_store_tests
+        COMMAND ucn_cluster_config_store_tests)
+
+    add_executable(ucn_cluster_config_backup_tests
+        tests/test_cluster_config_backup.c
+    )
+    target_link_libraries(ucn_cluster_config_backup_tests PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_config_backup_tests PRIVATE
+        ${UCN_WARNING_OPTIONS}
+    )
+    add_test(NAME ucn_cluster_config_backup_tests
+        COMMAND ucn_cluster_config_backup_tests)
+
+    add_executable(ucn_cluster_config_joint_tests
+        tests/test_cluster_config_joint.c
+    )
+    target_link_libraries(ucn_cluster_config_joint_tests PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_config_joint_tests PRIVATE
+        ${UCN_WARNING_OPTIONS}
+    )
+    add_test(NAME ucn_cluster_config_joint_tests
+        COMMAND ucn_cluster_config_joint_tests)
+
+    # CLV2-M08: controlled Authority Owner contract.  It links the normal
+    # Cluster archive but provides no v4 encoder/RX/FSM target switch.
+    add_executable(ucn_cluster_authority_tests
+        tests/test_cluster_authority.c
+    )
+    target_link_libraries(ucn_cluster_authority_tests PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_authority_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_cluster_authority_tests
+        COMMAND ucn_cluster_authority_tests)
+
     if(TARGET ucn_cluster_sim)
         foreach(UCN_CLUSTER_SIM_NODES 64 256 1000)
             add_test(NAME ucn_cluster_${UCN_CLUSTER_SIM_NODES}_convergence
@@ -373,7 +560,12 @@ if(UCN_BUILD_TESTS)
                     "CLUSTER_SIM nodes=${UCN_CLUSTER_SIM_NODES} scenario=impaired.*dropped=[1-9].*delayed=[1-9].*duplicated=[1-9].*asymmetric=[1-9].*m03_isolation=passed")
         endforeach()
 
-        foreach(UCN_CLUSTER_SIM_SCENARIO head-failover mobility score-shift)
+        # CLV2-07-12: v3 Backup/Takeover control is deliberately fenced and
+        # v4 production authority is still outside M05/M07.  The historical
+        # head-failover scenario therefore cannot be a current convergence
+        # claim; M10 will replace it with a frozen-Config v4 certificate
+        # scenario.  Mobility and score-shift remain non-authority coverage.
+        foreach(UCN_CLUSTER_SIM_SCENARIO mobility score-shift)
             add_test(NAME ucn_cluster_64_${UCN_CLUSTER_SIM_SCENARIO}
                 COMMAND ucn_cluster_sim --nodes 64
                     --scenario ${UCN_CLUSTER_SIM_SCENARIO})
@@ -381,13 +573,6 @@ if(UCN_BUILD_TESTS)
                 PROPERTIES PASS_REGULAR_EXPRESSION
                     "CLUSTER_SIM nodes=64 scenario=${UCN_CLUSTER_SIM_SCENARIO}.*converged_ms=[1-9]")
         endforeach()
-
-        add_test(NAME ucn_cluster_64_fast_head_failover
-            COMMAND ucn_cluster_sim --nodes 64 --scenario head-failover
-                --profile fast-fixed)
-        set_tests_properties(ucn_cluster_64_fast_head_failover
-            PROPERTIES PASS_REGULAR_EXPRESSION
-                "CLUSTER_SIM nodes=64 scenario=head-failover profile=fast-fixed.*recovery_ms=[1-3][0-9][0-9][0-9]")
 
         foreach(UCN_CLUSTER_SIM_GROUP 2 4 8)
             add_test(NAME ucn_cluster_64_fast_impaired_group_${UCN_CLUSTER_SIM_GROUP}

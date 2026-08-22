@@ -40,7 +40,7 @@ bool recovery_quorum_met(const ucn_cluster_t *cluster)
 {
     size_t index;
     size_t member_index;
-    uint16_t mirror_count = member_count_u16(cluster);
+    uint16_t mirror_count = primary_member_protected_voter_count_u16(cluster);
     uint16_t visible_mirror = 0U;
     uint16_t required;
 
@@ -53,8 +53,9 @@ bool recovery_quorum_met(const ucn_cluster_t *cluster)
         }
         for (member_index = 0U; member_index < UCN_CLUSTER_MAX_MEMBERS;
              ++member_index) {
-            if (cluster->members[member_index].occupied &&
-                cluster->members[member_index].node_id ==
+            if (primary_member_is_protected_voter(
+                    &cluster->primary_members.slots[member_index]) &&
+                cluster->primary_members.slots[member_index].node_id ==
                     cluster->peers[index].node_id) {
                 in_mirror = true;
                 break;
@@ -310,18 +311,19 @@ ucn_result_t handle_recovery_ack(ucn_cluster_t *cluster,
      * takeover/stepdown.  A repeated ACK only refreshes the lease.
      * Recovery uses every member slot directly: the declaring node was
      * likely a plain member with member_capacity 0, so the normal
-     * capacity-gated allocate_member() would always refuse survivors. */
-    member = find_member(cluster, source);
+     * capacity-gated primary_member_allocate() would always refuse survivors. */
+    member = primary_member_find(cluster, source);
     if (member == NULL) {
         size_t index;
 
         for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
-            if (!cluster->members[index].occupied) {
-                (void)memset(&cluster->members[index], 0,
-                             sizeof(cluster->members[index]));
-                cluster->members[index].occupied = true;
-                cluster->members[index].node_id = source;
-                member = &cluster->members[index];
+            if (!cluster->primary_members.slots[index].occupied) {
+                if (!member_initialize_legacy(&cluster->primary_members.slots[index],
+                                              source, now_ms,
+                                              cluster->config.provisional_timeout_ms)) {
+                    return UCN_ERR_ACCESS;
+                }
+                member = &cluster->primary_members.slots[index];
                 break;
             }
         }
@@ -334,5 +336,6 @@ ucn_result_t handle_recovery_ack(ucn_cluster_t *cluster,
     }
     member->lease_expires_at_ms = ucn_deadline_from_now(
         now_ms, cluster->config.recovery_head_ttl_ms);
+    member_note_legacy_keepalive(member, now_ms);
     return UCN_OK;
 }

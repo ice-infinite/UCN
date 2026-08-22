@@ -22,72 +22,543 @@
 
 #include "ucn_cluster_internal.h"
 
+#define UCN_CLUSTER_VOTER_HASH_OFFSET UINT32_C(2166136261)
+#define UCN_CLUSTER_VOTER_HASH_PRIME UINT32_C(16777619)
 
-uint16_t member_count_u16(const ucn_cluster_t *cluster)
+static uint32_t voter_hash_byte(uint32_t hash, uint8_t value)
+{
+    return (hash ^ (uint32_t)value) * UCN_CLUSTER_VOTER_HASH_PRIME;
+}
+
+static uint32_t voter_hash_u32(uint32_t hash, uint32_t value)
+{
+    hash = voter_hash_byte(hash, (uint8_t)(value >> 24U));
+    hash = voter_hash_byte(hash, (uint8_t)(value >> 16U));
+    hash = voter_hash_byte(hash, (uint8_t)(value >> 8U));
+    return voter_hash_byte(hash, (uint8_t)value);
+}
+
+static uint32_t voter_set_hash_from_canonical(
+    const ucn_cluster_voter_set_t *set)
 {
     size_t index;
-    uint16_t count = 0U;
+    uint32_t hash = UCN_CLUSTER_VOTER_HASH_OFFSET;
 
+    hash = voter_hash_u32(hash, set->config_id);
+    hash = voter_hash_byte(hash, set->count);
+    for (index = 0U; index < (size_t)set->count; ++index) {
+        hash = voter_hash_u32(hash, set->node_ids[index]);
+    }
+    return hash;
+}
+
+static bool voter_node_id_is_valid(ucn_node_id_t node_id)
+{
+    return node_id != 0U && node_id != UCN_NODE_BROADCAST;
+}
+
+bool ucn_cluster_member_status_is_valid(ucn_cluster_member_status_t status)
+{
+    return status == UCN_CLUSTER_MEMBER_STATUS_NONE ||
+           status == UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL ||
+           status == UCN_CLUSTER_MEMBER_STATUS_COMMITTED ||
+           status == UCN_CLUSTER_MEMBER_STATUS_REMOVING;
+}
+
+bool ucn_cluster_member_transition_is_valid(
+    ucn_cluster_member_status_t previous,
+    ucn_cluster_member_status_t next)
+{
+    if (!ucn_cluster_member_status_is_valid(previous) ||
+        !ucn_cluster_member_status_is_valid(next)) {
+        return false;
+    }
+    if (previous == next) {
+        return true;
+    }
+    switch (previous) {
+    case UCN_CLUSTER_MEMBER_STATUS_NONE:
+        return next == UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL ||
+               next == UCN_CLUSTER_MEMBER_STATUS_COMMITTED;
+    case UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL:
+        return next == UCN_CLUSTER_MEMBER_STATUS_COMMITTED ||
+               next == UCN_CLUSTER_MEMBER_STATUS_REMOVING ||
+               next == UCN_CLUSTER_MEMBER_STATUS_NONE;
+    case UCN_CLUSTER_MEMBER_STATUS_COMMITTED:
+        return next == UCN_CLUSTER_MEMBER_STATUS_REMOVING;
+    case UCN_CLUSTER_MEMBER_STATUS_REMOVING:
+        return next == UCN_CLUSTER_MEMBER_STATUS_COMMITTED ||
+               next == UCN_CLUSTER_MEMBER_STATUS_NONE;
+    default:
+        return false;
+    }
+}
+
+bool ucn_cluster_member_record_is_valid(const ucn_cluster_member_t *member)
+{
+    ucn_cluster_member_status_t status;
+
+    if (member == NULL) {
+        return false;
+    }
+    status = (ucn_cluster_member_status_t)member->status;
+    if (!member->occupied) {
+        return status == UCN_CLUSTER_MEMBER_STATUS_NONE && !member->voting &&
+               !member->provisional_deadline_armed &&
+               member->wire_version == 0U && member->capabilities == 0U &&
+               member->node_id == 0U && member->lease_expires_at_ms == 0U &&
+               member->last_nonce == 0U && member->joined_at_ms == 0U &&
+               member->last_keepalive_at_ms == 0U &&
+               member->provisional_deadline_ms == 0U;
+    }
+    if (member->node_id == 0U || member->node_id == UCN_NODE_BROADCAST ||
+        status == UCN_CLUSTER_MEMBER_STATUS_NONE ||
+        !ucn_cluster_member_status_is_valid(status) ||
+        (member->wire_version != UCN_CLUSTER_MEMBER_WIRE_VERSION_V3 &&
+         member->wire_version != UCN_CLUSTER_MEMBER_WIRE_VERSION_V4)) {
+        return false;
+    }
+    if (member->wire_version == UCN_CLUSTER_MEMBER_WIRE_VERSION_V3 &&
+        member->capabilities != 0U) {
+        return false;
+    }
+    if (status == UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL) {
+        return !member->voting && member->provisional_deadline_armed;
+    }
+    return !member->provisional_deadline_armed &&
+           member->provisional_deadline_ms == 0U;
+}
+
+bool ucn_cluster_member_table_is_valid(
+    const ucn_cluster_member_table_t *table)
+{
+    size_t index;
+
+    if (table == NULL) {
+        return false;
+    }
     for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
-        if (cluster->members[index].occupied) {
+        if (!ucn_cluster_member_record_is_valid(&table->slots[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+size_t ucn_cluster_member_table_count(
+    const ucn_cluster_member_table_t *table)
+{
+    size_t index;
+    size_t count = 0U;
+
+    if (table == NULL) {
+        return 0U;
+    }
+    for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+        if (table->slots[index].occupied) {
             ++count;
         }
     }
     return count;
 }
 
-uint16_t available_capacity(const ucn_cluster_t *cluster)
+bool ucn_cluster_voter_set_is_valid(const ucn_cluster_voter_set_t *set)
 {
-    uint16_t used = member_count_u16(cluster);
+    size_t index;
+
+    if (set == NULL || set->count == 0U ||
+        (size_t)set->count > UCN_CLUSTER_MAX_VOTERS) {
+        return false;
+    }
+    for (index = 0U; index < UCN_CLUSTER_MAX_VOTERS; ++index) {
+        ucn_node_id_t node_id = set->node_ids[index];
+
+        if (index < (size_t)set->count) {
+            if (!voter_node_id_is_valid(node_id) ||
+                (index != 0U && node_id <= set->node_ids[index - 1U])) {
+                return false;
+            }
+        } else if (node_id != 0U) {
+            return false;
+        }
+    }
+    return set->hash == voter_set_hash_from_canonical(set);
+}
+
+bool ucn_cluster_voter_set_build(ucn_cluster_voter_set_t *output,
+                                 uint32_t config_id,
+                                 const ucn_node_id_t *node_ids,
+                                 size_t count)
+{
+    ucn_cluster_voter_set_t candidate;
+    size_t index;
+    size_t sorted;
+
+    if (output == NULL || node_ids == NULL || count == 0U ||
+        count > UCN_CLUSTER_MAX_VOTERS) {
+        return false;
+    }
+    (void)memset(&candidate, 0, sizeof(candidate));
+    candidate.config_id = config_id;
+    candidate.count = (uint8_t)count;
+    for (index = 0U; index < count; ++index) {
+        if (!voter_node_id_is_valid(node_ids[index])) {
+            return false;
+        }
+        candidate.node_ids[index] = node_ids[index];
+    }
+    /* Insertion sorting keeps the construction bounded and allocation-free. */
+    for (index = 1U; index < count; ++index) {
+        ucn_node_id_t value = candidate.node_ids[index];
+
+        sorted = index;
+        while (sorted != 0U && candidate.node_ids[sorted - 1U] > value) {
+            candidate.node_ids[sorted] = candidate.node_ids[sorted - 1U];
+            --sorted;
+        }
+        candidate.node_ids[sorted] = value;
+    }
+    for (index = 1U; index < count; ++index) {
+        if (candidate.node_ids[index - 1U] == candidate.node_ids[index]) {
+            return false;
+        }
+    }
+    candidate.hash = voter_set_hash_from_canonical(&candidate);
+    if (!ucn_cluster_voter_set_is_valid(&candidate)) {
+        return false;
+    }
+    *output = candidate;
+    return true;
+}
+
+bool ucn_cluster_voter_set_contains(const ucn_cluster_voter_set_t *set,
+                                    ucn_node_id_t node_id)
+{
+    size_t index;
+
+    if (!ucn_cluster_voter_set_is_valid(set) ||
+        !voter_node_id_is_valid(node_id)) {
+        return false;
+    }
+    for (index = 0U; index < (size_t)set->count; ++index) {
+        if (set->node_ids[index] == node_id) {
+            return true;
+        }
+        if (set->node_ids[index] > node_id) {
+            break;
+        }
+    }
+    return false;
+}
+
+uint8_t ucn_cluster_voter_set_quorum(const ucn_cluster_voter_set_t *set)
+{
+    if (!ucn_cluster_voter_set_is_valid(set)) {
+        return 0U;
+    }
+    return (uint8_t)((set->count / 2U) + 1U);
+}
+
+bool ucn_cluster_voter_set_bitmap_for_node(const ucn_cluster_voter_set_t *set,
+                                           ucn_node_id_t node_id,
+                                           uint64_t *bitmap)
+{
+    size_t index;
+
+    if (bitmap == NULL || !ucn_cluster_voter_set_is_valid(set) ||
+        !voter_node_id_is_valid(node_id)) {
+        return false;
+    }
+    for (index = 0U; index < (size_t)set->count; ++index) {
+        if (set->node_ids[index] == node_id) {
+            *bitmap = UINT64_C(1) << index;
+            return true;
+        }
+        if (set->node_ids[index] > node_id) {
+            break;
+        }
+    }
+    return false;
+}
+
+bool member_initialize_legacy(ucn_cluster_member_t *member,
+                              ucn_node_id_t node_id,
+                              uint32_t now_ms,
+                              uint32_t provisional_timeout_ms)
+{
+    if (member == NULL || node_id == 0U || node_id == UCN_NODE_BROADCAST) {
+        return false;
+    }
+    (void)memset(member, 0, sizeof(*member));
+    member->occupied = true;
+    member->wire_version = UCN_CLUSTER_MEMBER_WIRE_VERSION_V3;
+    member->node_id = node_id;
+    member->joined_at_ms = now_ms;
+    member->last_keepalive_at_ms = now_ms;
+#if defined(UCN_CLUSTER_ENABLE_TEST_HOOKS)
+    /* The historical Current-FSM unit target keeps its pre-M07 fixture model
+     * behind the existing M01 test-hook boundary.  It is not a product
+     * configuration and must not be confused with a Config Commit.  The
+     * separate M06 legacy bridge and the production archive are removed from
+     * this path by CLV2-07-12. */
+    member->voting = true;
+    member->status = (uint8_t)UCN_CLUSTER_MEMBER_STATUS_COMMITTED;
+    (void)provisional_timeout_ms;
+#else
+    member->voting = false;
+    member->status = (uint8_t)UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL;
+    member->provisional_deadline_armed = true;
+    member->provisional_deadline_ms = ucn_deadline_from_now(
+        now_ms, provisional_timeout_ms);
+#endif
+    return true;
+}
+
+void member_note_legacy_keepalive(ucn_cluster_member_t *member,
+                                  uint32_t now_ms)
+{
+    if (member != NULL && member->occupied) {
+        member->last_keepalive_at_ms = now_ms;
+    }
+}
+
+uint16_t primary_member_count_u16(const ucn_cluster_t *cluster)
+{
+    return cluster == NULL ? 0U :
+           (uint16_t)ucn_cluster_member_table_count(
+               &cluster->primary_members);
+}
+
+bool primary_member_is_protected_voter(const ucn_cluster_member_t *member)
+{
+    if (member == NULL || !member->occupied) {
+        return false;
+    }
+#if defined(UCN_CLUSTER_ENABLE_TEST_HOOKS)
+    /* Historical Current-FSM fixture only; no product target receives this
+     * definition.  M07 Config tests link the production archive instead. */
+    return true;
+#else
+    return member->status == (uint8_t)UCN_CLUSTER_MEMBER_STATUS_COMMITTED &&
+           member->voting &&
+           member->wire_version == UCN_CLUSTER_MEMBER_WIRE_VERSION_V4;
+#endif
+}
+
+uint16_t primary_member_protected_voter_count_u16(
+    const ucn_cluster_t *cluster)
+{
+    size_t index;
+    uint16_t count = 0U;
+
+    if (cluster == NULL) {
+        return 0U;
+    }
+    for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+        if (primary_member_is_protected_voter(
+                &cluster->primary_members.slots[index])) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+uint16_t primary_member_available_capacity(const ucn_cluster_t *cluster)
+{
+    uint16_t used = primary_member_count_u16(cluster);
 
     return used >= cluster->config.member_capacity ?
                0U : (uint16_t)(cluster->config.member_capacity - used);
 }
 
-ucn_cluster_member_t *find_member(
+ucn_cluster_member_t *primary_member_find(
     ucn_cluster_t *cluster,
     ucn_node_id_t node_id)
 {
     size_t index;
 
     for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
-        if (cluster->members[index].occupied &&
-            cluster->members[index].node_id == node_id) {
-            return &cluster->members[index];
+        if (cluster->primary_members.slots[index].occupied &&
+            cluster->primary_members.slots[index].node_id == node_id) {
+            return &cluster->primary_members.slots[index];
         }
     }
     return NULL;
 }
 
-ucn_cluster_member_t *allocate_member(
+ucn_cluster_member_t *primary_member_allocate(
     ucn_cluster_t *cluster,
-    ucn_node_id_t node_id)
+    ucn_node_id_t node_id,
+    uint32_t now_ms)
 {
     size_t index;
-    ucn_cluster_member_t *member = find_member(cluster, node_id);
+    ucn_cluster_member_t *member = primary_member_find(cluster, node_id);
 
     if (member != NULL) {
         return member;
     }
-    if (member_count_u16(cluster) >= cluster->config.member_capacity) {
+    if (primary_member_count_u16(cluster) >= cluster->config.member_capacity) {
         return NULL;
     }
     for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
-        if (!cluster->members[index].occupied) {
-            (void)memset(&cluster->members[index], 0,
-                         sizeof(cluster->members[index]));
-            cluster->members[index].occupied = true;
-            cluster->members[index].node_id = node_id;
-            return &cluster->members[index];
+        if (!cluster->primary_members.slots[index].occupied) {
+            if (!member_initialize_legacy(
+                    &cluster->primary_members.slots[index], node_id,
+                    now_ms, cluster->config.provisional_timeout_ms)) {
+                return NULL;
+            }
+            return &cluster->primary_members.slots[index];
         }
     }
     return NULL;
+}
+
+ucn_result_t cluster_admit_verified_v4_provisional_member(
+    ucn_cluster_t *cluster,
+    ucn_node_id_t node_id,
+    uint16_t capabilities,
+    uint32_t now_ms,
+    ucn_cluster_member_admission_reason_t *reason)
+{
+    ucn_cluster_member_t *member;
+
+    if (reason != NULL) {
+        *reason = UCN_CLUSTER_MEMBER_ADMISSION_NONE;
+    }
+
+    if (cluster == NULL || !voter_node_id_is_valid(node_id)) {
+        if (reason != NULL) {
+            *reason = UCN_CLUSTER_MEMBER_ADMISSION_ARGUMENT;
+        }
+        return UCN_ERR_ARGUMENT;
+    }
+    if (cluster->role != UCN_CLUSTER_ROLE_HEAD) {
+        if (reason != NULL) {
+            *reason = UCN_CLUSTER_MEMBER_ADMISSION_NOT_HEAD;
+        }
+        return UCN_ERR_ACCESS;
+    }
+    member = primary_member_find(cluster, node_id);
+    if (member != NULL) {
+        if (member->status ==
+                (uint8_t)UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL &&
+            !member->voting &&
+            member->wire_version == UCN_CLUSTER_MEMBER_WIRE_VERSION_V4) {
+            return UCN_OK;
+        }
+        if (reason != NULL) {
+            *reason = UCN_CLUSTER_MEMBER_ADMISSION_MEMBER_CONFLICT;
+        }
+        return UCN_ERR_STATE;
+    }
+    if (primary_member_count_u16(cluster) >= cluster->config.member_capacity) {
+        if (reason != NULL) {
+            *reason = UCN_CLUSTER_MEMBER_ADMISSION_RUNTIME_CAPACITY;
+        }
+        return UCN_ERR_NO_SPACE;
+    }
+    for (size_t index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+        if (!cluster->primary_members.slots[index].occupied) {
+            member = &cluster->primary_members.slots[index];
+            (void)memset(member, 0, sizeof(*member));
+            member->occupied = true;
+            member->voting = false;
+            member->status =
+                (uint8_t)UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL;
+            member->wire_version = UCN_CLUSTER_MEMBER_WIRE_VERSION_V4;
+            member->capabilities = capabilities;
+            member->node_id = node_id;
+            member->joined_at_ms = now_ms;
+            member->last_keepalive_at_ms = now_ms;
+            member->provisional_deadline_armed = true;
+            member->provisional_deadline_ms = ucn_deadline_from_now(
+                now_ms, cluster->config.provisional_timeout_ms);
+            return UCN_OK;
+        }
+    }
+    if (reason != NULL) {
+        *reason = UCN_CLUSTER_MEMBER_ADMISSION_RUNTIME_CAPACITY;
+    }
+    return UCN_ERR_NO_SPACE;
+}
+
+ucn_result_t cluster_preflight_provisional_voter_commit(
+    const ucn_cluster_t *cluster,
+    ucn_node_id_t node_id,
+    ucn_cluster_member_admission_reason_t *reason)
+{
+    const ucn_cluster_member_t *member = NULL;
+    size_t index;
+
+    if (reason != NULL) {
+        *reason = UCN_CLUSTER_MEMBER_ADMISSION_NONE;
+    }
+    if (cluster == NULL || !voter_node_id_is_valid(node_id)) {
+        if (reason != NULL) {
+            *reason = UCN_CLUSTER_MEMBER_ADMISSION_ARGUMENT;
+        }
+        return UCN_ERR_ARGUMENT;
+    }
+    for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+        if (cluster->primary_members.slots[index].occupied &&
+            cluster->primary_members.slots[index].node_id == node_id) {
+            member = &cluster->primary_members.slots[index];
+            break;
+        }
+    }
+    if (member == NULL ||
+        member->status != (uint8_t)UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL ||
+        member->voting ||
+        member->wire_version != UCN_CLUSTER_MEMBER_WIRE_VERSION_V4) {
+        if (reason != NULL) {
+            *reason = UCN_CLUSTER_MEMBER_ADMISSION_MEMBER_CONFLICT;
+        }
+        return UCN_ERR_STATE;
+    }
+    if (!ucn_cluster_voter_set_is_valid(&cluster->active_voter_set)) {
+        if (reason != NULL) {
+            *reason = UCN_CLUSTER_MEMBER_ADMISSION_CONFIG_UNAVAILABLE;
+        }
+        return UCN_ERR_STATE;
+    }
+    if (cluster->active_voter_set.count >= cluster->config.voter_capacity) {
+        if (reason != NULL) {
+            *reason = UCN_CLUSTER_MEMBER_ADMISSION_VOTER_CAPACITY;
+        }
+        return UCN_ERR_NO_SPACE;
+    }
+    return UCN_OK;
+}
+
+size_t primary_member_expire_provisionals(ucn_cluster_t *cluster,
+                                          uint32_t now_ms)
+{
+    size_t index;
+    size_t expired = 0U;
+
+    if (cluster == NULL || cluster->role != UCN_CLUSTER_ROLE_HEAD) {
+        return 0U;
+    }
+    for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
+        ucn_cluster_member_t *member = &cluster->primary_members.slots[index];
+
+        if (member->occupied &&
+            member->status ==
+                (uint8_t)UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL &&
+            member->provisional_deadline_armed &&
+            ucn_deadline_expired(now_ms, member->provisional_deadline_ms)) {
+            (void)memset(member, 0, sizeof(*member));
+            ++expired;
+        }
+    }
+    cluster->stats.provisional_members_expired += (uint32_t)expired;
+    return expired;
 }
 
 void remove_member(ucn_cluster_t *cluster, ucn_node_id_t node_id,
                           uint32_t now_ms)
 {
-    ucn_cluster_member_t *member = find_member(cluster, node_id);
+    ucn_cluster_member_t *member = primary_member_find(cluster, node_id);
 
     if (cluster->backup_node_id == node_id) {
         /* CLV2-01-04d.4: preflight pattern (human auditor design) for the
@@ -143,9 +614,12 @@ void remove_member(ucn_cluster_t *cluster, ucn_node_id_t node_id,
     backup_resync(cluster);
 }
 
-void clear_members(ucn_cluster_t *cluster)
+void primary_member_table_clear(ucn_cluster_t *cluster)
 {
-    (void)memset(cluster->members, 0, sizeof(cluster->members));
+    if (cluster != NULL) {
+        (void)memset(cluster->primary_members.slots, 0,
+                     sizeof(cluster->primary_members.slots));
+    }
 }
 
 ucn_result_t handle_join_request(
@@ -164,7 +638,7 @@ ucn_result_t handle_join_request(
         cluster->stats.joins_rejected++;
         return UCN_ERR_ACCESS;
     }
-    member = allocate_member(cluster, source);
+    member = primary_member_allocate(cluster, source, now_ms);
     if (member == NULL) {
         cluster->stats.joins_rejected++;
         (void)send_join_reply(cluster, source, UCN_CLUSTER_MSG_JOIN_REJECT,
@@ -179,6 +653,7 @@ ucn_result_t handle_join_request(
     member->last_nonce = message->nonce;
     member->lease_expires_at_ms =
         ucn_deadline_from_now(now_ms, cluster->config.lease_ms);
+    member_note_legacy_keepalive(member, now_ms);
     cluster->stats.joins_accepted++;
     assign_backup(cluster, now_ms);
     if (!member_was_present) {
@@ -204,7 +679,7 @@ ucn_result_t send_join_reply(ucn_cluster_t *cluster,
     message.term = cluster->term;
     message.head_node_id = cluster->config.local_node_id;
     message.head_score = cluster->config.head_score;
-    message.available_capacity = available_capacity(cluster);
+    message.available_capacity = primary_member_available_capacity(cluster);
     message.lease_ms = cluster->config.lease_ms;
     message.nonce = join_nonce;
     return send_cluster_message(cluster, destination, &message);
@@ -299,7 +774,7 @@ ucn_result_t handle_keepalive(
         message->term != cluster->term) {
         return UCN_ERR_ACCESS;
     }
-    member = find_member(cluster, source);
+    member = primary_member_find(cluster, source);
     if (member == NULL) {
         return UCN_ERR_NOT_FOUND;
     }
@@ -310,13 +785,14 @@ ucn_result_t handle_keepalive(
     member->last_nonce = message->nonce;
     member->lease_expires_at_ms =
         ucn_deadline_from_now(now_ms, cluster->config.lease_ms);
+    member_note_legacy_keepalive(member, now_ms);
     return UCN_OK;
 }
 
 void expire_members(ucn_cluster_t *cluster, uint32_t now_ms)
 {
     size_t index;
-    bool changed = false;
+    bool changed = primary_member_expire_provisionals(cluster, now_ms) != 0U;
     bool backup_expired = false;
 
     /* CLV2-01-04d.4: preflight pattern for the backup-expiry branch.  The
@@ -329,10 +805,12 @@ void expire_members(ucn_cluster_t *cluster, uint32_t now_ms)
      * transition, no shadow write. */
     for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
         if (cluster->backup_node_id != 0U &&
-            cluster->members[index].occupied &&
-            cluster->members[index].node_id == cluster->backup_node_id &&
+            cluster->primary_members.slots[index].occupied &&
+            cluster->primary_members.slots[index].status !=
+                (uint8_t)UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL &&
+            cluster->primary_members.slots[index].node_id == cluster->backup_node_id &&
             ucn_deadline_expired(now_ms,
-                                 cluster->members[index].lease_expires_at_ms)) {
+                                 cluster->primary_members.slots[index].lease_expires_at_ms)) {
             backup_expired = true;
             break;
         }
@@ -362,13 +840,15 @@ void expire_members(ucn_cluster_t *cluster, uint32_t now_ms)
      * expired member (the Backup included when it expired), clear the
      * backup identity, then resync. */
     for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
-        if (cluster->members[index].occupied &&
+        if (cluster->primary_members.slots[index].occupied &&
+            cluster->primary_members.slots[index].status !=
+                (uint8_t)UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL &&
             ucn_deadline_expired(now_ms,
-                                 cluster->members[index].lease_expires_at_ms)) {
-            ucn_node_id_t expired_id = cluster->members[index].node_id;
+                                 cluster->primary_members.slots[index].lease_expires_at_ms)) {
+            ucn_node_id_t expired_id = cluster->primary_members.slots[index].node_id;
 
-            (void)memset(&cluster->members[index], 0,
-                         sizeof(cluster->members[index]));
+            (void)memset(&cluster->primary_members.slots[index], 0,
+                         sizeof(cluster->primary_members.slots[index]));
             cluster->stats.member_leases_expired++;
             changed = true;
             if (cluster->backup_node_id == expired_id) {

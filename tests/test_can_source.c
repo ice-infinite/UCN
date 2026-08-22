@@ -2,6 +2,7 @@
 
 #include "test_support.h"
 #include "ucn/adapters/ucn_can_source.h"
+#include "ucn/ucn_cluster_wire_v4.h"
 #include "ucn/ucn_frame.h"
 #include "ucn/ucn_node.h"
 
@@ -24,6 +25,9 @@ typedef struct can_fake_port {
 typedef struct can_receive_state {
     uint32_t count;
     uint32_t last_source;
+    uint16_t last_payload_length;
+    bool last_payload_captured;
+    uint8_t last_payload[UCN_CLUSTER_WIRE_MAX_MESSAGE_BYTES];
     uint8_t last_value;
 } can_receive_state_t;
 
@@ -126,6 +130,14 @@ static void can_receive(void *context, const ucn_frame_t *frame)
 
     state->count++;
     state->last_source = frame->source;
+    state->last_payload_length = frame->payload_length;
+    state->last_payload_captured =
+        frame->payload_length <= sizeof(state->last_payload) &&
+        (frame->payload_length == 0U || frame->payload != NULL);
+    if (state->last_payload_captured && frame->payload_length != 0U) {
+        (void)memcpy(state->last_payload, frame->payload,
+                     frame->payload_length);
+    }
     state->last_value = frame->payload_length == 0U ? 0U : frame->payload[0];
 }
 
@@ -399,6 +411,99 @@ static int test_can_carrier_contracts(void)
                         (uint16_t)segment_count, segment,
                         &segment_length) == UCN_ERR_NOT_FOUND);
     }
+    return 0;
+}
+
+/* CLV2-05-09: prove the generic CAN carriers can transport the frozen v4
+ * message size.  This intentionally transports a normal UCN payload only;
+ * it does not enable v4 Cluster RX/TX or FSM wiring. */
+static int test_can_cluster_v4_sized_payload_transport(void)
+{
+    can_fixture_t fixture;
+    ucn_can_frame_t physical;
+    uint8_t encoded[UCN_MAX_FRAME_BYTES];
+    uint8_t segment[UCN_CAN_CLASSIC_MAX_DATA_BYTES];
+    uint8_t expected[UCN_CLUSTER_WIRE_MAX_MESSAGE_BYTES];
+    size_t encoded_length = 0U;
+    size_t segment_count;
+    size_t segment_length;
+    size_t index;
+    const ucn_can_source_stats_t *stats;
+
+    TEST_ASSERT(UCN_CLUSTER_MESSAGE_BYTES ==
+                UCN_CLUSTER_WIRE_V3_MESSAGE_BYTES);
+    TEST_ASSERT(UCN_CLUSTER_WIRE_MAX_MESSAGE_BYTES ==
+                UCN_CLUSTER_WIRE_V4_MESSAGE_BYTES);
+    for (index = 0U; index < sizeof(expected); ++index) {
+        expected[index] = (uint8_t)(UINT8_C(0x90) + (uint8_t)index);
+    }
+
+    TEST_ASSERT(can_fixture_init(&fixture, 8U, 4U,
+                                 UCN_CAN_SOURCE_CAN_FD_DIRECT) == UCN_OK);
+    TEST_ASSERT(can_make_fd(0x100U, CAN_REMOTE_A, 90U,
+                            UCN_CLUSTER_WIRE_MAX_MESSAGE_BYTES, 0x90U,
+                            &physical) == UCN_OK);
+    TEST_ASSERT(physical.length == UCN_CAN_FD_MAX_DATA_BYTES);
+    encoded_length = UCN_FRAME_W0_HEADER_SIZE +
+                     UCN_CLUSTER_WIRE_MAX_MESSAGE_BYTES;
+    TEST_ASSERT(encoded_length == 57U);
+    for (index = encoded_length; index < physical.length; ++index) {
+        TEST_ASSERT(physical.data[index] == 0U);
+    }
+    TEST_ASSERT(ucn_can_source_write(&fixture.source_a, &physical) == UCN_OK);
+    TEST_ASSERT(can_drain(&fixture, 8U) == 0);
+    TEST_ASSERT(fixture.received.count == 1U &&
+                fixture.received.last_payload_length ==
+                    UCN_CLUSTER_WIRE_MAX_MESSAGE_BYTES &&
+                fixture.received.last_payload_captured &&
+                memcmp(fixture.received.last_payload, expected,
+                       sizeof(expected)) == 0 &&
+                fixture.received.last_value == 0x90U);
+
+    TEST_ASSERT(can_make_fd(0x100U, CAN_REMOTE_A, 91U,
+                            UCN_CLUSTER_WIRE_MAX_MESSAGE_BYTES, 0xB0U,
+                            &physical) == UCN_OK);
+    for (index = encoded_length; index < physical.length; ++index) {
+        TEST_ASSERT(physical.data[index] == 0U);
+    }
+    physical.data[physical.length - 1U] = UINT8_C(0x7E);
+    TEST_ASSERT(ucn_can_source_write(&fixture.source_a, &physical) == UCN_OK);
+    TEST_ASSERT(can_drain(&fixture, 8U) == 0);
+    TEST_ASSERT(fixture.received.count == 1U);
+    stats = ucn_can_source_get_stats(&fixture.source_a);
+    TEST_ASSERT(stats != NULL && stats->fd_padding_errors == 1U);
+
+    TEST_ASSERT(can_fixture_init(&fixture, 8U, 4U,
+                                 UCN_CAN_SOURCE_CLASSIC_CARRIER) == UCN_OK);
+    TEST_ASSERT(can_make_encoded(CAN_REMOTE_A, 91U,
+                                 UCN_CLUSTER_WIRE_MAX_MESSAGE_BYTES, 0xA0U,
+                                 encoded, &encoded_length) == UCN_OK);
+    TEST_ASSERT(encoded_length == UCN_FRAME_W0_HEADER_SIZE +
+                                      UCN_CLUSTER_WIRE_MAX_MESSAGE_BYTES);
+    segment_count = ucn_can_classic_carrier_segment_count(encoded_length);
+    TEST_ASSERT(segment_count == 12U);
+    for (index = 0U; index < sizeof(expected); ++index) {
+        expected[index] = (uint8_t)(UINT8_C(0xA0) + (uint8_t)index);
+    }
+    for (index = 0U; index < segment_count; ++index) {
+        (void)memset(&physical, 0, sizeof(physical));
+        physical.identifier = 0x100U;
+        TEST_ASSERT(ucn_can_classic_carrier_encode_segment(
+                        encoded, encoded_length, 90U, (uint16_t)index,
+                        segment, &segment_length) == UCN_OK);
+        physical.length = (uint8_t)segment_length;
+        (void)memcpy(physical.data, segment, segment_length);
+        TEST_ASSERT(ucn_can_source_write(&fixture.source_a, &physical) ==
+                    UCN_OK);
+        TEST_ASSERT(can_drain(&fixture, 8U) == 0);
+    }
+    TEST_ASSERT(fixture.received.count == 1U &&
+                fixture.received.last_payload_length ==
+                    UCN_CLUSTER_WIRE_MAX_MESSAGE_BYTES &&
+                fixture.received.last_payload_captured &&
+                memcmp(fixture.received.last_payload, expected,
+                       sizeof(expected)) == 0 &&
+                fixture.received.last_value == 0xA0U);
     return 0;
 }
 
@@ -751,6 +856,7 @@ int test_can_source(void)
     int result = 0;
 
     result |= test_can_carrier_contracts();
+    result |= test_can_cluster_v4_sized_payload_transport();
     result |= test_can_fd_multi_source_and_padding();
     result |= test_can_classic_reassembly_and_faults();
     result |= test_can_slots_bus_state_and_backpressure();

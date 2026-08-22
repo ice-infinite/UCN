@@ -15,11 +15,11 @@
 > | M01 显式 Phase | DONE | 01-01..01-04f 全部闭环（OP-203..210） | 用户正式签字 PASS（2026-08-16，ab53b31）：01-01~03 + 01-04a..f 全序列 PASS；全文件断言达成（无正常路径 phase change 绕过 cluster_transition()）；Shadow-Guard 纪律全站成立；M01.0.2 组合保留；Golden 等价；observed 35/0；cluster_bytes 1096。授权进入 M02（纯结构性重构，不得顺手优化 FSM） |
 > | M02 模块拆分 | DONE | 02-01..02-06 + approved scope adjustments 02-07/08（OP-211..216 + M02.1 对齐） | ucn_cluster.c 6216→1667 行；6 模块 + internal header（codec/fsm/membership/backup[+takeover 合并]/recovery/merge）；字节级等价（函数体未动，仅 de-static + 前向声明）；FULL/ASan/LITE/NANO 全绿；observed 35/0；golden 逐字节不变；cluster_bytes 1096；Core 不反向依赖；whole-Cluster EXCLUDE_FROM_ALL 按需链接（per-module trim deferred）；02-07 internal storage contract DONE / opaque split → CLV2-14-02 |
 > | M03 Epoch 分类 | DONE | 03-01..03-09 + R01..R08（M03 候选提交） | 2026-08-21 功能审计 GO：Epoch 域截断、同簇 authority、运行期历史、serial fail-closed、Provider/incarnation、复审整改和隔离门禁均通过；M11 Merge/Handover、M14 物理 active-epoch 收拢仍按原计划后置。 |
-> | M04 Persistence | IN PROGRESS | 04-01 | 先冻结与实现 Platform-agnostic Persistence Provider 公共契约；严格执行 persist-before-promise，未持久化成功不得发送 Advertise/ACK/Commit。 |
-> | M05 Wire v4 | TODO | — | — |
-> | M06 Provisional | TODO | — | — |
-> | M07 Joint Config | TODO | — | — |
-> | M08 Authority/Fence | TODO | — | — |
+> | M04 Persistence | DONE（软件范围） | 04-01..10 + R17..R23 代码整改完成（未提交） | 外部复审已签署 R23 PASS：旧版合法 Record v1 `PREPARED` 可在受控启动时原子 abort + replay incarnation，M04 软件范围解除 AUDIT HOLD，授权进入 M05。真实 Flash Provider、掉电和 MCU 实机仍未验证，不得误称生产发布。 |
+> | M05 Wire v4 | AUDIT HOLD / 05-01..12 均已受限签字 | 05-01 RFC4 已冻结；05-02..05-12 均已外审 GO（各自受限范围） | 默认产品仍不得接入 Head/Backup 选择、生产 RX/TX/FSM 或 v4 发送。仅 M07 可在明确命名的测试/实验 target 内做 Config/Joint/Persistence 受控集成；不得改变默认产品行为、解除顶层 AUDIT HOLD，或把 VOLATILE_TEST 当作掉电安全证明。 |
+> | M06 Provisional | DONE / 外部复审 GO（受限软件范围） | 06-01..09 与 R01 已完成；外审确认 production RX 在任何状态/计时/统计/shadow 写入前拒绝 v3 Backup/Takeover authority frame，且 legacy bridge 为 target-private。M05 05-01..12 的 codec/contract 子项均已受限签字，但 M05 顶层仍 AUDIT HOLD | 本签字只覆盖成员数据模型、v3 legacy 收紧、test-only bridge 及 R01 生产 RX fence；不得据此接入 production v4 RX/TX/FSM、Authority 或 Adapter，也不构成实机、Flash/掉电或互通放行。 |
+> | M07 Joint Config | DONE / 外部复审 GO（受限实验软件范围） | 07-00..12 + R24..R30 已完成；外审确认 R25/R26 最终旁路已关闭，未发现新的 P0/P1 | 只签实验 Config/Joint/Persistence 软件范围；M05 顶层 AUDIT HOLD 不解除，默认产品仍不启用 v4 encoder、production v4 RX/TX/FSM、Authority、Adapter，真实 Flash/掉电/MCU/互通也未验收。 |
+> | M08 Authority/Fence | SELF-AUDIT PASS / WAIT EXTERNAL | 08-01..12、R31/R32 已完成（未提交） | 已整改 Authority 缓存过期与 Config 切换残留授权；等待本轮外部复审，M05 顶层 `AUDIT HOLD` 不解除。 |
 > | M09 Backup 双缓冲 | TODO | — | — |
 > | M10 Final Takeover | TODO | — | — |
 > | M11 Merge/Handover | TODO | — | — |
@@ -406,21 +406,75 @@ duplicate/replay/reorder
 
 ## M04 当前执行进度（2026-08-21）
 
-- **进行中**：`CLV2-04-01`。先完成与 Flash、文件系统、RTOS 均解耦的 Provider 公共契约及 Host fake 对接点；在 04-01 尚未冻结前，不改写 Election、Takeover、ACK 或 Advertise 的生产承诺路径。
-- **不变门禁**：对外可见的 Advertise、TAKEOVER_ACK、Commit，必须由已成功完成的持久化动作授权；`PENDING` 只允许保留本地事务，不允许发送承诺帧；`ERROR` 必须 fail-closed。
+- **04-01/02 独立复审 GO**：独立对抗复审已签署 R01..R16 PASS；Record v1 当前源码 SHA256 为 `75D2745C33CECB8D03553C890D655C525D3816E0550E774AE57B1C9BF3BB4508`。已确认 retired Tombstone 不可被普通新簇创建抹除、普通 Epoch/新簇创建/Replay incarnation 的操作边界分离。
+- **04-03 独立复审 GO**：配置级 `REQUIRED / VOLATILE_TEST` 门禁已独立签署 PASS。默认 `REQUIRED` 缺少兼容 Provider 时 init fail-closed；`VOLATILE_TEST` 仅供测试/模拟使用，并在 view/stats 中显式可见。Full Host x64 `cluster_bytes` 为 `1144 B`，相对 M03 的 `1136 B` 增加 `8 B`，已录入资源增量记录。
+- **04-04..10 + R17..R23 外部复审 GO**：`REQUIRED` 在计时器、角色和任何发送路径建立前同步 `load()`；受控启动再以 `REPLAY_INCARNATION` 建立唯一 boot incarnation。运行期 Bridge 对每个承诺写入执行 `submit → PENDING/poll → load → journal match`，只有重新读到完全匹配的完成 journal 后，才允许改变 FSM 或发送对外承诺。外部复审已复跑 R23 的旧 Record Config/Rekey `PREPARED` encode/decode→restart/init 反例并签署 PASS；M04 软件范围解除 `AUDIT HOLD`，可进入 M05。
+- **已接线的安全承诺点**：普通 Election/Recovery 新 Epoch、Backup challenge、Takeover Head promotion、Member `TAKEOVER_ACK` 都在 durable Epoch/Vote 之后继续。M07/M13 的 Prepare 恢复、Commit 及 runtime continuation 未就绪，因此 Config/Rekey 的四个公共 Hook 都在 Provider I/O 前明确拒绝；新的 runtime 不会写入 orphaned `PREPARED`。为避免 R20 前已落盘的合法 Record v1 永久阻断启动，R23 仅在 controlled REQUIRED boot 原子清除该 `PREPARED` payload 并严格递增 incarnation；不能以 `ACTION_NONE` 把新 durable contract 或 retired Epoch 留在旧 RAM/FSM。
+- **R17/R18 I/O 与旧 authority 边界**：每次 Provider `load/submit/poll` 的**调用前**建立 `persistence_io_active`。回调同步重入的 `step/RX/poll` 只能返回 busy/state，不能推进或发送；初始 load 同样受此规则覆盖。Config/Rekey Commit 在 M07/M13 runtime continuation 未实现时于 Provider I/O 前拒绝，故不存在 durable successor 与旧 RAM Head 并存并发送 retired Epoch 的窗口。
+- **R19 背压边界**：已 durable 的 Vote 首次 `TAKEOVER_ACK` 若遇 `UCN_ERR_NO_SPACE`，只建立有界 retry continuation；对象不 fault，普通 TX/RX 继续被冻结，下一次 step 重新 load/prove durable Vote 后重发。真实 Provider 失败、非法 completion 或 “COMMITTED 但 reload 未看到同一 journal”仍 sticky fail-closed。Head/Recovery Head 正常路径转换为 wire-silent `TERM_CONFLICT_WAIT`；Member 禁止投票、Backup 禁止完成 Takeover。
+- **明确后置范围**：M04 未实现板级 Flash Provider/掉电实测；M05 才定义 Join Epoch 的 wire/install，故 REQUIRED Member 对 RAM authority 与 durable active Epoch 不相符时拒绝 `TAKEOVER_ACK`（安全优先的可用性降级）。Recovery Head 的创建已接入 persistence，但接收端 Recovery Join/`RECOVERY_ACK` 仍是 M05 前的 RAM 路径，不能表述为“全部 Recovery 均已持久化”。M07/M13 仍负责 Config/Rekey 的真正协议事务和 wire 语义；在重新开放新的 `PREPARED` 前，必须先完成 `CLV2-07-00` 的 Record 来源区分，R23 绝不能清理未来事务。
+
+### M04 连续实施与自审规则（用户授权，2026-08-21）
+
+- `CLV2-04-05` 至 `CLV2-04-10` 连续实施；不再把每一个小项作为等待外部审计的停点。
+- 每一个小项结束都必须先完成一次**独立自审**：逐条对照该任务的安全合同、检查所有生产调用点、添加正/负向测试，并至少运行受影响 Profile 的构建与测试。自审结论、发现项与证据写入 `01-项目操作记录.md`。
+- 全部 04-05..10 结束后，再进行一次**M04 全量交叉自审**：重扫所有 Head/ACK/Commit 发送路径、Provider `submit/poll` 状态机、失败/重启/崩溃矩阵、Profile 裁剪、Sanitizer/Analyzer、资源变化与文档一致性。
+- 只有全量自审通过后，才将 M04 标为 `CODE COMPLETE / 待外部审计` 并提交给外部审计；在那以前不得称为生产完成或擅自进入 M05。
 
 | 任务 ID | 优先级 | 依赖 | 主要文件/位置 | 具体修改任务 | 完成定义 / 测试 |
 |---|---:|---|---|---|---|
-| `CLV2-04-01` | P0 | M03 | include/ucn/ucn_cluster_persist.h | 定义 Provider：load、submit/store epoch、vote、config、rekey、tombstone、replay incarnation；支持同步 OK、异步 PENDING、失败 ERROR。 | API 不依赖文件系统/Flash SDK；Host fake 和 MCU 产品均可实现。 |
-| `CLV2-04-02` | P0 | 04-01 | Persisted record schema | 记录包含 magic、schema version、record size、monotonic record generation、CRC；安全记录至少含 active/max epoch、last vote、config commit、rekey tombstone、boot incarnation。 | 损坏/旧版本记录可检测并按配置 fail-closed 或 factory-empty。 |
-| `CLV2-04-03` | P0 | 04-01 | Cluster config | 增加 `persistence_mode`：REQUIRED、VOLATILE_TEST；生产 Strict Profile 缺 Provider 时 init 失败。VOLATILE 模式必须在 view/stats 中明显标识，不能宣称跨重启安全。 | Strict 模式无 Provider 返回 `UCN_ERR_CONFIG`。 |
-| `CLV2-04-04` | P0 | 04-01 | Init/load | `ucn_cluster_init` 先 load 安全记录，再建立 Phase；恢复 max_seen_term、vote、config/tombstone，禁止先发 Advertise 后加载。 | 掉电重启测试不会回到旧 Term。 |
-| `CLV2-04-05` | P0 | 04-01 | Election/Head transition | Election win、Backup challenge、Takeover commit 在对外发送新 Term Head 消息前必须持久化 Epoch；PENDING 时保持原 Phase 子事务并暂停承诺。 | 注入 store failure 时不出现新 Head Advertise。 |
-| `CLV2-04-06` | P0 | 04-01 | Takeover vote | Member 在 TAKEOVER_ACK 前 persist 完整 VoteId；重复相同 Vote 可重发 ACK，冲突 Vote 必须拒绝。 | 在 persist 完成前网络队列中不存在 ACK。 |
-| `CLV2-04-07` | P0 | 04-01 | Config/Rekey hooks | 先建立 `persist_config_prepare/commit`、`persist_rekey_prepare/commit` 调用骨架，M07/M13 接入；禁止后续协议绕过 Provider。 | 接口和失败语义有单元测试。 |
-| `CLV2-04-08` | P0 | 04-01 | Persistence failure handler | 异步失败作为最高优先级 Event：Head 撤销承诺，Member 停止投票，Backup 禁止完成 Takeover；记录 fail-closed reason。 | 每一种 pending operation 均有失败状态测试。 |
-| `CLV2-04-09` | P1 | 04-02 | Boot incarnation / replay epoch | 每次受控启动取得唯一 incarnation；高频 nonce 形成 `(node_id,incarnation,nonce)`，不要求每帧写 Flash。 | 重启后 nonce 从小值开始也不会与旧 boot 混淆。 |
-| `CLV2-04-10` | P1 | 04-01..09 | Host fake + crash matrix | 提供双槽 fake provider，模拟在 write-before/after、CRC、部分写、重启时崩溃；测试所有安全承诺点。 | Crash matrix 中 Safety 属性不被破坏。 |
+| CLV2-04-01 | P0 | M03 | include/ucn/ucn_cluster_persist.h | **DONE / 独立复审 PASS**：Provider v1 已有 invalid-zero-safe load/completion、request finalize/validate/admit、完整 VoteId 与 transaction contract；新增显式 `CLUSTER_CREATE_COMMIT`，并收紧 Vote 单投、Epoch 单调、Config serial、Rekey/Tombstone retain 与 Replay-only incarnation contract。 | R01..R16 负向门禁及跨 Profile 回归、独立复审均已签署通过。 |
+| CLV2-04-02 | P0 | 04-01 | src/extended/cluster/ucn_cluster_persist.c | **DONE / 独立复审 PASS**：Record v1 维持 280 B canonical layout；同簇 Epoch / 新簇创建分离验证、非 Replay 操作 boot incarnation 不变式，以及 Rekey/Tombstone source 的 create fail-closed 边界均已签署。 | R02/R03/R04/R07..R16、Sanitizer/Analyzer 与独立对抗复审均通过。 |
+| `CLV2-04-03` | P0 | 04-01 | Cluster config | **DONE / 独立复审 PASS**：`persistence_mode` 已提供 REQUIRED、VOLATILE_TEST；生产 Strict Profile 缺 Provider 时 init 失败。VOLATILE 在 view/stats 中明显标识，不能宣称跨重启安全。 | 默认 REQUIRED、非法 mode、不兼容 Provider、显式 VOLATILE、view/stats 一致性均已独立覆盖；未调用 load、未接线任何承诺帧。 |
+| `CLV2-04-04` | P0 | 04-01、04-03 | Init/load | **DONE / 外部复审 PASS**：`ucn_cluster_init` 在计时器、角色和发送路径前同步 `load()`；随后 replay incarnation 成功才解除启动门。Factory/READY/损坏/全零结果均 fail-closed，不在对象中复制完整 280 B Record。R23 允许合法 legacy `PREPARED` 通过原子 abort + replay 迁移而非永久拒绝启动。 | Factory/READY/CRC/非法 load、同步/异步 boot replay、Config/Rekey legacy `PREPARED` Record encode/decode→restart/init、双槽半写后重试均由 `test_cluster_persist` 覆盖并经外部复审。 |
+| `CLV2-04-05` | P0 | 04-01 | Election/Head transition | **DONE / 外部复审 PASS**：Election/Recovery 新 Epoch、Backup challenge、Takeover promotion 均经 `submit → reload journal` 后才进入 Candidate/Head/Recovery Head；PENDING 保持原子事务与原角色。 | PENDING、reload 不可见、poll fail 的正/负例保证无 Advertise/Head promotion 泄漏。 |
+| `CLV2-04-06` | P0 | 04-01 | Takeover vote | **DONE / 外部复审 PASS**：Member 在 `TAKEOVER_ACK` 前持久完整 VoteId；精确 durable Vote 可重发 ACK，候选/generation 冲突拒绝；RAM Epoch 与 durable Epoch 不同拒绝 ACK。 | 同步/异步、精确重放、冲突、Epoch 不匹配、poll failure 均断言 ACK 数量。 |
+| `CLV2-04-07` | P0 | 04-01 | Config/Rekey hooks | **DONE / 外部复审 PASS**：M07/M13 的 Prepare reset recovery、Commit 与 runtime continuation 未实现，Config/Rekey 四个公共 Hook 全部在 Provider I/O 前返回 `UCN_ERR_CONFIG`；不允许 orphaned `PREPARED` 或 `ACTION_NONE` 解冻旧 runtime contract。 | Config/Rekey 同步/异步 Provider 下的 Prepare/Commit fail-before-I/O、Prepare 后 reset/init 可用、事务状态保持 NONE；M07/M13 才开放各自真正事务。 |
+| `CLV2-04-08` | P0 | 04-01 | Persistence failure handler | **DONE / 外部复审 PASS**：PENDING/FAILED/伪 COMMITTED 一律 fail-closed；Head/Recovery Head 进入 wire-silent containment，Member/Backup 被全局 progress/TX gate 冻结，failure 统计可见。 | Election/Vote/Takeover/Head Config 的失败例覆盖；发送路径源码复扫确认全经 `cluster_transmit` 门。 |
+| `CLV2-04-09` | P1 | 04-02 | Boot incarnation / replay epoch | **DONE / 外部复审 PASS**：每次 REQUIRED 受控 init 先持久严格递增 incarnation，形成 `(node_id, incarnation, nonce)` replay 域；不要求每帧写 Flash。 | Factory boot=1、下一启动=2、异步 boot pending gate 覆盖。 |
+| `CLV2-04-10` | P1 | 04-01..09 | Host fake + crash matrix | **DONE / 外部复审 PASS**：双槽 Host fake 基于真实 Record v1 codec 模拟写前失败、半写、写满后故障、CRC 损坏与重启选择。 | 老 slot 保留或新 slot完整提交；重启后 exact retry 幂等，无 half-old state。 |
+
+## M04 04-01/02 复审整改任务（2026-08-21）
+
+> 独立复审已对 R01..R16 作出 **PASS** 签字；下表“完成定义/测试”栏中
+> 保留的“待独立复审”是整改执行时的历史措辞，不再表示当前状态。
+
+| 任务 ID | 优先级 | 核实结果 | 修改任务 | 完成定义 / 测试 |
+|---|---|---|---|---|
+| CLV2-04-R01 | P0 | 已签署 PASS | completion/load state 增加 INVALID=0，禁止零初始化被视为 COMMITTED 或 FACTORY_EMPTY；公共 fake 也 canonical factory-empty。 | 全零 completion/load result 均无效；Provider 无 poll 却返回 PENDING 被 owner-admission helper 拒绝。 |
+| CLV2-04-R02 | P1 | 已签署 PASS | 统一持久化 Epoch/serial 验证：Cluster/Head ID 禁止 0/broadcast；Term、Config/Rekey generation、incarnation、transaction/operation ID 必须在 no-wrap 域。 | 广播 ID、越阈值 Term/serial 的 encode、decode、request admission 已覆盖并拒绝。 |
+| CLV2-04-R03 | P1 | 已签署 PASS | Record encode 对 absent Epoch/Vote/Config/Rekey/Tombstone/journal 字段强制零化；decode 要求这些保留字节为零。 | 脏 absent state 产生同一 canonical record；脏 record 即使 CRC 重算也拒绝。 |
+| CLV2-04-R04 | P0 | 已签署 PASS | Config/Rekey 增加持久事务 phase、transaction ID、staging/committed reference；Tombstone 绑定 Rekey transaction；持久 last_completed_operation journal。此前只保存“标签”，没有证明合法转换。 | transition validator 已证明 Prepare/Commit 的 txid、staging/committed identity、原子 Tombstone 均匹配；重启后不可 Config Skip；待独立复审。 |
+| CLV2-04-R05 | P1 | 已签署 PASS | Provider request finalize/validate/admit 已固定 PENDING、多轮 poll、同步 provider 无 poll 的 fail-closed 基础语义；operation 幂等现同时受 R08 的状态转换约束。 | 连续 PENDING、多轮 poll、无 poll、failed/committed terminal、replay 与非法转换均覆盖；待独立复审。 |
+| CLV2-04-R06 | P1 | 已签署 PASS | 扩展 Host fake 和 public-header tests，覆盖上述全部负向场景与 canonical Record v1。此前未覆盖协议级非法事务转换。 | 已新增 Prepare-A/Commit-B、txid 冲突、双 PREPARE、提前 Tombstone、VoteId generation 重启恢复、Rekey successor mismatch 等反例；待独立复审。 |
+| CLV2-04-R07 | P0 | 已签署 PASS | 完整持久化 VoteId：`last_vote` 已含 `(cluster_id, term, voted_for_node_id, backup_generation)`；Record codec round-trip 全字段。 | 重启后同 generation 的重复 Vote 拒绝；不同 generation 可区分；越阈值 generation 拒绝；待独立复审。 |
+| CLV2-04-R08 | P0 | 已签署 PASS | 新增基于 `committed_state + operation + next_state` 的 transition validator；Config Commit 匹配同 txid 的 staging Config，Rekey Commit 匹配同 txid 的 staging successor；禁止请求改写无关事务状态。 | Prepare-A/Commit-B、txid conflict、Config/Rekey 双 PREPARE、非法并入变化和 standalone Tombstone 均拒绝；待独立复审。 |
+| CLV2-04-R09 | P1 | 已签署 PASS | Rekey reference 持久化 predecessor epoch/config 与 successor epoch；Rekey Commit 把 successor Active/Max Epoch、committed Rekey、transaction journal 和 Tombstone 作为一个 next snapshot。 | PREPARE/COMMIT 重启后恢复 exact successor；缺旧 config、缺 successor、successor 非 Term 1 或复用旧 cluster id 均拒绝；待独立复审。 |
+| CLV2-04-R10 | P1 | 已签署 PASS | Record v1 物理布局为 280 B（尚未发布，不承担兼容）；保持全字段 canonical/CRC/域校验。 | 全 Profile、codec dirty-byte、ASan/UBSan、`-fanalyzer` 已重新通过；04-03 继续冻结待独立审计。 |
+| CLV2-04-R11 | P0 | 已签署 PASS | 收紧 Vote admission：同一 Active Epoch 只允许一个 durable VoteId；相同请求走既有 operation-journal 幂等路径，candidate 或 backup_generation 不同的一律视为冲突。 | generation/candidate conflict、重启后相同 Vote 重试、Active Epoch 严格推进后的新 Vote 均已回归；待独立复审。 |
+| CLV2-04-R12 | P0 | 已签署 PASS | 收紧 Epoch admission：active/max 必须同一完整 Epoch；普通 EPOCH_COMMIT 仅允许当前 identity 的 exact-next Term，不得用该 operation 换 Cluster identity 或回退/跳过 max Term。 | Term 5→2、same-term different Head、active/max mismatch、新 Cluster Term 1 bypass 均拒绝；5→6 唯一通过；待独立复审。 |
+| CLV2-04-R13 | P0 | 已签署 PASS | 收紧 Config Prepare：Config txid、config_id、generation 均是 no-wrap serial。首次为 1；后继请求必须精确 `+1`，Commit 仍仅接受已持久 PREPARE 的同 txid/staging。 | txid reuse、txid skip、Config ID/generation rollback/skip、重启后旧 Prepare replay 均拒绝；合法连续事务通过；待独立复审。 |
+| CLV2-04-R14 | P0 | 已签署 PASS | 新增独立 `CLUSTER_CREATE_COMMIT`：普通 `EPOCH_COMMIT` 保持 same-Cluster/exact-next-Term；新簇创建只允许有效新 ID、Term=1、与即时父 Cluster ID 不同，并原子写入 active/max。该转换保留 node boot incarnation 与 operation journal，清除父簇 Vote/Config；Rekey/Tombstone source 由 R16 拒绝而非清除。Record v1 是 current-state bounded，调用方必须已在运行时 FSM 完成 Detach，04-05 才负责发送前接线。 | Factory Empty 必须先 Replay 再建首簇；Detach 后、Record reload 后再次新建簇通过；父 ID 重用、Term 非 1、携带父簇 Config 状态、以 EPOCH_COMMIT 换簇均拒绝；待独立复审。 |
+| CLV2-04-R15 | P0 | 已签署 PASS | `boot_incarnation` 的唯一变更操作为 `REPLAY_INCARNATION`，且必须严格单调递增；所有其他 operation 必须保持已持久 incarnation 完全相同，未建立 replay domain 的 Factory Empty 不得创建 Cluster 或提交普通 Epoch。 | Epoch 内夹带 incarnation 回退/前进均拒绝；Replay 可单独前进、但携带 Epoch 变化拒绝；Host fake 覆盖 Replay→Create→Epoch 的真实顺序；待独立复审。 |
+| CLV2-04-R16 | P0 | 已签署 PASS | 在 Record v1 尚无退休 identity 集合/lineage 的 M04 阶段，`CLUSTER_CREATE_COMMIT` 遇到已提交的 Rekey、Rekey transaction 或 Tombstone 必须 fail-closed；不得通过清空这些字段“创建新簇”。M12 定义并验证有界 lineage 后，才可另行设计安全的放行策略。 | A→B Rekey 后重建 retired A、创建 fresh C、以及 encode/decode 重启后的 fresh C 均拒绝；拒绝后 Tombstone 的 retired A→replacement B 与 committed Rekey 均保持不变；待独立复审。 |
+
+## M04 最终外部审计整改任务（2026-08-21，外部复审 PASS）
+
+> 外部审计确认常规门禁全部通过，但 Provider callback 的同步重入、Rekey
+> completion 与临时发送背压没有被既有回归覆盖。以下三项均为本轮阻断；
+> R17/R18 已在本轮外部复审确认 PASS；R19 的“新异步 Vote + NO_SPACE”主路径
+> 也确认 PASS，但重放和 Link Down 分支未闭环，另新增 R20..R23。全部整改、全
+> Profile/ASan/Analyzer 重跑及 R23 外部复审均已完成，M04 软件范围已签署放行。
+
+| 任务 ID | 优先级 | 核实结果 | 修改任务 | 完成定义 / 测试 |
+|---|---:|---|---|---|
+| `CLV2-04-R17` | P0 | **外部复审 PASS** | **Rekey completion fencing**：Config/Rekey 不得以 `ACTION_NONE` 直接解冻旧 Cluster FSM。M13 successor continuation 尚未存在时，Config/Rekey Commit 均在 API 层、Provider I/O 前返回 `UCN_ERR_CONFIG`；同步与异步都不可能让 retired Epoch 发送。 | 外部复审确认两个 Commit 均 fail-before-I/O，原旧 Epoch 泄漏已封堵。 |
+| `CLV2-04-R18` | P0 | **外部复审 PASS** | **Provider I/O reentrancy gate**：在调用 `load/submit/poll` 前先建立不可重入门；回调内同步进入 Cluster step/RX 或递归 poll 返回 `UCN_ERR_STATE`，且绝不能在门建立前发送旧 Epoch。 | 外部复审确认门在 callback 前建立，step/RX/递归 poll 与发送门均正确阻断。 |
+| `CLV2-04-R19` | P1 | **DONE / 外部复审 PASS** | **Durable Vote 与临时 ACK 背压分离**：新异步 Vote、durable replay 与 Link Down 都统一进入 retry dispatcher。 | R21/R22 已补齐边分支，R19 整体经外部复审通过。 |
+| `CLV2-04-R20` | P0 | **DONE / 外部复审 PASS** | **orphaned Prepare boot safety**：M07/M13 未实现 Prepare 的 reset recovery、Resume/Abort/Commit 时，Config/Rekey Prepare 也必须与 Commit 一样 fail-before-I/O；不得留下会阻断下一次 `REPLAY_INCARNATION` 的 durable `PREPARED`。 | 同步与 async-capable Provider 下，Config/Rekey Prepare/Commit 均不写 Record、不留 pending；随后 reset/init 成功、boot incarnation 前进、事务均为 NONE。 |
+| `CLV2-04-R21` | P1 | **DONE / 外部复审 PASS** | **durable Vote replay ACK retry**：预置或重启恢复的相同 durable Vote 不能绕过 `send_takeover_ack_after_persistence()`；`NO_SPACE` 必须建立 retry，并在下一 Step reload/prove 后重发。 | 预置 exact durable Vote、首次 replay ACK `NO_SPACE`、`retry=true/faulted=false`、下一 Step ACK 成功。 |
+| `CLV2-04-R22` | P1 | **DONE / 外部复审 PASS** | **ACK Link Down classification**：async Vote 已 durable 后的 `UCN_ERR_LINK_DOWN` 是传输结果，不是 Provider failure；它与 `NO_SPACE` 一样建立 retry，不能增加 `persistence_failures` 或 sticky fault。 | async Vote poll 完成→首次 ACK Link Down→`retry=true/faulted=false/persistence_failures=0`→链路恢复后下一 Step ACK 成功。 |
+| `CLV2-04-R23` | P0 | **DONE / 外部复审 PASS** | **legacy PREPARED boot migration**：R20 阻止未来公共 Hook 写入 `PREPARED`，但已存在的 canonical Record v1 仍合法。仅 controlled REQUIRED boot 可提交 `LEGACY_PREPARED_ABORT`：保持 Epoch/Vote/Config/Rekey/Tombstone 其余字段不变，清除唯一 `PREPARED` transaction，并在同一 Record 写入严格递增 boot incarnation；写入/PENDING/load-proof 失败仍 fail-closed。 | Config 与 Rekey 的 finalized PREPARED Record 均执行 encode/decode→同步/异步 restart/init；generic Replay 仍拒绝 PREPARED；非法 authority mutation 被 validator 拒绝；双槽半写后旧 PREPARED 保留并可在下一次启动完成迁移。 |
 
 ## 本里程碑禁止事项
 - 禁止先发 ACK/Advertise 后写存储。
@@ -439,18 +493,32 @@ duplicate/replay/reorder
 
 | 任务 ID | 优先级 | 依赖 | 主要文件/位置 | 具体修改任务 | 完成定义 / 测试 |
 |---|---:|---|---|---|---|
-| `CLV2-05-01` | P0 | M04 | docs/UCN_Cluster_Wire_v4.md | 先写 Wire RFC：建议固定 40 B，公共 16 B + 六个 u32 type payload；不修改 W0/W1/W2/W3 Core 头。明确网络字节序、保留位、每 Type 合法 Role/flags。 | RFC 评审通过后才改常量。 |
-| `CLV2-05-02` | P0 | 05-01 | Format/version | 把 Cluster Format 与 Core Protocol Version 分开；增加 v4 decoder/encoder，保留可选 v3 decoder，不允许同一消息被模糊解释。 | v3/v4 golden vectors 独立。 |
-| `CLV2-05-03` | P0 | 05-01 | Type-specific structs/builders | 停止让一个巨大 `ucn_cluster_message_t` 同时承载所有字段；建立内部 tagged payload 或每 Type builder，encode 前执行 type-specific validation。 | 未初始化无关字段不影响 Wire；parser 无交叉字段漏洞。 |
-| `CLV2-05-04` | P0 | 05-01 | v4 Snapshot payload | 确保一帧可绑定 generation、snapshot_id、sequence、member_id、member_nonce 和 lease/flags；不得再次截断或省略 Epoch。 | 边界值 UINT32_MAX-1 round-trip。 |
-| `CLV2-05-05` | P0 | 05-01 | v4 Takeover payload | 可表达 generation、snapshot/config identity、proposed term、certificate/vote bitmap 或其分片；联合配置证书必须可验证。 | 伪造/缺字段证书被拒绝。 |
-| `CLV2-05-06` | P0 | 05-01 | 新 Message Types | 预留并冻结 CONFIG_BEGIN/MEMBER/PREPARE/ACK/COMMIT/ABORT、HANDOVER_PREPARE/READY/COMMIT、HEAD_WITHDRAW、REKEY_PREPARE/ACK/COMMIT；编号只增不复用。 | Type enum、parser table、文档一致。 |
-| `CLV2-05-07` | P0 | 05-01 | Capability negotiation | Advertise/Join 携带 min/max Cluster Wire、capability bitmap：BACKUP、TAKEOVER、JOINT_CONFIG、PERSISTENCE、RECOVERY_LINEAGE、REKEY。 | 选 Head/Backup 时只选择能力满足者。 |
-| `CLV2-05-08` | P0 | 05-07 | Mixed-version policy | Strict v4 Cluster 禁止 v3 节点成为 Head、Backup 或 voter；可选允许 v3 作为 non-voting legacy member。兼容模式必须显式，不能静默降低 Safety。 | 混合版本矩阵测试覆盖拒绝/降级路径。 |
-| `CLV2-05-09` | P1 | 05-02 | Message bytes migration | 所有 Adapter/测试队列/bench 使用 `UCN_CLUSTER_MESSAGE_BYTES`，不得硬编码 32；检查 CAN/Stream Carrier 的 payload/fragment 行为。 | 40 B Cluster payload 在支持的 Carrier 上可发送或明确分片。 |
-| `CLV2-05-10` | P0 | 05-02..06 | Parser negative/fuzz | 为每个 Type 建合法 Role/flags/zero/nonzero/epoch 表；未知版本、未知 Type、组合 flags、保留位、非法 Node ID 全部 fail-closed。 | Codec fuzz 不崩溃；非法输入不改变状态。 |
-| `CLV2-05-11` | P1 | 05-01..10 | Versioned diagnostics | View/trace/stat 记录 peer wire version 与 capability；遇到降级时输出可诊断 reason。 | 实机日志能解释为何节点不可成为 Backup/voter。 |
-| `CLV2-05-12` | P0 | 05-02..11 | Compatibility gate | v4 encoder 默认关闭，先在 Host dual-stack 测试；完成 M07-M10 后再把 Strict v4 设为推荐配置。 | 中间提交不破坏现有 v3 实机。 |
+| `CLV2-05-01` | P0 | M04 | docs/UCN_Cluster_Wire_v4.md | **DONE / 外部冻结复审 GO**：固定 40 B，公共 16 B + 六个 u32 type payload；不修改 W0/W1/W2/W3 Core 头。RFC4 已冻结，明确网络字节序、保留位、Type 1..33 的合法 Role/flags、Capability、双模式 Handover 与 mode-bound READY 角色、可分片 Takeover Certificate、anchor Config/CRC 绑定、固定 pending cache 与 v3/v4 严格分派。 | RFC 复审通过；后续任何字节修改必须升 Cluster Format。 |
+| `CLV2-05-02` | P0 | 05-01 | Format/version | **DONE / 外部复审 GO（受限范围）**：Cluster Format 与 Core Protocol Version 分开；已增加隔离 v4 decoder、测试专用 encoder 与严格 32B/v3、40B/v4 分派，保留 v3 decoder，不允许同一消息被模糊解释。生产库 v4 encoder 默认关闭，未接入生产发送/FSM。R06 helper 要求 receiver-side source/frozen-Config admission context，raw frame 不能自行占 slot；R06-B 固定“未准入分片不得借 `now==deadline` 触发 lazy expiry”。 | v3/v4 golden/negative vectors 独立；严格长度/版本/type/role/flags/reserved 字段失败无副作用；R06 source mismatch、未获 frozen-Config admission、Stable/Joint Config mismatch，含 `now==deadline` 三个边界反例，均保持 slot/deadline/fragment mask 不变；外部复审确认 GCC Full 28/28，签署 GO。仅授权进入受限 05-03，M05 整体仍为 AUDIT HOLD。 |
+| `CLV2-05-03` | P0 | 05-01 | Type-specific structs/builders | **DONE / 外部复审 GO（受限范围）**：已在隔离 v4 codec 内建立 private tagged semantic message（Common Header + Type-specific payload union）与 raw-frame 双向 builder；`to_frame` 必先清零 raw frame、只映射 active Type 的规范字段，最后复用既有 raw structural validator。RFC4 字节、v3 生产路径与 default-disabled encoder 未改。 | Type `1..33` raw→semantic→raw 全量字节回环；9 条 frozen vector 同样经过 semantic builder；inactive payload storage 污染不影响 Wire；invalid raw/semantic 输出保持不写回；外部独立 GCC Full 28/28 与生产隔离复扫通过。仅授权进入受限 05-04，M05 整体仍为 AUDIT HOLD。 |
+| `CLV2-05-04` | P0 | 05-01、05-03 | v4 Snapshot payload | **DONE / 外部复审 GO（受限范围）**：private codec 层的 Type 12 完整 Snapshot 对象与 helper 已获外审；完整绑定 Common Header Epoch、generation、snapshot ID、sequence、member ID、nonce、lease 与 marker/delta kind。 | 合法 `UINT32_MAX-1` ID/nonce、serial threshold、最大安全 lease round-trip；超域 serial/duration、marker 成员字段、缺失任一 Epoch 字段和错 Type 拒绝且 output 不变；外审独立 GCC Full 28/28，确认无生产接线。仅授权进入受限 05-05；M05 整体仍 AUDIT HOLD。 |
+| `CLV2-05-05` | P0 | 05-01、05-02、05-03 | v4 Takeover payload | **DONE / 外部复审 GO（受限范围）**：private codec 的 Type 8 `HEAD_TAKEOVER` 与 Type 33 fragment 完整、固定大小语义对象及双向 builder 已获外审。每个对象绑定 proposed Epoch、backup generation、snapshot、anchor/fragment Config、txid、required set、CRC carrier、fragment index/count 与 bitmap word；Stable/Joint 的 `C_old/C_new` 显式依赖 admission context。 | 外审确认 Stable 两片/Joint OLD+NEW 回环、伪造 key/Config/set、缺片、越界和输出/slot 无副作用均通过；CRC、VoteId、voter order、bitmap 上界、quorum、Authority 明确保留 M10；无生产调用、encoder default-disabled。仅授权进入受限 05-06；M05 整体仍 AUDIT HOLD。 |
+| `CLV2-05-06` | P0 | 05-01、05-02、05-03 | 新 Message Types | **DONE / 外部复审 GO（受限范围）**：独立 fixture table 已取代低区分 `make_valid_frame()` 样本。每个 Type 20..33 都以合法且可区分的 P0..P5 输入，分别固定 raw→semantic 的具名字段和 semantic→raw 的精确 P0..P5；未修改 Wire、codec 实现、v4 production encoder 或 RX/TX/FSM。 | 外审确认 parser/builder 同时交换字段也会被独立的具名字段断言发现；numeric/role/flag/zero-tail gate 保留，生产路径仍为零。该受限 GO 不放行 M05 整体。 |
+| `CLV2-05-07` | P0 | 05-01、05-02、05-03 | Capability negotiation | **DONE / 外部复审 GO（受限范围）**：private codec 已将 RFC4 `wire_offer`（ADVERTISE.P3、JOIN_REQUEST.P1、HEAD_DECLARE.P3）和 `selected_wire_offer`（JOIN_ACCEPT.P4）收敛为 typed value、严格 word 转换和无状态 capability intersection/requirement helper；固定 BACKUP、TAKEOVER、JOINT_CONFIG、PERSISTENCE、RECOVERY_LINEAGE、REKEY 六位。未接入 Head/Backup 选择、生产 RX/TX/FSM 或 v4 encoder。 | 外审确认六个 capability 位、严格校验、最高共同 format、共同 capability 集与四个字段归属均正确；无 production RX/TX/FSM 引用，encoder 只在定向测试开启。该受限 GO 不放行 M05 整体或 Head/Backup eligibility。 |
+| `CLV2-05-08` | P0 | 05-07 | Mixed-version policy | **DONE / 外部复审 GO（受限范围）**：已按 `UCN_V5_Cluster_M05_08_混合版本策略实施计划_2026-08-22.md` 建立 Strict v4 / explicit legacy 的私有、无状态判定合同。Strict v4 禁止 v3 节点成为 Head、Backup 或 voter；可选模式仅允许 `v3 + non-voting + zero required bits`。v4 只校验调用方显式要求的 capability 子集，不能静默降低 Safety；不接入生产资格决策或 FSM。自审与外审结论见 `UCN_V5_Cluster_M05_08_混合版本策略自审报告_2026-08-22.md`。 | 混合版本矩阵覆盖 Strict 拒绝、explicit legacy 降级、v4 required-capability pass/fail 与非法参数 fail-closed；外审复跑 Windows Full `2/2`、WSL ASan/UBSan `25/25` 通过。production v4 RX/TX/FSM 仍为零调用，encoder 默认关闭；该受限 GO 不放行 M05 整体。 |
+| `CLV2-05-09` | P1 | 05-02 | Message bytes migration | **DONE / 外部复审 GO（受限范围）**：v3 精确 32 B、v4 精确 40 B 与 dual-version max 40 B 合同已冻结；Stream/CAN-FD/Classic CAN 的 40 B 回归精确 `memcmp`。CAN-FD 精确验证 57→64 的 7 B zero padding，篡改 padding 后 source 拒绝且 endpoint 无交付。 | 外审独立复跑 Windows Full 2/2、WSL ASan/UBSan 25/25；确认生产 v3、default-disabled encoder 与 production isolation 不变。该 GO 不放行 M05 整体。 |
+| `CLV2-05-10` | P0 | 05-02..06 | Parser negative/fuzz | **DONE / 外部复审 GO（受限范围）**：独立 RFC4 fixture table 固定 Type `1..33` 的 sender Role、flag contract 与 P0..P5 规则；全 Role 枚举、全部 flag byte、每个受 codec 约束的 payload 字段都分别在 raw decode / strict dispatch / semantic parser 走无写回反例。 | 外审确认 Type 12 marker、同簇 `HANDOVER_READY` Backup 分支与 4096 次 fixed-seed fuzz；独立 Windows Full 2/2、WSL ASan/UBSan 25/25 通过。`HEAD_TAKEOVER.P5` CRC carrier、Certificate.P5 bitmap raw carrier 与 selected-offer peer-intersection 仍留 M05-07/M10；production v4 RX/TX/FSM 仍为零调用。该 GO 不放行 M05 整体。 |
+| `CLV2-05-11` | P1 | 05-01..10 | Versioned diagnostics | **DONE / 外部复审 GO（受限范围）**：private、caller-owned 的 version/capability diagnostic view、reason 与 saturating stats 已外审通过；严格复用 05-08，v3+offer/required bit 仍为参数错误；没有 `ucn_cluster_t` 写入或 v4 RX Owner。实施与自审见 `UCN_V5_Cluster_M05_11_版本诊断实施计划_2026-08-22.md`、`UCN_V5_Cluster_M05_11_版本诊断自审报告_2026-08-22.md`。 | 外审复跑 Windows Full `2/2`、WSL ASan/UBSan `25/25`；确认 Strict/legacy、v4 offer、无写回和统计饱和均可解释，production v4 RX/TX/FSM 仍为零调用。该 GO 不放行真实资格、Authority 或 M05 整体。 |
+| `CLV2-05-12` | P0 | 05-02..11 | Compatibility gate | **DONE / 外部复审 GO（受限范围）**：外审确认 Host 双格式 dispatcher 与测试宏隔离正确；默认 encoder-closed 回归保存完整 40 B 哨兵副本并精确 `memcmp`，锁住 fail-closed 分支零 output 写入。未改 encoder 或生产路径。完成 M07-M10 后再把 Strict v4 设为推荐配置。 | 外审独立复跑 Windows Full `3/3`、WSL ASan/UBSan `26/26`；生产 Cluster/Adapter 仍无 v4 API 接线，encoder 宏只在两个测试 target。详见 `UCN_V5_Cluster_M05_12_外审P1整改计划_2026-08-22.md` 与自审报告。该 GO 不放行 M05、生产 v4 RX/TX/FSM、Authority 或实机兼容性宣称。 |
+
+## M05-01 RFC 外部审计整改任务（2026-08-21，AUDIT HOLD）
+
+| 任务 ID | 优先级 | 核实结果 | 整改任务 | 完成定义 / 测试 |
+|---|---:|---|---|---|
+| `CLV2-05-R01` | P0 | **外部复审已确认 PASS** | **Handover 双 Epoch 合同**：Type 26..29 Common Header 固定为 Losing Head 的 old Epoch；payload 固定编码 handover txid 与 target `{cluster_id, term, head_id}`。`HANDOVER_READY` 必须由 Winning Head 发送，outer source 精确匹配 target Head；`HEAD_STEPDOWN` 携带完整 target Epoch + nonce。 | A→B 的 Prepare/READY/撤权/Stepdown/Commit vector 与负例均获外部复核；仍须随 R05 一并进行 RFC3 最终冻结复审。 |
+| `CLV2-05-R02` | P0 | **外部复审已确认 PASS** | **可验证 Takeover/Joint Certificate**：Type 33 fragment；Voter set 以 Node ID 排序且覆盖 `MAX_MEMBERS+1`，Type 8 仅引用完整 Certificate。定义 stable/old/new set flag、fragment index/count、VoteId、joint 双 quorum 与 canonical CRC32。 | 33 voter 至少两片；Joint old/new 双证书；缺片、重复冲突、越界 bit、伪造/错误 CRC、非法 voter、任一 quorum 不足均拒绝。 |
+| `CLV2-05-R03` | P1 | **外部复审已确认 PASS** | **HEAD_DECLARE 协商字段统一**：Type 7 的 `P3` 统一为 `wire_offer`，P4/P5 强制零；其 min/max/capability 位布局与 ADVERTISE/JOIN_REQUEST 完全一致。 | 复用 ADVERTISE 的 wire_offer vector；拆分旧 capability/range、非零 P4/P5、保留 capability 位、非法 range 均拒绝。 |
+| `CLV2-05-R04` | P1 | **外部冻结复审 PASS** | **Type 8 Certificate Anchor**：`HEAD_TAKEOVER.P2` 固定为 Certificate anchor Config ID：Stable=`C_old`，Joint=`C_new`；它必须与 Fragment、frozen Config 和 canonical CRC 同时绑定。 | Stable/Joint anchor 映射、P2 篡改、P2/fragment 不同、P2/CRC 不同均拒绝；规范 vector CRC 为 `0x12D221F9`。 |
+| `CLV2-05-R05` | P1 | **外部冻结复审 PASS** | **双模式 Handover**：跨 Cluster 只作 identity/config 绑定且禁止跨簇 Term 比较；同 Cluster Planned Leadership Transfer 必须 exact `old_term + 1`、不同 Head、同一 frozen Config，且只可由 old authoritative Head 的完整事务证明。 | 两种模式的正/负向 vector；同簇跳 term/同 Head/Config 改写、跨簇数值比较或无旧 Authority 的假 transfer 均拒绝。 |
+| `CLV2-05-R06` | P1 | **外部复审 GO** | **Certificate-pending 静态资源与准入上下文**：独立、固定 1-slot codec helper 强制调用者传入非 wire 的 `certificate_admission`（outer source、source-admitted、frozen-config-admitted、`C_old`、可选 `C_new`）。helper 自己绑定 source=head、Stable `C_old=Type8.P2`、Joint `C_new=Type8.P2`、Type33 OLD/NEW=`C_old/C_new`；不匹配只拒绝且不碰现有 slot/deadline。后续 v4 Cluster owner 必须只持有一个实例。 | 先 fragment、slot-full、冲突 fragment、超时、active Epoch 变化、source mismatch、未获 frozen-Config admission、Stable/Joint Config mismatch 与零 Authority 副作用均由隔离测试覆盖；外审确认通过。把 slot 绑定进未来 v4 RX owner 归后续已授权 FSM 任务，不能提前接线。 |
+| `CLV2-05-R06-B` | P1 | **外部复审 GO** | **pending deadline 边界无副作用**：`pending_accept_fragment()` 先执行 admission、pending key 与 frozen Config set 的只读校验；只有完全匹配的候选才允许执行 lazy expiry。未准入、source 不匹配或 Config 不匹配的 Type33 不得成为 timeout eviction primitive。未来 RX owner 仍必须周期调用公开 `pending_expire()` 完成时间驱动回收。 | 在 `now_ms == deadline_ms` 分别注入 source mismatch、`frozen_config_admitted=false`、fragment Config mismatch，三例均断言 slot occupied、deadline 和 fragment mask 不变；随后直接 `pending_expire()` 才释放 slot；外审已签署 GO。 |
+| `CLV2-05-R07` | P0 | **外部冻结复审 PASS** | **同 Cluster READY 角色时序**：Type 27 按模式严格分派：跨 Cluster Merge 只能由 target `HEAD` 发送；同 Cluster Planned Transfer 只能由 old Config 已确认的 target `BACKUP` 发送。Backup READY 仅表示 ready-to-commit，持久化 target Epoch 并完成正式 Head 转换前禁止任何 Head Authority 帧/写入。 | 同簇 `PREPARE → BACKUP READY → STEPDOWN` 40 B 正向 vector；同簇 READY role=HEAD、跨簇 READY role=BACKUP、source/target 不匹配和 Commit 前 Authority 帧均拒绝。 |
+| `CLV2-05-R08` | P1 | **外部冻结复审 PASS** | **READY/Stepdown 验证责任分离**：A 本地匹配 READY 后才撤权/发 Stepdown；B 收 Commit 时匹配自己发出的 READY；成员只验证 old Authority、Stepdown txid/nonce、完整 target Epoch 与模式，不能要求见过单播 READY。 | 同簇成员只收 Stepdown 的正例通过；成员伪造 READY 缓存要求、A 无 READY 发 Stepdown、B 无 READY 收 Commit 均拒绝且零 Authority 副作用。 |
 
 ## 本里程碑禁止事项
 - 禁止改 Core W0-W3。
@@ -467,17 +535,20 @@ duplicate/replay/reorder
 
 **里程碑门禁：** JOIN_ACCEPT 不再自动成为 voter；Runtime Member、Committed Voter 与 Backup Mirror 不再混为同一概念。
 
+**当前状态：** **DONE / 外部复审 GO（受限软件范围）**。06-01..09 已连续完成并逐项自审；外审随后发现的生产 RX v3 Backup/Takeover 控制帧 P0 已由 `CLV2-06-R01` 在生产入口整体 fail-closed，并签署复审 GO。historical Host simulator 与 `ucn_tests` 的 v3 bridge 继续是 target-private；production archive 保持 v3 `PROVISIONAL/non-voting`。完整证据见 `UCN_V5_Cluster_M06_全量自审报告_2026-08-22.md` 与 `UCN_V5_Cluster_M06_R01_v3BackupReceiveAuthority_整改自审报告_2026-08-22.md`。**M05 顶层仍为 `AUDIT HOLD`；本状态不授权 production v4 RX/TX/FSM、Authority 或 Adapter 接线。**
+
 | 任务 ID | 优先级 | 依赖 | 主要文件/位置 | 具体修改任务 | 完成定义 / 测试 |
 |---|---:|---|---|---|---|
-| `CLV2-06-01` | P0 | M05 | ucn_cluster_membership.h | 定义 member status：PROVISIONAL、COMMITTED、REMOVING；成员记录增加 joined_at、last_keepalive、capabilities、wire_version、voting 标志。 | 状态转换表和非法状态测试齐全。 |
-| `CLV2-06-02` | P0 | 06-01 | Member table | 把当前 `members[]` 抽象为 `ucn_cluster_member_table_t primary_members`；Head 使用 Runtime table，Backup 使用 committed mirror；后续另加 staging table。 | Head/Backup 不再通过含义不明的全局 helper 混用表。 |
-| `CLV2-06-03` | P0 | 06-01 | Voter set | 新增有界 `ucn_cluster_voter_set_t`，保存排序稳定的 Node ID、count、hash；最大 voter 数包含 Head，bitmap 宽度必须覆盖 `MAX_MEMBERS + 1`。 | 集合排序/hash/contains/quorum 单元测试。 |
-| `CLV2-06-04` | P0 | 06-01 | JOIN_ACCEPT flow | v4 Join 成功后进入 `MEMBER_PROVISIONAL`；Head 添加 PROVISIONAL Runtime Member，不立即修改 Active voter set。 | Head 在 Join 后立刻故障时，新节点不被算入旧 takeover quorum。 |
-| `CLV2-06-05` | P0 | 06-04 | Provisional timeout | 增加 bounded provisional deadline；未收到 CONFIG_COMMIT 的节点离开并重新观察，Head 清理未提交 provisional entry。 | 丢 CONFIG 消息不会永久占满容量。 |
-| `CLV2-06-06` | P1 | 06-04 | Legacy v3 member | 兼容模式下 v3 Join 只能成为 non-voting provisional/legacy member；不得成为 Backup 或 Head candidate。 | Mixed-version 安全测试通过。 |
-| `CLV2-06-07` | P1 | 06-01 | Public summaries | member summary 增加 status/voting/config_id，但保持只读 Owner-context API；应用不能直接改内部表。 | 诊断能区分 provisional/committed/removing。 |
-| `CLV2-06-08` | P0 | 06-02..07 | Capacity semantics | 明确 Runtime capacity 与 Voter capacity；Provisional 占 Runtime slot，只有 commit 后占 Voter slot；拒绝原因细化。 | 容量边界和重复 Join 测试。 |
-| `CLV2-06-09` | P0 | 06-01..08 | Current behavior bridge | 在 Joint Config 尚未启用的过渡构建中，使用 test-only auto-commit 开关维持旧测试；生产 Strict v4 禁止 auto-commit。 | 过渡开关有删除任务，不能成为最终默认。 |
+| `CLV2-06-01` | P0 | M05 | `ucn_cluster_membership.h`、`ucn_cluster_membership.c` | **DONE / 外部复审 GO（受限范围；06-06 已有意收紧 legacy bridge）**：已定义 `NONE/PROVISIONAL/COMMITTED/REMOVING`、record 合法域与显式转换表。06-01 原始 v3 committed/voting bridge 只作为过渡基线；06-06 已将产品 v3 Join 收紧为 non-voting provisional。 | 独立模型、真实 v3 Join/Backup/Recovery 基线及外部矩阵当时通过；本项后续语义以 06-06/06-09 和 M06 final 自审/外审为准。production v4 RX/TX/FSM、Authority、Adapter 引用仍为零。 |
+| `CLV2-06-02` | P0 | 06-01 | Member table | **DONE / 外部复审 GO（受限软件范围）**：按 `UCN_V5_Cluster_M06_02_成员表封装实施计划_2026-08-22.md` 把当前 `members[]` 抽象为 `ucn_cluster_member_table_t primary_members`；Head 使用 Runtime table，Backup 使用 committed mirror；后续另加 staging table。 | 独立模型、v3 Cluster/Federation 回归、Full/Lite/Nano、Service OFF、用户配置、Sanitizer/Analyzer、资源和 production-v4 隔离均通过；本项不授予 v4 production 或 Authority。 |
+| `CLV2-06-03` | P0 | 06-01 | Voter set | **DONE / 外部复审 GO（受限软件范围）**：有界 `ucn_cluster_voter_set_t` 保存 canonical 升序 Node ID、count、config_id、FNV-1a hash；最大 voter = `MAX_MEMBERS + 1`，使用 64-bit logical bitmap 覆盖 Head 在内的全容量。当前仅为数据模型，未接入 legacy takeover 或 Authority。 | `ucn_tests` 与 membership model 均通过；覆盖排序/hash/contains/quorum、最大位、重复/非法/篡改和无写回。production v4/Adapter 隔离扫描通过。见 `UCN_V5_Cluster_M06_03_VoterSet_自审报告_2026-08-22.md`。 |
+| `CLV2-06-04` | P0 | 06-01 | JOIN_ACCEPT flow | **DONE / 外部复审 GO（受限软件范围）**：新增与 wire codec 解耦的、post-validation v4 provisional-admission helper；Head 只写 `PROVISIONAL/non-voting/v4` Runtime record，`active_voter_set`、Backup、takeover 与 Authority 均不变。 | 模型证明旧 voter `{2,7,11}` 接纳 node 21 后仍为 count=3/quorum=2，node 21 不进入旧 quorum；幂等、非 Head、非法 ID、容量耗尽、无写回及 M05 隔离扫描通过。见 `UCN_V5_Cluster_M06_04_ProvisionalAdmission_自审报告_2026-08-22.md`。 |
+| `CLV2-06-05` | P0 | 06-04 | Provisional timeout | **DONE / 外部复审 GO（受限软件范围）**：`provisional_timeout_ms` 独立于 post-commit lease；provisional record 使用 armed absolute deadline，首个 admission 建立、重复 admission 不延期；Head 到期只清理 provisional Runtime entry。 | 定向模型覆盖 deadline 前/边界/后、容量复用、committed 不被删除与 canonical record；Full 定向回归及 M05 隔离扫描通过。见 `UCN_V5_Cluster_M06_05_ProvisionalDeadline_自审报告_2026-08-22.md`。 |
+| `CLV2-06-06` | P1 | 06-04 | Legacy v3 member | **DONE / 外部复审 GO（受限软件范围）**：产品 v3 Join 生成 bounded `PROVISIONAL/non-voting` record；Backup 选择、takeover vote/prepare 与 Recovery mirror quorum 只接受 `COMMITTED + voting + v4` protected voter。 | production archive 模型验证 v3 不能选 Backup，而 canonical v4 committed voter 可选；`ucn_tests` 只经 test-hook bridge 保持旧基线。见 `UCN_V5_Cluster_M06_06_LegacyV3_自审报告_2026-08-22.md`。 |
+| `CLV2-06-07` | P1 | 06-01 | Public summaries | **DONE / 外部复审 GO（受限软件范围）**：member summary 增加 status/voting/config_id，但保持只读 Owner-context API；`config_id` 仅为 canonical active voter set 的诊断投影，未安装时为 0。 | 两种 summary API 字段一致；caller-side 修改无法写回 owner table；失败路径不写 output。见 `UCN_V5_Cluster_M06_07_PublicSummary_自审报告_2026-08-22.md`。 |
+| `CLV2-06-08` | P0 | 06-02..07 | Capacity semantics | **DONE / 外部复审 GO（受限软件范围）**：`member_capacity` 是 remote Runtime slot 上限；新增包含 Head 的 `voter_capacity` 与只读 view。provisional admission 只报告 Runtime 压力；future M07 commit 只有无副作用 voter-capacity preflight，不改 voter/status。 | Runtime 满、Voter 满、重复 Join、Head-inclusive count、细化 reason、view 无写回均已模型覆盖。见 `UCN_V5_Cluster_M06_08_CapacitySemantics_自审报告_2026-08-22.md`。 |
+| `CLV2-06-09` | P0 | 06-01..08 | Current behavior bridge | **DONE / 外部复审 GO（受限软件范围）**：`UCN_CLUSTER_ENABLE_TEST_HOOKS` 只属于 `ucn_tests` 自编译 membership copy；`UCN_CLUSTER_LEGACY_V3_TEST_BRIDGE` 只属于 historical Host simulator copy。两者才保留旧 v3 auto-commit regression，production archive 与 model target 无宏，严格生成 v3 provisional/non-voting。 | CMake target 隔离、两种测试副本 committed 分支、production archive provisional 分支、旧回归与 v4/Adapter 扫描均通过；M07-12 必须删除 bridge。见 `UCN_V5_Cluster_M06_09_TestOnlyBridge_自审报告_2026-08-22.md` 与 M06 全量自审报告。 |
+| `CLV2-06-R01` | P0 | M06 外审发现 | Production v3 Backup/Takeover RX | **DONE / 外部复审 GO（受限软件范围）**：生产 `ucn_cluster_receive_inner()` 在 v3 decode/source 校验后、`now/stats/shadow` 与 handler 前，拒绝 Type 8、10..15、18、19。故 v3 不可建立或消费 Backup、mirror、liveness、vote 或 Head takeover 权威。 | 无 bridge 的 production archive model 通过公开 `ucn_cluster_receive()` 构造 self/non-self Type10、完整 Type12 BEGIN/data/END、Type8 与其它受限类型；每例断言 `UCN_ERR_ACCESS` 且整个 `ucn_cluster_t` 无写回。外审复跑 Full/Lite/Nano、产品配置并确认 bridge 为 target-private。测试 bridge 仍仅服务 Host 回归；M07 真实 committed-v4 Config owner 才可取代此临时 fence。 |
 
 ## 本里程碑禁止事项
 - 禁止 JOIN_ACCEPT 直接 voting=true。
@@ -494,20 +565,30 @@ duplicate/replay/reorder
 
 **里程碑门禁：** 任何 voter 增删都必须 C_old -> C_joint -> C_new；Head/Backup 对 Active Config 的理解始终一致。
 
+**连续实施与外审规则（2026-08-22）：** 先完成并自审 `CLV2-07-00`，随后连续实施 `07-01..12`；每项必须留有自审报告、定向测试和失败回退证据。全部完成后才做 M07 全量自审并统一送外部审计。M05 的默认产品边界不变；M07 仅可通过明确命名的测试/实验 target 验证 Config/Joint/Persistence 联动，不得启用默认 v4 encoder、production v4 RX/TX/FSM、Authority 或 Adapter 接线，亦不得把 `VOLATILE_TEST` 当作掉电安全证明。
+
 | 任务 ID | 优先级 | 依赖 | 主要文件/位置 | 具体修改任务 | 完成定义 / 测试 |
 |---|---:|---|---|---|---|
-| `CLV2-07-01` | P0 | M06 | config state | 实现 `ucn_cluster_config_state_t {config_id,phase,old_set,new_set,hashes}`；Stable 时 old/new 归一为单一集合。 | 序列化和 hash 确定性测试。 |
-| `CLV2-07-02` | P0 | 07-01 | config transaction | 实现单一有界 `config_tx`：ID、proposal、ACK bitmap、deadline、retry、persist state；同一时刻只允许一个成员配置事务。 | 并发 Join/Leave 被排队、合并或明确拒绝，不覆盖事务。 |
-| `CLV2-07-03` | P0 | 07-01 | Addition proposal | PROVISIONAL Join 生成 C_new；Head self vote；发送 CONFIG_BEGIN/MEMBER 或等价有界描述，所有 voter 获得 config identity。 | 新成员在 Commit 前始终 provisional。 |
-| `CLV2-07-04` | P0 | 07-01 | Removal proposal | LEAVE/lease timeout 先标记 REMOVING；在 C_new Commit 前节点仍属于 C_old denominator，不得直接清 voter。 | 连续两个成员失联时不会偷偷降低 quorum。 |
-| `CLV2-07-05` | P0 | 07-01 | Joint quorum helper | `joint_quorum_reached = quorum(C_old) && quorum(C_new)`；使用统一 voter ordering/bitmap，并包含 Head self vote。 | old有/new无、new有/old无均不得 Commit。 |
-| `CLV2-07-06` | P0 | 07-02 | Config voting persistence | Member/Backup 对 CONFIG_ACK 的安全承诺先持久化；Head 对 CONFIG_COMMIT 先持久化新 Config，再广播。 | 存储失败不 ACK/Commit。 |
-| `CLV2-07-07` | P0 | 07-02 | Backup involvement | 若存在 HA Backup，C_new 完整配置必须先进入 Backup staging 并 ACK；无 Backup 时允许安全但非 HA 的 Config Commit，明确 `ha_ready=false`，产品可配置 require_backup_for_config。 | 无 Backup 不冒充可 takeover；有 Backup 时双方 config 一致。 |
-| `CLV2-07-08` | P0 | 07-02 | CONFIG_JOINT | Prepare quorum 达到后持久化 Joint 状态，再进入 CONFIG_JOINT；Joint 期间 Authority 和后续 Takeover 都按 old+new 双 quorum。 | Head 在 Joint 阶段掉电，Backup 能恢复同一 Joint Config。 |
-| `CLV2-07-09` | P0 | 07-02 | CONFIG_COMMIT/ABORT | Commit C_new 后更新 member status：新增->COMMITTED，删除->释放；超时只 Abort 未 Commit 的 proposal，继续使用 C_old。 | 重复 Commit/Abort 幂等。 |
-| `CLV2-07-10` | P1 | 07-02 | Config ID no-wrap | config_id 使用 checked serial；达到阈值触发 M13 Rekey，M13 前 fail-closed，不允许 MAX->1。 | 边界测试。 |
-| `CLV2-07-11` | P0 | 07-01..10 | Crash/restart matrix | 覆盖 proposing、joint persisted、commit persisted、commit broadcast 前后、Backup 替换期间掉电。 | 重启后只恢复一个合法 Active Config。 |
-| `CLV2-07-12` | P0 | 07-01..11 | 删除 auto-commit | 移除 M06 test bridge 的生产路径；所有 v4 voter 变更强制走 Config transaction。 | grep/CI 确认不存在 JOIN_ACCEPT 直接 voting=true。 |
+| `CLV2-07-00` | P2 | M05、M04 R23 | Record schema / migration | **CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final**：Record writer 升级为 schema v2；v1 仅只读兼容，decode provenance 保留在 `record_schema_version`。正常 runtime write 强制 v2；`LEGACY_PREPARED_ABORT` 仅接受 `v1 PREPARED → v2 no-transaction`，v2 PREPARED 当前 fail-closed，绝不被启动迁移清除。 | v1 Config/Rekey PREPARED 受控迁移、v2 Config PREPARED restart 不 abort、public writer 拒绝 v1、v1/v2 codec 与 legacy-abort admission 回归通过；Full/Lite/Nano、WSL ASan/UBSan 各 `4/4`。见 `UCN_V5_Cluster_M07_00_RecordV2Provenance_自审报告_2026-08-23.md`。 |
+| `CLV2-07-01` | P0 | M06 | config state | **CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final**：新增独立 `ucn_cluster_config_state_t {config_id,phase,old_set,new_set,old/new hashes}`、Stable/Joint value constructor、纯 promote、hash 与固定 canonical serialization。Stable 时 old/new 是同一 set；Joint 仅允许 C_old 的 checked-next C_new。 | 无 wire/FSM/Authority 副作用的 production archive test 覆盖排序 canonical、Stable/Joint/promote、hash/serialization 确定性、threshold/no-write 与结构损坏；Full/Lite/Nano、WSL ASan/UBSan 各 `5/5`。见 `UCN_V5_Cluster_M07_01_ConfigState_自审报告_2026-08-23.md`。 |
+| `CLV2-07-02` | P0 | 07-01 | config transaction | **CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final**：新增独立固定容量 `ucn_cluster_config_tx_t`，封装 transaction ID、add/remove proposal、C_old/C_new ACK bitmap、deadline、retry 与 persist-stage；canonical IDLE 之外只允许一个 active transaction。 | production archive 测试覆盖 stable→joint 开始、并发 begin 无写回拒绝、old/new 双 bitmap、非 voter/重复 ACK 无写回、deadline/retry/exhaust 与位图损坏；Full/Lite/Nano、WSL ASan/UBSan 各 `6/6`。见 `UCN_V5_Cluster_M07_02_ConfigTransaction_自审报告_2026-08-23.md`。 |
+| `CLV2-07-03` | P0 | 07-01 | Addition proposal | **CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final**：新增独立 Addition planner，只接受已验证的 v4 `PROVISIONAL/non-voting` member；从 Stable C_old 生成 checked-next Joint C_new，并在 single `config_tx` 内记录 Head self ACK。Config identity 固化在 transaction 的 C_old/C_new，wire 广播仍严格后置。 | production archive 测试覆盖 Stable `{1,4,9}`→Joint `{1,4,9,21}`、Head self ACK、非法 Head/v3 candidate/capacity 无写回；输入 Runtime member `memcmp` 不变，故新增成员直到后续 Commit 前仍是 provisional/non-voting。Full/Lite/Nano、WSL ASan/UBSan 各 `7/7`。见 `UCN_V5_Cluster_M07_03_AdditionProposal_自审报告_2026-08-23.md`。 |
+| `CLV2-07-04` | P0 | 07-01 | Removal proposal | **CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final**：新增 v4 committed voter 的 `REMOVING` value transition；removal planner 只接受标记后的 member，保留其 C_old/voting 身份并生成排除它的 checked-next C_new。Head removal 在本 planner fail-closed。 | production archive 回归覆盖 C_old `{1,4,9}` 到 C_new `{1,4}`、被删 member 仍在 old denominator、Head self ACK、未标记/删 Head 无写回拒绝。Full/Lite/Nano、WSL ASan/UBSan 各 `7/7`。见 `UCN_V5_Cluster_M07_04_RemovalProposal_自审报告_2026-08-23.md`。 |
+| `CLV2-07-05` | P0 | 07-01 | Joint quorum helper | **CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final**：新增纯 `joint_quorum_reached`，针对同一 config_tx 的 C_old/C_new canonical bitmap 独立计数。transaction start 同时收紧为 add/remove 均必须是恰好一个 Node ID 的受控 delta，拒绝多节点隐式改组。 | Head self vote、old 满/new 不满、new 满/old 不满、越界 bitmap 与 multi-node delta 均被定向覆盖；不产生 Commit/Authority。Full/Lite/Nano、WSL ASan/UBSan 各 `8/8`。见 `UCN_V5_Cluster_M07_05_JointQuorum_自审报告_2026-08-23.md`。 |
+| `CLV2-07-06` | P0 | 07-02 | Config voting persistence | **CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final**：新增显式、未接入产品 FSM 的实验 Config persistence owner：Prepare/Commit 均经 submit completion 后 `load + exact journal` proof；Prepare 是 future CONFIG_ACK 的 durable gate，Commit 额外强制 Joint quorum。 | sync、PENDING→poll、submit fail、无 quorum commit 均覆盖；`durable=false` 从不代表 ACK/Commit permission，失败不改 durable state。Full/Lite/Nano、WSL ASan/UBSan 各 `9/9`。见 `UCN_V5_Cluster_M07_06_ConfigPersistence_自审报告_2026-08-23.md`。 |
+| `CLV2-07-07` | P0 | 07-02 | Backup involvement | **CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final**：新增 Backup staging gate。绑定 v4 committed backup 后，C_new digest/txid 必须先 stage、再由 exact Backup ACK；无 Backup 仅在 policy 不要求 HA 时给出 commit-allowed + `ha_ready=false`，否则 fail-closed。 | 错来源、错 digest/txid ACK 不写回；无 Backup 和 require-backup 两支、staged 未 ACK、exact ACK→ha_ready 均覆盖。Full/Lite/Nano、WSL ASan/UBSan 各 `10/10`。见 `UCN_V5_Cluster_M07_07_BackupStaging_自审报告_2026-08-23.md`。 |
+| `CLV2-07-08` | P0 | 07-02 | CONFIG_JOINT | **CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final**：新增实验 Joint runtime gate；仅在 dual quorum 与 Record v2 中 `committed C_old + PREPARED exact C_new/txid` 共同证明后进入 Joint，并将 local tx 标为 `JOINT_DURABLE`。 | 无 quorum 或缺 durable prepare 时 runtime 逐字节不变；成功进入后 active Config 必是 exact C_new。Full/Lite/Nano、WSL ASan/UBSan 各 `11/11`。完整 Config body 双槽/掉电恢复留 07-11，Authority/Takeover 不提前启用。见 `UCN_V5_Cluster_M07_08_DurableJoint_自审报告_2026-08-23.md`。 |
+| `CLV2-07-09` | P0 | 07-02 | CONFIG_COMMIT/ABORT | **CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final**：实验 owner 的 Commit/Abort 都必须先完成 M04 submit→load exact proof。Commit 由 Stable(C_new) durable ref 绑定后才使 ADD→COMMITTED/voting、REMOVE→canonical empty；deadline Abort 以 `CONFIG_ABORT` 保留 C_old/txid 后才恢复本地 runtime，ADD 保持 provisional、REMOVE 复原 committed/voting。 | ADD/REMOVE Commit/Abort、sync/async Abort、Stable(C_new) ref 一致性、终态重复 Commit/Abort（无二次 submit/无写回）均定向覆盖；Full/Lite/Nano、WSL ASan/UBSan 各 `11/11`。见 `UCN_V5_Cluster_M07_09_CommitAbort_自审报告_2026-08-23.md`。 |
+| `CLV2-07-10` | P1 | 07-02 | Config ID no-wrap | **CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final**：Stable Config 达到 reserved serial threshold 时公开 `rekey_required`；M13 尚未实现时 Add/Remove planner 统一返回 `UCN_ERR_EXHAUSTED`，不创建下一 Joint、更不回绕为 1。 | `threshold-1 → threshold` 是唯一最后合法推进；threshold Stable 无 Joint、Add/Remove 均 no-write exhausted。Full/Lite/Nano、WSL ASan/UBSan 各 `11/11`。见 `UCN_V5_Cluster_M07_10_ConfigIdNoWrap_自审报告_2026-08-23.md`。 |
+| `CLV2-07-11` | P0 | 07-01..10 | Crash/restart matrix | **CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final**：新增 caller-owned CRC32 双槽 Config body format；实验 owner 在 Prepare 前持久化 Stable(C_new) body，所有 submit/poll reload 与 restart 都由 M04 committed/staging ref 验证。PREPARED 恢复只激活 C_old、C_new 仅 staged；Commit 持久化后只恢复 C_new；body 缺失/撕裂 fail-closed。 | proposing、prepared Joint、Commit-before-local/broadcast、Commit-after-local、独立 reader replacement 与 torn staging 都覆盖；必要 body 缺失不写 output。Windows Full/Lite/Nano、WSL ASan/UBSan 各 `12/12`。真实 Flash/掉电与 M09 mirror 仍后置。见 `UCN_V5_Cluster_M07_11_ConfigBodyRecovery_自审报告_2026-08-23.md`。 |
+| `CLV2-07-12` | P0 | 07-01..11 | 删除 auto-commit | **CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final**：删除 `UCN_CLUSTER_LEGACY_V3_TEST_BRIDGE` 与 simulator 的自编译 override；simulator 改为直接链接 production archive。历史 v3 Backup/Takeover failover CTest 被移除，等待 M10 frozen-Config v4 certificate 替代。所有 v4 voter 变更继续只走 Config transaction。 | production archive 公共 RX 回归验证 v3 JOIN_REQUEST 只生成 `PROVISIONAL/non-voting`，不进入 voter set/Backup；bridge 名称 grep 无匹配；启用 simulator 的 Windows Full `23/23`。见 `UCN_V5_Cluster_M07_12_NoAutoCommit_自审报告_2026-08-23.md`。 |
+| `CLV2-07-R24` | P0 | 07-06..09 | Durable Joint barrier | **DONE / M07 外部复审 GO（受限实验软件范围）**：新增 `CONFIG_JOINT` 持久化 operation。只有 exact `PREPARED(C_new,txid)` 已经 `submit → load + journal proof` 后，runtime 才能进入 Joint；Commit 同时要求此 durable journal 和已进入的 exact Joint runtime。 | 双 ACK 但无 Joint、重启后只有 PREPARED、或 Joint runtime/C_new 不匹配时均在 Provider I/O 前拒绝、state 不写回；完整 `Prepare → Joint proof → runtime enter → Commit` 通过。 |
+| `CLV2-07-R25` | P0 | 07-07, R24 | Backup pre-submit gate | **SUPERSEDED BY R29**：原整改将 gate 移到 submit 前，但 gate 仍只读 `staged/acknowledged`，不能把 ACK 绑定到当前 tx/C_new/Backup。 | R29 取代本条的完整授权条件；本条的缺 Backup/未 stage/未 ACK 零 submit 仍由回归保留。 |
+| `CLV2-07-R26` | P0 | M04 R18 | Config Owner provider reentrancy | **SUPERSEDED BY R30**：原 `io_active` 已覆盖 prepare/joint/commit/abort/poll，但 `owner_init()` 不能读取未初始化对象门，Provider load 内递归 init 可绕过。 | R30 用对象外 callback scope 完成 init/load/submit/poll 的统一动态范围保护。 |
+| `CLV2-07-R27` | P1 | 07-02 | Deadline serial wrap | **DONE / M07 外部复审 GO（受限实验软件范围）**：Config Tx expiry 复用公共 `ucn_deadline_expired()` 的模 32 位时间比较，不再直接 `now >= deadline`。 | `UINT32_MAX → 0 → deadline` 三段断言证明跨回绕不提前 Abort。 |
+| `CLV2-07-R28` | P1 | 07-09 | Abort C_new binding | **DONE / M07 外部复审 GO（受限实验软件范围）**：Abort admission 与 terminal replay 均绑定 txid、C_old 和 exact C_new；v2 terminal Config journal 保留该 immutable C_new ref。此前未发布的终态 v2 record 缺少此 ref 时 fail-closed。 | 同 txid、不同 C_new 的 Abort 被零 submit 拒绝；合法 Abort/replay 与 Record codec 回归通过。 |
+| `CLV2-07-R29` | P0 | R25, 07-07, R24 | Exact Backup ACK admission | **DONE / M07 外部复审 GO（受限实验软件范围）**：新增 `commit_allowed_for_tx()`；存在 Backup 时，Commit 和 runtime apply 同时核验 active tx 的 `transaction_id`、由该 tx 推导的 exact C_new ref、bound Backup ID 与实际 ACK source。原无上下文 helper 降为诊断用途，不能授权 Commit。 | 旧 ACK/错误 tx、相同 txid 不同 C_new、ACK source 与当前 Backup 不同均 fail-before-submit；runtime apply 的错绑 gate 不写 runtime/member。合法 exact gate 才允许一次 Commit submit。 |
+| `CLV2-07-R30` | P0 | R26, M04 R18 | Init callback reentrancy | **DONE / M07 外部复审 GO（受限实验软件范围）**：Provider callback 前建立对象外 `provider_callback_owner` 动态范围门，避免 `owner_init()` 读取未初始化 `bool`；init/load/submit/poll 的任何同步嵌套 Provider I/O 都 fail-closed。 | fake Provider 在 init-load、submit、poll 三种回调中递归 init/Prepare/Joint/Commit/Abort/Poll，全部 `UCN_ERR_STATE`；递归 init 前后 owner 逐字节不变、无第二 submit。 |
 
 ## 本里程碑禁止事项
 - 禁止直接缩小 quorum denominator。
@@ -526,18 +607,20 @@ duplicate/replay/reorder
 
 | 任务 ID | 优先级 | 依赖 | 主要文件/位置 | 具体修改任务 | 完成定义 / 测试 |
 |---|---:|---|---|---|---|
-| `CLV2-08-01` | P0 | M07 | Phase enum/state | 加入 HEAD_RECONFIGURING、HEAD_QUORUM_GRACE、HEAD_FENCED；保存 `head_resume_phase`、quorum_loss_deadline、restore_since、fenced_dissolve_deadline。 | Phase 合法迁移测试。 |
-| `CLV2-08-02` | P0 | 08-01 | authority_active | 新增独立 `authority_active`，不再用 `role==HEAD` 判断写权限；public view 增加 authority state 和 fence reason。 | 应用/扩展层可可靠查询。 |
-| `CLV2-08-03` | P0 | M07 | Quorum calculator | Stable Config 计算单 quorum；Joint Config 同时计算 old/new；活性来自 Cluster Keepalive/lease，不直接用瞬时 Neighbor SUSPECT。 | 所有集合尺寸、self vote、失联组合测试。 |
-| `CLV2-08-04` | P0 | 08-02,08-03 | Immediate revoke | 任何 operational Head Phase 首次发现 quorum 不足时，先 `authority_active=false`、停止 Authority TX/Directory 写，再进入 HEAD_QUORUM_GRACE。 | 同一 Step 的 trace 顺序证明先撤权后迁移。 |
-| `CLV2-08-05` | P0 | 08-04 | TX permission matrix | 集中实现 `cluster_tx_allowed(phase,type)`；Grace/Fenced 禁止 HEAD_ADVERTISE、PRIMARY_HB、JOIN_ACCEPT、Backup/Config Authority TX，可选只发一次 HEAD_WITHDRAW。 | 每个 Phase/Type 组合表驱动测试。 |
-| `CLV2-08-06` | P0 | 08-04 | Quorum restore hold | Grace 内 quorum 恢复必须连续稳定 `quorum_restore_hold_ms`，且未见 higher term/conflict、Persistence 健康，才能恢复保存的 Head Phase。 | flapping 不反复开关 Authority。 |
-| `CLV2-08-07` | P0 | 08-04 | Permanent Fence | Grace 到期、same-term conflict、higher authority 或 persistence fault 进入 HEAD_FENCED；同 cluster+term 即使 quorum 恢复也不得重新 active。 | same-term reactivation 测试必须失败。 |
-| `CLV2-08-08` | P0 | 08-07 | Fenced cleanup | 收到 valid higher Stable Authority -> JOIN_PENDING；否则到 `fenced_dissolve_ms` 保存 lineage 后进入 Recovery Observe。 | Fenced 节点不会无限发旧 Head 消息。 |
-| `CLV2-08-09` | P0 | 08-02 | Federation/Directory integration | 所有 Directory/Locator Authority 发布入口检查 `authority_active`；Grace/Fenced 立即停止续租和写入。 | 集成测试：分区旧 Head 无法继续发布 Authority record。 |
-| `CLV2-08-10` | P0 | M00,08-04 | Timer budget model | 增加 owner step、network、retry、clock drift、scheduler jitter、margin 预算；用公式派生 Head/Member/Backup lease，而不是只检查 interval<=lease/3。 | 无效 profile init 返回 CONFIG。 |
-| `CLV2-08-11` | P0 | 08-10 | Member Takeover Grace | 按 `max(0,backup_lease-member_lease)+takeover_window+delay budgets` 校验/派生；保证 Member 不早于 Backup 完成投票窗口进入 Recovery。 | 极限调度/延迟测试不误杀健康 Takeover。 |
-| `CLV2-08-12` | P0 | 08-01..11 | Partition suite | 3/4/5/6 节点所有多数派切分；验证只有多数派一侧可 writable，少数派 Head 同 Step 撤权。 | Safety-1/2 property 全绿。 |
+| `CLV2-08-01` | P0 | M07 | Phase enum/state | **CODE COMPLETE / SELF-AUDIT PASS**：追加 `HEAD_RECONFIGURING`、`HEAD_QUORUM_GRACE`、`HEAD_FENCED`，且与 M01 frozen `shadow_phase` 分离；保存 resume/loss/restore/dissolve 状态。 | Stable/Joint、Grace、Fence、Recovery/Join cleanup 的实际状态迁移回归通过。 |
+| `CLV2-08-02` | P0 | 08-01 | authority_active | **CODE COMPLETE / SELF-AUDIT PASS**：新增独立 `authority_active`、phase/fence public view 与 Authority Owner 查询；显式未安装 Owner 一律不返回 Authority。 | `role==HEAD` 与 authority 分离、view 输出及无 Owner fail-closed 回归通过。 |
+| `CLV2-08-03` | P0 | M07 | Quorum calculator | **CODE COMPLETE / SELF-AUDIT PASS**：Stable 及 Joint 的 old/new 集合独立 quorum；只读取 canonical Config 与 explicit voter keepalive lease，忽略 Neighbor `SUSPECT`。 | self vote、lease 到期、Joint 一侧不足、3/4/5/6 分区组合回归通过。 |
+| `CLV2-08-04` | P0 | 08-02,08-03 | Immediate revoke | **CODE COMPLETE / SELF-AUDIT PASS**：Owner step 先清 `authority_active`，再进入 Grace；`ucn_cluster_step()` 在所有 legacy Head send 前调用 Owner。 | 同一步 Authority=false/Grace/TX denied trace 回归通过。 |
+| `CLV2-08-05` | P0 | 08-04 | TX permission matrix | **CODE COMPLETE / SELF-AUDIT PASS**：集中 gate 覆盖 Head advertise/declare/join/stepdown/backup-sync/primary heartbeat 与 Backup ready/prepare/resync；拒绝发生在 token 前。 | Grace/Fenced 全矩阵拒绝、普通 Member keepalive 保留、Directory 入口集成回归通过。 |
+| `CLV2-08-06` | P0 | 08-04 | Quorum restore hold | **CODE COMPLETE / SELF-AUDIT PASS**：Grace 中 quorum 必须连续保持 `quorum_restore_hold_ms` 才恢复保存的 operational Head phase。 | lease flapping 首次恢复不激活、完整 hold 后才激活回归通过。 |
+| `CLV2-08-07` | P0 | 08-04 | Permanent Fence | **CODE COMPLETE / SELF-AUDIT PASS**：Grace 超时、same-term conflict、higher-term observation、持久化 fault 与 Owner 调度超预算均 Fence；`fence_latched` 不允许相同实例再次激活。 | 每个原因与 quorum 恢复后仍 inactive 的反例回归通过。 |
+| `CLV2-08-08` | P0 | 08-07 | Fenced cleanup | **CODE COMPLETE / SELF-AUDIT PASS**：仅 future M10/M11 验证后的 higher Stable Authority 可走 `JOIN_PENDING`；旧 v3 higher Term 仅 Fence，超时进入 Recovery Observe。 | verified/unverified 两分支和 dissolve 后无 Authority TX 回归通过。 |
+| `CLV2-08-09` | P0 | 08-02 | Federation/Directory integration | **CODE COMPLETE / SELF-AUDIT PASS**：已安装 Owner 的 Federation Head view 必须 active；Grace/Fenced 不刷新、不注册、不撤销 Locator，也不发布 handover。 | production archive Federation fixture 验证旧 Head 无新增 Directory write。 |
+| `CLV2-08-10` | P0 | M00,08-04 | Timer budget model | **CODE COMPLETE / SELF-AUDIT PASS**：从 owner/network/retry/jitter/drift/margin 计算 control window、voter lease、Grace/restore/dissolve；Owner 调度超预算 Fence。 | 零/溢出预算与 lease 小于 profile 均 `UCN_ERR_CONFIG/ARGUMENT` 且 no-write。 |
+| `CLV2-08-11` | P0 | 08-10 | Member Takeover Grace | **CODE COMPLETE / SELF-AUDIT PASS**：公开公式 `max(0,backup_lease-member_lease)+takeover_window+control_window`，输出无写回失败语义。 | lease 差、极限小/大关系和非法 duration 回归通过；M10 实际 Member takeover FSM 仍后置。 |
+| `CLV2-08-12` | P0 | 08-01..11 | Partition suite | **CODE COMPLETE / SELF-AUDIT PASS**：枚举 3/4/5/6 voter Head-containing partition，只有到达 quorum 的 Head active；少数派同一步进入 Grace 并拒绝 Authority TX。 | 3..6 所有 mask property 回归通过。 |
+| `CLV2-08-R31` | P0 | 08-03..05 | Authority current-time preflight | **CODE COMPLETE / SELF-AUDIT PASS**：新增 `preflight(now_ms)`；Cluster TX、RX 的本地 Head 写入门，以及 Federation step/query/public handover 入口均在当前时刻刷新 Owner，且位于 token、成员/lease 或 Directory 写入之前。 | voter lease/Owner budget 过期后先 TX、先 `JOIN_REQUEST`、先 Federation handover/locator 均无 send、token、member 或 Directory 写。 |
+| `CLV2-08-R32` | P0 | 08-03..06 | Atomic Config install revoke | **CODE COMPLETE / SELF-AUDIT PASS**：`install_config(..., now_ms)` 先在候选 Stable/Joint Config 上计算 quorum，再原子撤销旧授权；新集合无 quorum 时立即进入 Grace，绝不保留旧 `authority_active`。 | active→无 quorum Joint 与 active→无 quorum Stable 均即时 inactive，Head/Backup Authority TX 全拒绝。 |
 
 ## 本里程碑禁止事项
 - 禁止 Grace 内继续 Authority 写。
@@ -672,7 +755,7 @@ duplicate/replay/reorder
 
 | 任务 ID | 优先级 | 依赖 | 主要文件/位置 | 具体修改任务 | 完成定义 / 测试 |
 |---|---:|---|---|---|---|
-| `CLV2-13-01` | P0 | M12 | Phase/state | 加入 HEAD_REKEYING 和 `rekey_tx`，只允许 authority-active 且当前 Config quorum 正常的 Stable Head 发起。 | 非法 Phase 发起被拒绝。 |
+| `CLV2-13-01` | P0 | M12、CLV2-07-00 | Phase/state | 加入 HEAD_REKEYING 和 `rekey_tx`，只允许 authority-active 且当前 Config quorum 正常的 Stable Head 发起。 | 非法 Phase 发起被拒绝；不得在未完成 Record PREPARED 来源区分时开放新 Rekey Prepare。 |
 | `CLV2-13-02` | P0 | 13-01 | Thresholds | Term、backup_generation、config_id 接近阈值触发 Cluster Rekey；snapshot_id 可先 rotate generation，generation 再触发 Rekey。 | 所有旧 wrap 代码删除。 |
 | `CLV2-13-03` | P0 | M03,M04,13-01 | New Cluster ID | Provider 生成新 ID；RekeyTxn 包含 old epoch/config、新 ID、新 term=1、txid。 | 新 ID 唯一且可持久化。 |
 | `CLV2-13-04` | P0 | M05,13-01 | Wire | 实现 REKEY_PREPARE/ACK/COMMIT，绑定 old epoch/config 和 new epoch；v3/无 REKEY capability voter 不允许进入需 Rekey 的 Strict Config。 | 旧/跨事务消息 replay。 |
@@ -874,22 +957,7 @@ Type payload 24 B：
 36-39  word5
 ```
 
-示例映射：
-
-| Type | word0 | word1 | word2 | word3 | word4 | word5 |
-|---|---|---|---|---|---|---|
-| JOIN_REQUEST | join_txid | capability | current config | incarnation | score/capacity | nonce |
-| JOIN_ACCEPT | join_txid | target config | lease | member flags | backup capability | nonce |
-| CONFIG_PREPARE | config_id | old_hash | new_hash | old_count/new_count | txid | nonce |
-| CONFIG_ACK | config_id | txid | voter slot | phase | persist generation | nonce |
-| SYNC_MEMBER | generation | snapshot_id | sequence | member_id | member_nonce | lease/flags |
-| BACKUP_READY | generation | snapshot_id | final seq | config_id | config_hash | nonce |
-| TAKEOVER_PREPARE | generation | snapshot_id | config_id | proposed_term | txid | nonce |
-| HEAD_TAKEOVER | generation | config_id | proposed_term | bitmap_lo | bitmap_hi | certificate hash |
-| RECOVERY_DECLARE | parent cluster | parent term | parent config | recovery round | recovery nonce | ttl |
-| REKEY_PREPARE | new cluster | new term | rekey txid | old config | new config | nonce |
-
-这只是任务执行建议；真正实现前以 M05 RFC 评审结果为准。
+M05-01 已将上述“建议字段”收敛为唯一**冻结规范**：[`UCN-CL-WIRE-4-RFC4`](UCN_Cluster_Wire_v4.md)。该 RFC 明确 40 B 固定布局、Type 1..33、每 Type 的 role/flags/六个 word、统一 `wire_offer`、双模式 Handover 与 mode-bound READY、可分片 Takeover/Joint Certificate、anchor Config/CRC 绑定、固定 pending cache、严格 v3/v4 分派和 golden vector。05-02..05-12 均已获各自受限外部 GO：05-06 使用独立、可区分的 Type 20..33 fixture table 固定具名 parser 字段与精确 builder P0..P5；05-07 只处理 ADVERTISE.P3、JOIN_REQUEST.P1、HEAD_DECLARE.P3 和 JOIN_ACCEPT.P4 的 private capability 语义；05-08 的 private mixed-version precondition 在 Strict v4 拒绝所有 v3，explicit legacy 仅允许 v3 non-voting + zero required bits；05-09 证明普通 Stream/CAN Carrier 能完整承载 40 B 而不接进 production Cluster；05-10 以独立 RFC4 表固定所有 Type 的 Role/flags/P0..P5 raw 负向合同与 fixed-seed fuzz；05-11 已外审通过 caller-owned version/capability diagnostic view、reason 与 stats；05-12 已外审通过 Host dual-stack 的交替 v3/v4 strict dispatcher、默认 encoder 关闭的完整 40 B 无写回以及 production isolation。以上均不接入生产发送/FSM，也不将 Capability 变成 Head/Backup eligibility；M05-05 不计算 CRC/quorum/Authority。
 
 ---
 

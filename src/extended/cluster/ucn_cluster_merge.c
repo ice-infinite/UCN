@@ -27,6 +27,8 @@
 
 #include "ucn_cluster_internal.h"
 
+#include "ucn/ucn_cluster_authority.h"
+
 /* CLV2-M02 (02-06): intra-module forward declarations - the extracted
  * function order differs from the former single file, so the helpers
  * used before their definitions are declared here (bodies untouched). */
@@ -34,13 +36,18 @@ bool score_improves_by(uint16_t candidate_score, uint16_t current_score,
                               uint8_t percent);
 void send_head_stepdown(ucn_cluster_t *cluster);
 
-ucn_result_t backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms)
+ucn_result_t backup_challenge_after_persistence(
+    ucn_cluster_t *cluster,
+    const ucn_cluster_persist_state_t *durable_state,
+    uint32_t now_ms)
 {
     ucn_cluster_phase_t pre_phase;
-    uint32_t next_term;
 
-    if (cluster_serial_next_checked(cluster->term, &next_term) != UCN_OK) {
-        return UCN_ERR_EXHAUSTED;
+    if (cluster == NULL || durable_state == NULL ||
+        !durable_state->has_active_epoch ||
+        durable_state->active_epoch.cluster_id != cluster->cluster_id ||
+        durable_state->active_epoch.head_node_id != cluster->config.local_node_id) {
+        return UCN_ERR_STATE;
     }
 
     /* CLV2-01-04e.7: derive the pre-phase from the PRE-CALL legacy state
@@ -74,7 +81,7 @@ ucn_result_t backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms)
      * site's role write is idempotent with apply_legacy(ELECTION) (kept in
      * original order for the not-yet-migrated callers). */
     cluster->role = UCN_CLUSTER_ROLE_CANDIDATE;
-    cluster->term = next_term;
+    cluster->term = durable_state->active_epoch.term;
     cluster->head_node_id = cluster->config.local_node_id;
     cluster->current_head_score = cluster->config.head_score;
     cluster->role_since_ms = now_ms;
@@ -90,6 +97,41 @@ ucn_result_t backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms)
            UCN_CLUSTER_PHASE_ELECTION);
 #endif
     return UCN_OK;
+}
+
+ucn_result_t backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms)
+{
+    ucn_cluster_epoch_t epoch;
+    ucn_cluster_persist_state_t durable_state;
+    ucn_cluster_phase_t pre_phase;
+    uint32_t next_term;
+    bool committed;
+    ucn_result_t result;
+
+    if (cluster == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = cluster_serial_next_checked(cluster->term, &next_term);
+    if (result != UCN_OK) {
+        return result;
+    }
+    pre_phase = cluster_phase_from_legacy_state(cluster, now_ms);
+    result = cluster_transition_preflight(cluster, pre_phase,
+                                          UCN_CLUSTER_PHASE_ELECTION, now_ms);
+    if (result != UCN_OK) {
+        return result;
+    }
+    (void)memset(&epoch, 0, sizeof(epoch));
+    epoch.cluster_id = cluster->cluster_id;
+    epoch.term = next_term;
+    epoch.head_node_id = cluster->config.local_node_id;
+    result = cluster_persistence_begin_epoch(
+        cluster, &epoch, CLUSTER_PERSIST_ACTION_BACKUP_CHALLENGE, 0U,
+        &committed, &durable_state);
+    if (result != UCN_OK || !committed) {
+        return result;
+    }
+    return backup_challenge_after_persistence(cluster, &durable_state, now_ms);
 }
 
 static void begin_ordered_stepdown_with_reason(
@@ -345,6 +387,14 @@ bool process_term_conflict(
         UCN_CLUSTER_EPOCH_RELATION_CONFLICT) {
         return false;
     }
+    if (cluster->authority_runtime != NULL) {
+        /* The M08 Owner fences before legacy phase cleanup.  This safety-only
+         * observation never grants v3 authority; it closes the current Head
+         * TX window while M05 keeps v4 production RX/FSM disabled. */
+        (void)ucn_cluster_authority_runtime_note_term_conflict(
+            cluster->authority_runtime, candidate->cluster_id, candidate->term,
+            candidate->head_node_id, now_ms);
+    }
     if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
         /* Idempotent: additional advertisements from either same-Term Head
          * cannot re-enable control actions or manufacture transitions. */
@@ -388,6 +438,13 @@ bool process_higher_authority(
     if (ucn_cluster_epoch_compare(&local_epoch, &remote_epoch) !=
         UCN_CLUSTER_EPOCH_RELATION_LOWER) {
         return false;
+    }
+    if (cluster->authority_runtime != NULL) {
+        /* Current v3 offers are only a safety observation.  They cannot
+         * claim the M10 frozen-Config certificate needed for JOIN_PENDING. */
+        (void)ucn_cluster_authority_runtime_note_higher_term_observed(
+            cluster->authority_runtime, candidate->cluster_id, candidate->term,
+            candidate->head_node_id, now_ms);
     }
     /* A protected, replay-admitted higher same-Cluster Term is a safety
      * observation even when the following Current-FSM transition later
@@ -779,8 +836,8 @@ void send_head_stepdown(ucn_cluster_t *cluster)
     size_t index;
 
     for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
-        if (cluster->members[index].occupied) {
-            (void)send_message(cluster, cluster->members[index].node_id,
+        if (cluster->primary_members.slots[index].occupied) {
+            (void)send_message(cluster, cluster->primary_members.slots[index].node_id,
                                UCN_CLUSTER_MSG_HEAD_STEPDOWN,
                                UCN_CLUSTER_ROLE_HEAD, cluster->cluster_id,
                                cluster->term, cluster->config.local_node_id,
