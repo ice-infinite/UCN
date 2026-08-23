@@ -125,7 +125,9 @@ static int test_offer_candidate_hysteresis_and_feasibility(void)
     ASSERT_TRUE(!ucn_cluster_handover_candidate_is_eligible(candidate, 800U, 0U,
                                                              &policy, 60U));
     ucn_cluster_handover_candidate_expire(&table, 200U, 100U);
-    ASSERT_TRUE(!table.slots[0].occupied);
+    ASSERT_TRUE(!table.slots[0].occupied && table.tombstones[0].occupied &&
+                table.tombstones[0].nonce_high_water == 2U &&
+                table.tombstones[0].hold_down_until_ms == 101U);
 
     foreign.available_capacity = 0U;
     ASSERT_TRUE(ucn_cluster_handover_feasibility_evaluate(
@@ -401,6 +403,120 @@ static int test_r08_replay_namespace_and_hysteresis_context(void)
     ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
                     &table, &local, 800U, &replay, &policy, 305U, &candidate) ==
                 UCN_ERR_REPLAY && memcmp(&table, &before, sizeof(table)) == 0);
+    return 0;
+}
+
+/* CLV2-11-R08-B: candidate eligibility may expire, but neither replay
+ * high-water nor a live hold-down may disappear with that expiry. */
+static int test_r08_b_expiry_preserves_replay_and_hold_down(void)
+{
+    ucn_cluster_epoch_t local = make_epoch(1U, 2U, 1U);
+    ucn_cluster_handover_offer_t foreign =
+        make_offer(2U, 600U, 2U, 60U, 61U, 100U);
+    ucn_cluster_handover_offer_t replay;
+    ucn_cluster_handover_policy_t policy = make_policy();
+    ucn_cluster_handover_candidate_table_t table;
+    ucn_cluster_handover_candidate_table_t before;
+    ucn_cluster_handover_candidate_t *candidate = NULL;
+    size_t index;
+
+    ucn_cluster_handover_candidate_table_reset(&table);
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 100U, &candidate) ==
+                UCN_OK && candidate != NULL && candidate->score_samples == 1U);
+    foreign.nonce = 101U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 101U, &candidate) ==
+                UCN_OK && candidate->score_samples == 2U &&
+                ucn_cluster_handover_candidate_is_eligible(candidate, 800U, 0U,
+                                                            &policy, 101U));
+    ucn_cluster_handover_candidate_note_result(candidate, true, &policy, 101U);
+    ASSERT_TRUE(candidate->hold_down_until_ms == 151U);
+    ucn_cluster_handover_candidate_expire(&table, 120U, 10U);
+    ASSERT_TRUE(!table.slots[0].occupied && table.tombstones[0].occupied &&
+                table.tombstones[0].nonce_high_water == 101U &&
+                table.tombstones[0].hold_down_until_ms == 151U);
+
+    replay = make_offer(2U, 600U, 2U, 60U, 61U, 50U);
+    before = table;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &replay, &policy, 121U, &candidate) ==
+                UCN_ERR_REPLAY && memcmp(&table, &before, sizeof(table)) == 0);
+    replay.nonce = 51U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &replay, &policy, 122U, &candidate) ==
+                UCN_ERR_REPLAY && memcmp(&table, &before, sizeof(table)) == 0);
+
+    foreign.nonce = 102U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 123U, &candidate) ==
+                UCN_OK && candidate->active && candidate->score_samples == 1U &&
+                candidate->hold_down_until_ms == 151U &&
+                !ucn_cluster_handover_candidate_is_eligible(candidate, 800U, 0U,
+                                                             &policy, 123U));
+    foreign.nonce = 103U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 124U, &candidate) ==
+                UCN_OK && candidate->score_samples == 2U &&
+                !ucn_cluster_handover_candidate_is_eligible(candidate, 800U, 0U,
+                                                             &policy, 124U) &&
+                ucn_cluster_handover_candidate_is_eligible(candidate, 800U, 0U,
+                                                            &policy, 152U));
+
+    /* Tombstones have no time eviction.  Once their fixed capacity is full,
+     * expiry leaves any further candidate as inactive in-place so an old
+     * nonce cannot be accepted merely to regain table capacity. */
+    ucn_cluster_handover_candidate_table_reset(&table);
+    for (index = 0U; index < UCN_CLUSTER_HANDOVER_MAX_REPLAY_TOMBSTONES;
+         ++index) {
+        foreign = make_offer(2U, 700U + (uint32_t)index,
+                             (ucn_node_id_t)(2U + index),
+                             70U + (uint32_t)index, 80U + (uint32_t)index,
+                             100U);
+        ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                        &table, &local, 800U, &foreign, &policy,
+                        10U + (uint32_t)index, &candidate) == UCN_OK);
+    }
+    ucn_cluster_handover_candidate_expire(&table, 100U, 10U);
+    for (index = 0U; index < UCN_CLUSTER_HANDOVER_MAX_REPLAY_TOMBSTONES;
+         ++index) {
+        ASSERT_TRUE(table.tombstones[index].occupied && !table.slots[index].occupied);
+    }
+    foreign = make_offer(2U, 800U, 10U, 90U, 91U, 100U);
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 101U, &candidate) ==
+                UCN_OK && candidate->active);
+    ucn_cluster_handover_candidate_expire(&table, 120U, 10U);
+    ASSERT_TRUE(table.slots[0].occupied && !table.slots[0].active &&
+                table.slots[0].offer.nonce == 100U);
+    replay = foreign;
+    replay.nonce = 50U;
+    before = table;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &replay, &policy, 121U, &candidate) ==
+                UCN_ERR_REPLAY && memcmp(&table, &before, sizeof(table)) == 0);
+
+    /* Fill the remaining candidate slots while tombstones are already full.
+     * Their expiry must retain inactive history in-place; a fifth identity is
+     * rejected rather than evicting any nonce high-water record. */
+    for (index = 1U; index < UCN_CLUSTER_HANDOVER_MAX_CANDIDATES; ++index) {
+        foreign = make_offer(2U, 900U + (uint32_t)index,
+                             (ucn_node_id_t)(20U + index),
+                             100U + (uint32_t)index,
+                             110U + (uint32_t)index, 100U);
+        ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                        &table, &local, 800U, &foreign, &policy, 122U,
+                        &candidate) == UCN_OK && candidate->active);
+    }
+    ucn_cluster_handover_candidate_expire(&table, 140U, 10U);
+    for (index = 0U; index < UCN_CLUSTER_HANDOVER_MAX_CANDIDATES; ++index) {
+        ASSERT_TRUE(table.slots[index].occupied && !table.slots[index].active);
+    }
+    foreign = make_offer(2U, 1000U, 30U, 130U, 140U, 1U);
+    before = table;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 141U, &candidate) ==
+                UCN_ERR_NO_SPACE && memcmp(&table, &before, sizeof(table)) == 0);
     return 0;
 }
 
@@ -825,6 +941,7 @@ int main(void)
     ASSERT_TRUE(test_offer_candidate_hysteresis_and_feasibility() == 0);
     ASSERT_TRUE(test_candidate_qualification_and_proposal_domains() == 0);
     ASSERT_TRUE(test_r08_replay_namespace_and_hysteresis_context() == 0);
+    ASSERT_TRUE(test_r08_b_expiry_preserves_replay_and_hold_down() == 0);
     ASSERT_TRUE(test_foreign_handover_order_retry_and_member() == 0);
     ASSERT_TRUE(test_same_cluster_planned_transfer_and_timeout() == 0);
     ASSERT_TRUE(test_revoked_head_timeout_requires_observe() == 0);

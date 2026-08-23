@@ -146,25 +146,6 @@ void ucn_cluster_handover_candidate_table_reset(
     }
 }
 
-void ucn_cluster_handover_candidate_expire(
-    ucn_cluster_handover_candidate_table_t *table,
-    uint32_t now_ms,
-    uint32_t expiry_ms)
-{
-    size_t index;
-
-    if (table == NULL || !ucn_duration_is_valid(expiry_ms)) {
-        return;
-    }
-    for (index = 0U; index < UCN_CLUSTER_HANDOVER_MAX_CANDIDATES; ++index) {
-        if (table->slots[index].occupied &&
-            ucn_elapsed_at_least(now_ms, table->slots[index].last_seen_ms,
-                                 expiry_ms)) {
-            (void)memset(&table->slots[index], 0, sizeof(table->slots[index]));
-        }
-    }
-}
-
 static bool offer_replay_namespace_matches(
     const ucn_cluster_handover_offer_t *left,
     const ucn_cluster_handover_offer_t *right)
@@ -175,12 +156,13 @@ static bool offer_replay_namespace_matches(
            left->config_hash == right->config_hash;
 }
 
-static bool offer_replay_namespace_advances(
-    const ucn_cluster_handover_offer_t *current,
+static bool replay_namespace_advances(
+    const ucn_cluster_epoch_t *current_epoch,
+    uint32_t current_config_id,
     const ucn_cluster_handover_offer_t *incoming)
 {
     const ucn_cluster_epoch_relation_t relation =
-        ucn_cluster_epoch_compare(&current->epoch, &incoming->epoch);
+        ucn_cluster_epoch_compare(current_epoch, &incoming->epoch);
 
     /* Epoch and Config are serial/no-wrap checked by offer_is_valid().  A
      * lower current Epoch means the remote moved forward; within one exact
@@ -190,7 +172,7 @@ static bool offer_replay_namespace_advances(
         return true;
     }
     return relation == UCN_CLUSTER_EPOCH_RELATION_SAME &&
-           incoming->config_id > current->config_id;
+           incoming->config_id > current_config_id;
 }
 
 static bool offer_hysteresis_context_matches(
@@ -256,6 +238,7 @@ static void candidate_start_new_proposal(
 {
     (void)memset(candidate, 0, sizeof(*candidate));
     candidate->occupied = true;
+    candidate->active = true;
     candidate->offer = *offer;
     qualification_context_store(candidate, local_head_score, policy);
     candidate->score_samples = score_qualifies(offer->head_score,
@@ -270,6 +253,155 @@ static void candidate_start_new_proposal(
     candidate->hold_down_until_ms = hold_down_until_ms;
 }
 
+static void candidate_restart_hysteresis(
+    ucn_cluster_handover_candidate_t *candidate,
+    const ucn_cluster_handover_offer_t *offer,
+    uint16_t local_head_score,
+    const ucn_cluster_handover_policy_t *policy,
+    uint32_t now_ms)
+{
+    candidate->active = true;
+    candidate->offer = *offer;
+    qualification_context_store(candidate, local_head_score, policy);
+    candidate->score_samples = score_qualifies(offer->head_score,
+                                                local_head_score,
+                                                policy->improvement_percent) ?
+                                   1U :
+                                   0U;
+    candidate->first_seen_ms = now_ms;
+    candidate->last_seen_ms = now_ms;
+}
+
+static void candidate_clear_liveness(ucn_cluster_handover_candidate_t *candidate)
+{
+    candidate->active = false;
+    candidate->score_samples = 0U;
+    candidate->qualification_improvement_percent = 0U;
+    candidate->qualification_required_samples = 0U;
+    candidate->qualification_local_head_score = 0U;
+    candidate->qualification_required_capabilities = 0U;
+    candidate->first_seen_ms = 0U;
+    candidate->last_seen_ms = 0U;
+}
+
+static bool candidate_identity_matches(
+    const ucn_cluster_handover_candidate_t *candidate,
+    const ucn_cluster_handover_offer_t *offer)
+{
+    return candidate != NULL && offer != NULL && candidate->occupied &&
+           candidate->offer.epoch.cluster_id == offer->epoch.cluster_id &&
+           candidate->offer.epoch.head_node_id == offer->epoch.head_node_id;
+}
+
+static bool tombstone_identity_matches(
+    const ucn_cluster_handover_replay_tombstone_t *tombstone,
+    const ucn_cluster_handover_offer_t *offer)
+{
+    return tombstone != NULL && offer != NULL && tombstone->occupied &&
+           tombstone->epoch.cluster_id == offer->epoch.cluster_id &&
+           tombstone->epoch.head_node_id == offer->epoch.head_node_id;
+}
+
+static bool tombstone_namespace_matches(
+    const ucn_cluster_handover_replay_tombstone_t *tombstone,
+    const ucn_cluster_handover_offer_t *offer)
+{
+    return tombstone_identity_matches(tombstone, offer) &&
+           epoch_is_exact(&tombstone->epoch, &offer->epoch) &&
+           tombstone->config_id == offer->config_id &&
+           tombstone->config_hash == offer->config_hash;
+}
+
+static bool tombstone_namespace_advances(
+    const ucn_cluster_handover_replay_tombstone_t *tombstone,
+    const ucn_cluster_handover_offer_t *offer)
+{
+    return tombstone_identity_matches(tombstone, offer) &&
+           replay_namespace_advances(&tombstone->epoch, tombstone->config_id,
+                                     offer);
+}
+
+static void tombstone_store(
+    ucn_cluster_handover_replay_tombstone_t *tombstone,
+    const ucn_cluster_handover_candidate_t *candidate)
+{
+    (void)memset(tombstone, 0, sizeof(*tombstone));
+    tombstone->occupied = true;
+    tombstone->epoch = candidate->offer.epoch;
+    tombstone->config_id = candidate->offer.config_id;
+    tombstone->config_hash = candidate->offer.config_hash;
+    tombstone->nonce_high_water = candidate->offer.nonce;
+    tombstone->hold_down_until_ms = candidate->hold_down_until_ms;
+}
+
+static bool tombstone_can_replace(
+    const ucn_cluster_handover_replay_tombstone_t *tombstone,
+    const ucn_cluster_handover_candidate_t *candidate)
+{
+    ucn_cluster_handover_offer_t offer;
+
+    if (!tombstone->occupied) {
+        return true;
+    }
+    (void)memset(&offer, 0, sizeof(offer));
+    offer.epoch = candidate->offer.epoch;
+    offer.config_id = candidate->offer.config_id;
+    offer.config_hash = candidate->offer.config_hash;
+    offer.nonce = candidate->offer.nonce;
+    if (tombstone_namespace_matches(tombstone, &offer)) {
+        return offer.nonce >= tombstone->nonce_high_water;
+    }
+    return tombstone_namespace_advances(tombstone, &offer);
+}
+
+void ucn_cluster_handover_candidate_expire(
+    ucn_cluster_handover_candidate_table_t *table,
+    uint32_t now_ms,
+    uint32_t expiry_ms)
+{
+    size_t index;
+
+    if (table == NULL || !ucn_duration_is_valid(expiry_ms)) {
+        return;
+    }
+    for (index = 0U; index < UCN_CLUSTER_HANDOVER_MAX_CANDIDATES; ++index) {
+        size_t tombstone_index;
+        ucn_cluster_handover_candidate_t *candidate = &table->slots[index];
+        ucn_cluster_handover_replay_tombstone_t *target = NULL;
+
+        if (!candidate->occupied || !candidate->active ||
+            !ucn_elapsed_at_least(now_ms, candidate->last_seen_ms, expiry_ms)) {
+            continue;
+        }
+        for (tombstone_index = 0U;
+             tombstone_index < UCN_CLUSTER_HANDOVER_MAX_REPLAY_TOMBSTONES;
+             ++tombstone_index) {
+            ucn_cluster_handover_replay_tombstone_t *tombstone =
+                &table->tombstones[tombstone_index];
+
+            if (tombstone_identity_matches(tombstone, &candidate->offer)) {
+                if (tombstone_can_replace(tombstone, candidate)) {
+                    target = tombstone;
+                }
+                break;
+            }
+            if (!tombstone->occupied && target == NULL) {
+                target = tombstone;
+            }
+        }
+        if (target != NULL) {
+            tombstone_store(target, candidate);
+            (void)memset(candidate, 0, sizeof(*candidate));
+        } else {
+            /* The bounded tombstone table is full.  Retain this record as an
+             * inactive candidate rather than silently lowering its replay or
+             * hold-down fence; new identities will fail closed if all slots
+             * become historical records. */
+            candidate_clear_liveness(candidate);
+        }
+    }
+}
+
 ucn_result_t ucn_cluster_handover_candidate_observe(
     ucn_cluster_handover_candidate_table_t *table,
     const ucn_cluster_epoch_t *local_epoch,
@@ -281,6 +413,7 @@ ucn_result_t ucn_cluster_handover_candidate_observe(
 {
     size_t index;
     ucn_cluster_handover_candidate_t *free_slot = NULL;
+    ucn_cluster_handover_replay_tombstone_t *matching_tombstone = NULL;
 
     if (output != NULL) {
         *output = NULL;
@@ -299,15 +432,15 @@ ucn_result_t ucn_cluster_handover_candidate_observe(
             }
             continue;
         }
-        if (candidate->offer.epoch.cluster_id == offer->epoch.cluster_id &&
-            candidate->offer.epoch.head_node_id == offer->epoch.head_node_id) {
+        if (candidate_identity_matches(candidate, offer)) {
             if (!offer_replay_namespace_matches(&candidate->offer, offer)) {
                 const uint32_t hold_down_until_ms = candidate->hold_down_until_ms;
 
                 /* Only a strictly advanced Epoch/Config may create a new
                  * nonce namespace.  In particular, an old Epoch/Config
                  * cannot return after a newer one and be treated as fresh. */
-                if (!offer_replay_namespace_advances(&candidate->offer, offer)) {
+                if (!replay_namespace_advances(&candidate->offer.epoch,
+                                               candidate->offer.config_id, offer)) {
                     return UCN_ERR_REPLAY;
                 }
                 candidate_start_new_proposal(candidate, offer, local_head_score,
@@ -320,41 +453,59 @@ ucn_result_t ucn_cluster_handover_candidate_observe(
             if (offer->nonce <= candidate->offer.nonce) {
                 return UCN_ERR_REPLAY;
             }
-            if (!offer_hysteresis_context_matches(&candidate->offer, offer)) {
+            if (!candidate->active ||
+                !offer_hysteresis_context_matches(&candidate->offer, offer) ||
+                !qualification_context_matches(candidate, local_head_score, policy)) {
                 /* capacity/size/capability/wire/Backup-policy changes are
                  * allowed only on a fresh nonce.  They restart score
                  * hysteresis but retain the namespace's high-water nonce,
                  * preventing D1 -> D2 -> D1 ABA replay. */
-                candidate->offer = *offer;
-                candidate->last_seen_ms = now_ms;
-                candidate->first_seen_ms = now_ms;
-                candidate->score_samples = 0U;
-                qualification_context_store(candidate, local_head_score, policy);
+                candidate_restart_hysteresis(candidate, offer, local_head_score,
+                                             policy, now_ms);
             } else {
                 candidate->offer = *offer;
                 candidate->last_seen_ms = now_ms;
-            }
-            if (!qualification_context_matches(candidate, local_head_score, policy)) {
-                /* The remote proposal is unchanged but local policy/score
-                 * changed.  The next fresh offer starts a new qualifying run;
-                 * its nonce history remains in force. */
-                qualification_context_store(candidate, local_head_score, policy);
-                candidate->first_seen_ms = now_ms;
-                candidate->score_samples = 0U;
-            }
-            if (score_qualifies(offer->head_score, local_head_score,
-                                policy->improvement_percent)) {
-                if (candidate->score_samples < UINT8_MAX) {
-                    ++candidate->score_samples;
+                if (score_qualifies(offer->head_score, local_head_score,
+                                    policy->improvement_percent)) {
+                    if (candidate->score_samples < UINT8_MAX) {
+                        ++candidate->score_samples;
+                    }
+                } else {
+                    candidate->score_samples = 0U;
                 }
-            } else {
-                candidate->score_samples = 0U;
             }
             if (output != NULL) {
                 *output = candidate;
             }
             return UCN_OK;
         }
+    }
+    for (index = 0U; index < UCN_CLUSTER_HANDOVER_MAX_REPLAY_TOMBSTONES;
+         ++index) {
+        if (tombstone_identity_matches(&table->tombstones[index], offer)) {
+            matching_tombstone = &table->tombstones[index];
+            break;
+        }
+    }
+    if (matching_tombstone != NULL) {
+        if (tombstone_namespace_matches(matching_tombstone, offer)) {
+            if (offer->nonce <= matching_tombstone->nonce_high_water) {
+                return UCN_ERR_REPLAY;
+            }
+        } else if (!tombstone_namespace_advances(matching_tombstone, offer)) {
+            return UCN_ERR_REPLAY;
+        }
+        if (free_slot == NULL) {
+            return UCN_ERR_NO_SPACE;
+        }
+        candidate_start_new_proposal(free_slot, offer, local_head_score, policy,
+                                     now_ms,
+                                     matching_tombstone->hold_down_until_ms);
+        (void)memset(matching_tombstone, 0, sizeof(*matching_tombstone));
+        if (output != NULL) {
+            *output = free_slot;
+        }
+        return UCN_OK;
     }
     if (free_slot == NULL) {
         return UCN_ERR_NO_SPACE;
@@ -374,7 +525,8 @@ bool ucn_cluster_handover_candidate_is_eligible(
     const ucn_cluster_handover_policy_t *policy,
     uint32_t now_ms)
 {
-    if (candidate == NULL || !candidate->occupied || !policy_is_valid(policy) ||
+    if (candidate == NULL || !candidate->occupied || !candidate->active ||
+        !policy_is_valid(policy) ||
         !qualification_context_matches(candidate, local_head_score, policy) ||
         candidate->score_samples < policy->required_samples ||
         !ucn_elapsed_at_least(now_ms, local_head_since_ms,
@@ -393,7 +545,8 @@ void ucn_cluster_handover_candidate_note_result(
     const ucn_cluster_handover_policy_t *policy,
     uint32_t now_ms)
 {
-    if (candidate == NULL || !candidate->occupied || !policy_is_valid(policy)) {
+    if (candidate == NULL || !candidate->occupied || !candidate->active ||
+        !policy_is_valid(policy)) {
         return;
     }
     candidate->score_samples = 0U;

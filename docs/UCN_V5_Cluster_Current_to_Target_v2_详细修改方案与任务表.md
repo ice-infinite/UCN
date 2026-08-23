@@ -22,7 +22,7 @@
 > | M08 Authority/Fence | SELF-AUDIT PASS / WAIT EXTERNAL | 08-01..12、R31/R32 已完成（已提交 `5a237a0`） | Authority Fence 负责即时撤销数据面 Authority；`TERM_CONFLICT_WAIT` 保留为控制面安全等待，两者并存。M05 顶层 `AUDIT HOLD` 不解除。 |
 > | M09 Backup 双缓冲 | AUDIT HOLD / BLOCKED BY M08 WAIT EXTERNAL（R01 外审 GO，受限实验软件范围） | 09-01..11 已完成分项和全量自审；R01 已获外审 GO，但 M08 仍为 SELF-AUDIT PASS / WAIT EXTERNAL，M05 顶层 AUDIT HOLD 不解除 | 仅建立独立 Backup mirror/同步合同与 production-archive 单元测试；不接入 v4 production RX/TX/FSM、Authority 或 Takeover 提交。 |
 > | M10 Final Takeover | AUDIT HOLD / R31–R34 SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW（受控实验范围） | 外审确认的通用 EPOCH bypass、durable terminal、连续接管与覆盖声明四项缺陷均已整改并完成矩阵自审；尚未获得本轮外部复审签字 | 默认产品仍不接入 v4 RX/TX/FSM、Authority、encoder 或实机结论；M10 实验 archive 也不得视为可放行，待 R31–R34 独立复审。 |
-> | M11 Merge/Handover | AUDIT HOLD / R07 EXTERNAL PASS / R08-A SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW（受限实验范围） | R01–R07 已闭环；R08 的共用 proposal/replay 域已被 ABA 审计撤回，R08-A 已把不可回退的 Epoch/Config replay namespace 与迟滞 context 分离并完成当前矩阵自审。 | 仍仅限 caller-owned、default-OFF 实验模型。M05 顶层 `AUDIT HOLD`、M08 `WAIT EXTERNAL` 与 M10 外审等待均不解除；不得把 M11 接入 production v4 RX/TX/FSM、Authority、Adapter 或实机结论。 |
+> | M11 Merge/Handover | AUDIT HOLD / R07、R08-A EXTERNAL PASS / R08-B SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW（受限实验范围） | R01–R07 已闭环；R08-A 的同槽 ABA 已由外审确认修复；R08-B 已将 live candidate expiry 与 bounded replay tombstone 分离，并完成全矩阵自审。 | 仍仅限 caller-owned、default-OFF 实验模型。M05 顶层 `AUDIT HOLD`、M08 `WAIT EXTERNAL` 与 M10 外审等待均不解除；不得把 M11 接入 production v4 RX/TX/FSM、Authority、Adapter 或实机结论。 |
 > | M12 RecoveryLineage | TODO | — | — |
 > | M13 Rekey/No-wrap | TODO | — | — |
 > | M14 收敛/发布 | TODO | — | — |
@@ -707,7 +707,7 @@ duplicate/replay/reorder
 
 **依赖：** M10。当前 M10 尚待外部复审，但用户明确授权 M11 连续实施；因此本阶段仅在 default-OFF experimental archive 建模/验证，并同步撤除默认产品的旧 v3 自主 score 切换，不提前接通 v4 production RX/TX/FSM。
 
-**状态：** **AUDIT HOLD / R07 EXTERNAL PASS / R08-A SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW（受控实验范围）**。R01–R07 已获各自受限范围外审 GO；R08 的旧“proposal/replay 共用一个域”设计被外审发现 D1→D2→D1 ABA history-loss，R08-A 已分离不可回退的 Epoch/Config replay namespace 与会重置迟滞的 feasibility context，并完成当前矩阵自审。M11 不得进入 M12。完整计划、分项/全量自审和外部审计入口见 `UCN_V5_Cluster_M11_MergeHandover_连续实施计划_2026-08-23.md`、`UCN_V5_Cluster_M11_分项与全量自审报告_2026-08-23.md`、`UCN_V5_Cluster_M11_外部审计材料_2026-08-23.md`。
+**状态：** **AUDIT HOLD / R07、R08-A EXTERNAL PASS / R08-B SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW（受控实验范围）**。R01–R07 已获各自受限范围外审 GO；R08-A 的 D1→D2→D1 同槽 ABA 已获外审确认修复；R08-B 已将 `candidate_expire()` 的 live activity 与 bounded replay tombstone 分离并完成全矩阵自审。M11 不得进入 M12。完整计划、分项/全量自审和外部审计入口见 `UCN_V5_Cluster_M11_MergeHandover_连续实施计划_2026-08-23.md`、`UCN_V5_Cluster_M11_分项与全量自审报告_2026-08-23.md`、`UCN_V5_Cluster_M11_外部审计材料_2026-08-23.md`。
 
 **里程碑门禁：** 不同 cluster_id 只走 Merge；同 cluster higher Term 只走 Authority；Merge 不会 score 乒乓。
 
@@ -733,6 +733,7 @@ duplicate/replay/reorder
 | `CLV2-11-R07` | P1 | 11-02、11-03 | Consecutive qualifying score samples | **DONE / EXTERNAL RE-REVIEW PASS（受限实验范围）**：`score_samples` 只计入同一迟滞 context、同一 local score、improvement percent、required samples 与 required capabilities 输入下连续达到 threshold 的 fresh offer；不合格 score 或这些 qualification 输入改变都会清零，不能累计普通 fresh packet。eligible 判定也必须精确匹配当前 inputs。 | 外部复审确认 `870→890`（required=2）仍不可 eligible；`890→870` 清零；`890→870→890→890` 仅最后一帧 eligible；阈值边界为 `>=`；已累积后本地 score/qualification 输入改变也立即不可 eligible。 |
 | `CLV2-11-R08` | P1 | 11-02、R07 | Candidate proposal/replay domain | **SUPERSEDED BY R08-A**：旧设计把 full Epoch、Config 与可逆的 size/capacity/capabilities/wire/Backup-policy 一并作为 nonce reset 域；外审确认这会在 D1→D2→D1 时遗失 D1 high-water nonce，不能签字。 | R08 的 Epoch/Config low-nonce 正向回归保留，但不再代表完整 replay 安全。 |
 | `CLV2-11-R08-A` | P0 / MAJOR | R08 | Replay namespace / ABA closure | **CODE COMPLETE / SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW**：replay namespace 只能是不可回退的 full Epoch + Config ID/hash；仅严格前进的 Epoch/Config 可从低 nonce 新建 namespace。cluster size/capacity/capabilities/wire/Backup-policy 是 hysteresis context：任一变化仅清连续样本/first-seen，仍要求 nonce 严格大于本 namespace high-water。 | 覆盖 D1 `nonce100`→D2（capacity 变化）`nonce101`→旧 D1 `nonce50/51` 均 `REPLAY` 且表逐字节不写；size/capacity/capability/wire/Backup-policy 全字段变更均 reset samples；新 Epoch/Config `nonce1` 合法，旧 namespace 即使较大 nonce 也不可复活。 |
+| `CLV2-11-R08-B` | P0 / MAJOR | R08-A | Expiry replay-history / hold-down lifecycle | **CODE COMPLETE / SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW**：candidate activity 允许按 expiry 失活，但 Epoch/Config nonce high-water 与 hold-down 转入固定容量、无时间淘汰的 replay tombstone；tombstone 满时保留失活 candidate，并在 history 占满 slots 后以 `UCN_ERR_NO_SPACE` fail-closed，禁止为了回收容量清 replay history。 | D1 `100/101`→expiry 后 `50/51` 仍 `REPLAY` 且 table 不写；`102` 可重启样本为 1；已 armed hold-down 经 expiry/re-activate 前不提前失效；tombstone 满且 candidate history 占满时新 identity `NO_SPACE`、旧 nonce 仍拒绝。 |
 
 ## 本里程碑禁止事项
 - 禁止跨簇比 Term。

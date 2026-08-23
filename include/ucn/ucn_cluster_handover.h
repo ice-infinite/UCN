@@ -29,6 +29,7 @@ extern "C" {
     (UCN_CLUSTER_HANDOVER_CAP_BACKUP | UCN_CLUSTER_HANDOVER_CAP_JOINT_CONFIG | \
      UCN_CLUSTER_HANDOVER_CAP_PERSISTENCE)
 #define UCN_CLUSTER_HANDOVER_TRACE_CAPACITY ((size_t)8U)
+#define UCN_CLUSTER_HANDOVER_MAX_REPLAY_TOMBSTONES ((size_t)4U)
 
 typedef enum ucn_cluster_handover_offer_class {
     UCN_CLUSTER_HANDOVER_OFFER_INVALID = 0,
@@ -119,7 +120,11 @@ typedef struct ucn_cluster_handover_policy {
 } ucn_cluster_handover_policy_t;
 
 typedef struct ucn_cluster_handover_candidate {
+    /* occupied reserves an identity/replay record.  active is the shorter
+     * lived hysteresis/eligibility state; expiry may clear active but must
+     * never erase the replay namespace, nonce high-water or hold-down. */
     bool occupied;
+    bool active;
     ucn_cluster_handover_offer_t offer;
     /* offer.epoch + offer.config_id/config_hash are the candidate's replay
      * namespace: nonce can restart only when that namespace strictly
@@ -141,8 +146,24 @@ typedef struct ucn_cluster_handover_candidate {
     uint32_t hold_down_until_ms;
 } ucn_cluster_handover_candidate_t;
 
+/* A replay tombstone is intentionally not time-evicted.  The experimental
+ * model has no signed freshness/boot-incarnation field that could prove an old
+ * offer is no longer replayable.  If this bounded table fills, expiry keeps
+ * the candidate's inactive record instead of discarding replay protection;
+ * later admission therefore fails closed with UCN_ERR_NO_SPACE. */
+typedef struct ucn_cluster_handover_replay_tombstone {
+    bool occupied;
+    ucn_cluster_epoch_t epoch;
+    uint32_t config_id;
+    uint32_t config_hash;
+    uint32_t nonce_high_water;
+    uint32_t hold_down_until_ms;
+} ucn_cluster_handover_replay_tombstone_t;
+
 typedef struct ucn_cluster_handover_candidate_table {
     ucn_cluster_handover_candidate_t slots[UCN_CLUSTER_HANDOVER_MAX_CANDIDATES];
+    ucn_cluster_handover_replay_tombstone_t
+        tombstones[UCN_CLUSTER_HANDOVER_MAX_REPLAY_TOMBSTONES];
 } ucn_cluster_handover_candidate_table_t;
 
 typedef struct ucn_cluster_handover_feasibility {
@@ -235,6 +256,9 @@ ucn_cluster_handover_offer_class_t ucn_cluster_handover_offer_classify(
     const ucn_cluster_epoch_t *local_epoch,
     const ucn_cluster_handover_offer_t *offer);
 
+/* Explicit caller-owned lifetime reset.  This is initialization/destruction,
+ * not ordinary candidate expiry: it intentionally removes replay history and
+ * therefore must not be used as a runtime capacity-recovery mechanism. */
 void ucn_cluster_handover_candidate_table_reset(
     ucn_cluster_handover_candidate_table_t *table);
 void ucn_cluster_handover_candidate_expire(

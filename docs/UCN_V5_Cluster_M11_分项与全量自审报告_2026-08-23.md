@@ -1,7 +1,7 @@
 # UCN V5 Cluster M11：分项与全量自审报告（2026-08-23）
 
-> 当前结论：**M11 AUDIT HOLD / R07 EXTERNAL PASS / R08-A SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW（受限实验范围）**。
-> R01–R07 的既有外部复审 GO 仅覆盖各自签字范围；R08 原设计因 ABA history-loss 已撤回并由 R08-A 重做。本报告不解除 M05 `AUDIT HOLD`，也不改变 M08 `WAIT EXTERNAL`、M10 外审等待状态，更不授权启动 M12。
+> 当前结论：**M11 AUDIT HOLD / R07、R08-A EXTERNAL PASS / R08-B SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW（受限实验范围）**。
+> R01–R07 的既有外部复审 GO 仅覆盖各自签字范围；R08 原设计因 ABA history-loss 已撤回并由 R08-A 重做。R08-B 再关闭 expiry 删除 replay-history 的生命周期旁路。本报告不解除 M05 `AUDIT HOLD`，也不改变 M08 `WAIT EXTERNAL`、M10 外审等待状态，更不授权启动 M12。
 
 ## 1. 自审范围与冻结边界
 
@@ -21,7 +21,7 @@ M11 的目标是把跨簇 Merge 与同簇 Planned Leadership Transfer 分开建�
 |---|---|---|
 | 11-00 范围围栏 | `UCN_BUILD_CLUSTER_HANDOVER_EXPERIMENTAL=OFF`；header 未经 target 的 public macro 直接 `#error`；默认 archive 不编入该 object。 | 默认 `ucn_cluster.lib` 的精确 M11 transaction/candidate/offer/member/feasibility symbol scan 为空；header OFF/ON 编译探针分别失败/成功。 |
 | 11-01 offer 分类 | `ucn_cluster_handover_offer_classify()` 只看 `cluster_id`；foreign 不调用 Epoch Term 比较。 | `A/T2`、`B/T100` 仍是 `FOREIGN_MERGE`。 |
-| 11-02 candidate | 固定 4 slot，保存 full Epoch、Config、nonce、score samples、size/capacity、wire/capability、Backup policy 与时间状态；Epoch+Config 是单调 replay namespace，其他 remote 字段是 hysteresis context。 | stale nonce 在同 Epoch/Config namespace 返回 `UCN_ERR_REPLAY` 且 table 不写；只有严格前进的 Epoch/Config 可从低 nonce 开始；context 改变只清 sample/first-seen；过期按有界时间回收。 |
+| 11-02 candidate | 固定 4 live slot + 固定 4 replay tombstone；保存 full Epoch、Config、nonce、score samples、size/capacity、wire/capability、Backup policy 与时间状态；Epoch+Config 是单调 replay namespace，其他 remote 字段是 hysteresis context。 | stale nonce 在同 Epoch/Config namespace 返回 `UCN_ERR_REPLAY` 且 table 不写；只有严格前进的 Epoch/Config 可从低 nonce 开始；context 改变只清 sample/first-seen；expiry 只结束 live activity，history 不时间回收。 |
 | 11-03 迟滞 | required samples、improvement%、Head minimum tenure、hold-down 都在 independent candidate model；sample 只统计连续达标的 score，且绑定 local score、improvement、required samples/capabilities。 | 临界样本不足、低分 packet、这些 qualification input 改变、hold-down 未过期均不可发起；reverse score 清零 samples。 |
 | 11-04 feasibility | READY 前检查 target capacity、wire format=4、`BACKUP|JOINT_CONFIG|PERSISTENCE`、Config 与 Backup policy。 | capacity/capability/wire 拒绝均不建立 Ready；无法承接时旧簇保持稳定。 |
 | 11-05 事务/replay | Prepare/Ready/Commit 绑定完整 old/target Epoch、target Config、mode、txid；Type 26..28 的 nonce 必为零，Type 9/29 才携带撤权后生成的 nonce；retry 只在 Prepare；重复 exact 输入幂等。 | duplicate Prepare 返回同一 Ready；duplicate Ready/Commit 不推进第二次；错 role/identity/nonce、非法 duration/serial 均零写拒绝。 |
@@ -69,7 +69,20 @@ R08-A 已完成如下实现和自审：
 
 本轮验证：Windows MSVC Full Debug `41/41`、Full Release `41/41`；Lite、Nano、Service-OFF 的 M11 定向 target 各 `1/1`；WSL GCC 13.3 ASan/UBSan `41/41`，以及 `-fanalyzer -Wall -Wextra -Wpedantic -Werror` 的 M11 定向 target `1/1`。默认 `M11=OFF` 的 `ucn_cluster.lib` 独立构建成功且 production Cluster/Adapter source scan 无 handover API。既有 CP936/C4819 编码警告未升级为错误。
 
-R08-A 尚待外部复审；因此它不覆盖 M11 的 `AUDIT HOLD`，也不构成 production protocol、实机、掉电、Authority 或 MCU 结论。
+R08-A 的同槽 ABA 已获外部复审确认；但随后外审发现 candidate expiry 会整体清槽，删除 nonce high-water 和 hold-down，故由 R08-B 继续保持 `AUDIT HOLD`。R08-B 也不构成 production protocol、实机、掉电、Authority 或 MCU 结论。
+
+## 3.3 R08-B：Expiry 与 replay-history / hold-down 生命周期分离
+
+外部审计确认 R08-A 不能单独覆盖 `candidate_expire()`：D1 的 live candidate 若在 nonce `100/101` 后到期，旧实现会 `memset` 该 slot，使同 namespace 的 `50/51` 重新成为 fresh input，也会在原 hold-down 未到期时提前解除 anti-ping-pong fence。
+
+本轮自审的实现与对抗结论：
+
+- candidate 新增 `active`：expiry 只终止 activity 与连续样本，不能清空它所属 replay namespace；在有 tombstone 容量时，历史移动到静态 tombstone，live slot 才可释放。
+- tombstone 固定为 4 条，记录 exact Epoch、Config ID/hash、nonce high-water 与 `hold_down_until_ms`，且没有基于时间的回收路径。新 offer 只有 nonce 更高或 Epoch/Config 严格前进才可恢复 live candidate。
+- D1 `100/101 → expiry → 50/51` 均返回 `UCN_ERR_REPLAY` 且 table 逐字节不变；D1 `102` 重新进入 live table 后 sample 恰为 1，`103` 才能满足 required samples，且 `hold_down_until_ms=151` 在 `now=124` 仍阻止资格、到 `152` 才解除。
+- tombstone 已满时，expiry 保留原 candidate 的 inactive history；将其余 live slot 也到期后，新 identity `UCN_ERR_NO_SPACE` 且完整 table 不写。这是没有 signed freshness/incarnation 证明时的有意 fail-closed 策略，不将任何 tombstone 静默逐出。
+
+R08-B 已完成定向、Full Debug/Release、Lite/Nano/Service-OFF 以及 WSL sanitizer/analyzer 自审；仍等待外部复审签字，M11 必须保持 `AUDIT HOLD`。
 
 ## 4. 既有自审中发现并关闭的问题
 
@@ -89,17 +102,17 @@ R08-A 尚待外部复审；因此它不覆盖 M11 的 `AUDIT HOLD`，也不构�
 
 | 环境/配置 | 结果 |
 |---|---:|
-| Windows MSVC Full Debug + config contract，M11 ON（R08-A 后） | 41/41 |
-| Windows MSVC Full Release，M11 ON（R08-A 后） | 41/41 |
+| Windows MSVC Full Debug + config contract，M11 ON（R08-B 后） | 41/41 |
+| Windows MSVC Full Release，M11 ON（R08-B 后） | 41/41 |
 | Windows MSVC Lite Debug + config contract，M11 ON | 20/20 |
 | Windows MSVC Nano Debug + config contract，M11 ON | 20/20 |
 | Windows MSVC Service-OFF Debug + config contract，M11 ON | 20/20 |
-| Windows MSVC Lite，M11 ON（R08-A 定向 target） | 1/1 |
-| Windows MSVC Nano，M11 ON（R08-A 定向 target） | 1/1 |
-| Windows MSVC Service-OFF，M11 ON（R08-A 定向 target） | 1/1 |
-| WSL GCC 13.3 + ASan/UBSan，M11 ON（R08-A 后） | 41/41 |
+| Windows MSVC Lite，M11 ON（R08-B 定向 target） | 1/1 |
+| Windows MSVC Nano，M11 ON（R08-B 定向 target） | 1/1 |
+| Windows MSVC Service-OFF，M11 ON（R08-B 定向 target） | 1/1 |
+| WSL GCC 13.3 + ASan/UBSan，M11 ON（R08-B 后） | 41/41 |
 | WSL GCC 13.3 + `-fanalyzer -Wall -Wextra -Wpedantic -Werror`，M11 定向 target | 1/1 |
-| Windows default product，M11 OFF（R08-A 后） | `ucn_cluster.lib` 构建成功；production Cluster/Adapter source scan 无 handover API |
+| Windows default product，M11 OFF（R08-B 后） | `ucn_cluster.lib` 构建成功；production Cluster/Adapter source scan 无 handover API |
 | whitespace | `git diff --check` 通过；仅出现既有 CRLF 提示 |
 
 Windows 编译会报告既有 CP936/C4819 Unicode 警告；本轮未新增 warning-as-error 失败。所有上述 CTest 均为 Host 软件验证，不能替代 MCU 运行结果。
@@ -113,6 +126,6 @@ Windows 编译会报告既有 CP936/C4819 Unicode 警告；本轮未新增 warni
 
 ## 7. 交付判定
 
-R01–R07 的外部复审已确认闭环；但 R08 的旧设计有 ABA history-loss，先前 GO 不覆盖 R08-A 新代码。R08-A 已完成自审与当前 Host 矩阵，M11 当前必须保持 **AUDIT HOLD / WAIT EXTERNAL RE-REVIEW（受限实验范围）**。
+R01–R07 的外部复审已确认闭环，R08-A 的同槽 ABA 也已获确认；但 R08-B 新增 expiry-history 生命周期整改，尚待外部签字。R08-B 已完成自审与当前 Host 矩阵，M11 当前必须保持 **AUDIT HOLD / WAIT EXTERNAL RE-REVIEW（受限实验范围）**。
 
 它不等于生产放行：re-entry Fence 只是 caller-owned RAM 实验模型的不可逆约束，不能防护掉电或原始内存破坏。未来生产接线仍须由 M04 持久化/reload 与真实 Authority Owner 共同保证；M05 继续 `AUDIT HOLD`，M08 继续 `WAIT EXTERNAL`，M10 仍待外审，M12 尚未开始。不得据此接入 production v4 RX/TX/FSM、Authority、Adapter 或默认 encoder，也不得宣称 Flash/掉电/MCU/无线/多跳或跨版本互通已经验证。
