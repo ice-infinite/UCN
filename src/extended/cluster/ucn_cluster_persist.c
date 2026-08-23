@@ -259,7 +259,8 @@ static bool persist_operation_is_valid(uint8_t operation)
             operation == UCN_CLUSTER_PERSIST_OPERATION_CONFIG_ABORT ||
             operation == UCN_CLUSTER_PERSIST_OPERATION_CONFIG_JOINT ||
             operation == UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_VOTE_COMMIT ||
-            operation == UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_EPOCH_COMMIT;
+            operation == UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_EPOCH_COMMIT ||
+            operation == UCN_CLUSTER_PERSIST_OPERATION_RECOVERY_CREATE_COMMIT;
 }
 
 static bool transaction_phase_is_valid(
@@ -1089,6 +1090,48 @@ static bool cluster_create_commit_transition_is_valid(
     return state_equal_ignoring_completed_operation(&expected, next);
 }
 
+/* CLV2-M12.1 (MAJOR-1): the Recovery create is the ONLY new-identity
+ * transition that may carry a non-1 Term.  The Term is the captured
+ * parent Term (a valid serial) and is exactly what the Recovery Head
+ * publishes, so the durable promise and the wire authority Epoch agree.
+ * Every other gate (no prepared transaction, no committed Rekey/
+ * Tombstone, parent identity must differ, ordinary-state clear policy)
+ * is identical to CLUSTER_CREATE_COMMIT. */
+static bool recovery_create_commit_transition_is_valid(
+    const ucn_cluster_persist_state_t *committed,
+    const ucn_cluster_persist_state_t *next)
+{
+    const ucn_cluster_epoch_t *parent = NULL;
+    ucn_cluster_persist_state_t expected;
+
+    if (state_has_prepared_transaction(committed) ||
+        committed->committed_rekey.valid || committed->tombstone.valid ||
+        committed->rekey_transaction.phase !=
+            UCN_CLUSTER_PERSIST_TRANSACTION_NONE ||
+        !serial_is_valid(committed->boot_incarnation) ||
+        !next->has_active_epoch || !next->has_max_epoch ||
+        !epoch_is_equal(&next->active_epoch, &next->max_epoch) ||
+        !serial_is_valid(next->active_epoch.term)) {
+        return false;
+    }
+    if (committed->has_active_epoch) {
+        parent = &committed->active_epoch;
+    } else if (committed->has_max_epoch) {
+        parent = &committed->max_epoch;
+    }
+    if (parent != NULL && next->active_epoch.cluster_id == parent->cluster_id) {
+        return false;
+    }
+
+    expected = *committed;
+    state_clear_ordinary_cluster_state(&expected);
+    expected.has_active_epoch = true;
+    expected.active_epoch = next->active_epoch;
+    expected.has_max_epoch = true;
+    expected.max_epoch = next->max_epoch;
+    return state_equal_ignoring_completed_operation(&expected, next);
+}
+
 static bool replay_incarnation_transition_is_valid(
     const ucn_cluster_persist_state_t *committed,
     const ucn_cluster_persist_state_t *next)
@@ -1170,6 +1213,9 @@ static bool request_transition_is_valid(
     case UCN_CLUSTER_PERSIST_OPERATION_CLUSTER_CREATE_COMMIT:
         return cluster_create_commit_transition_is_valid(committed,
                                                          &request->next_state);
+    case UCN_CLUSTER_PERSIST_OPERATION_RECOVERY_CREATE_COMMIT:
+        return recovery_create_commit_transition_is_valid(
+            committed, &request->next_state);
     case UCN_CLUSTER_PERSIST_OPERATION_VOTE_COMMIT:
         return vote_commit_transition_is_valid(committed, &request->next_state);
     case UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_VOTE_COMMIT:

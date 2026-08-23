@@ -21,6 +21,22 @@
 #include "ucn_cluster_internal.h"
 
 
+/* CLV2-M12.1 (MAJOR-2): a Recovery Member that already follows a
+ * winner ranks an incoming candidate from a DIFFERENT source against its
+ * CURRENT accepted Head, never against itself.  v3 wire subset:
+ * parent_term DESC (the member's Term mirrors the accepted Head's Term),
+ * then head_node_id ASC. */
+static bool recovery_candidate_outranks_current_head(
+    const ucn_cluster_t *cluster,
+    uint32_t candidate_term,
+    ucn_node_id_t candidate_node)
+{
+    if (candidate_term != cluster->term) {
+        return candidate_term > cluster->term;
+    }
+    return candidate_node < cluster->known_recovery_source;
+}
+
 /* CLV2-M12 (12-04): pure deterministic Recovery rank comparator.  Terms
  * are compared ONLY between equal non-zero parents (the M03 milestone
  * gate); different parents are UNRANKABLE and go to ordinary Merge
@@ -96,8 +112,10 @@ uint32_t compute_recovery_backoff(const ucn_cluster_t *cluster)
 
 /* C07.7 P0-2: a Recovery Head may only be declared when this node can see
  * a meaningful part of the headless domain.  A Backup that still holds a
- * membership mirror requires a visible majority of that mirror; a plain
- * member requires at least one visible ADMITTED peer so a completely
+ * membership mirror requires a visible REMOTE majority of that mirror -
+ * this is a conservative isolation threshold (the Backup itself is not one
+ * of its own peers), deliberately NOT a Config-majority/quorum claim; a
+ * plain member requires at least one visible ADMITTED peer so a completely
  * isolated node can never self-declare. */
 bool recovery_quorum_met(const ucn_cluster_t *cluster)
 {
@@ -183,20 +201,22 @@ void start_recovery_backoff(ucn_cluster_t *cluster, uint32_t now_ms)
         now_ms, compute_recovery_backoff(cluster));
 }
 
-void declare_recovery_head(ucn_cluster_t *cluster, uint32_t recovery_cluster_id,
+void declare_recovery_head(ucn_cluster_t *cluster,
+                           const ucn_cluster_epoch_t *durable_epoch,
                            uint32_t now_ms)
 {
     if (cluster->recovery_nonce == 0U) {
         cluster->recovery_nonce = next_nonce(cluster);
     }
+    /* CLV2-M12.1 (MAJOR-1): the RAM/wire epoch IS the durable promise.
+     * The Term is adopted from the persisted recovery Epoch - it is never
+     * recomputed from mutable lineage state, so persist-before-promise
+     * (M04) and the published authority Epoch can never diverge. */
     cluster->role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
-    cluster->recovery_cluster_id = recovery_cluster_id;
-    cluster->cluster_id = cluster->recovery_cluster_id;
-    /* CLV2-M12 (12-04): the recovery control domain's epoch term mirrors
-     * the parent term (lineage authority).  Without captured lineage the
-     * legacy term 1 is kept so staged/legacy paths are unchanged. */
-    cluster->term = (cluster->parent_term != 0U) ? cluster->parent_term : 1U;
-    cluster->head_node_id = cluster->config.local_node_id;
+    cluster->recovery_cluster_id = durable_epoch->cluster_id;
+    cluster->cluster_id = durable_epoch->cluster_id;
+    cluster->term = durable_epoch->term;
+    cluster->head_node_id = durable_epoch->head_node_id;
     cluster->current_head_score = cluster->config.head_score;
     cluster->role_since_ms = now_ms;
     cluster->election_deadline_ms = 0U;
@@ -294,9 +314,28 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
     }
     if (message->recovery_parent_cluster_id != 0U &&
         cluster->parent_cluster_id != 0U &&
-        cluster->recovery_nonce != 0U) {
-        /* Same-parent lineage arbitration.  A node that has not started
-         * its own backoff yet still always accepts (legacy rule). */
+        cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+        cluster->recovery_cluster_id != 0U &&
+        cluster->known_recovery_source != 0U &&
+        source != cluster->known_recovery_source) {
+        /* CLV2-M12.1 (MAJOR-2): a Member that already follows a winner
+         * only switches when the incoming candidate outranks the CURRENT
+         * accepted Head (parent_term DESC, node ASC).  A delayed loser
+         * can never pull an already-converged island apart again. */
+        if (!recovery_candidate_outranks_current_head(cluster, message->term,
+                                                      source)) {
+            cluster->stats.stale_messages++;
+            return UCN_ERR_REPLAY;
+        }
+        /* The candidate outranks the current Head: fall through to the
+         * join block and switch. */
+    } else if (message->recovery_parent_cluster_id != 0U &&
+               cluster->parent_cluster_id != 0U &&
+               cluster->recovery_nonce != 0U) {
+        /* Same-parent lineage arbitration for contenders (a node that has
+         * started its own backoff ranks the candidate against ITSELF).  A
+         * non-contending node that is not already following a winner still
+         * always accepts (legacy rule). */
         bool yield_to_candidate =
             (message->term > cluster->parent_term) ||
             (message->term == cluster->parent_term &&

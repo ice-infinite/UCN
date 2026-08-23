@@ -907,9 +907,16 @@ void cluster_lineage_capture(ucn_cluster_t *cluster)
     if (cluster->parent_cluster_id == parent_id) {
         /* Same parent: only a strictly newer observed Term upgrades the
          * lineage; the round survives so failed attempts keep escalating
-         * backoff (12-03) instead of resetting on every fence exit. */
+         * backoff (12-03) instead of resetting on every fence exit.
+         * CLV2-M12.1 (MAJOR-3): the config lineage is ALSO forward-only:
+         * a freshly bound higher config_id upgrades the capture, a stale
+         * binding never regresses it (M03/M07 forward-only serials). */
         if (parent_term > cluster->parent_term) {
             cluster->parent_term = parent_term;
+        }
+        if (cluster->lineage_config_binding != 0U &&
+            cluster->lineage_config_binding > cluster->parent_config_id) {
+            cluster->parent_config_id = cluster->lineage_config_binding;
         }
         return;
     }
@@ -1591,27 +1598,45 @@ static ucn_result_t start_election(ucn_cluster_t *cluster, uint32_t now_ms)
     return start_election_after_persistence(cluster, &durable_state, now_ms);
 }
 
+/* CLV2-M12 (12-04): the recovery control domain's epoch term mirrors
+ * the parent term (lineage authority); without a captured lineage the
+ * legacy term 1 is kept.  Single point of truth so the persisted Epoch
+ * and the published authority Epoch can never diverge (MAJOR-1). */
+static uint32_t cluster_recovery_term(const ucn_cluster_t *cluster)
+{
+    return (cluster->parent_term != 0U) ? cluster->parent_term : 1U;
+}
+
 static ucn_result_t declare_recovery_after_persistence(
     ucn_cluster_t *cluster,
+    const ucn_cluster_epoch_t *expected_epoch,
     const ucn_cluster_persist_state_t *durable_state,
     uint32_t now_ms)
 {
-    const ucn_cluster_epoch_t *epoch;
-
-    if (cluster == NULL || durable_state == NULL ||
+    if (cluster == NULL || expected_epoch == NULL || durable_state == NULL ||
         !durable_state->has_active_epoch ||
-        durable_state->active_epoch.term != 1U ||
-        durable_state->active_epoch.head_node_id != cluster->config.local_node_id) {
+        durable_state->active_epoch.cluster_id == 0U ||
+        (cluster->parent_cluster_id != 0U &&
+         durable_state->active_epoch.cluster_id ==
+             cluster->parent_cluster_id) ||
+        /* CLV2-M12.1 (MAJOR-1): the durable promise must be EXACTLY the
+         * epoch about to be published - id, term and head.  A persisted
+         * Term that diverged from the computed recovery Term fails
+         * closed here instead of publishing a different authority Epoch
+         * on the wire. */
+        durable_state->active_epoch.cluster_id != expected_epoch->cluster_id ||
+        durable_state->active_epoch.term != expected_epoch->term ||
+        durable_state->active_epoch.head_node_id !=
+            expected_epoch->head_node_id) {
         return UCN_ERR_STATE;
     }
-    epoch = &durable_state->active_epoch;
     if (cluster_transition(cluster, UCN_CLUSTER_PHASE_RECOVERY_ELECTION,
                            UCN_CLUSTER_PHASE_RECOVERY_HEAD,
                            UCN_CLUSTER_REASON_RECOVERY_WIN,
                            now_ms) != UCN_OK) {
         return UCN_ERR_STATE;
     }
-    declare_recovery_head(cluster, epoch->cluster_id, now_ms);
+    declare_recovery_head(cluster, &durable_state->active_epoch, now_ms);
 #if !defined(NDEBUG)
     assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
            UCN_CLUSTER_PHASE_RECOVERY_HEAD);
@@ -1722,10 +1747,22 @@ static ucn_result_t apply_persistence_resolution(
         return complete_takeover_after_persistence(cluster,
                                                    &resolution->durable_state,
                                                    now_ms);
-    case CLUSTER_PERSIST_ACTION_RECOVERY_DECLARE:
-        return declare_recovery_after_persistence(cluster,
-                                                  &resolution->durable_state,
-                                                  now_ms);
+    case CLUSTER_PERSIST_ACTION_RECOVERY_DECLARE: {
+        /* CLV2-M12.1 (MAJOR-1): the deferred continuation validates the
+         * durable Epoch against the SAME expected recovery identity -
+         * the persisted id is the begin-time promise, and the Term must
+         * still equal the computed recovery Term (parent_term is stable
+         * across the pending window), otherwise it fails closed. */
+        ucn_cluster_epoch_t expected_epoch;
+
+        (void)memset(&expected_epoch, 0, sizeof(expected_epoch));
+        expected_epoch.cluster_id =
+            resolution->durable_state.active_epoch.cluster_id;
+        expected_epoch.term = cluster_recovery_term(cluster);
+        expected_epoch.head_node_id = cluster->config.local_node_id;
+        return declare_recovery_after_persistence(
+            cluster, &expected_epoch, &resolution->durable_state, now_ms);
+    }
     case CLUSTER_PERSIST_ACTION_TAKEOVER_ACK:
         result = send_takeover_ack_after_persistence(
             cluster, resolution->destination, &resolution->durable_state);
@@ -2172,7 +2209,9 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                     }
                     (void)memset(&recovery_epoch, 0, sizeof(recovery_epoch));
                     recovery_epoch.cluster_id = recovery_cluster_id;
-                    recovery_epoch.term = 1U;
+                    /* CLV2-M12.1 (MAJOR-1): the persisted Term is the SAME
+                     * value the Recovery Head will publish. */
+                    recovery_epoch.term = cluster_recovery_term(cluster);
                     recovery_epoch.head_node_id = cluster->config.local_node_id;
                     /* A recovery declaration is a new authority promise.  Its
                      * Cluster-create record must be durable before either the
@@ -2191,7 +2230,7 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                         return result;
                     }
                     result = declare_recovery_after_persistence(
-                        cluster, &durable_state, now_ms);
+                        cluster, &recovery_epoch, &durable_state, now_ms);
                     if (result != UCN_OK) {
                         cluster_persistence_fail_closed(cluster, result);
                         return result;

@@ -345,6 +345,10 @@ ucn_result_t cluster_persistence_begin_epoch(
     if (current.has_active_epoch &&
         current.active_epoch.cluster_id == epoch->cluster_id) {
         operation = UCN_CLUSTER_PERSIST_OPERATION_EPOCH_COMMIT;
+    } else if (action == CLUSTER_PERSIST_ACTION_RECOVERY_DECLARE) {
+        /* CLV2-M12.1 (MAJOR-1): a Recovery identity carries the parent
+         * Term mirror; only this owner may request the relaxed create. */
+        operation = UCN_CLUSTER_PERSIST_OPERATION_RECOVERY_CREATE_COMMIT;
     } else {
         /* Match CLUSTER_CREATE_COMMIT's exact clear policy without touching
          * Rekey/Tombstone lineage evidence; the transition validator rejects

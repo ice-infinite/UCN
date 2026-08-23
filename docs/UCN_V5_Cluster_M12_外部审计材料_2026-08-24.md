@@ -32,7 +32,7 @@ git diff --stat 摘要:
 | 12-06 round 绑定 | 12-06 报告 | OP-365 | cluster_test_recovery_round_binding |
 | 12-07 Stable 优先 | 12-07 报告 | OP-366 | cluster_test_recovery_stable_precedence |
 | 12-08 隔离策略 | OP-367 | OP-367 | cluster_test_recovery_isolation_policy |
-| 12-09 持久化 | 12-09 报告 | OP-368 | cluster_persist_test_recovery_identity_restart |
+| 12-09 持久化 | 12-09 报告（第 0 节降级） | OP-368 + OP-371 | cluster_persist_test_recovery_identity_restart（ID 维度 PASS；重启入站 replay 归 M13） |
 | 12-10 套件 | 12-10 报告 | OP-369 | cluster_test_recovery_suite_m12 |
 
 ## 4. 复现步骤
@@ -41,6 +41,6 @@ cd ucn-wt-m35
 cmake -B build -DUCN_PROFILE=FULL -DCMAKE_BUILD_TYPE=Debug && cmake --build build -j4 && ./build/ucn_tests
 （ASan 加 -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"；LITE/NANO 换 profile；ucn_cluster_authority_tests 独立 target）
 
-## 5. 预期结果
+## 5. M12.1 外审整改（2026-08-24）
 
 - All UCN tests passed；OBSERVED-PAIRS count=30、VIOLATION 0；Golden blob 8b80b087c554708e8538ee2db23f545167b31554、trace mismatch 0；cluster_bytes=1616；-Werror 零告警；git diff --check 干净。

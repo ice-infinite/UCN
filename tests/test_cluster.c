@@ -9872,6 +9872,25 @@ static int cluster_test_recovery_lineage_capture(void)
     TEST_ASSERT(node->cluster.parent_config_id == 12U);
     TEST_ASSERT(node->cluster.recovery_round == 0U);
 
+    /* ---- (c4) CLV2-M12.1 (MAJOR-3): same-parent config lineage is
+     * forward-only.  A freshly bound higher config_id upgrades the
+     * capture (round preserved); a stale binding never regresses it. */
+    ucn_cluster_lineage_bind_config(&node->cluster, 13U);
+    node->cluster.last_cluster_id = 4U; /* same parent as the capture */
+    node->cluster.max_seen_term = 2U;
+    node->cluster.cluster_id = 4U; /* live same-parent identity */
+    node->cluster.term = 2U;
+    node->cluster.recovery_cluster_id = 0U;
+    node->cluster.recovery_round = 3U;
+    ucn_cluster_test_lineage_capture(&node->cluster);
+    TEST_ASSERT(node->cluster.parent_cluster_id == 4U);
+    TEST_ASSERT(node->cluster.parent_config_id == 13U); /* upgraded 12->13 */
+    TEST_ASSERT(node->cluster.recovery_round == 3U); /* round preserved */
+    ucn_cluster_lineage_bind_config(&node->cluster, 9U); /* stale binding */
+    ucn_cluster_test_lineage_capture(&node->cluster);
+    TEST_ASSERT(node->cluster.parent_config_id == 13U); /* never regressed */
+    TEST_ASSERT(node->cluster.recovery_round == 3U);
+
     /* ---- (c3) A recovery domain is never captured as a parent. */
     node->cluster.cluster_id = 55U;
     node->cluster.term = 1U;
@@ -10564,6 +10583,130 @@ static int cluster_test_recovery_isolation_policy(void)
         TEST_ASSERT(cluster_test_sync_neighbors(&network) == 0);
         TEST_ASSERT(recovery_quorum_met(&node->cluster) == false);
     }
+    return 0;
+}
+
+/* CLV2-M12.1 (MAJOR-2): a Recovery Member that already follows a winner
+ * compares a DIFFERENT-source candidate against the current accepted Head
+ * rank, not against itself.  A delayed loser can never re-tear a converged
+ * island. */
+static int cluster_test_recovery_member_winner_fence(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *member;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    ucn_node_id_t winner;
+    ucn_node_id_t loser;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 100U;
+    member = &network.nodes[2];
+    winner = network.nodes[0].node_id; /* node 1: better on node ASC */
+    loser = network.nodes[1].node_id;  /* node 2: worse */
+
+    /* ---- (a) Member follows H1 (node 1), delayed H2 (node 2) arrives:
+     * IGNORE (2 > 1 on node ASC). */
+    member->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    member->cluster.cluster_id = 52U;
+    member->cluster.recovery_cluster_id = 52U;
+    member->cluster.term = 9U; /* mirrors the accepted Head's parent term */
+    member->cluster.head_node_id = winner;
+    member->cluster.parent_cluster_id = 5U;
+    member->cluster.parent_term = 9U;
+    member->cluster.accepted_recovery_nonce = 22U;
+    member->cluster.known_recovery_source = winner;
+    member->cluster.head_lease_expires_at_ms = 500U;
+    member->cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    member->cluster.transition_reason = UCN_CLUSTER_REASON_RECOVERY_WIN;
+    member->cluster.shadow_transition_count = 0U;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_RECOVERY_DECLARE;
+    message.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    message.cluster_id = 62U;
+    message.term = 9U;
+    message.head_node_id = loser;
+    message.recovery_nonce = 23U;
+    message.recovery_ttl_ms = 30000U;
+    message.recovery_parent_cluster_id = 5U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&member->cluster, loser, true,
+                                    encoded, sizeof(encoded)) ==
+                UCN_ERR_REPLAY);
+    TEST_ASSERT(member->cluster.cluster_id == 52U); /* still H1's domain */
+    TEST_ASSERT(member->cluster.head_node_id == winner);
+    TEST_ASSERT(member->cluster.accepted_recovery_nonce == 22U);
+    TEST_ASSERT(member->cluster.shadow_transition_count == 0U);
+    TEST_ASSERT(member->cluster.stats.stale_messages == 1U);
+
+    /* ---- (b) Member follows the loser H2, then the better H1 arrives:
+     * SWITCH. */
+    member->cluster.cluster_id = 62U;
+    member->cluster.recovery_cluster_id = 62U;
+    member->cluster.head_node_id = loser;
+    member->cluster.accepted_recovery_nonce = 23U;
+    member->cluster.known_recovery_source = loser;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_RECOVERY_DECLARE;
+    message.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    message.cluster_id = 52U;
+    message.term = 9U;
+    message.head_node_id = winner;
+    message.recovery_nonce = 22U;
+    message.recovery_ttl_ms = 30000U;
+    message.recovery_parent_cluster_id = 5U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&member->cluster, winner, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(member->cluster.cluster_id == 52U); /* switched to H1 */
+    TEST_ASSERT(member->cluster.head_node_id == winner);
+    TEST_ASSERT(member->cluster.known_recovery_source == winner);
+
+    /* ---- (c) Member follows T9/H8, incoming T8/H1: IGNORE (term DESC
+     * dominates node ASC). */
+    member->cluster.cluster_id = 71U;
+    member->cluster.recovery_cluster_id = 71U;
+    member->cluster.term = 9U;
+    member->cluster.head_node_id = loser; /* stands in for H8 */
+    member->cluster.known_recovery_source = loser;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_RECOVERY_DECLARE;
+    message.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    message.cluster_id = 72U;
+    message.term = 8U; /* an OLDER parent generation */
+    message.head_node_id = winner; /* lower node id does not help */
+    message.recovery_nonce = 24U;
+    message.recovery_ttl_ms = 30000U;
+    message.recovery_parent_cluster_id = 5U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&member->cluster, winner, true,
+                                    encoded, sizeof(encoded)) ==
+                UCN_ERR_REPLAY);
+    TEST_ASSERT(member->cluster.cluster_id == 71U);
+    TEST_ASSERT(member->cluster.head_node_id == loser);
+
+    /* ---- (d) Member follows T8/H1, incoming T9/H8: SWITCH (the newer
+     * parent generation wins even with a worse node id). */
+    member->cluster.term = 8U;
+    member->cluster.cluster_id = 81U;
+    member->cluster.recovery_cluster_id = 81U;
+    member->cluster.head_node_id = winner;
+    member->cluster.known_recovery_source = winner;
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_RECOVERY_DECLARE;
+    message.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    message.cluster_id = 82U;
+    message.term = 9U;
+    message.head_node_id = loser;
+    message.recovery_nonce = 25U;
+    message.recovery_ttl_ms = 30000U;
+    message.recovery_parent_cluster_id = 5U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&member->cluster, loser, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(member->cluster.cluster_id == 82U);
+    TEST_ASSERT(member->cluster.head_node_id == loser);
+    TEST_ASSERT(member->cluster.term == 9U);
     return 0;
 }
 
@@ -13098,6 +13241,8 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_recovery_scope() == 0);
     /* CLV2-M12 (12-06): DECLARE/ACK round + lineage binding. */
     TEST_ASSERT(cluster_test_recovery_round_binding() == 0);
+    /* CLV2-M12.1 (MAJOR-2): Recovery Member current-winner fencing. */
+    TEST_ASSERT(cluster_test_recovery_member_winner_fence() == 0);
     /* CLV2-M12 (12-07): stable precedence reclaim. */
     TEST_ASSERT(cluster_test_recovery_stable_precedence() == 0);
     /* CLV2-M12 (12-08): min_recovery_peers isolation policy. */

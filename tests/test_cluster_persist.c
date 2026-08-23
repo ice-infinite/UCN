@@ -2144,6 +2144,66 @@ static int cluster_persist_test_runtime_head_paths(void)
                 cluster.cluster_id == 2U && cluster.term == 1U &&
                 probe.sent_count == 0U);
 
+    /* CLV2-M12.1 (MAJOR-1): with a captured parent lineage A/T9, the
+     * persisted recovery Epoch MUST carry Term 9 - the deferred
+     * continuation adopts the durable promise and the RAM term equals
+     * the published term. */
+    (void)memset(&probe, 0, sizeof(probe));
+    cluster_persist_runtime_seed_active(&probe, 5U, 7U);
+    cluster_persist_runtime_provider(&provider, &probe);
+    cluster_persist_runtime_config(&config, &probe, &provider, true);
+    TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
+    cluster.role = UCN_CLUSTER_ROLE_DETACHED;
+    cluster.recovery_eligible = true;
+    cluster.recovery_backoff_deadline_ms = 1U;
+    cluster.parent_cluster_id = 5U;
+    cluster.parent_term = 9U;
+    cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
+    (void)memset(&recovery_epoch, 0, sizeof(recovery_epoch));
+    recovery_epoch.cluster_id = 2U;
+    recovery_epoch.term = 9U; /* mirrors the parent term */
+    recovery_epoch.head_node_id = 1U;
+    probe.store.submit_pending = true;
+    TEST_ASSERT(cluster_persistence_begin_epoch(
+                    &cluster, &recovery_epoch,
+                    CLUSTER_PERSIST_ACTION_RECOVERY_DECLARE, 0U, &committed,
+                    &durable_state) == UCN_OK && !committed &&
+                cluster.persistence_pending);
+    TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_OK &&
+                !cluster.persistence_pending &&
+                cluster.role == UCN_CLUSTER_ROLE_RECOVERY_HEAD &&
+                cluster.cluster_id == 2U && cluster.term == 9U &&
+                cluster.head_node_id == 1U);
+
+    /* A persisted Term that diverges from the computed recovery Term
+     * (parent T9 but a legacy Term-1 record) must FAIL CLOSED: no
+     * RECOVERY_HEAD, no publish, persistence fault recorded. */
+    (void)memset(&probe, 0, sizeof(probe));
+    cluster_persist_runtime_seed_active(&probe, 5U, 7U);
+    cluster_persist_runtime_provider(&provider, &probe);
+    cluster_persist_runtime_config(&config, &probe, &provider, true);
+    TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
+    cluster.role = UCN_CLUSTER_ROLE_DETACHED;
+    cluster.recovery_eligible = true;
+    cluster.recovery_backoff_deadline_ms = 1U;
+    cluster.parent_cluster_id = 5U;
+    cluster.parent_term = 9U;
+    cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
+    (void)memset(&recovery_epoch, 0, sizeof(recovery_epoch));
+    recovery_epoch.cluster_id = 2U;
+    recovery_epoch.term = 1U; /* mismatched legacy record */
+    recovery_epoch.head_node_id = 1U;
+    probe.store.submit_pending = true;
+    TEST_ASSERT(cluster_persistence_begin_epoch(
+                    &cluster, &recovery_epoch,
+                    CLUSTER_PERSIST_ACTION_RECOVERY_DECLARE, 0U, &committed,
+                    &durable_state) == UCN_OK && !committed &&
+                cluster.persistence_pending);
+    TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_ERR_STATE &&
+                cluster.persistence_faulted &&
+                cluster.role == UCN_CLUSTER_ROLE_DETACHED &&
+                probe.sent_count == 0U);
+
     /* A failed pending takeover cannot promote a Backup after its local
      * quorum has already been observed. */
     (void)memset(&probe, 0, sizeof(probe));

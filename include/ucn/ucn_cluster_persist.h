@@ -228,7 +228,15 @@ typedef enum ucn_cluster_persist_operation {
      * then writes the proposed Epoch in a distinct atomic operation. Neither
      * operation has a production RX/TX/FSM call site while M05 is on hold. */
     UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_VOTE_COMMIT = 13,
-    UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_EPOCH_COMMIT = 14
+    UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_EPOCH_COMMIT = 14,
+    /* CLV2-M12.1 (MAJOR-1): a Recovery declaration creates a NEW identity
+     * whose Epoch Term mirrors the captured parent Term (the published
+     * authority term), so the durable promise and the wire promise can
+     * never diverge.  Ordinary elections keep CLUSTER_CREATE_COMMIT and
+     * its Term-1 rule.  Only the RECOVERY_DECLARE owner may request this
+     * operation; its transition validator applies the same ordinary-state
+     * clear policy as CLUSTER_CREATE_COMMIT. */
+    UCN_CLUSTER_PERSIST_OPERATION_RECOVERY_CREATE_COMMIT = 15
 } ucn_cluster_persist_operation_t;
 
 typedef struct ucn_cluster_persist_request {

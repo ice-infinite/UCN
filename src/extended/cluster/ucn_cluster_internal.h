@@ -337,7 +337,8 @@ ucn_result_t send_backup_snapshot_step(ucn_cluster_t *cluster);
 uint32_t compute_recovery_backoff(const ucn_cluster_t *cluster);
 bool recovery_quorum_met(const ucn_cluster_t *cluster);
 void start_recovery_backoff(ucn_cluster_t *cluster, uint32_t now_ms);
-void declare_recovery_head(ucn_cluster_t *cluster, uint32_t recovery_cluster_id,
+void declare_recovery_head(ucn_cluster_t *cluster,
+                           const ucn_cluster_epoch_t *durable_epoch,
                            uint32_t now_ms);
 void stepdown_recovery_head(ucn_cluster_t *cluster, uint32_t now_ms);
 void send_recovery_declare(ucn_cluster_t *cluster);

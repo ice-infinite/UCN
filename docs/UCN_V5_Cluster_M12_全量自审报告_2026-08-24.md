@@ -54,6 +54,6 @@ M12 全部 10 个节点（CLV2-12-01..12-10）逐节点自审全部 PASS；本�
 ## 7. 已知边界（外部审计应复核）
 
 - 12-08 未单列分项报告（P1，与 OP-367 一并记录；门禁同）。
-- 12-09 采用任务或分支（boot incarnation），round/lineage 持久化与恢复域专用 tombstone 明确归 M13（schema v4）。
+- 12-09（M12.1 外审 MAJOR-4 后）: 正式降级 PARTIAL / boot-ID non-reuse only；重启入站 replay 保护（恢复域 tombstone）归 M13。另 M12.1 已修 MAJOR-1（durable Recovery Term 一致，新 operation 类 RECOVERY_CREATE_COMMIT）、MAJOR-2（成员当前赢家 fencing）、MAJOR-3（同 parent config 前向刷新）、MINOR（12-08 可见远端多数措辞）——见 OP-371。
 - 12-04 线上仲裁只含（parent_term DESC, node_id ASC）: v3 线无 score/config 通道，全契约比较器服务本地/v4 排序。
 - 12-05 的 M07/M10 实验 owner 以 ucn_cluster_recovery_scoped 为调用方契约（无 ucn_cluster_t 引用的 caller-owned 模块）。
