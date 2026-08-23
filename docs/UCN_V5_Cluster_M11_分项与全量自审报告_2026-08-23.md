@@ -1,7 +1,7 @@
 # UCN V5 Cluster M11：分项与全量自审报告（2026-08-23）
 
-> 当前结论：**M11 AUDIT HOLD / R07、R08-A EXTERNAL PASS / R08-B SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW（受限实验范围）**。
-> R01–R07 的既有外部复审 GO 仅覆盖各自签字范围；R08 原设计因 ABA history-loss 已撤回并由 R08-A 重做。R08-B 再关闭 expiry 删除 replay-history 的生命周期旁路。本报告不解除 M05 `AUDIT HOLD`，也不改变 M08 `WAIT EXTERNAL`、M10 外审等待状态，更不授权启动 M12。
+> 当前结论：**M11 DONE / R01–R08-B EXTERNAL RE-REVIEW PASS / LIMITED EXPERIMENTAL GO**。
+> R01–R07 的既有外部复审 GO 仅覆盖各自签字范围；R08 原设计因 ABA history-loss 已撤回并由 R08-A 重做，R08-B 再关闭 expiry 删除 replay-history 的生命周期旁路。此签字不解除 M05 `AUDIT HOLD`，也不改变 M08 `WAIT EXTERNAL`、M10 外审等待状态，更不授权启动 M12。
 
 ## 1. 自审范围与冻结边界
 
@@ -82,7 +82,7 @@ R08-A 的同槽 ABA 已获外部复审确认；但随后外审发现 candidate e
 - D1 `100/101 → expiry → 50/51` 均返回 `UCN_ERR_REPLAY` 且 table 逐字节不变；D1 `102` 重新进入 live table 后 sample 恰为 1，`103` 才能满足 required samples，且 `hold_down_until_ms=151` 在 `now=124` 仍阻止资格、到 `152` 才解除。
 - tombstone 已满时，expiry 保留原 candidate 的 inactive history；将其余 live slot 也到期后，新 identity `UCN_ERR_NO_SPACE` 且完整 table 不写。这是没有 signed freshness/incarnation 证明时的有意 fail-closed 策略，不将任何 tombstone 静默逐出。
 
-R08-B 已完成定向、Full Debug/Release、Lite/Nano/Service-OFF 以及 WSL sanitizer/analyzer 自审；仍等待外部复审签字，M11 必须保持 `AUDIT HOLD`。
+R08-B 已完成定向、Full Debug/Release、Lite/Nano/Service-OFF 以及 WSL sanitizer/analyzer 自审，并获得对 `9386dca` 的外部复审 PASS。M11 candidate replay/hysteresis chain 已闭环，M11 可标记为受限实验范围 GO。
 
 ## 4. 既有自审中发现并关闭的问题
 
@@ -126,6 +126,6 @@ Windows 编译会报告既有 CP936/C4819 Unicode 警告；本轮未新增 warni
 
 ## 7. 交付判定
 
-R01–R07 的外部复审已确认闭环，R08-A 的同槽 ABA 也已获确认；但 R08-B 新增 expiry-history 生命周期整改，尚待外部签字。R08-B 已完成自审与当前 Host 矩阵，M11 当前必须保持 **AUDIT HOLD / WAIT EXTERNAL RE-REVIEW（受限实验范围）**。
+R01–R08-B 的外部复审均已确认闭环；`9386dca` 的 R08-B 外审确认 high-water、hold-down、expiry 后 old nonce、fresh higher nonce restart、ABA 与 tombstone/candidate-history saturation 均 PASS（BLOCKER/MAJOR/MINOR 为 0）。M11 当前为 **DONE / LIMITED EXPERIMENTAL GO**。非阻塞 NIT：后续 production integration 前补 tombstone strict-forward direct regression，并禁止普通 runtime 以 `candidate_table_reset()` 清理 replay history。
 
 它不等于生产放行：re-entry Fence 只是 caller-owned RAM 实验模型的不可逆约束，不能防护掉电或原始内存破坏。未来生产接线仍须由 M04 持久化/reload 与真实 Authority Owner 共同保证；M05 继续 `AUDIT HOLD`，M08 继续 `WAIT EXTERNAL`，M10 仍待外审，M12 尚未开始。不得据此接入 production v4 RX/TX/FSM、Authority、Adapter 或默认 encoder，也不得宣称 Flash/掉电/MCU/无线/多跳或跨版本互通已经验证。

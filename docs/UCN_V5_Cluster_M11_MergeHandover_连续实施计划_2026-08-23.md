@@ -4,7 +4,7 @@
 
 用户已授权连续实施 `CLV2-11-01..10`：每项完成须留下定向自审和测试证据，全部完成后再做全量自审并整理外部审计材料。
 
-现场依赖仍有 M05 `AUDIT HOLD`、M08 `WAIT EXTERNAL` 和 M10 `WAIT EXTERNAL RE-REVIEW`。因此 M11 的完整协议模型必须是 **caller-owned、default-OFF 的实验 archive**，不能把 RFC4 Type 26..29 编解码、发送、RX、Authority 或 Adapter 接入默认产品。R01–R07 的既有外部复审 GO 保留各自签字范围；R08 原设计因 ABA history-loss 已撤回，R08-A 的同槽 ABA 已获外审确认修复；R08-B 已完成自审，等待对 expiry 后 replay-history / hold-down 生命周期的外部复审。M11 整体仍为 `AUDIT HOLD`，不改变上述依赖或默认产品边界。
+现场依赖仍有 M05 `AUDIT HOLD`、M08 `WAIT EXTERNAL` 和 M10 `WAIT EXTERNAL RE-REVIEW`。因此 M11 的完整协议模型必须是 **caller-owned、default-OFF 的实验 archive**，不能把 RFC4 Type 26..29 编解码、发送、RX、Authority 或 Adapter 接入默认产品。R01–R07 的既有外部复审 GO 保留各自签字范围；R08 原设计因 ABA history-loss 已撤回，R08-A 的同槽 ABA 与 R08-B 的 expiry replay-history / hold-down 生命周期均已获外审确认修复。M11 获得 **LIMITED EXPERIMENTAL GO**，但不改变上述依赖或默认产品边界。
 
 默认产品允许且必须执行的安全收敛只有两项：
 
@@ -69,7 +69,7 @@ default-OFF ucn_cluster_handover_experimental.a
 - R08-A：replay namespace 仅为 full Epoch + Config ID/hash，必须严格向前。cluster size/capacity、capabilities、wire format 与 Backup policy 为 hysteresis/feasibility context；它们改变时清 `score_samples/first_seen`，但本 namespace nonce 仍严格递增。故 capacity `8→7→8` 必须使用 nonce `100→101→102`，历史 `50/51` 永远不能变成 fresh samples；真正新 Epoch/Config 才可合法从 nonce `1` 开始。该同槽 ABA 闭环已获外审确认。
 - R08-B：live candidate 因 inactivity expiry 到期时，必须先把 full Epoch、Config ID/hash、nonce high-water 与 hold-down 转入固定 4 个 replay tombstone；tombstone 永不按时间淘汰。D1 `100/101` expiry 后，`50/51` 仍是 replay，`102` 只能以 1 个新样本恢复 activity，且原 hold-down 仍有效。若 tombstone 已满，expiry 只把原 slot 标记 inactive 并保留 history；所有 slot 也被历史占用时，新 identity 返回 `UCN_ERR_NO_SPACE`，禁止为了容量接收旧 nonce 或删除 tombstone。
 
-R08-B 已完成源码与定向/全量 Host 自审，当前仍不增加生产接线；M11 仅可在 R08-B 外部复审重新签字后恢复受限实验范围 GO。
+R08-B 已获外部复审 PASS：candidate replay/hysteresis chain 完整闭环。外审保留两项不阻塞事项：未来 production integration 前增加 tombstone strict-forward direct regression；并将 `candidate_table_reset()` 严格限定为初始化/销毁的 privileged lifecycle API，禁止被 runtime recovery 当作容量回收。当前仍不增加生产接线；M11 仅获受限实验范围 GO。
 
 ## 5. 最终自审和外审材料
 

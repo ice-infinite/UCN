@@ -1,7 +1,7 @@
 # UCN V5 Cluster M11：外部审计材料（2026-08-23）
 
 > 历史外部复审结论：**R01–R06-B GO（受限实验范围）**。
-> 当前状态：外部逐提交复审已签 R07（连续合格样本）和 R08-A（同槽 ABA）PASS；后续审计发现 expiry 会删除 replay-history/hold-down，R08-B 已完成自审，M11 处于 **AUDIT HOLD / WAIT EXTERNAL RE-REVIEW**。
+> 当前状态：外部逐提交复审已签 R07（连续合格样本）、R08-A（同槽 ABA）及 `9386dca` 的 R08-B（expiry replay-history / hold-down）PASS；M11 为 **DONE / LIMITED EXPERIMENTAL GO**。
 > 审计范围始终仅限 M11 caller-owned、default-OFF 实验模型；不是 production protocol、实机或掉电签字。
 
 ## 1. 审计边界
@@ -112,4 +112,4 @@ ctest --test-dir build_external_m11_analyzer -R '^ucn_cluster_handover_tests$' -
 
 说明：Windows Full Debug/Release、Lite/Nano/Service-OFF 定向 target、WSL sanitizer 与 analyzer 已在 R08-B 后重跑；Windows 矩阵以 M11 archive 显式 ON、M10 archive OFF 执行；WSL sanitizer 是独立 GCC Debug 构建。分析器本轮只构建/执行 M11 定向 target，不能误记为全量 analyzer 结果。
 
-R08-B 仅完成自审，等待外部复审；后续若发现默认生产路径出现 v4/M11 接线、任何 score→Authority/Term/Join 旁路，或 Stepdown 绕过 Config/Authority 合同，必须保持/恢复 `AUDIT HOLD`。无论如何，本材料不授权进入 M12。
+R08-B 外审确认 BLOCKER/MAJOR/MINOR 为 0：expiry 不销毁 replay history，old nonce 被拒绝，higher nonce 重启 sample=1 且保留 hold-down，tombstone/candidate-history 满载 fail-closed；R08-A ABA 闭环未被破坏。外审 NIT 已登记：补 tombstone strict-forward direct regression，且 production integration 时保护 `candidate_table_reset()` 不被 runtime recovery 调用。后续若发现默认生产路径出现 v4/M11 接线、任何 score→Authority/Term/Join 旁路，或 Stepdown 绕过 Config/Authority 合同，必须保持/恢复 `AUDIT HOLD`。无论如何，本材料不授权进入 M12。
