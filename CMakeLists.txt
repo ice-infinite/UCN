@@ -13,6 +13,8 @@ option(UCN_BUILD_CONFIG_CONTRACT_TESTS
     "Build standalone global/default/fallback configuration contract tests" OFF)
 option(UCN_ENABLE_WIRE_V4_RELEASE_GATES
     "Build test-only optimized RFC4 codec gates (-O1/-O2/-O3 or MSVC equivalents)" OFF)
+option(UCN_BUILD_CLUSTER_TAKEOVER_EXPERIMENTAL
+    "Build the isolated M10 frozen-majority takeover model (default OFF)" OFF)
 set(UCN_PROFILE "FULL" CACHE STRING "UCN feature profile: NANO, LITE, or FULL")
 set_property(CACHE UCN_PROFILE PROPERTY STRINGS NANO LITE FULL)
 option(UCN_FEATURE_SERVICE "Build the orthogonal Service Router/Bridge" ON)
@@ -188,6 +190,27 @@ target_link_libraries(ucn_cluster PUBLIC ucn_core)
 target_compile_options(ucn_cluster PRIVATE
     $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
 )
+
+# CLV2-M10: this model is deliberately opt-in and physically separate from
+# the default Cluster archive. A product cannot pull in the frozen-majority
+# takeover APIs merely by linking ucn_cluster; controlled experiments must
+# explicitly link this target and still receive no v4 RX/TX/FSM/Authority
+# integration from it.
+if(UCN_BUILD_CLUSTER_TAKEOVER_EXPERIMENTAL)
+    add_library(ucn_cluster_takeover_experimental STATIC EXCLUDE_FROM_ALL
+        src/extended/cluster/ucn_cluster_takeover.c
+        src/extended/cluster/ucn_cluster_takeover_persist.c
+    )
+    target_link_libraries(ucn_cluster_takeover_experimental
+        PUBLIC ucn_cluster
+    )
+    target_compile_definitions(ucn_cluster_takeover_experimental PUBLIC
+        UCN_CLUSTER_TAKEOVER_EXPERIMENTAL_ENABLED=1
+    )
+    target_compile_options(ucn_cluster_takeover_experimental PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+endif()
 
 # C06 federation format/state remains an opt-in Extended archive.  C06.1 only
 # freezes the Endpoint codec and read-only Cluster boundary; no Core object
@@ -533,6 +556,22 @@ if(UCN_BUILD_TESTS)
     )
     add_test(NAME ucn_cluster_backup_profile_tests
         COMMAND ucn_cluster_backup_profile_tests)
+
+    if(UCN_BUILD_CLUSTER_TAKEOVER_EXPERIMENTAL)
+        # CLV2-M10: exact frozen Config/Snapshot quorum and certificate model.
+        # This target remains wire-agnostic and does not enable the v4 encoder.
+        add_executable(ucn_cluster_takeover_tests
+            tests/test_cluster_takeover.c
+        )
+        target_link_libraries(ucn_cluster_takeover_tests PRIVATE
+            ucn_cluster_takeover_experimental
+        )
+        target_compile_options(ucn_cluster_takeover_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+        )
+        add_test(NAME ucn_cluster_takeover_tests
+            COMMAND ucn_cluster_takeover_tests)
+    endif()
 
     # CLV2-07-01: independent production-archive value-model gate. It has no
     # test bridge and no v4 encoder/dispatcher definition.

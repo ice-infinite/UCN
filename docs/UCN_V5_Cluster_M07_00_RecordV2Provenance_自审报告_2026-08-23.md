@@ -1,4 +1,4 @@
-# CLV2-07-00：Record v2 与 PREPARED 来源区分自审报告
+# CLV2-07-00：Record v2 与 PREPARED 来源区分自审报告（历史基线；当前 writer 已由 M10 升级为 v3）
 
 日期：2026-08-23  
 状态：**CODE COMPLETE / SELF-AUDIT PASS；外审并入 M07 final。**
@@ -7,7 +7,7 @@
 
 R23 的 `LEGACY_PREPARED_ABORT` 原本只能依赖“Record 中存在 PREPARED”判断。未来 M07 Config 或 M13 Rekey 重新开放真正的 PREPARED 后，这会把新事务误当成历史遗留并在启动时删除。
 
-本项将物理 Record writer 提升为 schema v2，并让 decode 保留 `record_schema_version` provenance：
+本项在 M07 当时将物理 Record writer 提升为 schema v2，并让 decode 保留 `record_schema_version` provenance。后续 M10 采用 append-only 迁移将**当前 writer**升级为 schema v3（292 B）；本报告中的 v2 描述均为 M07 历史基线，v1/v2 当前均只读：
 
 | 输入 | 启动处理 |
 |---|---|
@@ -18,11 +18,11 @@ R23 的 `LEGACY_PREPARED_ABORT` 原本只能依赖“Record 中存在 PREPARED�
 
 ## 2. 实现核对
 
-- `ucn_cluster_persist_record_encode()` 只接受并写出 schema v2；测试中的 v1 仅由 test-only fixture 模拟历史物理记录。
-- decoder 严格只接受 v1/v2，向 Runtime state 写入 provenance；未知 schema 仍返回 `UCN_ERR_VERSION`。
-- `cluster_persistence_begin_state()` 在提交前强制 `next_state.record_schema_version=v2`，避免任一正常 runtime 路径继续写 v1。
-- `LEGACY_PREPARED_ABORT` admission 强制 `committed=v1`、`next=v2`；Config/Rekey Prepare/Commit 的新 transaction 必须是 v2。
-- controlled boot 只会清理 v1 PREPARED；v2 PREPARED 在 M07/M13 owner 还未实现恢复 continuation 时返回 `UCN_ERR_STATE`，不提交、不发送、不修改记录。
+- M07 时 `ucn_cluster_persist_record_encode()` 只接受并写出 schema v2；M10 后 public writer 只写 v3，测试中的 v1/v2 仅模拟历史物理记录。
+- 当前 decoder 严格接受 v1/v2/v3，并向 Runtime state 写入 provenance；未知 schema 仍返回 `UCN_ERR_VERSION`。
+- M07 时 `cluster_persistence_begin_state()` 强制 `next_state.record_schema_version=v2`；M10 后正常 runtime 路径强制 v3，避免继续写 v1/v2。
+- `LEGACY_PREPARED_ABORT` 的历史 admission 仍仅接受 `committed=v1`、下一状态进入受控升级格式；它不会清理 v2/v3 PREPARED。
+- controlled boot 只会清理 v1 PREPARED；v2/v3 PREPARED 在各自 owner 没有明确恢复 continuation 时均 fail-closed，不提交、不发送、不修改记录。
 
 ## 3. 定向回归
 
@@ -44,6 +44,6 @@ R23 的 `LEGACY_PREPARED_ABORT` 原本只能依赖“Record 中存在 PREPARED�
 
 ## 5. 限制与下一步
 
-07-00 只建立新旧 PREPARED 的不可混淆 schema 边界，尚未开放 Config 或 Rekey 的恢复 continuation。07-01/02 将建立 Config State/transaction owner；M07 中才可让 v2 Config PREPARED 进入明确的 Resume/Abort/Commit 路径。M13 前 v2 Rekey PREPARED 继续 fail-closed。
+07-00 只建立新旧 PREPARED 的不可混淆 schema 边界，尚未开放 Config 或 Rekey 的恢复 continuation。M10 的 v3 仅为完整 Takeover VoteId append-only 持久化，**没有**把 v2/v3 PREPARED 当作可恢复事务；M13 前 Rekey PREPARED 继续 fail-closed。
 
 M05 顶层继续 `AUDIT HOLD`：默认产品仍不能启用 v4 encoder、production v4 RX/TX/FSM、Authority 或 Adapter 接线；本项不构成真实 Flash、掉电或 MCU 实机验证。

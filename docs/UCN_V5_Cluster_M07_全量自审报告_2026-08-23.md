@@ -17,7 +17,7 @@
 
 | 项 | 自审结论 | 关键安全结果 |
 |---|---|---|
-| 07-00 | PASS | Record v2 provenance 使 legacy v1 PREPARED migration 不会误清 v2 新事务。 |
+| 07-00 | PASS（历史基线） | Record v2 provenance 使 legacy v1 PREPARED migration 不会误清 v2 新事务；当前 writer 已由 M10 append-only 升级为 v3，v1/v2 继续只读。 |
 | 07-01 | PASS | Stable/Joint Config canonical value model，checked-next Config ID。 |
 | 07-02 | PASS | 固定单实例 transaction；并发、损坏 ACK bitmap、deadline/retry fail-closed。 |
 | 07-03/04 | PASS | ADD 只接纳 v4 provisional/non-voting；REMOVE 在 Commit 前保留 C_old voter。 |
@@ -35,7 +35,7 @@
 
 1. **voter 变化不能 auto-commit。** production-archive 公共 RX 回归证明 v3 `JOIN_REQUEST` 只能创建 `PROVISIONAL/non-voting/v3` member，带 deadline，既不进入 `active_voter_set`、也不成为 protected voter/Backup。ADD/REMOVE 的唯一变更点在 07-09 durable Commit。
 2. **持久化顺序。** Prepare、Commit、Abort 均由实验 Config owner 做 `submit → completion → load + exact journal`。无 quorum、submit failure、错 txid/ref、body torn/missing 都保持 caller output/runtime 不写回。
-3. **重启与历史格式。** schema v1 PREPARED 仅可走受控 legacy migration；schema v2 PREPARED 不会被误 abort。Config body recovery 将 active C_old、staged C_new 与 M04 Record ref 分离验证。
+3. **重启与历史格式。** schema v1 PREPARED 仅可走受控 legacy migration；schema v2 PREPARED 不会被误 abort。M10 后正常 writer 为 schema v3，v1/v2 都只读；这不改变 Config body recovery 将 active C_old、staged C_new 与 M04 Record ref 分离验证的 M07 结论。
 4. **无回绕与双分母。** proposal/config-tx/quorum 测试覆盖 `threshold-1 → threshold` 的最后合法跳，拒绝下一 Joint；Joint Commit 同时需要 old/new quorum。
 5. **M05 隔离。** `src/extended/ucn_cluster.c` 对 v4 codec/Config owner 无引用；默认 encoder 保持关闭。仍保留的 `UCN_CLUSTER_ENABLE_TEST_HOOKS` 只属于 M01 historical Current-FSM fixture，不是 public/product、M07 Config target 或 simulator 配置。
 

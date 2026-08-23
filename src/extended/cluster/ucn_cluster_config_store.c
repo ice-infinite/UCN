@@ -301,7 +301,7 @@ ucn_result_t ucn_cluster_config_store_recover(
     if (store == NULL || durable_state == NULL || output == NULL ||
         !ucn_cluster_persist_state_is_valid(durable_state) ||
         durable_state->record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ||
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
         !ref_is_valid(&durable_state->committed_config)) {
         return UCN_ERR_ARGUMENT;
     }

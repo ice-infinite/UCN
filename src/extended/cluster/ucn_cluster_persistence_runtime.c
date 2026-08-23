@@ -252,9 +252,9 @@ ucn_result_t cluster_persistence_begin_state(
     request.operation = operation;
     request.next_state = *next_state;
     /* Record v1 is read-only migration input. A normal runtime write always
-     * emits schema v2, including the controlled legacy-abort transition. */
+     * emits schema v3, including the controlled legacy-abort transition. */
     request.next_state.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
     result = ucn_cluster_persist_request_finalize(&request);
     if (result != UCN_OK) {
         cluster_persistence_fail_closed(cluster, result);

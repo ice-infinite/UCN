@@ -2,8 +2,9 @@
 
 #include "ucn/ucn_cluster_persist.h"
 
-/* Record v1 is deliberately an explicit byte layout.  Do not replace these
- * offsets with a packed C struct: persistence must remain ABI-independent. */
+/* Record v1/v2/v3 are deliberately explicit byte layouts. Do not replace
+ * these offsets with a packed C struct: persistence must remain
+ * ABI-independent. v3 appends M10 VoteId fields after the v1/v2 280 B body. */
 enum {
     PERSIST_MAGIC_OFFSET = 0U,
     PERSIST_SCHEMA_OFFSET = 4U,
@@ -43,11 +44,18 @@ enum {
     PERSIST_LAST_OPERATION_KIND_OFFSET = 268U,
     PERSIST_LAST_OPERATION_FINGERPRINT_OFFSET = 269U,
     PERSIST_RESERVED_OFFSET = 273U,
-    PERSIST_RESERVED_BYTES = 7U
+    PERSIST_RESERVED_BYTES = 7U,
+    PERSIST_V3_VOTE_PROPOSED_TERM_OFFSET = 280U,
+    PERSIST_V3_VOTE_CONFIG_ID_OFFSET = 284U,
+    PERSIST_V3_VOTE_SNAPSHOT_ID_OFFSET = 288U,
+    PERSIST_V3_EXTENSION_BYTES = 12U
 };
 
-typedef char ucn_cluster_persist_record_layout_must_be_280_bytes[
+typedef char ucn_cluster_persist_record_legacy_layout_must_be_280_bytes[
     PERSIST_RESERVED_OFFSET + PERSIST_RESERVED_BYTES ==
+            UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES ? 1 : -1];
+typedef char ucn_cluster_persist_record_v3_layout_must_be_292_bytes[
+    PERSIST_V3_VOTE_PROPOSED_TERM_OFFSET + PERSIST_V3_EXTENSION_BYTES ==
             UCN_CLUSTER_PERSIST_RECORD_BYTES ? 1 : -1];
 
 static uint16_t read_u16_be(const uint8_t *input)
@@ -92,6 +100,21 @@ static bool bytes_are_zero(const uint8_t *input, size_t length)
     return true;
 }
 
+static bool bytes_are_value(const uint8_t *input, size_t length, uint8_t value)
+{
+    size_t index;
+
+    if (input == NULL) {
+        return false;
+    }
+    for (index = 0U; index < length; ++index) {
+        if (input[index] != value) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool serial_is_valid(uint32_t serial)
 {
     return serial != 0U &&
@@ -101,8 +124,15 @@ static bool serial_is_valid(uint32_t serial)
 static bool record_schema_version_is_valid(uint16_t version)
 {
     return version == UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V1 ||
-           version ==
-               UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2;
+           version == UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V2 ||
+           version == UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
+}
+
+static size_t record_bytes_for_schema(uint16_t schema_version)
+{
+    return schema_version == UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ?
+               UCN_CLUSTER_PERSIST_RECORD_BYTES :
+               UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES;
 }
 
 /* Persisted protocol serials advance by exactly one.  Accepting a merely
@@ -133,6 +163,24 @@ static bool epoch_is_equal(const ucn_cluster_epoch_t *a,
 {
     return a != NULL && b != NULL && a->cluster_id == b->cluster_id &&
            a->term == b->term && a->head_node_id == b->head_node_id;
+}
+
+bool ucn_cluster_persist_vote_is_complete_takeover(
+    const ucn_cluster_persist_vote_t *vote)
+{
+    return vote != NULL && vote->valid && epoch_is_valid(&vote->epoch) &&
+           node_id_is_valid(vote->voted_for_node_id) &&
+           serial_is_valid(vote->backup_generation) &&
+           serial_is_next(vote->epoch.term, vote->proposed_term) &&
+           serial_is_valid(vote->config_id) && serial_is_valid(vote->snapshot_id);
+}
+
+static bool vote_is_partial_legacy(const ucn_cluster_persist_vote_t *vote)
+{
+    return vote != NULL && vote->valid && epoch_is_valid(&vote->epoch) &&
+           node_id_is_valid(vote->voted_for_node_id) &&
+           serial_is_valid(vote->backup_generation) && vote->proposed_term == 0U &&
+           vote->config_id == 0U && vote->snapshot_id == 0U;
 }
 
 static bool config_ref_is_present_valid(
@@ -207,9 +255,11 @@ static bool persist_operation_is_valid(uint8_t operation)
 {
     return (operation >= UCN_CLUSTER_PERSIST_OPERATION_REPLAY_INCARNATION &&
             operation <= UCN_CLUSTER_PERSIST_OPERATION_CLUSTER_CREATE_COMMIT) ||
-           operation == UCN_CLUSTER_PERSIST_OPERATION_LEGACY_PREPARED_ABORT ||
-           operation == UCN_CLUSTER_PERSIST_OPERATION_CONFIG_ABORT ||
-           operation == UCN_CLUSTER_PERSIST_OPERATION_CONFIG_JOINT;
+            operation == UCN_CLUSTER_PERSIST_OPERATION_LEGACY_PREPARED_ABORT ||
+            operation == UCN_CLUSTER_PERSIST_OPERATION_CONFIG_ABORT ||
+            operation == UCN_CLUSTER_PERSIST_OPERATION_CONFIG_JOINT ||
+            operation == UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_VOTE_COMMIT ||
+            operation == UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_EPOCH_COMMIT;
 }
 
 static bool transaction_phase_is_valid(
@@ -311,7 +361,7 @@ void ucn_cluster_persist_state_init_empty(ucn_cluster_persist_state_t *state)
     }
     (void)memset(state, 0, sizeof(*state));
     state->record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
     state->config_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE;
     state->rekey_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE;
 }
@@ -326,7 +376,7 @@ static void state_normalize_absent_fields(ucn_cluster_persist_state_t *state)
      * writer schema; an explicitly decoded v1 state retains its source. */
     if (state->record_schema_version == 0U) {
         state->record_schema_version =
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2;
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
     }
     if (!state->has_active_epoch) {
         (void)memset(&state->active_epoch, 0, sizeof(state->active_epoch));
@@ -339,6 +389,9 @@ static void state_normalize_absent_fields(ucn_cluster_persist_state_t *state)
                      sizeof(state->last_vote.epoch));
         state->last_vote.voted_for_node_id = 0U;
         state->last_vote.backup_generation = 0U;
+        state->last_vote.proposed_term = 0U;
+        state->last_vote.config_id = 0U;
+        state->last_vote.snapshot_id = 0U;
     }
     if (!state->committed_config.valid) {
         (void)memset(&state->committed_config, 0,
@@ -382,9 +435,8 @@ bool ucn_cluster_persist_state_is_valid(
          (!state->has_max_epoch ||
           !epoch_is_equal(&state->active_epoch, &state->max_epoch))) ||
         (state->last_vote.valid &&
-         (!epoch_is_valid(&state->last_vote.epoch) ||
-          !node_id_is_valid(state->last_vote.voted_for_node_id) ||
-          !serial_is_valid(state->last_vote.backup_generation))) ||
+         !(vote_is_partial_legacy(&state->last_vote) ||
+           ucn_cluster_persist_vote_is_complete_takeover(&state->last_vote))) ||
         (state->committed_config.valid &&
          !config_ref_is_present_valid(&state->committed_config)) ||
         !config_transaction_is_valid(&state->config_transaction,
@@ -528,10 +580,10 @@ static uint32_t crc32_bytes(const uint8_t *input, size_t length,
     return crc ^ UINT32_MAX;
 }
 
-static uint32_t crc32_record(const uint8_t *record)
+static uint32_t crc32_record(const uint8_t *record, size_t record_length)
 {
-    return crc32_bytes(record, UCN_CLUSTER_PERSIST_RECORD_BYTES,
-                       PERSIST_CRC_OFFSET, 4U);
+    return crc32_bytes(record, record_length,
+                        PERSIST_CRC_OFFSET, 4U);
 }
 
 static bool decode_bool(const uint8_t *record, size_t offset, bool *value)
@@ -550,8 +602,16 @@ static uint32_t request_fingerprint(
     uint8_t record[UCN_CLUSTER_PERSIST_RECORD_BYTES];
     uint32_t fingerprint;
 
-    if (ucn_cluster_persist_record_encode(state, 1U, record,
-                                          sizeof(record)) != UCN_OK) {
+    ucn_cluster_persist_state_t canonical_state;
+
+    if (state == NULL) {
+        return 0U;
+    }
+    canonical_state = *state;
+    canonical_state.record_schema_version =
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
+    if (ucn_cluster_persist_record_encode(&canonical_state, 1U, record,
+                                           sizeof(record)) != UCN_OK) {
         return 0U;
     }
     fingerprint = crc32_bytes(record, sizeof(record), sizeof(record), 0U);
@@ -630,14 +690,14 @@ static bool state_canonical_equal(const ucn_cluster_persist_state_t *a,
     if (a == NULL || b == NULL) {
         return false;
     }
-    /* A legacy record becomes v2 on its next accepted write. Schema is
+    /* A legacy record becomes v3 on its next accepted write. Schema is
      * migration provenance, not a logical Config/Epoch authority field. */
     canonical_a = *a;
     canonical_b = *b;
     canonical_a.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
     canonical_b.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
 
     return ucn_cluster_persist_record_encode(&canonical_a, 1U, record_a,
                                              sizeof(record_a)) == UCN_OK &&
@@ -698,7 +758,7 @@ static bool config_prepare_transition_is_valid(
     ucn_cluster_persist_state_t expected;
 
     if (next->record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ||
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
         committed->config_transaction.phase ==
             UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED ||
         committed->rekey_transaction.phase ==
@@ -729,9 +789,9 @@ static bool config_commit_transition_is_valid(
     ucn_cluster_persist_state_t expected;
 
     if (committed->record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ||
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
         next->record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ||
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
         committed->config_transaction.phase !=
             UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED ||
         committed->rekey_transaction.phase ==
@@ -759,9 +819,9 @@ static bool config_joint_transition_is_valid(
     const ucn_cluster_persist_state_t *next)
 {
     if (committed->record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ||
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
         next->record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ||
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
         committed->config_transaction.phase !=
             UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED ||
         committed->rekey_transaction.phase ==
@@ -778,9 +838,9 @@ static bool config_abort_transition_is_valid(
     ucn_cluster_persist_state_t expected;
 
     if (committed->record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ||
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
         next->record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ||
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
         committed->config_transaction.phase !=
             UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED ||
         next->config_transaction.phase !=
@@ -803,7 +863,7 @@ static bool rekey_prepare_transition_is_valid(
     ucn_cluster_persist_state_t expected;
 
     if (next->record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ||
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
         state_has_prepared_transaction(committed) || committed->tombstone.valid ||
         !committed->has_active_epoch || !committed->committed_config.valid ||
         next->rekey_transaction.phase !=
@@ -828,9 +888,9 @@ static bool rekey_commit_transition_is_valid(
     ucn_cluster_persist_state_t expected;
 
     if (committed->record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ||
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
         next->record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ||
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
         committed->config_transaction.phase ==
             UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED ||
         committed->rekey_transaction.phase !=
@@ -870,7 +930,7 @@ static bool vote_commit_transition_is_valid(
     ucn_cluster_persist_state_t expected;
 
     if (state_has_prepared_transaction(committed) || !committed->has_active_epoch ||
-        !next->last_vote.valid ||
+        !vote_is_partial_legacy(&next->last_vote) ||
         !epoch_is_equal(&next->last_vote.epoch, &committed->active_epoch) ||
         (committed->last_vote.valid &&
          epoch_is_equal(&committed->last_vote.epoch,
@@ -879,6 +939,81 @@ static bool vote_commit_transition_is_valid(
     }
     expected = *committed;
     expected.last_vote = next->last_vote;
+    return state_equal_ignoring_completed_operation(&expected, next);
+}
+
+/* M10 has a separate operation class because its VoteId is materially wider
+ * than the historic v3 Backup ACK promise.  Treating a partial legacy vote as
+ * a quorum vote after reset would re-open exactly the mixed-version path M06
+ * fenced.  The full identity is therefore written before the local self-bit
+ * may be counted by the caller-owned takeover model. */
+static bool takeover_vote_commit_transition_is_valid(
+    const ucn_cluster_persist_state_t *committed,
+    const ucn_cluster_persist_state_t *next)
+{
+    ucn_cluster_persist_state_t expected;
+
+    if (next->record_schema_version !=
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
+        state_has_prepared_transaction(committed) || !committed->has_active_epoch ||
+        !committed->has_max_epoch ||
+        !epoch_is_equal(&committed->active_epoch, &committed->max_epoch) ||
+        !committed->committed_config.valid ||
+        /* One current-Epoch durable Vote is a single-vote promise. A vote
+         * attached to an older Epoch is only historical audit evidence and
+         * is atomically replaced by the next full M10 VoteId. */
+        (committed->last_vote.valid &&
+         epoch_is_equal(&committed->last_vote.epoch,
+                        &committed->active_epoch)) ||
+        !ucn_cluster_persist_vote_is_complete_takeover(&next->last_vote) ||
+        !epoch_is_equal(&next->last_vote.epoch, &committed->active_epoch) ||
+        next->last_vote.config_id != committed->committed_config.config_id) {
+        return false;
+    }
+    expected = *committed;
+    expected.last_vote = next->last_vote;
+    return state_equal_ignoring_completed_operation(&expected, next);
+}
+
+/* A resulting Head Epoch is a distinct durable promise. It must be an exact
+ * successor of the complete VoteId's frozen old Epoch, retain that VoteId for
+ * restart audit, and cannot smuggle a Config/Rekey/Incarnation update. */
+static bool takeover_epoch_commit_transition_is_valid(
+    const ucn_cluster_persist_state_t *committed,
+    const ucn_cluster_persist_state_t *next)
+{
+    ucn_cluster_persist_state_t expected;
+    ucn_cluster_epoch_t proposed;
+
+    if (committed->record_schema_version !=
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
+        next->record_schema_version !=
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
+        state_has_prepared_transaction(committed) || !committed->has_active_epoch ||
+        !committed->has_max_epoch ||
+        !epoch_is_equal(&committed->active_epoch, &committed->max_epoch) ||
+        !committed->committed_config.valid ||
+        !ucn_cluster_persist_vote_is_complete_takeover(&committed->last_vote) ||
+        !epoch_is_equal(&committed->last_vote.epoch, &committed->active_epoch) ||
+        committed->last_vote.config_id != committed->committed_config.config_id ||
+        !next->has_active_epoch || !next->has_max_epoch ||
+        !epoch_is_equal(&next->active_epoch, &next->max_epoch) ||
+        !ucn_cluster_persist_vote_is_complete_takeover(&next->last_vote) ||
+        memcmp(&next->last_vote, &committed->last_vote,
+               sizeof(next->last_vote)) != 0) {
+        return false;
+    }
+    proposed.cluster_id = committed->last_vote.epoch.cluster_id;
+    proposed.term = committed->last_vote.proposed_term;
+    proposed.head_node_id = committed->last_vote.voted_for_node_id;
+    if (!epoch_is_equal(&next->active_epoch, &proposed)) {
+        return false;
+    }
+    expected = *committed;
+    expected.has_active_epoch = true;
+    expected.active_epoch = proposed;
+    expected.has_max_epoch = true;
+    expected.max_epoch = proposed;
     return state_equal_ignoring_completed_operation(&expected, next);
 }
 
@@ -900,6 +1035,14 @@ static bool epoch_commit_transition_is_valid(
               committed->active_epoch.cluster_id ||
           !serial_is_next(committed->max_epoch.term,
                           next->active_epoch.term))) ||
+        /* A complete M10 VoteId for the current Epoch is an exclusive
+         * promise to its named Backup. The generic election transition has
+         * no certificate parameter, so only TAKEOVER_EPOCH_COMMIT may select
+         * a successor while that promise is live. */
+        (committed->last_vote.valid &&
+         ucn_cluster_persist_vote_is_complete_takeover(&committed->last_vote) &&
+         epoch_is_equal(&committed->last_vote.epoch,
+                        &committed->active_epoch)) ||
         (!committed->has_active_epoch && committed->has_max_epoch)) {
         return false;
     }
@@ -976,7 +1119,7 @@ static bool legacy_prepared_abort_transition_is_valid(
     if (committed->record_schema_version !=
             UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V1 ||
         next->record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ||
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
         !state_has_prepared_transaction(committed) ||
         !serial_is_valid(next->boot_incarnation) ||
         next->boot_incarnation <= committed->boot_incarnation) {
@@ -1029,6 +1172,12 @@ static bool request_transition_is_valid(
                                                          &request->next_state);
     case UCN_CLUSTER_PERSIST_OPERATION_VOTE_COMMIT:
         return vote_commit_transition_is_valid(committed, &request->next_state);
+    case UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_VOTE_COMMIT:
+        return takeover_vote_commit_transition_is_valid(
+            committed, &request->next_state);
+    case UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_EPOCH_COMMIT:
+        return takeover_epoch_commit_transition_is_valid(
+            committed, &request->next_state);
     case UCN_CLUSTER_PERSIST_OPERATION_CONFIG_PREPARE:
         return config_prepare_transition_is_valid(committed,
                                                   &request->next_state);
@@ -1094,7 +1243,9 @@ bool ucn_cluster_persist_record_is_factory_empty(
     bool all_ff = true;
     size_t index;
 
-    if (record == NULL || record_length != UCN_CLUSTER_PERSIST_RECORD_BYTES) {
+    if (record == NULL ||
+        (record_length != UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES &&
+         record_length != UCN_CLUSTER_PERSIST_RECORD_BYTES)) {
         return false;
     }
     for (index = 0U; index < record_length; ++index) {
@@ -1145,7 +1296,7 @@ ucn_result_t ucn_cluster_persist_record_encode(
     }
     if (record_generation == 0U ||
         state->record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ||
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ||
         !ucn_cluster_persist_state_is_valid(state)) {
         return UCN_ERR_CONFIG;
     }
@@ -1170,7 +1321,15 @@ ucn_result_t ucn_cluster_persist_record_encode(
         write_u32_be(output + PERSIST_VOTE_FOR_OFFSET,
                      state->last_vote.voted_for_node_id);
         write_u32_be(output + PERSIST_VOTE_GENERATION_OFFSET,
-                     state->last_vote.backup_generation);
+                      state->last_vote.backup_generation);
+        if (ucn_cluster_persist_vote_is_complete_takeover(&state->last_vote)) {
+            write_u32_be(output + PERSIST_V3_VOTE_PROPOSED_TERM_OFFSET,
+                         state->last_vote.proposed_term);
+            write_u32_be(output + PERSIST_V3_VOTE_CONFIG_ID_OFFSET,
+                         state->last_vote.config_id);
+            write_u32_be(output + PERSIST_V3_VOTE_SNAPSHOT_ID_OFFSET,
+                         state->last_vote.snapshot_id);
+        }
     }
     if (state->committed_config.valid) {
         write_config_ref(output + PERSIST_CONFIG_VALID_OFFSET,
@@ -1221,7 +1380,7 @@ ucn_result_t ucn_cluster_persist_record_encode(
         state->last_completed_operation;
     write_u32_be(output + PERSIST_LAST_OPERATION_FINGERPRINT_OFFSET,
                  state->last_completed_operation_fingerprint);
-    crc = crc32_record(output);
+    crc = crc32_record(output, UCN_CLUSTER_PERSIST_RECORD_BYTES);
     write_u32_be(output + PERSIST_CRC_OFFSET, crc);
     return UCN_OK;
 }
@@ -1247,11 +1406,15 @@ ucn_result_t ucn_cluster_persist_record_decode(
 {
     ucn_cluster_persist_state_t decoded;
     uint32_t stored_crc;
+    uint16_t schema_version;
+    size_t expected_record_bytes;
+    size_t logical_record_bytes;
 
     if (record == NULL || record_generation == NULL || state == NULL) {
         return UCN_ERR_ARGUMENT;
     }
-    if (record_length != UCN_CLUSTER_PERSIST_RECORD_BYTES) {
+    if (record_length != UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES &&
+        record_length != UCN_CLUSTER_PERSIST_RECORD_BYTES) {
         return UCN_ERR_MALFORMED;
     }
     if (ucn_cluster_persist_record_is_factory_empty(record, record_length)) {
@@ -1261,17 +1424,25 @@ ucn_result_t ucn_cluster_persist_record_decode(
         UCN_CLUSTER_PERSIST_RECORD_MAGIC) {
         return UCN_ERR_MALFORMED;
     }
-    if (!record_schema_version_is_valid(
-            read_u16_be(record + PERSIST_SCHEMA_OFFSET))) {
+    schema_version = read_u16_be(record + PERSIST_SCHEMA_OFFSET);
+    if (!record_schema_version_is_valid(schema_version)) {
         return UCN_ERR_VERSION;
     }
-    if (read_u16_be(record + PERSIST_SIZE_OFFSET) !=
-        UCN_CLUSTER_PERSIST_RECORD_BYTES ||
+    expected_record_bytes = record_bytes_for_schema(schema_version);
+    logical_record_bytes = expected_record_bytes;
+    if ((record_length != expected_record_bytes &&
+         !(expected_record_bytes == UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES &&
+           record_length == UCN_CLUSTER_PERSIST_RECORD_BYTES &&
+           (bytes_are_zero(record + UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES,
+                           PERSIST_V3_EXTENSION_BYTES) ||
+            bytes_are_value(record + UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES,
+                            PERSIST_V3_EXTENSION_BYTES, UINT8_MAX)))) ||
+        read_u16_be(record + PERSIST_SIZE_OFFSET) != expected_record_bytes ||
         read_u32_be(record + PERSIST_GENERATION_OFFSET) == 0U) {
         return UCN_ERR_MALFORMED;
     }
     stored_crc = read_u32_be(record + PERSIST_CRC_OFFSET);
-    if (stored_crc != crc32_record(record)) {
+    if (stored_crc != crc32_record(record, logical_record_bytes)) {
         return UCN_ERR_CRC;
     }
     if (!bytes_are_zero(record + PERSIST_RESERVED_OFFSET,
@@ -1279,7 +1450,7 @@ ucn_result_t ucn_cluster_persist_record_decode(
         return UCN_ERR_MALFORMED;
     }
     ucn_cluster_persist_state_init_empty(&decoded);
-    decoded.record_schema_version = read_u16_be(record + PERSIST_SCHEMA_OFFSET);
+    decoded.record_schema_version = schema_version;
     if (!decode_bool(record, PERSIST_ACTIVE_VALID_OFFSET,
                      &decoded.has_active_epoch) ||
         !decode_bool(record, PERSIST_MAX_VALID_OFFSET,
@@ -1316,7 +1487,22 @@ ucn_result_t ucn_cluster_persist_record_decode(
             read_u32_be(record + PERSIST_VOTE_FOR_OFFSET);
         decoded.last_vote.backup_generation =
             read_u32_be(record + PERSIST_VOTE_GENERATION_OFFSET);
+        if (schema_version ==
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3) {
+            decoded.last_vote.proposed_term =
+                read_u32_be(record + PERSIST_V3_VOTE_PROPOSED_TERM_OFFSET);
+            decoded.last_vote.config_id =
+                read_u32_be(record + PERSIST_V3_VOTE_CONFIG_ID_OFFSET);
+            decoded.last_vote.snapshot_id =
+                read_u32_be(record + PERSIST_V3_VOTE_SNAPSHOT_ID_OFFSET);
+        }
     } else if (!bytes_are_zero(record + PERSIST_VOTE_EPOCH_OFFSET, 20U)) {
+        return UCN_ERR_MALFORMED;
+    }
+    if (schema_version == UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 &&
+        !decoded.last_vote.valid &&
+        !bytes_are_zero(record + PERSIST_V3_VOTE_PROPOSED_TERM_OFFSET,
+                        PERSIST_V3_EXTENSION_BYTES)) {
         return UCN_ERR_MALFORMED;
     }
     if (!decoded.committed_config.valid &&

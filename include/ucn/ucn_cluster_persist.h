@@ -29,33 +29,42 @@ extern "C" {
 #define UCN_CLUSTER_PERSIST_CONFIG_DIGEST_BYTES ((size_t)16U)
 /* Physical record schemas: all fields are explicit big-endian bytes;
  * never persist a C struct image because alignment and bool layout vary by
- * toolchain.  Schema v1 is read-only legacy input. Schema v2 is the only
- * writer format and separates future M07/M13 PREPARED recovery from R23's
- * one-time legacy migration. Both use a 16 B header + 264 B canonical payload, whose
- * final 7 B are reserved and must remain zero.  The larger payload is
- * intentional: complete VoteId and
- * Config/Rekey PREPARE/COMMIT must survive a reset as distinguishable
- * transactions. */
+ * toolchain. Schema v1/v2 are read-only 280 B legacy inputs. Schema v3 is
+ * the only writer format: it keeps the first 280 B byte-for-byte compatible
+ * with v2 and appends the three missing M10 VoteId fields. A product that
+ * persists raw slots must therefore support a 292 B v3 slot (or explicitly
+ * migrate its older 280 B slots before making a v3 write). */
 #define UCN_CLUSTER_PERSIST_RECORD_MAGIC UINT32_C(0x55435052)
 #define UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V1 ((uint16_t)1U)
-#define UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 ((uint16_t)2U)
+#define UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V2 ((uint16_t)2U)
+#define UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ((uint16_t)3U)
+/* Kept as a source-level name for code that explicitly handles an on-media
+ * v2 input. It is not a writer schema. */
+#define UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 \
+    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V2
 #define UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION \
-    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2
+    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3
 #define UCN_CLUSTER_PERSIST_RECORD_HEADER_BYTES ((size_t)16U)
-#define UCN_CLUSTER_PERSIST_RECORD_PAYLOAD_BYTES ((size_t)264U)
-#define UCN_CLUSTER_PERSIST_RECORD_BYTES ((size_t)280U)
+#define UCN_CLUSTER_PERSIST_RECORD_LEGACY_PAYLOAD_BYTES ((size_t)264U)
+#define UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES ((size_t)280U)
+#define UCN_CLUSTER_PERSIST_RECORD_PAYLOAD_BYTES ((size_t)276U)
+#define UCN_CLUSTER_PERSIST_RECORD_BYTES ((size_t)292U)
 
 typedef uint32_t ucn_cluster_persist_token_t;
 
-/* A vote is bound to the complete takeover VoteId.  Runtime takeover logic
- * already distinguishes (cluster_id, term, backup_generation); omitting the
- * generation here would permit a restart to re-acknowledge a conflicting
- * takeover transaction. */
+/* Schema-v3 can bind a vote to the complete M10 Takeover VoteId. Runtime v3
+ * compatibility code may still create an older partial vote (all three M10
+ * extension fields are zero); it is never accepted as M10 quorum proof.
+ * This distinction lets the pre-existing, separately fenced v3 control path
+ * remain readable while M10 refuses to turn it into a v4 takeover promise. */
 typedef struct ucn_cluster_persist_vote {
     bool valid;
     ucn_cluster_epoch_t epoch;
     ucn_node_id_t voted_for_node_id;
     uint32_t backup_generation;
+    uint32_t proposed_term;
+    uint32_t config_id;
+    uint32_t snapshot_id;
 } ucn_cluster_persist_vote_t;
 
 /* M07 owns the membership body.  M04 persists only its immutable committed
@@ -127,10 +136,10 @@ typedef struct ucn_cluster_persist_tombstone {
  * active identity may never lag its durable maximum. */
 typedef struct ucn_cluster_persist_state {
     /* On-media schema provenance, populated by decode. It is not authority
-     * state: v1 exists only so controlled boot can identify historical
-     * PREPARED records. The public writer and normal runtime writes emit v2.
-     * Its pre-release terminal Config records retain C_new; older unpublished
-     * terminal v2 records without that identity are fail-closed. */
+     * state: v1/v2 exist only for controlled migration/readback. The public
+     * writer and normal runtime writes emit v3. Its pre-release terminal
+     * Config records retain C_new; older unpublished terminal records without
+     * that identity are fail-closed. */
     uint16_t record_schema_version;
     bool has_active_epoch;
     ucn_cluster_epoch_t active_epoch;
@@ -214,7 +223,12 @@ typedef enum ucn_cluster_persist_operation {
      * PREPARED state, but journals that the exact txid/C_new pair entered the
      * Joint phase.  A reboot can therefore distinguish "prepared only" from
      * "joint was durably authorized" without granting an implicit commit. */
-    UCN_CLUSTER_PERSIST_OPERATION_CONFIG_JOINT = 12
+    UCN_CLUSTER_PERSIST_OPERATION_CONFIG_JOINT = 12,
+    /* M10 persists an exact full VoteId before it can count the local vote,
+     * then writes the proposed Epoch in a distinct atomic operation. Neither
+     * operation has a production RX/TX/FSM call site while M05 is on hold. */
+    UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_VOTE_COMMIT = 13,
+    UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_EPOCH_COMMIT = 14
 } ucn_cluster_persist_operation_t;
 
 typedef struct ucn_cluster_persist_request {
@@ -328,6 +342,10 @@ static inline bool ucn_cluster_persist_provider_accepts_completion(
 void ucn_cluster_persist_state_init_empty(ucn_cluster_persist_state_t *state);
 bool ucn_cluster_persist_state_is_valid(
     const ucn_cluster_persist_state_t *state);
+/* True only for the schema-v3 representation of M10's complete VoteId.
+ * A valid partial legacy vote deliberately returns false. */
+bool ucn_cluster_persist_vote_is_complete_takeover(
+    const ucn_cluster_persist_vote_t *vote);
 bool ucn_cluster_persist_load_result_is_valid(
     const ucn_cluster_persist_load_result_t *result);
 

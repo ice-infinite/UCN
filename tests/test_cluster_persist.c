@@ -228,9 +228,9 @@ static ucn_cluster_persist_request_t persist_replay_incarnation_request(
     ucn_cluster_persist_state_t next = *committed;
 
     next.boot_incarnation = boot_incarnation;
-    /* Any accepted next write upgrades a decoded v1 record. */
+    /* Any accepted next write upgrades a decoded v1/v2 record. */
     next.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
     return persist_request_from_state(
         operation_id, UCN_CLUSTER_PERSIST_OPERATION_REPLAY_INCARNATION, &next);
 }
@@ -308,12 +308,12 @@ static void test_write_u16_be(uint8_t *output, uint16_t value)
     output[1] = (uint8_t)value;
 }
 
-static uint32_t test_crc32_record(const uint8_t *record)
+static uint32_t test_crc32_record(const uint8_t *record, size_t record_length)
 {
     uint32_t crc = UINT32_MAX;
     size_t index;
 
-    for (index = 0U; index < UCN_CLUSTER_PERSIST_RECORD_BYTES; ++index) {
+    for (index = 0U; index < record_length; ++index) {
         uint8_t value = index >= TEST_CRC_OFFSET &&
                                 index < TEST_CRC_OFFSET + 4U ?
                             0U : record[index];
@@ -328,13 +328,14 @@ static uint32_t test_crc32_record(const uint8_t *record)
     return crc ^ UINT32_MAX;
 }
 
-static void test_refresh_record_crc(uint8_t *record)
+static void test_refresh_record_crc(uint8_t *record, size_t record_length)
 {
-    test_write_u32_be(record + TEST_CRC_OFFSET, test_crc32_record(record));
+    test_write_u32_be(record + TEST_CRC_OFFSET,
+                      test_crc32_record(record, record_length));
 }
 
 /* The public writer never emits v1. This fixture emulates a verified v1
- * record found after an upgrade by rewriting an otherwise canonical v2
+ * record found after an upgrade by rewriting an otherwise canonical v3
  * payload and refreshing its test CRC. No production code calls this helper. */
 static ucn_result_t persist_encode_legacy_v1_fixture(
     const ucn_cluster_persist_state_t *legacy_state,
@@ -342,23 +343,30 @@ static ucn_result_t persist_encode_legacy_v1_fixture(
     uint8_t *record,
     size_t record_capacity)
 {
+    uint8_t writer_record[UCN_CLUSTER_PERSIST_RECORD_BYTES];
     ucn_cluster_persist_state_t writer_state;
     ucn_result_t result;
 
-    if (legacy_state == NULL || record == NULL) {
+    if (legacy_state == NULL || record == NULL ||
+        record_capacity < UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES) {
         return UCN_ERR_ARGUMENT;
     }
     writer_state = *legacy_state;
     writer_state.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
     result = ucn_cluster_persist_record_encode(&writer_state, generation,
-                                               record, record_capacity);
+                                                writer_record,
+                                                sizeof(writer_record));
     if (result != UCN_OK) {
         return result;
     }
+    (void)memcpy(record, writer_record,
+                 UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES);
     test_write_u16_be(record + 4U,
                       UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V1);
-    test_refresh_record_crc(record);
+    test_write_u16_be(record + 6U,
+                      (uint16_t)UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES);
+    test_refresh_record_crc(record, UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES);
     return UCN_OK;
 }
 
@@ -392,7 +400,7 @@ static void persist_rekey_ref_set(ucn_cluster_persist_rekey_ref_t *rekey,
 
 /* These builders represent an already-decoded pre-R20 Record-v1 snapshot.
  * They are intentionally logical fixtures, not writer paths: production
- * record_encode() only emits schema v2. Legacy v1 bytes are created below by
+ * record_encode() only emits schema v3. Legacy v1 bytes are created below by
  * a test-only header rewrite plus CRC refresh. */
 static ucn_result_t persist_legacy_config_prepared_state(
     ucn_cluster_persist_state_t *state)
@@ -495,12 +503,12 @@ static int cluster_persist_test_record_codec(void)
                            0xA6U);
     TEST_ASSERT(ucn_cluster_persist_record_encode(
                     &state, 7U, record, sizeof(record)) == UCN_OK);
-    TEST_ASSERT(record[4U] == 0U && record[5U] == 2U);
+    TEST_ASSERT(record[4U] == 0U && record[5U] == 3U);
     TEST_ASSERT(ucn_cluster_persist_record_decode(
                     record, sizeof(record), &generation, &decoded) == UCN_OK);
     TEST_ASSERT(generation == 7U &&
                 decoded.record_schema_version ==
-                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 &&
+                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 &&
                 decoded.has_active_epoch &&
                 decoded.active_epoch.term == 2U && decoded.last_vote.valid &&
                 decoded.last_vote.voted_for_node_id == 8U &&
@@ -516,7 +524,7 @@ static int cluster_persist_test_record_codec(void)
 
     /* Schema v1 remains a read-only legacy input. The exact same PREPARED
      * payload is decoded with v1 provenance so R23 can migrate it once; the
-     * normal writer above always emits v2. */
+      * normal writer above always emits v3. */
     state.record_schema_version =
         UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V1;
     TEST_ASSERT(ucn_cluster_persist_record_encode(
@@ -526,14 +534,15 @@ static int cluster_persist_test_record_codec(void)
                     &state, 71U, record, sizeof(record)) == UCN_OK &&
                 record[4U] == 0U && record[5U] == 1U);
     TEST_ASSERT(ucn_cluster_persist_record_decode(
-                    record, sizeof(record), &generation, &decoded) == UCN_OK &&
+                    record, UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES,
+                    &generation, &decoded) == UCN_OK &&
                 generation == 71U &&
                 decoded.record_schema_version ==
                     UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V1 &&
                 decoded.config_transaction.phase ==
                     UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED);
     state.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
 
     /* A terminal transaction retains its exact C_new reference as well as its
      * txid.  This binds CONFIG_ABORT replay after reset to the proposal that
@@ -617,7 +626,7 @@ static int cluster_persist_test_record_codec(void)
                     &state, 9U, dirty, sizeof(dirty)) == UCN_OK);
     TEST_ASSERT(memcmp(canonical, dirty, sizeof(canonical)) == 0);
     dirty[TEST_ACTIVE_EPOCH_CLUSTER_OFFSET] = 1U;
-    test_refresh_record_crc(dirty);
+    test_refresh_record_crc(dirty, sizeof(dirty));
     TEST_ASSERT(ucn_cluster_persist_record_decode(
                     dirty, sizeof(dirty), &generation, &decoded) ==
                 UCN_ERR_MALFORMED);
@@ -675,7 +684,7 @@ static int cluster_persist_test_record_codec(void)
                     &state, 9U, record, sizeof(record)) == UCN_OK);
     test_write_u32_be(record + TEST_ACTIVE_EPOCH_CLUSTER_OFFSET,
                       UCN_NODE_BROADCAST);
-    test_refresh_record_crc(record);
+    test_refresh_record_crc(record, sizeof(record));
     TEST_ASSERT(ucn_cluster_persist_record_decode(
                     record, sizeof(record), &generation, &decoded) ==
                 UCN_ERR_MALFORMED);
@@ -683,7 +692,7 @@ static int cluster_persist_test_record_codec(void)
                     &state, 9U, record, sizeof(record)) == UCN_OK);
     test_write_u32_be(record + TEST_ACTIVE_EPOCH_TERM_OFFSET,
                       UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD + 1U);
-    test_refresh_record_crc(record);
+    test_refresh_record_crc(record, sizeof(record));
     TEST_ASSERT(ucn_cluster_persist_record_decode(
                     record, sizeof(record), &generation, &decoded) ==
                 UCN_ERR_MALFORMED);
@@ -692,7 +701,7 @@ static int cluster_persist_test_record_codec(void)
                     &state, 9U, record, sizeof(record)) == UCN_OK);
     test_write_u32_be(record + TEST_CONFIG_GENERATION_OFFSET,
                       UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD + 1U);
-    test_refresh_record_crc(record);
+    test_refresh_record_crc(record, sizeof(record));
     TEST_ASSERT(ucn_cluster_persist_record_decode(
                     record, sizeof(record), &generation, &decoded) ==
                 UCN_ERR_MALFORMED);
@@ -701,7 +710,7 @@ static int cluster_persist_test_record_codec(void)
                     &state, 9U, record, sizeof(record)) == UCN_OK);
     test_write_u32_be(record + TEST_BOOT_INCARNATION_OFFSET,
                       UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD + 1U);
-    test_refresh_record_crc(record);
+    test_refresh_record_crc(record, sizeof(record));
     TEST_ASSERT(ucn_cluster_persist_record_decode(
                     record, sizeof(record), &generation, &decoded) ==
                 UCN_ERR_MALFORMED);
@@ -709,7 +718,7 @@ static int cluster_persist_test_record_codec(void)
     TEST_ASSERT(ucn_cluster_persist_record_encode(
                     &request.next_state, 10U, record, sizeof(record)) == UCN_OK);
     record[TEST_LAST_OPERATION_FINGERPRINT_OFFSET + 3U] ^= 1U;
-    test_refresh_record_crc(record);
+    test_refresh_record_crc(record, sizeof(record));
     TEST_ASSERT(ucn_cluster_persist_record_decode(
                     record, sizeof(record), &generation, &decoded) ==
                 UCN_ERR_MALFORMED);
@@ -1192,7 +1201,7 @@ static int cluster_persist_test_operation_admission(void)
     next.config_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE;
     next.boot_incarnation = 10U;
     next.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
     request = persist_request_from_state(
         8U, UCN_CLUSTER_PERSIST_OPERATION_LEGACY_PREPARED_ABORT, &next);
     TEST_ASSERT(ucn_cluster_persist_request_is_valid(&request));
@@ -1211,7 +1220,7 @@ static int cluster_persist_test_operation_admission(void)
     next.rekey_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE;
     next.boot_incarnation = 10U;
     next.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
     request = persist_request_from_state(
         8U, UCN_CLUSTER_PERSIST_OPERATION_LEGACY_PREPARED_ABORT, &next);
     TEST_ASSERT(ucn_cluster_persist_request_admit(&committed, &request) ==
@@ -1756,7 +1765,8 @@ static int cluster_persist_test_legacy_prepared_boot_migration(void)
     (void)memset(&decoded, 0, sizeof(decoded));
     generation = 0U;
     TEST_ASSERT(ucn_cluster_persist_record_decode(
-                    record, sizeof(record), &generation, &decoded) == UCN_OK &&
+                    record, UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES,
+                    &generation, &decoded) == UCN_OK &&
                 generation == 7U &&
                 decoded.config_transaction.phase ==
                     UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED &&
@@ -1782,7 +1792,8 @@ static int cluster_persist_test_legacy_prepared_boot_migration(void)
     (void)memset(&decoded, 0, sizeof(decoded));
     generation = 0U;
     TEST_ASSERT(ucn_cluster_persist_record_decode(
-                    record, sizeof(record), &generation, &decoded) == UCN_OK &&
+                    record, UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES,
+                    &generation, &decoded) == UCN_OK &&
                 generation == 11U &&
                 decoded.rekey_transaction.phase ==
                     UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED &&
@@ -1804,7 +1815,7 @@ static int cluster_persist_test_legacy_prepared_boot_migration(void)
                     UCN_CLUSTER_PERSIST_OPERATION_LEGACY_PREPARED_ABORT &&
                 probe.sent_count == 0U);
 
-    /* A v2 PREPARED is deliberately not eligible for R23.  It must survive
+    /* A v3 PREPARED is deliberately not eligible for R23.  It must survive
      * boot unchanged until M07's Config owner (or M13's Rekey owner) supplies
      * its Resume/Abort/Commit continuation; the pre-owner behavior is a safe
      * fail-closed init, never a silent abort. */
@@ -1812,7 +1823,7 @@ static int cluster_persist_test_legacy_prepared_boot_migration(void)
     persist_fake_set_factory_empty(&probe.store);
     TEST_ASSERT(persist_legacy_config_prepared_state(&state) == UCN_OK);
     state.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
     state.last_completed_operation_id = 0U;
     state.last_completed_operation = 0U;
     state.last_completed_operation_fingerprint = 0U;
@@ -1822,11 +1833,11 @@ static int cluster_persist_test_legacy_prepared_boot_migration(void)
     state = request.next_state;
     TEST_ASSERT(ucn_cluster_persist_record_encode(
                     &state, 17U, record, sizeof(record)) == UCN_OK &&
-                record[4U] == 0U && record[5U] == 2U);
+                 record[4U] == 0U && record[5U] == 3U);
     TEST_ASSERT(ucn_cluster_persist_record_decode(
                     record, sizeof(record), &generation, &decoded) == UCN_OK &&
                 decoded.record_schema_version ==
-                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 &&
+                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 &&
                 decoded.config_transaction.phase ==
                     UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED);
     probe.store.stored.state = UCN_CLUSTER_PERSIST_LOAD_READY;
@@ -1835,7 +1846,7 @@ static int cluster_persist_test_legacy_prepared_boot_migration(void)
     cluster_persist_runtime_config(&config, &probe, &provider, false);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_ERR_STATE &&
                 probe.store.stored.snapshot.record_schema_version ==
-                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 &&
+                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 &&
                 probe.store.stored.snapshot.boot_incarnation == 9U &&
                 probe.store.stored.snapshot.config_transaction.phase ==
                     UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED &&
