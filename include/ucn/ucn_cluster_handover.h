@@ -121,7 +121,13 @@ typedef struct ucn_cluster_handover_policy {
 typedef struct ucn_cluster_handover_candidate {
     bool occupied;
     ucn_cluster_handover_offer_t offer;
+    /* score_samples is a consecutive run, never a fresh-packet count.  The
+     * context records the exact local threshold/policy that qualified it. */
     uint8_t score_samples;
+    uint8_t qualification_improvement_percent;
+    uint8_t qualification_required_samples;
+    uint16_t qualification_local_head_score;
+    uint16_t qualification_required_capabilities;
     uint32_t first_seen_ms;
     uint32_t last_seen_ms;
     uint32_t hold_down_until_ms;
@@ -230,6 +236,7 @@ void ucn_cluster_handover_candidate_expire(
 ucn_result_t ucn_cluster_handover_candidate_observe(
     ucn_cluster_handover_candidate_table_t *table,
     const ucn_cluster_epoch_t *local_epoch,
+    uint16_t local_head_score,
     const ucn_cluster_handover_offer_t *offer,
     const ucn_cluster_handover_policy_t *policy,
     uint32_t now_ms,

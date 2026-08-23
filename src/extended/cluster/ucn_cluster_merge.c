@@ -597,10 +597,28 @@ void consider_head_offer(
         }
     }
     if (cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING) {
-        /* Re-target a stale pending Head (e.g. after a takeover): switch
-         * only when the observed Head differs or has a higher Term. */
-        if (candidate->head_node_id != cluster->pending_head_node_id ||
-            candidate->term > cluster->pending_term) {
+        ucn_cluster_epoch_t pending_epoch;
+        ucn_cluster_epoch_t remote_epoch;
+        ucn_cluster_epoch_relation_t relation;
+
+        /* CLV2-03-R10: JOIN_PENDING is still an Epoch decision.  Build the
+         * pending target explicitly and use the one comparator so a foreign
+         * Cluster is selected by policy before any Term is inspected. */
+        pending_epoch.cluster_id = cluster->pending_cluster_id;
+        pending_epoch.term = cluster->pending_term;
+        pending_epoch.head_node_id = cluster->pending_head_node_id;
+        remote_epoch.cluster_id = candidate->cluster_id;
+        remote_epoch.term = candidate->term;
+        remote_epoch.head_node_id = candidate->head_node_id;
+        relation = ucn_cluster_epoch_compare(&pending_epoch, &remote_epoch);
+
+        /* FOREIGN means a different Join target, independent of both Term
+         * values.  Within one Cluster only a newer remote Epoch (LOWER from
+         * compare(pending, remote)) or a same-Term Head conflict re-targets;
+         * SAME and a stale remote HIGHER leave the in-flight Join untouched. */
+        if (relation == UCN_CLUSTER_EPOCH_RELATION_FOREIGN ||
+            relation == UCN_CLUSTER_EPOCH_RELATION_LOWER ||
+            relation == UCN_CLUSTER_EPOCH_RELATION_CONFLICT) {
             begin_join(cluster, candidate, now_ms);
         }
         return;

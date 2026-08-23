@@ -1,7 +1,8 @@
 # UCN V5 Cluster M11：外部审计材料（2026-08-23）
 
-> 外部复审结论：**GO（受限实验范围）**。R06-B 已闭环，M11 获得受控实验软件范围签字。
-> 签字范围：仅 M11 caller-owned、default-OFF 实验模型；不是 production protocol、实机或掉电签字。
+> 历史外部复审结论：**R01–R06-B GO（受限实验范围）**。
+> 当前状态：后续复审核实 R07/R08（连续合格样本、完整 proposal/replay 域）后，整改已完成自审，M11 处于 **AUDIT HOLD / WAIT EXTERNAL RE-REVIEW**。
+> 审计范围始终仅限 M11 caller-owned、default-OFF 实验模型；不是 production protocol、实机或掉电签字。
 
 ## 1. 审计边界
 
@@ -36,9 +37,11 @@ re-entry Fence 是 caller-owned RAM 的实验模型约束，不是掉电或原�
 4. **撤权后安全失败**：Stepdown/Commit 前超时或目标丢失不能恢复 old Authority，只能 Observe/Recovery；`TARGET_COMMITTED` 同样受 deadline 约束，且在 M04 Provider `submit→reload` 证明接线前，caller-supplied equal Epoch 不能使 target ready/Authority。
 5. **同簇特殊合同**：target Term 必须 exact next，target Head 是 confirmed Backup，Config 不变；Backup READY 本身没有 Authority。
 6. **Stepdown Config 不可变**：RFC4 Type 9 只绑定 old/target Epoch、txid/nonce，不能携带 target Config，也不能被用来改变成员 Config。
-7. **旧 v3 路径无旁路**：Member score 不能直接 LEAVE/Join；Backup score 不能直接 Term++；已持久化的 legacy async challenge continuation 不得复活。
-8. **物理隔离**：default product archive 无 M11 object/API；生产 Cluster/Adapter 无 M11 API 调用；v4 encoder 默认仍关闭。
-9. **RFC/公共值边界**：Type 26/27/28 的 typed nonce 必为零且不参加 identity，只有 Type 9/29 使用 nonce；所有 policy duration 通过 `ucn_duration_is_valid()`，Term/Config/txid 不得超过 serial rotation threshold；corrupt public transaction（特别是 `trace_count > 8`）必须零写拒绝。
+7. **候选迟滞不可伪造**：`score_samples` 只允许统计同一 proposal 和 local qualification context 下连续达到 threshold 的 fresh score；低分或 context 改变必须清零，eligible 也不得消费 stale samples。
+8. **proposal/replay 域完整**：nonce replay/history 至少绑定 full Epoch、Config、capacity、capabilities、wire format 和 Backup-policy compatibility。新域必须重置 nonce/sample/first-seen，而同域低 nonce 必须 no-write `UCN_ERR_REPLAY`。
+9. **旧 v3 路径无旁路**：Member score 不能直接 LEAVE/Join；Backup score 不能直接 Term++；已持久化的 legacy async challenge continuation 不得复活。
+10. **物理隔离**：default product archive 无 M11 object/API；生产 Cluster/Adapter 无 M11 API 调用；v4 encoder 默认仍关闭。
+11. **RFC/公共值边界**：Type 26/27/28 的 typed nonce 必为零且不参加 identity，只有 Type 9/29 使用 nonce；所有 policy duration 通过 `ucn_duration_is_valid()`，Term/Config/txid 不得超过 serial rotation threshold；corrupt public transaction（特别是 `trace_count > 8`）必须零写拒绝。
 10. **撤权 transaction 不可重开**：`revoke_authority()` 必须写入 implementation-owned 的不可逆 re-entry Fence；已 `AUTHORITY_REVOKED`、`STEPDOWN_SENT`、`COMMIT_SENT` 的对象，以及任何携带非法非零 Fence 的对象，调用 public `transaction_reset()` 都必须 no-op。随后在任何 Begin 参数下都必须保持逐字节不变，且 `local_authority_active` 不得由 Begin 或 Reset→Begin 重新置位。合法 Begin 参数配合此类对象必须返回 `UCN_ERR_STATE`；非法非零 Fence 必须 fail-closed。
 
 ## 4. 推荐复现命令

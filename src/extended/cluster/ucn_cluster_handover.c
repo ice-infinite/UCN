@@ -165,9 +165,90 @@ void ucn_cluster_handover_candidate_expire(
     }
 }
 
+static bool offer_proposal_domain_matches(
+    const ucn_cluster_handover_offer_t *left,
+    const ucn_cluster_handover_offer_t *right)
+{
+    /* nonce and head_score are intentionally excluded.  nonce is ordered
+     * only within this proposal domain, while every fresh head_score is the
+     * next sample in the consecutive-qualification run.  All remaining
+     * offer properties can change feasibility/compatibility, so they define
+     * a new proposal and cannot inherit replay or hysteresis history. */
+    return left != NULL && right != NULL &&
+           epoch_is_exact(&left->epoch, &right->epoch) &&
+           left->config_id == right->config_id &&
+           left->config_hash == right->config_hash &&
+           left->cluster_size == right->cluster_size &&
+           left->available_capacity == right->available_capacity &&
+           left->capabilities == right->capabilities &&
+           left->wire_format == right->wire_format &&
+           left->backup_policy_compatible == right->backup_policy_compatible;
+}
+
+static bool qualification_context_matches(
+    const ucn_cluster_handover_candidate_t *candidate,
+    uint16_t local_head_score,
+    const ucn_cluster_handover_policy_t *policy)
+{
+    return candidate != NULL && policy != NULL &&
+           candidate->qualification_local_head_score == local_head_score &&
+           candidate->qualification_improvement_percent ==
+               policy->improvement_percent &&
+           candidate->qualification_required_samples == policy->required_samples &&
+           candidate->qualification_required_capabilities ==
+               policy->required_capabilities;
+}
+
+static void qualification_context_store(ucn_cluster_handover_candidate_t *candidate,
+                                        uint16_t local_head_score,
+                                        const ucn_cluster_handover_policy_t *policy)
+{
+    candidate->qualification_local_head_score = local_head_score;
+    candidate->qualification_improvement_percent = policy->improvement_percent;
+    candidate->qualification_required_samples = policy->required_samples;
+    candidate->qualification_required_capabilities = policy->required_capabilities;
+}
+
+static bool score_qualifies(uint16_t candidate_score,
+                            uint16_t local_head_score,
+                            uint8_t improvement_percent)
+{
+    const uint32_t required =
+        (uint32_t)local_head_score * ((uint32_t)100U + improvement_percent);
+
+    /* The frozen boundary is inclusive: exact threshold is a qualified
+     * sample.  This mirrors the historical eligibility comparator. */
+    return (uint32_t)candidate_score * UINT32_C(100) >= required;
+}
+
+static void candidate_start_new_proposal(
+    ucn_cluster_handover_candidate_t *candidate,
+    const ucn_cluster_handover_offer_t *offer,
+    uint16_t local_head_score,
+    const ucn_cluster_handover_policy_t *policy,
+    uint32_t now_ms,
+    uint32_t hold_down_until_ms)
+{
+    (void)memset(candidate, 0, sizeof(*candidate));
+    candidate->occupied = true;
+    candidate->offer = *offer;
+    qualification_context_store(candidate, local_head_score, policy);
+    candidate->score_samples = score_qualifies(offer->head_score,
+                                                local_head_score,
+                                                policy->improvement_percent) ?
+                                   1U :
+                                   0U;
+    candidate->first_seen_ms = now_ms;
+    candidate->last_seen_ms = now_ms;
+    /* Hold-down belongs to the target identity, not one proposal nonce.  A
+     * newer proposal cannot erase an already-established anti-ping-pong gate. */
+    candidate->hold_down_until_ms = hold_down_until_ms;
+}
+
 ucn_result_t ucn_cluster_handover_candidate_observe(
     ucn_cluster_handover_candidate_table_t *table,
     const ucn_cluster_epoch_t *local_epoch,
+    uint16_t local_head_score,
     const ucn_cluster_handover_offer_t *offer,
     const ucn_cluster_handover_policy_t *policy,
     uint32_t now_ms,
@@ -195,13 +276,38 @@ ucn_result_t ucn_cluster_handover_candidate_observe(
         }
         if (candidate->offer.epoch.cluster_id == offer->epoch.cluster_id &&
             candidate->offer.epoch.head_node_id == offer->epoch.head_node_id) {
+            if (!offer_proposal_domain_matches(&candidate->offer, offer)) {
+                const uint32_t hold_down_until_ms = candidate->hold_down_until_ms;
+
+                /* A new Epoch/Config/compatibility proposal has its own
+                 * nonce domain and must not inherit score history. */
+                candidate_start_new_proposal(candidate, offer, local_head_score,
+                                              policy, now_ms, hold_down_until_ms);
+                if (output != NULL) {
+                    *output = candidate;
+                }
+                return UCN_OK;
+            }
             if (offer->nonce <= candidate->offer.nonce) {
                 return UCN_ERR_REPLAY;
             }
             candidate->offer = *offer;
             candidate->last_seen_ms = now_ms;
-            if (candidate->score_samples < UINT8_MAX) {
-                ++candidate->score_samples;
+            if (!qualification_context_matches(candidate, local_head_score, policy)) {
+                /* The remote proposal is unchanged but local policy/score
+                 * changed.  The next fresh offer starts a new qualifying run;
+                 * its nonce history remains in force. */
+                qualification_context_store(candidate, local_head_score, policy);
+                candidate->first_seen_ms = now_ms;
+                candidate->score_samples = 0U;
+            }
+            if (score_qualifies(offer->head_score, local_head_score,
+                                policy->improvement_percent)) {
+                if (candidate->score_samples < UINT8_MAX) {
+                    ++candidate->score_samples;
+                }
+            } else {
+                candidate->score_samples = 0U;
             }
             if (output != NULL) {
                 *output = candidate;
@@ -212,12 +318,8 @@ ucn_result_t ucn_cluster_handover_candidate_observe(
     if (free_slot == NULL) {
         return UCN_ERR_NO_SPACE;
     }
-    (void)memset(free_slot, 0, sizeof(*free_slot));
-    free_slot->occupied = true;
-    free_slot->offer = *offer;
-    free_slot->score_samples = 1U;
-    free_slot->first_seen_ms = now_ms;
-    free_slot->last_seen_ms = now_ms;
+    candidate_start_new_proposal(free_slot, offer, local_head_score, policy, now_ms,
+                                 0U);
     if (output != NULL) {
         *output = free_slot;
     }
@@ -231,9 +333,8 @@ bool ucn_cluster_handover_candidate_is_eligible(
     const ucn_cluster_handover_policy_t *policy,
     uint32_t now_ms)
 {
-    uint32_t required;
-
     if (candidate == NULL || !candidate->occupied || !policy_is_valid(policy) ||
+        !qualification_context_matches(candidate, local_head_score, policy) ||
         candidate->score_samples < policy->required_samples ||
         !ucn_elapsed_at_least(now_ms, local_head_since_ms,
                               policy->head_min_tenure_ms) ||
@@ -241,9 +342,8 @@ bool ucn_cluster_handover_candidate_is_eligible(
          !ucn_deadline_expired(now_ms, candidate->hold_down_until_ms))) {
         return false;
     }
-    required = (uint32_t)local_head_score *
-               ((uint32_t)100U + policy->improvement_percent);
-    return (uint32_t)candidate->offer.head_score * UINT32_C(100) >= required;
+    return score_qualifies(candidate->offer.head_score, local_head_score,
+                           policy->improvement_percent);
 }
 
 void ucn_cluster_handover_candidate_note_result(

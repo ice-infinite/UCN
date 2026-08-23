@@ -105,18 +105,20 @@ static int test_offer_candidate_hysteresis_and_feasibility(void)
 
     ucn_cluster_handover_candidate_table_reset(&table);
     ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
-                    &table, &local, &foreign, &policy, 30U, &candidate) == UCN_OK);
+                    &table, &local, 800U, &foreign, &policy, 30U, &candidate) ==
+                UCN_OK);
     ASSERT_TRUE(candidate != NULL && candidate->score_samples == 1U);
     ASSERT_TRUE(!ucn_cluster_handover_candidate_is_eligible(candidate, 800U, 0U,
                                                              &policy, 30U));
     before = table;
     ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
-                    &table, &local, &foreign, &policy, 31U, &candidate) ==
+                    &table, &local, 800U, &foreign, &policy, 31U, &candidate) ==
                 UCN_ERR_REPLAY);
     ASSERT_TRUE(memcmp(&table, &before, sizeof(table)) == 0);
     foreign.nonce = 2U;
     ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
-                    &table, &local, &foreign, &policy, 51U, &candidate) == UCN_OK);
+                    &table, &local, 800U, &foreign, &policy, 51U, &candidate) ==
+                UCN_OK);
     ASSERT_TRUE(ucn_cluster_handover_candidate_is_eligible(candidate, 800U, 0U,
                                                             &policy, 51U));
     ucn_cluster_handover_candidate_note_result(candidate, true, &policy, 51U);
@@ -139,6 +141,113 @@ static int test_offer_candidate_hysteresis_and_feasibility(void)
     ASSERT_TRUE(ucn_cluster_handover_feasibility_evaluate(
                     &foreign, 3U, &policy, &feasibility) == UCN_OK &&
                 feasibility.admitted);
+    return 0;
+}
+
+/* CLV2-11-R07/R08: fresh packets are not automatically qualifying samples;
+ * a different proposal establishes a fresh nonce/hysteresis domain. */
+static int test_candidate_qualification_and_proposal_domains(void)
+{
+    ucn_cluster_epoch_t local = make_epoch(1U, 2U, 1U);
+    ucn_cluster_handover_offer_t foreign =
+        make_offer(2U, 100U, 2U, 10U, 11U, 1U);
+    ucn_cluster_handover_policy_t policy = make_policy();
+    ucn_cluster_handover_candidate_table_t table;
+    ucn_cluster_handover_candidate_table_t before;
+    ucn_cluster_handover_candidate_t *candidate = NULL;
+
+    ucn_cluster_handover_candidate_table_reset(&table);
+
+    /* threshold = 800 * 1.10 = 880.  870 is a fresh but unqualified offer. */
+    foreign.head_score = 870U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 30U, &candidate) ==
+                UCN_OK);
+    ASSERT_TRUE(candidate != NULL && candidate->score_samples == 0U &&
+                !ucn_cluster_handover_candidate_is_eligible(candidate, 800U, 0U,
+                                                              &policy, 30U));
+
+    foreign.nonce = 2U;
+    foreign.head_score = 890U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 31U, &candidate) ==
+                UCN_OK);
+    ASSERT_TRUE(candidate->score_samples == 1U &&
+                !ucn_cluster_handover_candidate_is_eligible(candidate, 800U, 0U,
+                                                              &policy, 31U));
+
+    foreign.nonce = 3U;
+    foreign.head_score = 870U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 32U, &candidate) ==
+                UCN_OK && candidate->score_samples == 0U);
+    foreign.nonce = 4U;
+    foreign.head_score = 890U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 33U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U);
+    foreign.nonce = 5U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 34U, &candidate) ==
+                UCN_OK && candidate->score_samples == 2U &&
+                ucn_cluster_handover_candidate_is_eligible(candidate, 800U, 0U,
+                                                            &policy, 34U));
+    /* A caller cannot reinterpret an old run under a changed local score or
+     * policy without first observing a fresh offer in that new context. */
+    ASSERT_TRUE(!ucn_cluster_handover_candidate_is_eligible(candidate, 805U, 0U,
+                                                             &policy, 34U));
+
+    /* Exact threshold is deliberately a qualified sample (>=). */
+    ucn_cluster_handover_candidate_table_reset(&table);
+    foreign = make_offer(2U, 200U, 2U, 20U, 21U, 1U);
+    foreign.head_score = 880U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 40U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U);
+    foreign.nonce = 2U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 41U, &candidate) ==
+                UCN_OK && candidate->score_samples == 2U &&
+                ucn_cluster_handover_candidate_is_eligible(candidate, 800U, 0U,
+                                                            &policy, 41U));
+
+    /* Full Epoch + Config define a new proposal, so a lower nonce is legal
+     * and old qualifying samples cannot cross the new Epoch boundary. */
+    foreign.epoch.term = 201U;
+    foreign.config_id = 21U;
+    foreign.config_hash = 22U;
+    foreign.nonce = 1U;
+    foreign.head_score = 900U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 50U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U &&
+                candidate->first_seen_ms == 50U &&
+                !ucn_cluster_handover_candidate_is_eligible(candidate, 800U, 0U,
+                                                              &policy, 50U));
+    before = table;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 51U, &candidate) ==
+                UCN_ERR_REPLAY && memcmp(&table, &before, sizeof(table)) == 0);
+
+    /* Compatibility changes also create a fresh proposal instead of
+     * inheriting the sample run; local threshold/policy changes reset only
+     * qualification history while retaining the same-proposal nonce gate. */
+    foreign.capabilities |= UINT16_C(0x0002);
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 52U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U &&
+                candidate->first_seen_ms == 52U);
+    foreign.nonce = 2U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 805U, &foreign, &policy, 53U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U &&
+                candidate->first_seen_ms == 53U);
+    foreign.nonce = 3U;
+    policy.required_capabilities |= UINT16_C(0x0002);
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 805U, &foreign, &policy, 54U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U &&
+                candidate->first_seen_ms == 54U);
     return 0;
 }
 
@@ -561,6 +670,7 @@ static int test_r06_begin_cannot_reopen_revoked_transaction(void)
 int main(void)
 {
     ASSERT_TRUE(test_offer_candidate_hysteresis_and_feasibility() == 0);
+    ASSERT_TRUE(test_candidate_qualification_and_proposal_domains() == 0);
     ASSERT_TRUE(test_foreign_handover_order_retry_and_member() == 0);
     ASSERT_TRUE(test_same_cluster_planned_transfer_and_timeout() == 0);
     ASSERT_TRUE(test_revoked_head_timeout_requires_observe() == 0);

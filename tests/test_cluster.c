@@ -8672,6 +8672,108 @@ static int cluster_test_stable_switchback(void)
  *   (4) same-cluster same-term different Head           -> CONFLICT,
  *       enters the TERM_CONFLICT safe wait; score and Node ID cannot
  *       choose a winner. */
+/* CLV2-03-R10: JOIN_PENDING re-target is a separate Epoch decision from
+ * active Authority.  Exercise the public RX path so foreign Term values
+ * cannot select different outcomes for the same foreign Cluster policy. */
+static int cluster_test_join_pending_epoch_domain_retarget(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *node;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    ucn_node_id_t source;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    node = &network.nodes[0];
+    source = network.nodes[1].node_id;
+    network.now_ms = 100U;
+    node->cluster.role = UCN_CLUSTER_ROLE_JOIN_PENDING;
+    node->cluster.cluster_id = 0U;
+    node->cluster.term = 0U;
+    node->cluster.head_node_id = 0U;
+    node->cluster.pending_cluster_id = 1U;
+    node->cluster.pending_term = 100U;
+    node->cluster.pending_head_node_id = source;
+    node->cluster.pending_head_score = 100U;
+    node->cluster.next_join_retry_ms = 77U;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_JOIN_PENDING;
+    node->cluster.transition_reason = UCN_CLUSTER_REASON_JOIN_INITIATED;
+    node->cluster.shadow_transition_count = 0U;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_ADVERTISE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 2U;
+    message.term = 1U;
+    message.head_node_id = source;
+    message.head_score = 9000U;
+    message.available_capacity = 4U;
+    message.lease_ms = 8000U;
+    message.nonce = 1U;
+
+    /* A/100 -> B/1 is foreign and re-targets without comparing 1 to 100. */
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, source, true, encoded,
+                                    sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING &&
+                node->cluster.pending_cluster_id == 2U &&
+                node->cluster.pending_term == 1U &&
+                node->cluster.pending_head_node_id == source &&
+                node->cluster.pending_head_score == 9000U &&
+                node->cluster.next_join_retry_ms == network.now_ms);
+
+    /* The opposite numeric ordering has the identical foreign policy. */
+    node->cluster.pending_cluster_id = 1U;
+    node->cluster.pending_term = 1U;
+    node->cluster.pending_head_node_id = source;
+    node->cluster.pending_head_score = 101U;
+    node->cluster.next_join_retry_ms = 78U;
+    message.term = 100U;
+    message.nonce = 2U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, source, true, encoded,
+                                    sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(node->cluster.pending_cluster_id == 2U &&
+                node->cluster.pending_term == 100U &&
+                node->cluster.pending_head_score == 9000U &&
+                node->cluster.next_join_retry_ms == network.now_ms);
+
+    /* Same Cluster only accepts a remote newer Term. */
+    node->cluster.pending_cluster_id = 1U;
+    node->cluster.pending_term = 2U;
+    node->cluster.pending_head_node_id = source;
+    node->cluster.pending_head_score = 102U;
+    node->cluster.next_join_retry_ms = 79U;
+    message.cluster_id = 1U;
+    message.term = 3U;
+    message.nonce = 3U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, source, true, encoded,
+                                    sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(node->cluster.pending_cluster_id == 1U &&
+                node->cluster.pending_term == 3U &&
+                node->cluster.pending_head_score == 9000U &&
+                node->cluster.next_join_retry_ms == network.now_ms);
+
+    /* A stale same-Cluster offer remains entirely outside retarget policy. */
+    node->cluster.pending_head_score = 103U;
+    node->cluster.next_join_retry_ms = 80U;
+    message.term = 2U;
+    message.head_score = 8000U;
+    message.nonce = 4U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, source, true, encoded,
+                                    sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(node->cluster.pending_cluster_id == 1U &&
+                node->cluster.pending_term == 3U &&
+                node->cluster.pending_head_node_id == source &&
+                node->cluster.pending_head_score == 103U &&
+                node->cluster.next_join_retry_ms == 80U &&
+                node->cluster.shadow_phase == UCN_CLUSTER_PHASE_JOIN_PENDING &&
+                node->cluster.shadow_transition_count == 0U);
+    return 0;
+}
+
 static int cluster_test_epoch_classified_head_offer(void)
 {
     cluster_test_network_t network;
@@ -11844,6 +11946,7 @@ int test_cluster(void)
      * yields, while same-cluster same-term CONFLICT enters the local safe
      * wait and never a foreign merge or score arbitration. */
     TEST_ASSERT(cluster_test_epoch_classified_head_offer() == 0);
+    TEST_ASSERT(cluster_test_join_pending_epoch_domain_retarget() == 0);
     TEST_ASSERT(cluster_test_global_higher_authority_pre_dispatch() == 0);
     TEST_ASSERT(cluster_test_global_term_conflict_pre_dispatch() == 0);
     TEST_ASSERT(cluster_test_candidate_lower_authority_sequence() == 0);
