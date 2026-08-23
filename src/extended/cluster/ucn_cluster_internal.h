@@ -238,6 +238,21 @@ ucn_cluster_candidate_t *find_candidate(ucn_cluster_t *cluster,
                                         ucn_node_id_t node_id);
 void set_detached(ucn_cluster_t *cluster, uint32_t now_ms,
                   uint32_t observation_ms);
+/* CLV2-M12 (12-01): recovery lineage capture at a Member/Backup fence
+ * exit (site-owned; must run BEFORE the Active/Pending clear). */
+void cluster_lineage_capture(ucn_cluster_t *cluster);
+/* CLV2-M12 (12-02): Recovery identity keyed on the full lineage. */
+ucn_result_t cluster_make_next_recovery_id(ucn_cluster_t *cluster,
+                                           uint32_t parent_cluster_id,
+                                           uint32_t parent_term,
+                                           uint32_t parent_config_id,
+                                           uint32_t recovery_round,
+                                           uint32_t *cluster_id);
+/* CLV2-M12 (12-03): sustained-stable-join lineage reset + avalanche mix
+ * shared with the recovery backoff jitter. */
+void cluster_lineage_reset_arm(ucn_cluster_t *cluster, uint32_t now_ms);
+void cluster_lineage_reset(ucn_cluster_t *cluster);
+uint32_t cluster_id_mix(uint32_t value);
 void cluster_history_note_stable_epoch(ucn_cluster_t *cluster,
                                        uint32_t cluster_id,
                                        uint32_t term,

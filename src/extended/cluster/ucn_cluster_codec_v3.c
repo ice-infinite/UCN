@@ -222,11 +222,15 @@ static void encode_trailing_12b(const ucn_cluster_message_t *message,
     case UCN_CLUSTER_MSG_RECOVERY_DECLARE:
         write_u32_be(output + 0U, message->recovery_nonce);
         write_u32_be(output + 4U, message->recovery_ttl_ms);
-        write_u32_be(output + 8U, 0U);
+        /* CLV2-M12 (12-04): previously zeroed; now carries the declaring
+         * Head's parent lineage identity for same-parent rank. */
+        write_u32_be(output + 8U, message->recovery_parent_cluster_id);
         break;
     case UCN_CLUSTER_MSG_RECOVERY_ACK:
-        write_u32_be(output + 0U, 0U);
-        write_u32_be(output + 4U, 0U);
+        /* CLV2-M12 (12-06): the ACK echoes the declare round (nonce) and
+         * the lineage binding (parent) so old-round ACKs are replayable. */
+        write_u32_be(output + 0U, message->recovery_nonce);
+        write_u32_be(output + 4U, message->recovery_parent_cluster_id);
         write_u32_be(output + 8U, 0U);
         break;
     default:
@@ -306,8 +310,14 @@ static void decode_trailing_12b(ucn_cluster_message_t *message,
     case UCN_CLUSTER_MSG_RECOVERY_DECLARE:
         message->recovery_nonce = read_u32_be(input + 0U);
         message->recovery_ttl_ms = read_u32_be(input + 4U);
+        /* CLV2-M12 (12-04): parent lineage identity; old frames read 0. */
+        message->recovery_parent_cluster_id = read_u32_be(input + 8U);
         break;
     case UCN_CLUSTER_MSG_RECOVERY_ACK:
+        /* CLV2-M12 (12-06): round echo + lineage binding; old ACK frames
+         * decode as 0 and keep the legacy-tolerant path. */
+        message->recovery_nonce = read_u32_be(input + 0U);
+        message->recovery_parent_cluster_id = read_u32_be(input + 4U);
         break;
     default:
         break;

@@ -434,6 +434,29 @@ void consider_head_offer(
         cluster->stats.stale_messages++;
         return;
     }
+    /* CLV2-M12 (12-07): stable precedence.  A recovery-domain Member that
+     * sees a legal stable Head offer of its own parent lineage reclaims
+     * to it via the ordered JOIN_PENDING path - no score comparison, no
+     * capacity gate, no 11-08 Member freeze.  The 03-06 stale gate has
+     * already rejected lower-Term parent offers, so term >= parent_term
+     * is a legal stable successor.  Foreign stable Heads remain excluded
+     * (they are not the parent lineage). */
+    if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+        ucn_cluster_recovery_scoped(cluster) &&
+        cluster->parent_cluster_id != 0U &&
+        candidate->cluster_id == cluster->parent_cluster_id &&
+        candidate->term >= cluster->parent_term) {
+        ucn_cluster_phase_t reclaim_phase =
+            cluster_phase_from_legacy_state(cluster, now_ms);
+
+        if (cluster_transition(cluster, reclaim_phase,
+                               UCN_CLUSTER_PHASE_JOIN_PENDING,
+                               UCN_CLUSTER_REASON_STABLE_RECLAIM,
+                               now_ms) == UCN_OK) {
+            begin_join_prepare_fields(cluster, candidate, now_ms);
+        }
+        return;
+    }
     /* A full Head must keep refreshing existing members.  Capacity zero only
      * rejects new joins; treating it as an unavailable current Head causes
      * valid members to expire their lease and create a split brain. */

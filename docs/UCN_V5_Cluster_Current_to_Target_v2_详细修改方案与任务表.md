@@ -23,7 +23,7 @@
 > | M09 Backup 双缓冲 | AUDIT HOLD / BLOCKED BY M08 WAIT EXTERNAL（R01 外审 GO，受限实验软件范围） | 09-01..11 已完成分项和全量自审；R01 已获外审 GO，但 M08 仍为 SELF-AUDIT PASS / WAIT EXTERNAL，M05 顶层 AUDIT HOLD 不解除 | 仅建立独立 Backup mirror/同步合同与 production-archive 单元测试；不接入 v4 production RX/TX/FSM、Authority 或 Takeover 提交。 |
 > | M10 Final Takeover | AUDIT HOLD / R31–R34 SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW（受控实验范围） | 外审确认的通用 EPOCH bypass、durable terminal、连续接管与覆盖声明四项缺陷均已整改并完成矩阵自审；尚未获得本轮外部复审签字 | 默认产品仍不接入 v4 RX/TX/FSM、Authority、encoder 或实机结论；M10 实验 archive 也不得视为可放行，待 R31–R34 独立复审。 |
 > | M11 Merge/Handover | DONE / EXTERNAL RE-REVIEW PASS / LIMITED EXPERIMENTAL GO | R01–R08-B 全部获外审签字；R08-A 关闭同槽 ABA，R08-B 关闭 expiry 删除 replay-history / hold-down 的生命周期旁路。 | 仅限 caller-owned、default-OFF 实验 archive。M05 顶层 `AUDIT HOLD`、M08 `WAIT EXTERNAL`、M10 外审等待仍不解除；M12 不因此获授权，且不得把 M11 接入 production v4 RX/TX/FSM、Authority、Adapter 或实机结论。 |
-> | M12 RecoveryLineage | TODO | — | — |
+> | M12 RecoveryLineage | DONE / SELF-AUDIT PASS / WAIT EXTERNAL | 12-01..12-10 完成（合并提交 816467d） | 逐节点自审全部 PASS（OP-360..369 + 9 份分项报告）；里程碑门禁 3/3、禁止事项 3/3；FULL/ASan/LITE/NANO 全绿；OBSERVED 30 零违例；Golden 8b80b08；cluster_bytes 1616。等待外部复审；M05/M08/M10 边界不解除。 |
 > | M13 Rekey/No-wrap | TODO | — | — |
 > | M14 收敛/发布 | TODO | — | — |
 >

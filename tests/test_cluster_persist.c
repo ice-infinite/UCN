@@ -2016,6 +2016,52 @@ static void cluster_persist_runtime_seed_active(
     probe->store.stored.snapshot.max_epoch.head_node_id = head_node_id;
 }
 
+/* CLV2-M12 (12-09): recovery identity non-reuse across a controlled boot.
+ * Boot 1 establishes a durable incarnation; the recovery ID derives from it.
+ * Boot 2 (restart) loads the persisted snapshot, establishes a strictly
+ * higher incarnation, and derives a DIFFERENT recovery ID - so a restart
+ * can never re-derive the pre-restart recovery identity. */
+static int cluster_persist_test_recovery_identity_restart(void)
+{
+    cluster_persist_runtime_probe_t probe;
+    ucn_cluster_persist_provider_t provider;
+    ucn_cluster_config_t config;
+    ucn_cluster_t cluster;
+    uint32_t id1;
+    uint32_t id2;
+    uint32_t incarnation1;
+
+    /* Boot 1: factory empty -> a durable incarnation is established. */
+    (void)memset(&probe, 0, sizeof(probe));
+    persist_fake_set_factory_empty(&probe.store);
+    cluster_persist_runtime_provider(&provider, &probe);
+    cluster_persist_runtime_config(&config, &probe, &provider, true);
+    TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
+    incarnation1 = cluster.config.cluster_id_incarnation;
+    TEST_ASSERT(incarnation1 != 0U);
+    TEST_ASSERT(probe.store.stored.snapshot.boot_incarnation == incarnation1);
+    TEST_ASSERT(cluster_make_next_recovery_id(
+                    &cluster, 9U, 7U, 0U, 0U, &id1) == UCN_OK);
+    TEST_ASSERT(id1 != 9U && id1 != 0U && id1 != UCN_NODE_BROADCAST);
+
+    /* Boot 2 (restart): the persisted snapshot carries incarnation1; the
+     * boot boundary derives strictly-higher incarnation1+1. */
+    (void)memset(&probe, 0, sizeof(probe));
+    cluster_persist_runtime_seed_active(&probe, 9U, 1U);
+    probe.store.stored.snapshot.boot_incarnation = incarnation1;
+    cluster_persist_runtime_provider(&provider, &probe);
+    cluster_persist_runtime_config(&config, &probe, &provider, true);
+    TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
+    TEST_ASSERT(cluster.config.cluster_id_incarnation == incarnation1 + 1U);
+    TEST_ASSERT(probe.store.stored.snapshot.boot_incarnation ==
+                incarnation1 + 1U);
+    TEST_ASSERT(cluster_make_next_recovery_id(
+                    &cluster, 9U, 7U, 0U, 0U, &id2) == UCN_OK);
+    TEST_ASSERT(id2 != id1);
+    TEST_ASSERT(id2 != 9U && id2 != 0U && id2 != UCN_NODE_BROADCAST);
+    return 0;
+}
+
 static int cluster_persist_test_runtime_head_paths(void)
 {
     cluster_persist_runtime_probe_t probe;
@@ -2446,6 +2492,8 @@ int test_cluster_persist(void)
     TEST_ASSERT(cluster_persist_test_runtime_reentrancy_gate() == 0);
     TEST_ASSERT(cluster_persist_test_runtime_failure_containment() == 0);
     TEST_ASSERT(cluster_persist_test_runtime_head_paths() == 0);
+    /* CLV2-M12 (12-09): recovery identity non-reuse across restart. */
+    TEST_ASSERT(cluster_persist_test_recovery_identity_restart() == 0);
     TEST_ASSERT(cluster_persist_test_dual_slot_crash_matrix() == 0);
     TEST_ASSERT(cluster_persist_test_dual_slot_legacy_prepared_recovery() == 0);
     TEST_ASSERT(provider.load(provider.context, &loaded) == UCN_OK);

@@ -568,6 +568,54 @@ static int test_partition_quorum_property(void)
     return 0;
 }
 
+static int test_recovery_scoped_cluster_never_gets_authority(void)
+{
+    authority_fixture_t fixture;
+    ucn_result_t result;
+
+    ASSERT_TRUE(fixture_init(&fixture) == 0);
+    /* Detach the fixture's original bind so the recovery staging looks
+     * like an unattached recovery control domain. */
+    fixture.cluster.authority_runtime = NULL;
+    fixture.cluster.authority_active = false;
+
+    /* A recovery control domain: role RECOVERY_HEAD, active identity is
+     * the recovery domain ID. */
+    fixture.cluster.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    fixture.cluster.cluster_id = 77U;
+    fixture.cluster.recovery_cluster_id = 77U;
+    fixture.cluster.parent_cluster_id = 5U;
+    ASSERT_TRUE(ucn_cluster_recovery_scoped(&fixture.cluster));
+    result = ucn_cluster_authority_runtime_init(
+        &fixture.runtime, &fixture.cluster, &fixture.stable,
+        &fixture.timing, fixture.now_ms);
+    ASSERT_TRUE(result == UCN_ERR_STATE);
+    /* The scope exclusion runs FIRST: the Owner never re-binds and no
+     * authority-active permission appears. */
+    ASSERT_TRUE(fixture.cluster.authority_runtime == NULL);
+    ASSERT_TRUE(fixture.cluster.authority_active == false);
+
+    /* A recovery-domain MEMBER is equally excluded. */
+    fixture.cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    fixture.cluster.cluster_id = 77U;
+    fixture.cluster.recovery_cluster_id = 77U;
+    ASSERT_TRUE(ucn_cluster_recovery_scoped(&fixture.cluster));
+    result = ucn_cluster_authority_runtime_init(
+        &fixture.runtime, &fixture.cluster, &fixture.stable,
+        &fixture.timing, fixture.now_ms);
+    ASSERT_TRUE(result == UCN_ERR_STATE);
+    ASSERT_TRUE(fixture.cluster.authority_runtime == NULL);
+    ASSERT_TRUE(fixture.cluster.authority_active == false);
+
+    /* The same cluster identity is NOT recovery-scoped once the domain
+     * dissolves (recovery_cluster_id cleared) - the normal stable bind
+     * path stays available for a future stable identity. */
+    fixture.cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    fixture.cluster.recovery_cluster_id = 0U;
+    ASSERT_TRUE(!ucn_cluster_recovery_scoped(&fixture.cluster));
+    return 0;
+}
+
 int main(void)
 {
     int result = 0;
@@ -582,6 +630,7 @@ int main(void)
     result |= test_member_takeover_grace_and_owner_budget();
     result |= test_fence_causes_and_invalid_profile_no_write();
     result |= test_partition_quorum_property();
+    result |= test_recovery_scoped_cluster_never_gets_authority();
     if (result == 0) {
         printf("Cluster Authority tests passed.\\n");
     }

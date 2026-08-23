@@ -21,14 +21,77 @@
 #include "ucn_cluster_internal.h"
 
 
+/* CLV2-M12 (12-04): pure deterministic Recovery rank comparator.  Terms
+ * are compared ONLY between equal non-zero parents (the M03 milestone
+ * gate); different parents are UNRANKABLE and go to ordinary Merge
+ * (M11 handover), never to a recovery-arbitration cross-yield. */
+ucn_cluster_recovery_rank_relation_t ucn_cluster_recovery_rank_compare(
+    const ucn_cluster_recovery_rank_t *a,
+    const ucn_cluster_recovery_rank_t *b)
+{
+    if (a == NULL || b == NULL || a->parent_cluster_id == 0U ||
+        b->parent_cluster_id == 0U ||
+        a->parent_cluster_id != b->parent_cluster_id) {
+        return UCN_CLUSTER_RECOVERY_RANK_UNRANKABLE;
+    }
+    if (a->parent_term != b->parent_term) {
+        return a->parent_term > b->parent_term
+                   ? UCN_CLUSTER_RECOVERY_RANK_A_WINS
+                   : UCN_CLUSTER_RECOVERY_RANK_B_WINS;
+    }
+    if (a->parent_config_id != b->parent_config_id) {
+        return a->parent_config_id > b->parent_config_id
+                   ? UCN_CLUSTER_RECOVERY_RANK_A_WINS
+                   : UCN_CLUSTER_RECOVERY_RANK_B_WINS;
+    }
+    if (a->score != b->score) {
+        return a->score > b->score ? UCN_CLUSTER_RECOVERY_RANK_A_WINS
+                                   : UCN_CLUSTER_RECOVERY_RANK_B_WINS;
+    }
+    if (a->node_id != b->node_id) {
+        return a->node_id < b->node_id ? UCN_CLUSTER_RECOVERY_RANK_A_WINS
+                                       : UCN_CLUSTER_RECOVERY_RANK_B_WINS;
+    }
+    return UCN_CLUSTER_RECOVERY_RANK_EQUAL;
+}
+
 uint32_t compute_recovery_backoff(const ucn_cluster_t *cluster)
 {
-    /* Lower Node ID declares first in the same visibility domain.  The
-     * recovery nonce participates in the conflict arbitration below
-     * (handlers compare (nonce, node_id) lexicographically), so the
-     * backoff only needs to break the initial tie. */
-    return cluster->config.local_node_id %
-           cluster->config.recovery_backoff_max_ms;
+    uint32_t base = cluster->config.recovery_backoff_base_ms;
+    uint32_t exponent;
+    uint32_t exponential;
+    uint32_t jitter;
+    uint32_t backoff;
+
+    /* CLV2-M12 (12-03): bounded exponential escalation - attempt 0 waits
+     * base, attempt 1 waits 2x, ... capped at 16x and then clamped to the
+     * configured maximum.  This replaces the M01 zero-backoff degenerate
+     * spin (node_id % max could compute 0 and never leave RECOVERY_OBSERVE).
+     * The base is validated non-zero and <= max, so the result is always a
+     * non-zero valid duration. */
+    exponent = cluster->recovery_round < 4U ? cluster->recovery_round : 4U;
+    exponential = base;
+    while (exponent != 0U) {
+        if (exponential >= cluster->config.recovery_backoff_max_ms / 2U) {
+            exponential = cluster->config.recovery_backoff_max_ms;
+            break;
+        }
+        exponential <<= 1U;
+        exponent--;
+    }
+    /* Deterministic jitter derived from (parent, round, node): every node
+     * and round computes the same value repeatedly, but different nodes /
+     * rounds de-synchronise, so partitioned islands do not re-collide at a
+     * fixed interval.  Bounded to one quarter of the base. */
+    jitter = cluster_id_mix(cluster->parent_cluster_id ^
+                            (cluster->recovery_round << 16U) ^
+                            cluster->config.local_node_id) %
+             (base / 4U + 1U);
+    backoff = exponential + jitter;
+    if (backoff > cluster->config.recovery_backoff_max_ms) {
+        backoff = cluster->config.recovery_backoff_max_ms;
+    }
+    return backoff;
 }
 
 /* C07.7 P0-2: a Recovery Head may only be declared when this node can see
@@ -68,8 +131,11 @@ bool recovery_quorum_met(const ucn_cluster_t *cluster)
     if (mirror_count == 0U) {
         size_t visible_any = 0U;
 
-        /* No membership mirror (plain member): any visible ADMITTED peer
-         * proves this node is not fully isolated. */
+        /* CLV2-M12 (12-08): plain member (no Backup mirror): the product
+         * configures min_recovery_peers (default 1, which forbids a fully
+         * isolated self-declaration); a higher value raises the island
+         * formation bar.  A Backup with a mirror keeps the DISTINCT
+         * majority threshold below. */
         for (index = 0U; index < UCN_CLUSTER_MAX_PEERS; ++index) {
             if (cluster->peers[index].occupied &&
                 cluster->peers[index].neighbor_state ==
@@ -77,7 +143,7 @@ bool recovery_quorum_met(const ucn_cluster_t *cluster)
                 visible_any++;
             }
         }
-        return visible_any >= 1U;
+        return visible_any >= cluster->config.min_recovery_peers;
     }
     required = (uint16_t)(mirror_count / 2U + 1U);
     return visible_mirror >= required;
@@ -93,10 +159,14 @@ void send_recovery_declare(ucn_cluster_t *cluster)
     message.type = UCN_CLUSTER_MSG_RECOVERY_DECLARE;
     message.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
     message.cluster_id = cluster->cluster_id;
-    message.term = 1U;
+    message.term = cluster->term; /* mirrors parent_term when lineage is set */
     message.head_node_id = cluster->config.local_node_id;
     message.recovery_nonce = cluster->recovery_nonce;
     message.recovery_ttl_ms = cluster->config.recovery_head_ttl_ms;
+    /* CLV2-M12 (12-04): same-parent rank arbitration needs the parent
+     * identity on the wire (0 = legacy frame, ranked via the old
+     * (nonce, node_id) fallback). */
+    message.recovery_parent_cluster_id = cluster->parent_cluster_id;
     for (index = 0U; index < UCN_CLUSTER_MAX_PEERS; ++index) {
         if (cluster->peers[index].occupied &&
             cluster->peers[index].neighbor_state == UCN_NEIGHBOR_ADMITTED) {
@@ -122,7 +192,10 @@ void declare_recovery_head(ucn_cluster_t *cluster, uint32_t recovery_cluster_id,
     cluster->role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
     cluster->recovery_cluster_id = recovery_cluster_id;
     cluster->cluster_id = cluster->recovery_cluster_id;
-    cluster->term = 1U;
+    /* CLV2-M12 (12-04): the recovery control domain's epoch term mirrors
+     * the parent term (lineage authority).  Without captured lineage the
+     * legacy term 1 is kept so staged/legacy paths are unchanged. */
+    cluster->term = (cluster->parent_term != 0U) ? cluster->parent_term : 1U;
     cluster->head_node_id = cluster->config.local_node_id;
     cluster->current_head_score = cluster->config.head_score;
     cluster->role_since_ms = now_ms;
@@ -139,6 +212,11 @@ void declare_recovery_head(ucn_cluster_t *cluster, uint32_t recovery_cluster_id,
 
 void stepdown_recovery_head(ucn_cluster_t *cluster, uint32_t now_ms)
 {
+    /* CLV2-M12 (12-03): every TTL expiry or arbitration loss escalates the
+     * attempt counter, which both escalates the exponential backoff and
+     * derives a fresh Recovery ID (12-02).  A sustained stable join resets
+     * the round via cluster_lineage_reset(). */
+    cluster->recovery_round++;
     cluster->recovery_cooldown_until_ms = ucn_deadline_from_now(
         now_ms, cluster->config.recovery_observation_ms);
     cluster->recovery_cluster_id = 0U;
@@ -181,18 +259,57 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
         !ucn_deadline_expired(now_ms, cluster->head_lease_expires_at_ms)) {
         return UCN_ERR_ACCESS;
     }
-    /* C07.7 P0-3: deterministic (recovery_nonce, node-id) arbitration.
-     * A node that already started its own recovery backoff only defers to
-     * a strictly smaller (nonce, node_id) contender; a node that has not
-     * started backoff yet (recovery_nonce == 0) always accepts.  The
-     * comparison is anti-symmetric so two contenders can never both join
-     * each other and never both keep declaring.  A RECOVERY_HEAD that sees
-     * a strictly smaller contender yields the role and joins it. */
-    if (cluster->recovery_nonce != 0U &&
-        !(message->recovery_nonce < cluster->recovery_nonce ||
-          (message->recovery_nonce == cluster->recovery_nonce &&
-           source < cluster->config.local_node_id))) {
-        return UCN_OK; /* we keep contending; ignore this candidate */
+    /* CLV2-M12 (12-06): a recovery-domain member rejects an old-round
+     * DECLARE from its CURRENT Head.  recovery_nonce is a monotonic
+     * per-node counter (next_nonce), so the same source with a smaller
+     * nonce is a delayed old round -> REPLAY with zero writes; the same
+     * nonce with a different cluster_id is inconsistent -> REPLAY.  A
+     * strictly larger nonce is the Head's next round and follows the
+     * normal rank/join path below. */
+    if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+        cluster->recovery_cluster_id != 0U &&
+        cluster->known_recovery_source == source &&
+        message->recovery_nonce != 0U &&
+        (message->recovery_nonce < cluster->accepted_recovery_nonce ||
+         (message->recovery_nonce == cluster->accepted_recovery_nonce &&
+          message->cluster_id != cluster->recovery_cluster_id))) {
+        cluster->stats.stale_messages++;
+        return UCN_ERR_REPLAY;
+    }
+    /* CLV2-M12 (12-04): lineage-aware deterministic rank arbitration.
+     * - Legacy frames (no parent lineage on the wire, or no local
+     *   lineage) keep the M01 (recovery_nonce, node_id) fallback.
+     * - Lineage frames from a DIFFERENT parent are never rank-merged:
+     *   each island keeps contending and ordinary Merge (M11 handover)
+     *   owns cross-parent convergence.  Terms are never compared across
+     *   different parents (M03 milestone gate).
+     * - Same-parent lineage frames rank by parent_term DESC, then
+     *   node_id ASC.  (score/config are not carried on the frozen v3
+     *   DECLARE wire; the full comparator contract serves local/v4
+     *   ranking - see ucn_cluster_recovery_rank_compare.) */
+    if (message->recovery_parent_cluster_id != 0U &&
+        cluster->parent_cluster_id != 0U &&
+        message->recovery_parent_cluster_id != cluster->parent_cluster_id) {
+        return UCN_OK; /* different parent: keep contending, never cross-yield */
+    }
+    if (message->recovery_parent_cluster_id != 0U &&
+        cluster->parent_cluster_id != 0U &&
+        cluster->recovery_nonce != 0U) {
+        /* Same-parent lineage arbitration.  A node that has not started
+         * its own backoff yet still always accepts (legacy rule). */
+        bool yield_to_candidate =
+            (message->term > cluster->parent_term) ||
+            (message->term == cluster->parent_term &&
+             source < cluster->config.local_node_id);
+
+        if (!yield_to_candidate) {
+            return UCN_OK; /* we keep contending; ignore this candidate */
+        }
+    } else if (cluster->recovery_nonce != 0U &&
+               !(message->recovery_nonce < cluster->recovery_nonce ||
+                 (message->recovery_nonce == cluster->recovery_nonce &&
+                  source < cluster->config.local_node_id))) {
+        return UCN_OK; /* legacy fallback: we keep contending */
     }
     if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
         /* CLV2-01-04f.4: losing the Recovery arbitration to a strictly
@@ -291,6 +408,10 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
     ack.cluster_id = message->cluster_id;
     ack.term = message->term;
     ack.head_node_id = source;
+    /* CLV2-M12 (12-06): the ACK echoes the exact declare round (nonce) and
+     * lineage binding (parent), so the Head can reject old-round ACKs. */
+    ack.recovery_nonce = message->recovery_nonce;
+    ack.recovery_parent_cluster_id = message->recovery_parent_cluster_id;
     return send_cluster_message(cluster, source, &ack);
 }
 
@@ -304,6 +425,20 @@ ucn_result_t handle_recovery_ack(ucn_cluster_t *cluster,
     if (cluster->role != UCN_CLUSTER_ROLE_RECOVERY_HEAD ||
         message->cluster_id != cluster->recovery_cluster_id ||
         message->head_node_id != cluster->config.local_node_id) {
+        return UCN_ERR_ACCESS;
+    }
+    /* CLV2-M12 (12-06): the ACK is bound to the exact declare round and
+     * lineage.  A non-zero nonce that differs from the current round is an
+     * old-round ACK -> REPLAY with zero writes.  A non-zero parent binding
+     * that differs from ours is a different-parent island -> ACCESS.
+     * Zero fields keep the legacy/staged frame tolerance. */
+    if (message->recovery_nonce != 0U &&
+        message->recovery_nonce != cluster->recovery_nonce) {
+        cluster->stats.stale_messages++;
+        return UCN_ERR_REPLAY;
+    }
+    if (message->recovery_parent_cluster_id != 0U &&
+        message->recovery_parent_cluster_id != cluster->parent_cluster_id) {
         return UCN_ERR_ACCESS;
     }
     /* C07.7 P0-1: track the acknowledged member so the recovery Cluster
