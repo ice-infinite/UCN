@@ -353,10 +353,6 @@ void begin_ordered_stepdown(ucn_cluster_t *cluster,
                             const ucn_cluster_candidate_t *candidate,
                             uint32_t now_ms);
 ucn_result_t backup_challenge(ucn_cluster_t *cluster, uint32_t now_ms);
-ucn_result_t backup_challenge_after_persistence(
-    ucn_cluster_t *cluster,
-    const ucn_cluster_persist_state_t *durable_state,
-    uint32_t now_ms);
 
 /* Helpers the merge module calls but which stay in ucn_cluster.c core
  * (same exposure rule: de-static only, bodies untouched). */

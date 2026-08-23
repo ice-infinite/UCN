@@ -498,9 +498,9 @@ void cluster_shadow_sync(ucn_cluster_t *cluster,
  *
  * Deliberately EXCLUDED pairs (never allowed, review A/B):
  *   HEAD_NO_BACKUP / HEAD_BACKUP_ASSIGNING / HEAD_BACKUP_SYNCING /
- *   HEAD_STABLE -> ELECTION   : role CANDIDATE is written only by
- *       backup_challenge (BACKUP-only) and start_election (reached only
- *       from DETACHED with recovery_eligible == false); no HEAD path.
+ *   HEAD_STABLE -> ELECTION   : role CANDIDATE is written by
+ *       start_election (reached only from DETACHED with
+ *       recovery_eligible == false); no HEAD path.
  *   HEAD_NO_BACKUP / HEAD_BACKUP_ASSIGNING / HEAD_BACKUP_SYNCING /
  *   HEAD_STABLE -> DETACHED_OBSERVE : set_detached() is never called
  *       from a HEAD-role site.
@@ -674,7 +674,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         /* Primary lost (eligible): step L5028 (eligible=true L5030) + backup_clear_sync() L2736 */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) |
-        /* score challenge: backup_challenge() L2412 (role=CANDIDATE L2424) */
+        /* Reserved legacy relation; M11 disables v3 score challenge. */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION) |
         /* newer-Term Head: process_higher_authority() + backup_clear_sync()
          * + begin_join() (CLV2-M03 03-04 RX pre-dispatch). */
@@ -692,7 +692,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
          * RESYNC_STARTED) - the pair was DIRECT all along and is now
          * actually committed at the site */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_BACKUP_SYNCING) |
-        /* score challenge: backup_challenge() L2412 */
+        /* Reserved legacy relation; M11 disables v3 score challenge. */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION) |
         /* newer-Term Head: process_higher_authority() (CLV2-M03 03-04). */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
@@ -713,7 +713,7 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING) |
         /* HEAD_TAKEOVER / recovery: handle_head_takeover() L3504 */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_MEMBER_ACTIVE) |
-        /* score challenge: backup_challenge() L2412 */
+        /* Reserved legacy relation; M11 disables v3 score challenge. */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_ELECTION),
 
     [UCN_CLUSTER_PHASE_STEPPING_DOWN] =
@@ -787,9 +787,9 @@ static bool cluster_transition_is_allowed(ucn_cluster_phase_t old_phase,
  * that saw BACKUP_ASSIGN for another node KEEPS that knowledge through
  * MEMBER_ACTIVE), begin_join() does NOT clear the mirror (only the
  * BACKUP-specific same-cluster-higher-term path runs backup_clear_sync()
- * BEFORE begin_join, at the site), and backup_challenge() clears
- * ready/syncing/deadlines/takeover but NOT members[] or backup_generation
- * - so the special exits stay at the SITES during 01-04b..f wiring.  Only
+ * BEFORE begin_join, at the site).  M11 retires the old score-challenge
+ * site, so no default-product path clears Backup state merely for score.
+ * The remaining special exits stay at the SITES during 01-04b..f wiring. Only
  * after every inbound site of a phase is migrated may a common cleanup be
  * re-merged into a single entry action here.  CLV2-01-04e.7 (human NIT):
  * the former "fields a site writes after the call are fine: the
@@ -836,9 +836,8 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         break;
     case UCN_CLUSTER_PHASE_ELECTION:
 
-        /* role only: start_election() L4055 / backup_challenge() L2412
-
-         * write role=CANDIDATE; their mirror clears are site-owned and
+        /* role only: start_election() writes role=CANDIDATE; its mirror
+         * clears are site-owned and
          * must NOT be replayed here (members[]/backup_generation survive
          * a challenge, exactly as the real site leaves them). */
         cluster->role = UCN_CLUSTER_ROLE_CANDIDATE;

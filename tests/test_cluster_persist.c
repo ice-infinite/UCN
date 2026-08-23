@@ -2026,8 +2026,8 @@ static int cluster_persist_test_runtime_head_paths(void)
     ucn_cluster_persist_state_t durable_state;
     bool committed;
 
-    /* Backup score challenge: no candidate/Advertise before its same-Cluster
-     * next Term is durable. */
+    /* CLV2-M11: a live Backup score must not create a competing same-Cluster
+     * Term. The retired entry point performs zero Provider I/O. */
     (void)memset(&probe, 0, sizeof(probe));
     cluster_persist_runtime_seed_active(&probe, 5U, 7U);
     cluster_persist_runtime_provider(&provider, &probe);
@@ -2039,14 +2039,14 @@ static int cluster_persist_test_runtime_head_paths(void)
     cluster.head_node_id = 7U;
     cluster.backup_ready = true;
     cluster.shadow_phase = UCN_CLUSTER_PHASE_BACKUP_READY;
-    probe.store.submit_pending = true;
-    TEST_ASSERT(backup_challenge(&cluster, probe.now_ms) == UCN_OK &&
-                cluster.persistence_pending &&
-                cluster.role == UCN_CLUSTER_ROLE_BACKUP && probe.sent_count == 0U);
-    TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_OK &&
-                !cluster.persistence_pending &&
-                cluster.role == UCN_CLUSTER_ROLE_CANDIDATE && cluster.term == 6U &&
-                probe.sent_count == 0U);
+    {
+        ucn_cluster_t before = cluster;
+
+        TEST_ASSERT(backup_challenge(&cluster, probe.now_ms) ==
+                    UCN_ERR_UNSUPPORTED);
+        TEST_ASSERT(memcmp(&cluster, &before, sizeof(before)) == 0 &&
+                    !cluster.persistence_pending && probe.sent_count == 0U);
+    }
 
     /* Majority takeover uses the same gate: it cannot promote to Head until
      * the new Term+local Head Epoch has been reloaded from storage. */

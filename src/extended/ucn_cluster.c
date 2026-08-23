@@ -1543,9 +1543,11 @@ static ucn_result_t apply_persistence_resolution(
                                                 &resolution->durable_state,
                                                 now_ms);
     case CLUSTER_PERSIST_ACTION_BACKUP_CHALLENGE:
-        return backup_challenge_after_persistence(cluster,
-                                                  &resolution->durable_state,
-                                                  now_ms);
+        (void)now_ms;
+        /* CLV2-M11: no default-product path may complete the retired score
+         * challenge after a delayed provider callback. A pending legacy
+         * operation is fenced rather than turning into a competing Term. */
+        return UCN_ERR_UNSUPPORTED;
     case CLUSTER_PERSIST_ACTION_TAKEOVER_COMMIT:
         return complete_takeover_after_persistence(cluster,
                                                    &resolution->durable_state,
@@ -2379,12 +2381,9 @@ ucn_result_t ucn_cluster_test_complete_takeover(ucn_cluster_t *cluster,
     return complete_takeover(cluster, now_ms);
 }
 
-/* CLV2-01-04e.7: test-only view of the static score-challenge site
- * backup_challenge(), so tests can drive it directly and verify the full
- * site-side field effects (and the fail-closed rejection with zero
- * writes) without an end-of-RX shadow sync re-aligning the mirror.
- * backup_challenge() reports the outcome itself (UCN_OK on commit,
- * UCN_ERR_STATE on a rejected transition). */
+/* CLV2-M11 (11-09): test-only proof that the retired v3 score-challenge
+ * entry remains a no-write, fail-closed stub.  Planned transfer is modeled
+ * only by the separately gated experimental handover owner. */
 ucn_result_t ucn_cluster_test_backup_challenge(ucn_cluster_t *cluster,
                                                uint32_t now_ms)
 {

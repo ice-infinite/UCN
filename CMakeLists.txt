@@ -15,6 +15,8 @@ option(UCN_ENABLE_WIRE_V4_RELEASE_GATES
     "Build test-only optimized RFC4 codec gates (-O1/-O2/-O3 or MSVC equivalents)" OFF)
 option(UCN_BUILD_CLUSTER_TAKEOVER_EXPERIMENTAL
     "Build the isolated M10 frozen-majority takeover model (default OFF)" OFF)
+option(UCN_BUILD_CLUSTER_HANDOVER_EXPERIMENTAL
+    "Build the isolated M11 Merge/Handover model (default OFF)" OFF)
 set(UCN_PROFILE "FULL" CACHE STRING "UCN feature profile: NANO, LITE, or FULL")
 set_property(CACHE UCN_PROFILE PROPERTY STRINGS NANO LITE FULL)
 option(UCN_FEATURE_SERVICE "Build the orthogonal Service Router/Bridge" ON)
@@ -208,6 +210,22 @@ if(UCN_BUILD_CLUSTER_TAKEOVER_EXPERIMENTAL)
         UCN_CLUSTER_TAKEOVER_EXPERIMENTAL_ENABLED=1
     )
     target_compile_options(ucn_cluster_takeover_experimental PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+endif()
+
+# CLV2-M11: the Head-to-Head Merge/Handover model is a second, independent
+# opt-in archive.  It owns no production v4 codec, FSM, Authority or Adapter
+# integration; an application must explicitly link it for controlled tests.
+if(UCN_BUILD_CLUSTER_HANDOVER_EXPERIMENTAL)
+    add_library(ucn_cluster_handover_experimental STATIC EXCLUDE_FROM_ALL
+        src/extended/cluster/ucn_cluster_handover.c
+    )
+    target_link_libraries(ucn_cluster_handover_experimental PUBLIC ucn_cluster)
+    target_compile_definitions(ucn_cluster_handover_experimental PUBLIC
+        UCN_CLUSTER_HANDOVER_EXPERIMENTAL_ENABLED=1
+    )
+    target_compile_options(ucn_cluster_handover_experimental PRIVATE
         $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
     )
 endif()
@@ -571,6 +589,20 @@ if(UCN_BUILD_TESTS)
         )
         add_test(NAME ucn_cluster_takeover_tests
             COMMAND ucn_cluster_takeover_tests)
+    endif()
+
+    if(UCN_BUILD_CLUSTER_HANDOVER_EXPERIMENTAL)
+        add_executable(ucn_cluster_handover_tests
+            tests/test_cluster_handover.c
+        )
+        target_link_libraries(ucn_cluster_handover_tests PRIVATE
+            ucn_cluster_handover_experimental
+        )
+        target_compile_options(ucn_cluster_handover_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+        )
+        add_test(NAME ucn_cluster_handover_tests
+            COMMAND ucn_cluster_handover_tests)
     endif()
 
     # CLV2-07-01: independent production-archive value-model gate. It has no

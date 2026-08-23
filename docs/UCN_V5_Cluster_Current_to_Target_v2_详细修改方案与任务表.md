@@ -22,7 +22,7 @@
 > | M08 Authority/Fence | SELF-AUDIT PASS / WAIT EXTERNAL | 08-01..12、R31/R32 已完成（已提交 `5a237a0`） | Authority Fence 负责即时撤销数据面 Authority；`TERM_CONFLICT_WAIT` 保留为控制面安全等待，两者并存。M05 顶层 `AUDIT HOLD` 不解除。 |
 > | M09 Backup 双缓冲 | AUDIT HOLD / BLOCKED BY M08 WAIT EXTERNAL（R01 外审 GO，受限实验软件范围） | 09-01..11 已完成分项和全量自审；R01 已获外审 GO，但 M08 仍为 SELF-AUDIT PASS / WAIT EXTERNAL，M05 顶层 AUDIT HOLD 不解除 | 仅建立独立 Backup mirror/同步合同与 production-archive 单元测试；不接入 v4 production RX/TX/FSM、Authority 或 Takeover 提交。 |
 > | M10 Final Takeover | AUDIT HOLD / R31–R34 SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW（受控实验范围） | 外审确认的通用 EPOCH bypass、durable terminal、连续接管与覆盖声明四项缺陷均已整改并完成矩阵自审；尚未获得本轮外部复审签字 | 默认产品仍不接入 v4 RX/TX/FSM、Authority、encoder 或实机结论；M10 实验 archive 也不得视为可放行，待 R31–R34 独立复审。 |
-> | M11 Merge/Handover | TODO | — | — |
+> | M11 Merge/Handover | DONE / 外部复审 GO（受限实验范围） | R01–R06-B 已闭环；外审确认 re-entry Fence、Reset/Begin fail-closed、三类终态重开拒绝、41/41 M11 配置 CTest 与默认产品隔离均成立 | 仅签 caller-owned、default-OFF 实验模型。M05 顶层 `AUDIT HOLD`、M08 `WAIT EXTERNAL` 与 M10 外审等待均不解除；不得把 M11 接入 production v4 RX/TX/FSM、Authority、Adapter 或实机结论。 |
 > | M12 RecoveryLineage | TODO | — | — |
 > | M13 Rekey/No-wrap | TODO | — | — |
 > | M14 收敛/发布 | TODO | — | — |
@@ -704,22 +704,31 @@ duplicate/replay/reorder
 
 **目标：** 删除跨簇 Term 比较和 Member 自主跳槽，使用带迟滞的 Head-to-Head 事务迁移。
 
-**依赖：** M10
+**依赖：** M10。当前 M10 尚待外部复审，但用户明确授权 M11 连续实施；因此本阶段仅在 default-OFF experimental archive 建模/验证，并同步撤除默认产品的旧 v3 自主 score 切换，不提前接通 v4 production RX/TX/FSM。
+
+**状态：** **AUDIT HOLD / R01–R06 CODE COMPLETE / WAIT EXTERNAL RE-REVIEW（受控实验范围）**。外审先后发现 Type 26..28 nonce 与冻结 RFC4 不一致、duration/serial 缺域、target durable 的无证据升级、公开 transaction 结构可越界，以及撤权 transaction 可被二次 Begin 覆盖等问题；整改后完整计划、分项/全量自审和外部审计入口见 `UCN_V5_Cluster_M11_MergeHandover_连续实施计划_2026-08-23.md`、`UCN_V5_Cluster_M11_分项与全量自审报告_2026-08-23.md`、`UCN_V5_Cluster_M11_外部审计材料_2026-08-23.md`。M11 仍不得进入 M12，等待重新独立外审。
 
 **里程碑门禁：** 不同 cluster_id 只走 Merge；同 cluster higher Term 只走 Authority；Merge 不会 score 乒乓。
 
 | 任务 ID | 优先级 | 依赖 | 主要文件/位置 | 具体修改任务 | 完成定义 / 测试 |
 |---|---:|---|---|---|---|
-| `CLV2-11-01` | P0 | M10 | Offer classifier | 最终删除所有 foreign cluster Term 比较；same-cluster authority 与 foreign merge 使用独立函数、统计和 Trace reason。 | 测试 Cluster B Term 100 不压制 Cluster A Term 2。 |
-| `CLV2-11-02` | P1 | 11-01 | Merge candidate state | 为 foreign Head 保存 score samples、cluster size、capacity、capabilities、tenure、hold-down；不复用普通 election candidate 的 same-cluster 语义。 | 数据过期和 replay 处理明确。 |
-| `CLV2-11-03` | P1 | 11-02 | Merge hysteresis | 实现 improvement threshold、required samples、head_min_tenure、merge_hold_down；Safety/higher authority 不受 hold-down 限制。 | 阈值附近抖动不触发迁移。 |
-| `CLV2-11-04` | P0 | 11-02 | Feasibility | Winner 必须确认容量、v4 capability、Config/Backup 策略可承接 losing cluster；capacity=0 不阻断发现，但阻断 HANDOVER_READY。 | 无法承接时保持两个稳定簇。 |
-| `CLV2-11-05` | P0 | 11-04 | Handover protocol | 实现 HANDOVER_PREPARE/READY/COMMIT transaction id、retry、replay fencing；Winner READY 后 Losing Head 才开始撤权。 | 旧/重复 Handover 消息幂等。 |
-| `CLV2-11-06` | P0 | 11-05 | Authority ordering | Losing Head 收到 READY 后先 `authority_active=false`，再向成员发送带 target 的 HEAD_STEPDOWN，最后 COMMIT/Join。 | Trace 证明不存在撤权后仍写 Authority。 |
-| `CLV2-11-07` | P0 | 11-05 | HEAD_STEPDOWN v4 | 携带 old epoch、target epoch、stepdown txid/nonce；Member、Provisional、Backup 可直接 JOIN target，不再先盲目 DETACHED。 | 目标丢失时回到 Observe，不使用旧 Head。 |
-| `CLV2-11-08` | P1 | 11-05 | Remove Member autonomous switch | 删除 `MEMBER` 因 score 直接 LEAVE/Join；Member 只刷新 current Head 或响应 Stepdown/Takeover/Lease failure。 | 不同成员看到不同 score 时 Cluster 不被撕裂。 |
-| `CLV2-11-09` | P1 | 11-05 | Live Backup leadership optimization | 把当前 `backup_challenge()` 的 term++ election 改为同簇 Planned Leadership Transfer/Handover；避免活 Primary 下制造竞争 Term。 | 优化失败时原 Head 保持稳定。 |
-| `CLV2-11-10` | P0 | 11-01..09 | Merge suite | 双簇容量、score 抖动、Handover 丢包、Winner 故障、Backup/Provisional 成员、hold-down 反向 score。 | 最终确定性单 winner 或安全保持双簇。 |
+| `CLV2-11-01` | P0 | M10 | Offer classifier | **DONE / SELF-AUDIT PASS**：独立 classifier 只以 Cluster ID 分类；foreign Term 不进入 authority 比较。 | `A/T2` 对 `B/T100` 为 FOREIGN_MERGE；默认 v3 Head 分支仍先按 Epoch 分类。 |
+| `CLV2-11-02` | P1 | 11-01 | Merge candidate state | **DONE / SELF-AUDIT PASS**：固定 4 槽保存 foreign identity、score samples、cluster size、capacity、capabilities、tenure、hold-down/replay。 | nonce replay、满槽和过期均有 no-write/有界回归。 |
+| `CLV2-11-03` | P1 | 11-02 | Merge hysteresis | **DONE / SELF-AUDIT PASS**：实现 improvement、连续样本、minimum tenure、hold-down；不把安全 authority 输入接入该迟滞。 | 阈值、样本不足、hold-down 和反向 score 定向回归通过。 |
+| `CLV2-11-04` | P0 | 11-02 | Feasibility | **DONE / SELF-AUDIT PASS**：READY 前精确检查容量、wire=v4、`BACKUP|JOINT_CONFIG|PERSISTENCE`、target Config 与 Backup policy。 | capacity/format/capability 拒绝不产生 READY；保持双簇。 |
+| `CLV2-11-05` | P0 | 11-04 | Handover protocol | **DONE / 外部复审 GO（受限实验范围）**：caller-owned Prepare/Ready/Commit 只绑定 RFC4 实际承载的 `{old_epoch,target_epoch,txid,target_config,mode,source}`；Type 26..28 的 nonce 固定为零，Type 9/29 才携带撤权后生成的 nonce。所有 Term、Config ID、txid 和 transaction deadline 走 checked serial/duration；撤权会写入不可由 public reset 清除的 re-entry Fence。 | duplicate Prepare/Ready/Commit 幂等；伪造 nonce、越阈值 serial、非法 duration、冲突消息，以及 Reset→Begin 均零写拒绝。 |
+| `CLV2-11-06` | P0 | 11-05 | Authority ordering | **DONE / SELF-AUDIT PASS**：trace 固定 `READY → revoke → Stepdown → Commit`；撤权后超时只进入 Observe，绝不恢复旧 Authority。 | 越序、未 READY、赢家/旧 Head故障均有定向回归。 |
+| `CLV2-11-07` | P0 | 11-05 | HEAD_STEPDOWN v4 | **DONE / SELF-AUDIT PASS**：Stepdown 绑定 old/target Epoch、txid/nonce；按 RFC4 Type 9 不携带目标 Config，禁止借此改 Config。 | Member/Provisional/Backup 可转 Join target；目标丢失转 Observe；伪造 Config 字段拒绝且 output 不写回。 |
+| `CLV2-11-08` | P1 | 11-05 | Remove Member autonomous switch | **DONE / SELF-AUDIT PASS**：默认 v3 Member 的 foreign/same score 样本只清候选计数，不再 `LEAVE/Join`。 | foreign `B/T100` 重复样本后 Member 仍停留 `A/T2`，无 queue/role 写入。 |
+| `CLV2-11-09` | P1 | 11-05 | Live Backup leadership optimization | **DONE / SELF-AUDIT PASS**：旧 `backup_challenge()` 及其异步 continuation 已删除/封闭为 no-write `UCN_ERR_UNSUPPORTED`；同簇优化只能走实验 Planned Transfer。 | exact next Term、confirmed Backup、same frozen Config、Backup READY 无 Authority；失败保持旧 Head。 |
+| `CLV2-11-10` | P0 | 11-01..09 | Merge suite | **DONE / 外部复审 GO（受限实验范围）**：组合覆盖双簇 capacity、抖动、retry/replay、赢家/撤权后旧 Head故障、Backup/Provisional 和 Stepdown，并新增 RFC typed 对照、duration/serial、target commit deadline/no-fake-durable、transaction corruption 与撤权 transaction 的 Begin/Reset→Begin 反例。 | 全量矩阵与边界扫描通过；结果仅限实验软件模型。 |
+| `CLV2-11-R01` | P0 | 11-05、RFC4 §6.1 | Type 26..28 nonce 边界 | **DONE / 外部复审 GO（受限实验范围）**：Prepare/Ready/Commit 的 typed `stepdown_nonce` 必为零且不加入 identity；nonce 仅由 Losing Head 在 READY 后撤权时生成，并仅写入 Type 9/29。 | raw/typed 对照覆盖 Type 26/27/28 零 nonce、伪造 nonce 零写拒绝，以及 Type 9 保留非零 fence nonce。 |
+| `CLV2-11-R02` | P1 | 11-02..05 | duration / serial 域 | **DONE / 外部复审 GO（受限实验范围）**：policy 的所有时间字段调用 `ucn_duration_is_valid()`；Epoch Term、Config ID、txid 使用 `UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD` checked 域。 | `INT32_MAX+1` duration、threshold 以外 Term/Config/txid 全部拒绝，deadline 与 transaction 不写。 |
+| `CLV2-11-R03` | P1 | 11-05、M04 | Target durable contract | **DONE / 外部复审 GO（受限实验范围）**：`TARGET_COMMITTED` 纳入 deadline；M11 无 Provider `submit→reload` 证明时 `mark_target_epoch_durable()` fail-closed，`target_authority_ready()` 恒为 false。 | unexpired fake Epoch、expired commit/mark、step deadline 均不能授予 Authority；超时只进 Observe/Abort。 |
+| `CLV2-11-R04` | P1 | 11-05 | Public transaction validity | **DONE / 外部复审 GO（受限实验范围）**：每个 transaction 入口先做 bounded structure validation；`trace_count <= 8`、trace enum、state/role/nonce/config/deadline 均 fail-closed。 | corrupt public transaction 不越界读取，所有 output/transaction 均保持不写。 |
+| `CLV2-11-R05` | P1 | 11-10 | Audit-proof coverage | **DONE / 外部复审 GO（受限实验范围）**：把上述 P0/P1 对抗输入转为正式 `ucn_cluster_handover_tests` 回归，并在 Debug/Release/跨 Profile 重新执行。 | 仅签 M11 实验 archive，不改变 M05/M08/M10 或任何 production 边界。 |
+| `CLV2-11-R06` | P0 | 11-05、11-06 | Revoked transaction re-begin fence | **DONE / 外部复审 GO（受限实验范围）**：`transaction_begin()` 只接受显式 reset 的零 transaction；参数合法但 object 为 active/terminal/non-reset 时在写入前返回 `UCN_ERR_STATE`（其它参数错误仍 no-write）。不得清除已撤权 trace 或重新写入 `local_authority_active=true`。 | Begin→Ready→Revoke 后，以及 Stepdown-sent、Commit-sent 三阶段重复 Begin 均逐字节不写、保持无 Authority；默认产品仍无 M11 接线。 |
+| `CLV2-11-R06-B` | P0 | R06 | Public reset re-entry bypass | **DONE / 外部复审 GO（受限实验范围）**：`revoke_authority()` 写入 implementation-owned、不可逆的 Authority re-entry Fence；任何非零 Fence 的 transaction 调用 public `transaction_reset()` 必须 no-op，随后 Begin 仍只能返回 `UCN_ERR_STATE`。Fence 同时纳入 public transaction 的结构合法性，伪造非零值 fail-closed。 | `Revoke→Reset→Begin`、`Stepdown→Reset→Begin`、`Commit→Reset→Begin` 均逐字节 no-write、保持 `local_authority_active=false`；伪造 Fence 的 Reset/输出同样 no-write；默认产品仍无 M11 接线。 |
 
 ## 本里程碑禁止事项
 - 禁止跨簇比 Term。

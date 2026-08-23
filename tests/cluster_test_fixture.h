@@ -108,13 +108,9 @@ ucn_result_t ucn_cluster_test_start_takeover(ucn_cluster_t *cluster,
 ucn_result_t ucn_cluster_test_complete_takeover(ucn_cluster_t *cluster,
                                                 uint32_t now_ms);
 
-/* CLV2-01-04e.7: test-only view of the static score-challenge site
- * backup_challenge() (BACKUP_SYNCING / BACKUP_READY / BACKUP_TAKEOVER ->
- * ELECTION), so tests can drive it directly and verify the full
- * site-side field effects (and the fail-closed rejection with zero
- * writes) without an end-of-RX shadow sync re-aligning the mirror.
- * Returns UCN_OK when the transition committed, UCN_ERR_STATE when it
- * was rejected (fail closed). */
+/* CLV2-M11 (11-09): test-only view of the retired v3 score challenge.
+ * It must return UCN_ERR_UNSUPPORTED with no writes; a durable planned
+ * transfer belongs to the separate, default-OFF handover experiment. */
 ucn_result_t ucn_cluster_test_backup_challenge(ucn_cluster_t *cluster,
                                                uint32_t now_ms);
 
