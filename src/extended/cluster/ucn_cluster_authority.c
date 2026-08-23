@@ -369,6 +369,13 @@ ucn_result_t ucn_cluster_authority_runtime_init(
     ucn_cluster_authority_runtime_t candidate;
     ucn_cluster_phase_t phase;
 
+    /* CLV2-M12 (12-05): a recovery control domain only ever holds
+     * recovery-local authority.  It must never be published as parent
+     * Stable Authority, so the Owner refuses to bind it - this check runs
+     * FIRST so no config/timing detail can bypass the scope exclusion. */
+    if (cluster != NULL && ucn_cluster_recovery_scoped(cluster)) {
+        return UCN_ERR_STATE;
+    }
     if (runtime == NULL || cluster == NULL || config == NULL ||
         !authority_timing_is_valid(timing) ||
         !ucn_cluster_config_state_is_valid(config) ||

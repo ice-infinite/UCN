@@ -1912,6 +1912,14 @@ static ucn_result_t publish_one_locator(ucn_cluster_federation_t *federation)
     if (entry == NULL) {
         return UCN_OK;
     }
+    /* CLV2-M12 (12-05): a recovery control domain has no Directory
+     * presence.  Pending withdrawals still run (a node that became
+     * recovery-scoped must retract its old stable records), but fresh
+     * registrations/refreshes are skipped entirely. */
+    if (!entry->withdrawal_pending && federation->config.cluster != NULL &&
+        ucn_cluster_recovery_scoped(federation->config.cluster)) {
+        return UCN_OK;
+    }
     authority = federation->directory_authorities[entry->authority_cursor];
     (void)memset(&message, 0, sizeof(message));
     message.kind = entry->withdrawal_pending ?

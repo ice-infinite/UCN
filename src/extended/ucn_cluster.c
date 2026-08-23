@@ -59,7 +59,9 @@ ucn_result_t cluster_serial_next_checked(uint32_t current, uint32_t *next)
     return UCN_OK;
 }
 
-static uint32_t cluster_id_mix(uint32_t value)
+/* CLV2-M12 (12-03): exposed so the recovery module derives deterministic
+ * backoff jitter from the same avalanche mixer. */
+uint32_t cluster_id_mix(uint32_t value)
 {
     value ^= value >> 16U;
     value *= UINT32_C(0x7FEB352D);
@@ -90,10 +92,22 @@ static uint32_t cluster_default_next_id(const ucn_cluster_id_request_t *request)
         request->round == 1U) {
         return request->local_node_id;
     }
-    candidate = UINT32_C(0xA511E9B3) ^ request->local_node_id ^
-                request->parent_cluster_id ^ request->parent_term ^
-                request->incarnation ^ request->round ^
-                ((uint32_t)request->purpose << 24U);
+    /* CLV2-M12 (12-02): the Recovery identity keys on the full lineage
+     * (parent cluster/term/config/round) plus the boot incarnation and the
+     * monotonic object round.  Each input is mixed INTO the chain (not
+     * XOR-ed alongside): a bit delta in one input can never cancel a bit
+     * delta in another, so consecutive recovery rounds with consecutive
+     * object rounds can never derive the same ID. */
+    candidate = UINT32_C(0xA511E9B3);
+    candidate = cluster_id_mix(candidate ^ request->local_node_id);
+    candidate = cluster_id_mix(candidate ^ request->parent_cluster_id);
+    candidate = cluster_id_mix(candidate ^ request->parent_term);
+    candidate = cluster_id_mix(candidate ^ request->parent_config_id);
+    candidate = cluster_id_mix(candidate ^ request->recovery_round);
+    candidate = cluster_id_mix(candidate ^ request->incarnation);
+    candidate = cluster_id_mix(candidate ^ request->round);
+    candidate = cluster_id_mix(candidate ^
+                               ((uint32_t)request->purpose << 24U));
     for (attempt = 0U; attempt < 4U; ++attempt) {
         candidate = cluster_id_mix(candidate +
                                    UINT32_C(0x9E3779B9) + attempt);
@@ -104,11 +118,14 @@ static uint32_t cluster_default_next_id(const ucn_cluster_id_request_t *request)
     return 0U;
 }
 
-ucn_result_t cluster_make_next_id(ucn_cluster_t *cluster,
-                                  ucn_cluster_id_purpose_t purpose,
-                                  uint32_t parent_cluster_id,
-                                  uint32_t parent_term,
-                                  uint32_t *cluster_id)
+static ucn_result_t cluster_make_next_id_ex(
+    ucn_cluster_t *cluster,
+    ucn_cluster_id_purpose_t purpose,
+    uint32_t parent_cluster_id,
+    uint32_t parent_term,
+    uint32_t parent_config_id,
+    uint32_t recovery_round,
+    uint32_t *cluster_id)
 {
     ucn_cluster_id_request_t request;
     uint32_t next_round;
@@ -128,6 +145,8 @@ ucn_result_t cluster_make_next_id(ucn_cluster_t *cluster,
     request.local_node_id = cluster->config.local_node_id;
     request.parent_cluster_id = parent_cluster_id;
     request.parent_term = parent_term;
+    request.parent_config_id = parent_config_id;
+    request.recovery_round = recovery_round;
     request.incarnation = cluster->config.cluster_id_incarnation;
     request.round = next_round;
     if (cluster->config.make_cluster_id != NULL) {
@@ -140,11 +159,41 @@ ucn_result_t cluster_make_next_id(ucn_cluster_t *cluster,
         candidate = cluster_default_next_id(&request);
     }
     if (!cluster_id_is_valid(candidate, parent_cluster_id)) {
+        /* Fail closed: an invalid Provider answer (0 / broadcast / parent
+         * reuse) consumes no round and mutates no FSM state. */
         return UCN_ERR_CONFIG;
     }
     cluster->cluster_id_round = next_round;
     *cluster_id = candidate;
     return UCN_OK;
+}
+
+ucn_result_t cluster_make_next_id(ucn_cluster_t *cluster,
+                                  ucn_cluster_id_purpose_t purpose,
+                                  uint32_t parent_cluster_id,
+                                  uint32_t parent_term,
+                                  uint32_t *cluster_id)
+{
+    /* Generic (Election/Rekey) path: no config lineage, no recovery round. */
+    return cluster_make_next_id_ex(cluster, purpose, parent_cluster_id,
+                                   parent_term, 0U, 0U, cluster_id);
+}
+
+/* CLV2-M12 (12-02): the Recovery identity keys on the full captured
+ * lineage - parent cluster/term/config and the recovery round - so the
+ * same node derives a distinct ID for every round and boot incarnation,
+ * and the ID is never the parent cluster_id or 0/broadcast. */
+ucn_result_t cluster_make_next_recovery_id(ucn_cluster_t *cluster,
+                                           uint32_t parent_cluster_id,
+                                           uint32_t parent_term,
+                                           uint32_t parent_config_id,
+                                           uint32_t recovery_round,
+                                           uint32_t *cluster_id)
+{
+    return cluster_make_next_id_ex(cluster, UCN_CLUSTER_ID_PURPOSE_RECOVERY,
+                                   parent_cluster_id, parent_term,
+                                   parent_config_id, recovery_round,
+                                   cluster_id);
 }
 
 /* C07.5 control-plane Token Bucket.  One aggregate pool bounds the total
@@ -546,6 +595,27 @@ static void apply_config_defaults(ucn_cluster_config_t *config)
         config->recovery_backoff_max_ms =
             UCN_CLUSTER_RECOVERY_BACKOFF_MAX_MS;
     }
+    /* CLV2-M12 (12-03): zero selects the profile default for the
+     * exponential base and the lineage-reset period.  A base above the
+     * configured maximum is clamped instead of rejected so existing
+     * product/test configs with a small recovery_backoff_max_ms stay
+     * valid: the backoff then stays pinned at max (still non-zero and
+     * bounded, never the M01 zero-spin). */
+    if (config->recovery_backoff_base_ms == 0U) {
+        config->recovery_backoff_base_ms =
+            UCN_CLUSTER_RECOVERY_BACKOFF_BASE_MS;
+    }
+    if (config->recovery_backoff_base_ms > config->recovery_backoff_max_ms) {
+        config->recovery_backoff_base_ms = config->recovery_backoff_max_ms;
+    }
+    if (config->recovery_lineage_reset_ms == 0U) {
+        config->recovery_lineage_reset_ms =
+            UCN_CLUSTER_RECOVERY_LINEAGE_RESET_MS;
+    }
+    /* CLV2-M12 (12-08): the default forbids a fully isolated self-declare. */
+    if (config->min_recovery_peers == 0U) {
+        config->min_recovery_peers = UCN_CLUSTER_MIN_RECOVERY_PEERS;
+    }
 }
 
 static bool normalized_config_is_valid(const ucn_cluster_config_t *config)
@@ -569,7 +639,11 @@ static bool normalized_config_is_valid(const ucn_cluster_config_t *config)
            config->token_bucket.burst != 0U &&
            ucn_duration_is_valid(config->token_bucket.refill_ms) &&
            ucn_duration_is_valid(config->recovery_head_ttl_ms) &&
-           ucn_duration_is_valid(config->recovery_backoff_max_ms);
+           ucn_duration_is_valid(config->recovery_backoff_max_ms) &&
+           ucn_duration_is_valid(config->recovery_backoff_base_ms) &&
+           ucn_duration_is_valid(config->recovery_lineage_reset_ms) &&
+           config->min_recovery_peers >= 1U &&
+           config->min_recovery_peers <= UCN_CLUSTER_MAX_PEERS;
 }
 
 ucn_result_t ucn_cluster_init(
@@ -765,6 +839,9 @@ void set_detached(
     cluster->head_lease_expires_at_ms = 0U;
     cluster->head_grace_deadline_ms = 0U;
     cluster->election_deadline_ms = 0U;
+    /* CLV2-M12 (12-03): leaving the stable Cluster cancels the pending
+     * lineage reset - the lineage must survive for the next recovery. */
+    cluster->lineage_reset_deadline_ms = 0U;
     cluster->role_since_ms = now_ms;
     cluster->observation_deadline_ms =
         ucn_deadline_from_now(now_ms, observation_ms);
@@ -794,6 +871,99 @@ void cluster_history_note_stable_epoch(
          * never replace a remembered Head with a same-Term challenger. */
         cluster->last_stable_head = head_node_id;
     }
+}
+
+/* CLV2-M12 (12-01): capture the recovery lineage at the Member/Backup
+ * fence exit, BEFORE set_detached()/backup_clear_sync() clear the
+ * Active/Pending identity.  The live stable identity is preferred; after a
+ * detach cycle the 03-06 history is the authoritative parent.  A recovery
+ * domain itself (cluster_id == recovery_cluster_id) is never captured as a
+ * parent.  Same-parent re-entry preserves the round (12-03 owns round
+ * increments); a different parent replaces the whole lineage and resets
+ * the round. */
+void cluster_lineage_capture(ucn_cluster_t *cluster)
+{
+    uint32_t parent_id;
+    uint32_t parent_term;
+
+    if (cluster == NULL) {
+        return;
+    }
+    if (cluster->cluster_id != 0U && cluster->term != 0U &&
+        cluster->cluster_id != cluster->recovery_cluster_id) {
+        /* The fence exit runs before the Active/Pending clear: the live
+         * stable identity is the parent. */
+        parent_id = cluster->cluster_id;
+        parent_term = cluster->term;
+    } else {
+        /* Detach-cycle re-entry: the 03-06 history fields are the
+         * authoritative most-recent stable domain. */
+        parent_id = cluster->last_cluster_id;
+        parent_term = cluster->max_seen_term;
+    }
+    if (parent_id == 0U || parent_term == 0U) {
+        return; /* nothing authoritative to remember */
+    }
+    if (cluster->parent_cluster_id == parent_id) {
+        /* Same parent: only a strictly newer observed Term upgrades the
+         * lineage; the round survives so failed attempts keep escalating
+         * backoff (12-03) instead of resetting on every fence exit. */
+        if (parent_term > cluster->parent_term) {
+            cluster->parent_term = parent_term;
+        }
+        return;
+    }
+    cluster->parent_cluster_id = parent_id;
+    cluster->parent_term = parent_term;
+    cluster->parent_config_id = cluster->lineage_config_binding;
+    cluster->recovery_round = 0U;
+}
+
+void ucn_cluster_lineage_bind_config(ucn_cluster_t *cluster,
+                                     uint32_t config_id)
+{
+    if (cluster != NULL) {
+        cluster->lineage_config_binding = config_id;
+    }
+}
+
+bool ucn_cluster_recovery_scoped(const ucn_cluster_t *cluster)
+{
+    if (cluster == NULL) {
+        return false;
+    }
+    if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+        return true;
+    }
+    return cluster->recovery_cluster_id != 0U &&
+           cluster->cluster_id == cluster->recovery_cluster_id;
+}
+
+/* CLV2-M12 (12-03): arm the sustained-stable-join reset timer when a node
+ * completes a JOIN_ACCEPT against a stable Head.  Recovery-domain joins
+ * (RECOVERY_DECLARE/ACK) never call this. */
+void cluster_lineage_reset_arm(ucn_cluster_t *cluster, uint32_t now_ms)
+{
+    if (cluster == NULL) {
+        return;
+    }
+    cluster->lineage_reset_deadline_ms = ucn_deadline_from_now(
+        now_ms, cluster->config.recovery_lineage_reset_ms);
+}
+
+/* CLV2-M12 (12-03): clear the recovery lineage once the node has stayed in
+ * a stable Cluster for the configured reset period. */
+void cluster_lineage_reset(ucn_cluster_t *cluster)
+{
+    if (cluster == NULL) {
+        return;
+    }
+    cluster->parent_cluster_id = 0U;
+    cluster->parent_term = 0U;
+    cluster->parent_config_id = 0U;
+    cluster->recovery_round = 0U;
+    cluster->lineage_config_binding = 0U;
+    cluster->lineage_reset_deadline_ms = 0U;
 }
 
 bool cluster_history_offer_is_stale(
@@ -1696,6 +1866,14 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
     if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
         return UCN_OK;
     }
+    /* CLV2-M12 (12-03): a sustained stable join consumes the recovery
+     * lineage.  This is a pure site effect on phase-preserving state - no
+     * transition - and it runs before any Member control activity. */
+    if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+        cluster->lineage_reset_deadline_ms != 0U &&
+        ucn_deadline_expired(now_ms, cluster->lineage_reset_deadline_ms)) {
+        cluster_lineage_reset(cluster);
+    }
     if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
         ucn_deadline_expired(now_ms, cluster->head_lease_expires_at_ms)) {
         /* Grace period: a Backup may be mid-takeover exactly when the
@@ -1753,6 +1931,10 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                 return UCN_ERR_STATE;
             }
             cluster->recovery_eligible = true;
+            /* CLV2-M12 (12-01): capture the parent lineage BEFORE the
+             * detach clears Active/Pending identity (site-owned, in the
+             * original order the grace timeout already used). */
+            cluster_lineage_capture(cluster);
             set_detached(cluster, now_ms,
                          cluster->config.recovery_observation_ms);
 #if !defined(NDEBUG)
@@ -1847,6 +2029,9 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                 }
                 cluster->stats.head_leases_expired++;
                 cluster->recovery_eligible = true;
+                /* CLV2-M12 (12-01): capture the parent lineage BEFORE
+                 * backup_clear_sync() detaches and clears identity. */
+                cluster_lineage_capture(cluster);
                 backup_clear_sync(cluster, now_ms);
 #if !defined(NDEBUG)
                 /* CLV2-01-04f.2 post-commit derive assert: after the
@@ -1918,18 +2103,14 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                  * eligible=true ONLY; the caller-provided
                  * recovery_nonce / backoff_deadline writes stay in
                  * start_recovery_backoff() (CLV2-01-04a.1 Item 4: never
-                 * auto-mint the backoff).  Degenerate-config guard: a
-                 * node_id that is a multiple of recovery_backoff_max_ms
-                 * computes backoff 0, and ucn_deadline_from_now(now, 0)
-                 * returns 0 (ucn_duration_is_valid rejects 0), so the
-                 * derive would stay RECOVERY_OBSERVE - a committed
-                 * RECOVERY_ELECTION would trip the derive assert below /
-                 * shadow-flap in release.  Old code spun in RECOVERY_OBSERVE
-                 * (re-arming the zero deadline every Step) without ever
-                 * minting a phase change; preserve that EXACTLY: no
-                 * transition when the computed backoff is zero, while
-                 * start_recovery_backoff() still runs (the nonce bump is
-                 * preserved) and the phase stays put. */
+                 * auto-mint the backoff).  CLV2-M12 (12-03): the
+                 * exponential backoff is validated non-zero (base >= 1 and
+                 * <= max), so the M01 zero-backoff degenerate spin can no
+                 * longer be produced by a valid configuration.  The guard
+                 * below stays as belt-and-suspenders: if a future edit
+                 * reintroduces a zero backoff, no RECOVERY_ELECTION
+                 * transition is minted and the phase stays put instead of
+                 * shadow-flapping. */
                 {
                     /* CLV2-01-04f: the guard below is a LEGACY-side
                      * discriminator (the event "arm a non-zero backoff"
@@ -1982,10 +2163,10 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                     ucn_cluster_persist_state_t durable_state;
                     bool committed;
 
-                    result = cluster_make_next_id(
-                        cluster, UCN_CLUSTER_ID_PURPOSE_RECOVERY,
-                        cluster->last_cluster_id, cluster->max_seen_term,
-                        &recovery_cluster_id);
+                    result = cluster_make_next_recovery_id(
+                        cluster, cluster->parent_cluster_id,
+                        cluster->parent_term, cluster->parent_config_id,
+                        cluster->recovery_round, &recovery_cluster_id);
                     if (result != UCN_OK) {
                         return result;
                     }
@@ -2217,6 +2398,10 @@ ucn_result_t ucn_cluster_get_view(const ucn_cluster_t *cluster,
     view->max_seen_term = cluster->max_seen_term;
     view->last_stable_head = cluster->last_stable_head;
     view->cluster_id_round = cluster->cluster_id_round;
+    view->parent_cluster_id = cluster->parent_cluster_id;
+    view->parent_term = cluster->parent_term;
+    view->parent_config_id = cluster->parent_config_id;
+    view->recovery_round = cluster->recovery_round;
     view->current_head_score = cluster->current_head_score;
     view->authority_active = ucn_cluster_authority_active(cluster);
     view->authority_phase = cluster->authority_phase;
@@ -2391,6 +2576,28 @@ ucn_result_t ucn_cluster_test_backup_challenge(ucn_cluster_t *cluster,
         return UCN_ERR_ARGUMENT;
     }
     return backup_challenge(cluster, now_ms);
+}
+
+/* CLV2-M12 (12-01): test-only view of the lineage capture site so tests
+ * can pin the same-parent/new-parent/recovery-domain rules without a full
+ * fence-exit cycle. */
+void ucn_cluster_test_lineage_capture(ucn_cluster_t *cluster)
+{
+    cluster_lineage_capture(cluster);
+}
+
+/* CLV2-M12 (12-02): test-only view of the recovery ID allocation entry. */
+ucn_result_t ucn_cluster_test_make_next_recovery_id(
+    ucn_cluster_t *cluster,
+    uint32_t parent_cluster_id,
+    uint32_t parent_term,
+    uint32_t parent_config_id,
+    uint32_t recovery_round,
+    uint32_t *cluster_id)
+{
+    return cluster_make_next_recovery_id(cluster, parent_cluster_id,
+                                         parent_term, parent_config_id,
+                                         recovery_round, cluster_id);
 }
 
 /* CLV2-01-04f: test-only views of the static RECOVERY-domain offer sites

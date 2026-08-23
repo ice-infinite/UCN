@@ -127,6 +127,17 @@ ucn_result_t ucn_cluster_test_consider_head_offer(ucn_cluster_t *cluster,
 ucn_result_t ucn_cluster_test_begin_ordered_stepdown(ucn_cluster_t *cluster,
                                                      const ucn_cluster_candidate_t *candidate,
                                                      uint32_t now_ms);
+
+/* CLV2-M12 (12-01): test-only view of cluster_lineage_capture(). */
+void ucn_cluster_test_lineage_capture(ucn_cluster_t *cluster);
+/* CLV2-M12 (12-02): test-only view of the recovery ID allocation entry. */
+ucn_result_t ucn_cluster_test_make_next_recovery_id(
+    ucn_cluster_t *cluster,
+    uint32_t parent_cluster_id,
+    uint32_t parent_term,
+    uint32_t parent_config_id,
+    uint32_t recovery_round,
+    uint32_t *cluster_id);
 #endif
 
 #ifdef __cplusplus

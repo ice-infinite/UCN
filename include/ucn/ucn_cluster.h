@@ -135,6 +135,26 @@ typedef char ucn_cluster_serial_rotation_threshold_must_leave_valid_range[
 #ifndef UCN_CLUSTER_FAST_RECOVERY_BACKOFF_MAX_MS
 #define UCN_CLUSTER_FAST_RECOVERY_BACKOFF_MAX_MS UINT32_C(500)
 #endif
+/* CLV2-M12 (12-03): bounded exponential recovery backoff base (attempt 0)
+ * and the sustained-stable-join period after which the recovery lineage
+ * and round are reset.  Zero selects the profile default. */
+#ifndef UCN_CLUSTER_RECOVERY_BACKOFF_BASE_MS
+#define UCN_CLUSTER_RECOVERY_BACKOFF_BASE_MS UINT32_C(200)
+#endif
+#ifndef UCN_CLUSTER_RECOVERY_LINEAGE_RESET_MS
+#define UCN_CLUSTER_RECOVERY_LINEAGE_RESET_MS UINT32_C(30000)
+#endif
+#ifndef UCN_CLUSTER_FAST_RECOVERY_BACKOFF_BASE_MS
+#define UCN_CLUSTER_FAST_RECOVERY_BACKOFF_BASE_MS UINT32_C(100)
+#endif
+#ifndef UCN_CLUSTER_FAST_RECOVERY_LINEAGE_RESET_MS
+#define UCN_CLUSTER_FAST_RECOVERY_LINEAGE_RESET_MS UINT32_C(15000)
+#endif
+/* CLV2-M12 (12-08): minimum visible ADMITTED peers for a plain-member
+ * Recovery self-declaration (the default forbids a fully isolated node). */
+#ifndef UCN_CLUSTER_MIN_RECOVERY_PEERS
+#define UCN_CLUSTER_MIN_RECOVERY_PEERS UINT32_C(1)
+#endif
 
 /* Flags valid only on BACKUP_MEMBER_SYNC (Format v3). */
 #define UCN_CLUSTER_FLAG_SYNC_BEGIN ((uint8_t)0x01U)
@@ -288,15 +308,20 @@ typedef enum ucn_cluster_transition_reason {
     /* CLV2-M03 (03-05): same Cluster + same Term + different Head is a
      * safety conflict, never a score/Node-ID arbitration input. */
     UCN_CLUSTER_REASON_TERM_CONFLICT = 31,
-    UCN_CLUSTER_REASON_COUNT = 32
+    /* CLV2-M12 (12-07): a recovery-domain Member reclaims to a legal
+     * stable Head of its parent lineage (stable precedence; no score
+     * comparison is involved). */
+    UCN_CLUSTER_REASON_STABLE_RECLAIM = 32,
+    UCN_CLUSTER_REASON_COUNT = 33
 } ucn_cluster_transition_reason_t;
 
 /* CLV2-01-01: compile-time fences so an accidental enum extension is
  * caught at build time, not in a test run (C99-compatible assertion). */
 typedef char ucn_cluster_phase_count_must_be_21[
     UCN_CLUSTER_PHASE_COUNT == 21 ? 1 : -1];
-typedef char ucn_cluster_reason_count_must_be_32[
-    UCN_CLUSTER_REASON_COUNT == 32 ? 1 : -1];
+/* CLV2-M12 (12-07): extended by exactly one reason (STABLE_RECLAIM). */
+typedef char ucn_cluster_reason_count_must_be_33[
+    UCN_CLUSTER_REASON_COUNT == 33 ? 1 : -1];
 
 typedef enum ucn_cluster_message_type {
     UCN_CLUSTER_MSG_ADVERTISE = 1,
@@ -353,6 +378,11 @@ typedef struct ucn_cluster_message {
     uint32_t member_nonce;
     uint32_t recovery_nonce;
     uint32_t recovery_ttl_ms;
+    /* CLV2-M12 (12-04): the declaring Recovery Head's parent lineage
+     * identity, carried in the previously zeroed trailing word.  0 =
+     * legacy/unknown parent (old frames).  Terms are only ever compared
+     * between equal non-zero parents. */
+    uint32_t recovery_parent_cluster_id;
     uint32_t sync_token;
     /* C07.7 P1: BACKUP_REJECT reason (COVERAGE_FAILED / NO_SPACE /
      * UNSUPPORTED / EPOCH_CONFLICT). */
@@ -403,6 +433,11 @@ typedef struct ucn_cluster_id_request {
     uint32_t parent_term;
     uint32_t incarnation;
     uint32_t round;
+    /* CLV2-M12 (12-02): recovery lineage inputs, appended for source
+     * compatibility.  Zero for non-Recovery purposes; a Provider may key
+     * distinct Recovery identities on them. */
+    uint32_t parent_config_id;
+    uint32_t recovery_round;
 } ucn_cluster_id_request_t;
 
 typedef ucn_result_t (*ucn_cluster_make_id_fn)(
@@ -467,6 +502,16 @@ typedef struct ucn_cluster_config {
      * profile default). */
     uint32_t recovery_head_ttl_ms;
     uint32_t recovery_backoff_max_ms;
+    /* CLV2-M12 (12-03): exponential backoff base (attempt 0) and the
+     * sustained-stable-join period after which the recovery lineage and
+     * round are reset.  Zero selects the profile default. */
+    uint32_t recovery_backoff_base_ms;
+    uint32_t recovery_lineage_reset_ms;
+    /* CLV2-M12 (12-08): minimum visible ADMITTED peers a PLAIN member
+     * (no Backup mirror) must see before it may self-declare a Recovery
+     * Head.  Zero selects the profile default (1).  A Backup with a
+     * membership mirror keeps its own distinct majority threshold. */
+    uint32_t min_recovery_peers;
     /* Optional identity provider.  With NULL, UCN uses a deterministic Host
      * default derived from this request.  Set incarnation from a product's
      * boot counter/RNG/secure store when distinct IDs across reboot matter;
@@ -539,6 +584,11 @@ typedef struct ucn_cluster_view {
     /* Monotonic allocation round for optional Cluster ID generation.  It is
      * RAM-only until M04 persistence; never reuse within this object. */
     uint32_t cluster_id_round;
+    /* CLV2-M12 (12-01): recovery lineage snapshot (see the struct fields). */
+    uint32_t parent_cluster_id;
+    uint32_t parent_term;
+    uint32_t parent_config_id;
+    uint32_t recovery_round;
     uint16_t current_head_score;
     /* CLV2-08-02: role indicates retained identity context only.  These
      * fields are the sole public authority decision; applications and
@@ -728,6 +778,23 @@ typedef struct ucn_cluster {
     ucn_node_id_t known_recovery_source;
     uint8_t recovery_ack_count;
     uint32_t recovery_acked;
+    /* CLV2-M12 (12-01): recovery lineage captured at the fence exit from
+     * the parent cluster, BEFORE Active/Pending identity is cleared.  It
+     * survives detach (like the 03-06 history) and drives recovery ID
+     * generation (12-02), same-parent rank arbitration (12-04) and stable
+     * reclaim precedence (12-07).  Cleared only after a sustained stable
+     * join (12-03 reset).  A recovery domain itself is never a parent. */
+    uint32_t parent_cluster_id;
+    uint32_t parent_term;
+    uint32_t parent_config_id;
+    uint32_t recovery_round;
+    /* Pending canonical config_id binding consumed by the next lineage
+     * capture (ucn_cluster_lineage_bind_config).  0 = no config lineage
+     * (the v3 default product has no Config owner). */
+    uint32_t lineage_config_binding;
+    /* CLV2-M12 (12-03): armed when a stable join completes; expiry resets
+     * the recovery lineage + round.  Cancelled by any detach. */
+    uint32_t lineage_reset_deadline_ms;
     ucn_cluster_stats_t stats;
     /* CLV2-01-01..03 (M01 shadow): derived-only mirror of the legacy
      * role+bool+deadline state.  Production logic MUST NOT read these
@@ -838,6 +905,47 @@ const ucn_cluster_stats_t *ucn_cluster_get_stats(const ucn_cluster_t *cluster);
  * they call it from a Role/state that already has legitimate active
  * authority, or define validity at the call site. */
 ucn_cluster_epoch_t ucn_cluster_active_epoch_get(const ucn_cluster_t *cluster);
+
+/* CLV2-M12 (12-01): record the parent cluster's canonical config_id so the
+ * NEXT recovery-lineage capture carries it.  0 = no config lineage (the v3
+ * default product has no Config owner).  The experimental M07 Config owner
+ * is the intended caller; the value is consumed by cluster_lineage_capture
+ * at the Member/Backup fence exit and reset when the parent changes. */
+void ucn_cluster_lineage_bind_config(ucn_cluster_t *cluster,
+                                     uint32_t config_id);
+
+/* CLV2-M12 (12-05): true while the node is inside a recovery control
+ * domain (RECOVERY_HEAD role, or a member whose active cluster_id is the
+ * recovery domain ID).  A recovery-scoped node only ever holds
+ * recovery-local authority: the M08 Authority Owner must reject it, the
+ * Federation must not publish its Directory records, and experimental
+ * owners (M07 Config commit, M10 takeover) must use this predicate to
+ * refuse targeting the parent cluster identity. */
+bool ucn_cluster_recovery_scoped(const ucn_cluster_t *cluster);
+
+/* CLV2-M12 (12-04): deterministic Recovery rank.  Same parent ranks by
+ * parent_term DESC, parent_config_id DESC, score DESC, node_id ASC;
+ * different parents are UNRANKABLE (ordinary Merge is the M11 handover
+ * path, never a recovery-arbitration cross-yield).  A zero parent means
+ * "unknown lineage" and is never rankable against a non-zero parent. */
+typedef struct ucn_cluster_recovery_rank {
+    uint32_t parent_cluster_id;
+    uint32_t parent_term;
+    uint32_t parent_config_id;
+    uint16_t score;
+    ucn_node_id_t node_id;
+} ucn_cluster_recovery_rank_t;
+
+typedef enum ucn_cluster_recovery_rank_relation {
+    UCN_CLUSTER_RECOVERY_RANK_UNRANKABLE = 0,
+    UCN_CLUSTER_RECOVERY_RANK_A_WINS = 1,
+    UCN_CLUSTER_RECOVERY_RANK_B_WINS = 2,
+    UCN_CLUSTER_RECOVERY_RANK_EQUAL = 3
+} ucn_cluster_recovery_rank_relation_t;
+
+ucn_cluster_recovery_rank_relation_t ucn_cluster_recovery_rank_compare(
+    const ucn_cluster_recovery_rank_t *a,
+    const ucn_cluster_recovery_rank_t *b);
 
 #ifdef __cplusplus
 }

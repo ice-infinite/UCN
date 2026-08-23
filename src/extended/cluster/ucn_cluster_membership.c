@@ -737,6 +737,10 @@ ucn_result_t handle_join_accept(
     cluster_history_note_stable_epoch(cluster, cluster->cluster_id,
                                       cluster->term,
                                       cluster->head_node_id);
+    /* CLV2-M12 (12-03): JOIN_ACCEPT only ever comes from a stable Head
+     * (recovery-domain joins use RECOVERY_DECLARE/ACK), so this is the
+     * single site that arms the sustained-stable-join lineage reset. */
+    cluster_lineage_reset_arm(cluster, now_ms);
     cluster->current_head_score = message->head_score;
     cluster->head_lease_expires_at_ms =
         ucn_deadline_from_now(now_ms, message->lease_ms);
