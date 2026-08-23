@@ -1,7 +1,7 @@
 # UCN V5 Cluster M11：外部审计材料（2026-08-23）
 
 > 历史外部复审结论：**R01–R06-B GO（受限实验范围）**。
-> 当前状态：后续复审核实 R07/R08（连续合格样本、完整 proposal/replay 域）后，整改已完成自审，M11 处于 **AUDIT HOLD / WAIT EXTERNAL RE-REVIEW**。
+> 当前状态：外部逐提交复审已签 R07（连续合格样本）PASS；其同时发现 R08 旧 proposal/replay 共用域的 ABA history-loss。R08-A 已完成自审，M11 处于 **AUDIT HOLD / WAIT EXTERNAL RE-REVIEW**。
 > 审计范围始终仅限 M11 caller-owned、default-OFF 实验模型；不是 production protocol、实机或掉电签字。
 
 ## 1. 审计边界
@@ -37,8 +37,8 @@ re-entry Fence 是 caller-owned RAM 的实验模型约束，不是掉电或原�
 4. **撤权后安全失败**：Stepdown/Commit 前超时或目标丢失不能恢复 old Authority，只能 Observe/Recovery；`TARGET_COMMITTED` 同样受 deadline 约束，且在 M04 Provider `submit→reload` 证明接线前，caller-supplied equal Epoch 不能使 target ready/Authority。
 5. **同簇特殊合同**：target Term 必须 exact next，target Head 是 confirmed Backup，Config 不变；Backup READY 本身没有 Authority。
 6. **Stepdown Config 不可变**：RFC4 Type 9 只绑定 old/target Epoch、txid/nonce，不能携带 target Config，也不能被用来改变成员 Config。
-7. **候选迟滞不可伪造**：`score_samples` 只允许统计同一 proposal 和 local qualification context 下连续达到 threshold 的 fresh score；低分或 context 改变必须清零，eligible 也不得消费 stale samples。
-8. **proposal/replay 域完整**：nonce replay/history 至少绑定 full Epoch、Config、capacity、capabilities、wire format 和 Backup-policy compatibility。新域必须重置 nonce/sample/first-seen，而同域低 nonce 必须 no-write `UCN_ERR_REPLAY`。
+7. **候选迟滞不可伪造**：`score_samples` 只允许统计同一 hysteresis context 和 local qualification context 下连续达到 threshold 的 fresh score；低分或 context 改变必须清零，eligible 也不得消费 stale samples。
+8. **R08-A replay/history 不可 ABA**：nonce replay namespace 只绑定 full Epoch + Config ID/hash，且只接受严格前进的 namespace；capacity、size、capabilities、wire format 与 Backup policy 是可逆 hysteresis context，改变时只重置 sample/first-seen，不能重置 nonce high-water。D1→D2→D1 的旧 nonce 必须 no-write `UCN_ERR_REPLAY`。
 9. **旧 v3 路径无旁路**：Member score 不能直接 LEAVE/Join；Backup score 不能直接 Term++；已持久化的 legacy async challenge continuation 不得复活。
 10. **物理隔离**：default product archive 无 M11 object/API；生产 Cluster/Adapter 无 M11 API 调用；v4 encoder 默认仍关闭。
 11. **RFC/公共值边界**：Type 26/27/28 的 typed nonce 必为零且不参加 identity，只有 Type 9/29 使用 nonce；所有 policy duration 通过 `ucn_duration_is_valid()`，Term/Config/txid 不得超过 serial rotation threshold；corrupt public transaction（特别是 `trace_count > 8`）必须零写拒绝。
@@ -96,18 +96,19 @@ ctest --test-dir build_external_m11_analyzer -R '^ucn_cluster_handover_tests$' -
 - Begin→Ready→Revoke 后先调用 Reset 再 Begin，以及 Stepdown-sent、Commit-sent 两阶段的 Reset→Begin，均必须 `UCN_ERR_STATE`、逐字节 no-write 且不恢复 local Authority；另应尝试非法非零 Fence，确认 validator fail-closed。
 - Provider PENDING 后触发历史 `BACKUP_CHALLENGE` action；必须得到 `UCN_ERR_UNSUPPORTED` 且不写 durable/RAM 状态。
 - default archive 符号/链接扫描；production `ucn_cluster_receive()` 不能因任何 v3 score 输入自主换 Cluster。
+- R08-A：D1 `nonce100` → D2（capacity/size/capability/wire/Backup-policy 任一变化）`nonce101` → old D1 `nonce50/51`，后两帧必须 `UCN_ERR_REPLAY` 且 table 完整不写；真新 Epoch/Config `nonce1` 可接收，其后旧 namespace 即便 nonce 更大仍必须拒绝。
 
 ## 6. 自审结果供比对
 
 | 矩阵 | 自审结果 |
 |---|---:|
-| MSVC Full Debug + config contract / Release | 各 41/41 |
+| MSVC Full Debug + config contract / Release（R08-A 后） | 各 41/41 |
 | MSVC Lite Debug + config contract | 20/20 |
 | MSVC Nano Debug + config contract | 20/20 |
 | MSVC Service-OFF Debug + config contract | 20/20 |
-| WSL GCC 13.3 ASan/UBSan | 38/38 |
+| WSL GCC 13.3 ASan/UBSan（R08-A 后） | 41/41 |
 | WSL GCC 13.3 `-fanalyzer -Wall -Wextra -Wpedantic -Werror` | M11 定向 target 1/1 |
 
-说明：上述矩阵均在 R06-B 后重新执行。Windows 矩阵以 M11 archive 显式 ON、M10 archive OFF 执行；WSL sanitizer 是独立 GCC Debug 构建。分析器本轮只构建/执行 M11 定向 target，不能误记为全量 analyzer 结果。
+说明：Windows Full Debug/Release、Lite/Nano/Service-OFF 定向 target、WSL sanitizer 与 analyzer 已在 R08-A 后重跑；Windows 矩阵以 M11 archive 显式 ON、M10 archive OFF 执行；WSL sanitizer 是独立 GCC Debug 构建。分析器本轮只构建/执行 M11 定向 target，不能误记为全量 analyzer 结果。
 
-本份材料已完成 M11 受限外审签字；后续若发现默认生产路径出现 v4/M11 接线、任何 score→Authority/Term/Join 旁路，或 Stepdown 绕过 Config/Authority 合同，必须撤销此受限结论并恢复 `AUDIT HOLD`。无论如何，本签字不授权进入 M12。
+R08-A 仅完成自审，等待外部复审；后续若发现默认生产路径出现 v4/M11 接线、任何 score→Authority/Term/Join 旁路，或 Stepdown 绕过 Config/Authority 合同，必须保持/恢复 `AUDIT HOLD`。无论如何，本材料不授权进入 M12。

@@ -165,19 +165,44 @@ void ucn_cluster_handover_candidate_expire(
     }
 }
 
-static bool offer_proposal_domain_matches(
+static bool offer_replay_namespace_matches(
     const ucn_cluster_handover_offer_t *left,
     const ucn_cluster_handover_offer_t *right)
 {
-    /* nonce and head_score are intentionally excluded.  nonce is ordered
-     * only within this proposal domain, while every fresh head_score is the
-     * next sample in the consecutive-qualification run.  All remaining
-     * offer properties can change feasibility/compatibility, so they define
-     * a new proposal and cannot inherit replay or hysteresis history. */
     return left != NULL && right != NULL &&
            epoch_is_exact(&left->epoch, &right->epoch) &&
            left->config_id == right->config_id &&
-           left->config_hash == right->config_hash &&
+           left->config_hash == right->config_hash;
+}
+
+static bool offer_replay_namespace_advances(
+    const ucn_cluster_handover_offer_t *current,
+    const ucn_cluster_handover_offer_t *incoming)
+{
+    const ucn_cluster_epoch_relation_t relation =
+        ucn_cluster_epoch_compare(&current->epoch, &incoming->epoch);
+
+    /* Epoch and Config are serial/no-wrap checked by offer_is_valid().  A
+     * lower current Epoch means the remote moved forward; within one exact
+     * Epoch only a strictly higher Config ID creates a new nonce namespace.
+     * Same Config ID with a different hash is a conflict, never a reset. */
+    if (relation == UCN_CLUSTER_EPOCH_RELATION_LOWER) {
+        return true;
+    }
+    return relation == UCN_CLUSTER_EPOCH_RELATION_SAME &&
+           incoming->config_id > current->config_id;
+}
+
+static bool offer_hysteresis_context_matches(
+    const ucn_cluster_handover_offer_t *left,
+    const ucn_cluster_handover_offer_t *right)
+{
+    /* nonce and head_score are intentionally excluded.  A fresh head_score
+     * belongs to the same consecutive run.  Reversible feasibility fields
+     * cannot reset the nonce namespace, but they must start a new hysteresis
+     * run so stale qualifications are never inherited. */
+    return left != NULL && right != NULL &&
+           offer_replay_namespace_matches(left, right) &&
            left->cluster_size == right->cluster_size &&
            left->available_capacity == right->available_capacity &&
            left->capabilities == right->capabilities &&
@@ -276,11 +301,15 @@ ucn_result_t ucn_cluster_handover_candidate_observe(
         }
         if (candidate->offer.epoch.cluster_id == offer->epoch.cluster_id &&
             candidate->offer.epoch.head_node_id == offer->epoch.head_node_id) {
-            if (!offer_proposal_domain_matches(&candidate->offer, offer)) {
+            if (!offer_replay_namespace_matches(&candidate->offer, offer)) {
                 const uint32_t hold_down_until_ms = candidate->hold_down_until_ms;
 
-                /* A new Epoch/Config/compatibility proposal has its own
-                 * nonce domain and must not inherit score history. */
+                /* Only a strictly advanced Epoch/Config may create a new
+                 * nonce namespace.  In particular, an old Epoch/Config
+                 * cannot return after a newer one and be treated as fresh. */
+                if (!offer_replay_namespace_advances(&candidate->offer, offer)) {
+                    return UCN_ERR_REPLAY;
+                }
                 candidate_start_new_proposal(candidate, offer, local_head_score,
                                               policy, now_ms, hold_down_until_ms);
                 if (output != NULL) {
@@ -291,8 +320,20 @@ ucn_result_t ucn_cluster_handover_candidate_observe(
             if (offer->nonce <= candidate->offer.nonce) {
                 return UCN_ERR_REPLAY;
             }
-            candidate->offer = *offer;
-            candidate->last_seen_ms = now_ms;
+            if (!offer_hysteresis_context_matches(&candidate->offer, offer)) {
+                /* capacity/size/capability/wire/Backup-policy changes are
+                 * allowed only on a fresh nonce.  They restart score
+                 * hysteresis but retain the namespace's high-water nonce,
+                 * preventing D1 -> D2 -> D1 ABA replay. */
+                candidate->offer = *offer;
+                candidate->last_seen_ms = now_ms;
+                candidate->first_seen_ms = now_ms;
+                candidate->score_samples = 0U;
+                qualification_context_store(candidate, local_head_score, policy);
+            } else {
+                candidate->offer = *offer;
+                candidate->last_seen_ms = now_ms;
+            }
             if (!qualification_context_matches(candidate, local_head_score, policy)) {
                 /* The remote proposal is unchanged but local policy/score
                  * changed.  The next fresh offer starts a new qualifying run;

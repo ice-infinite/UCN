@@ -4,7 +4,7 @@
 
 用户已授权连续实施 `CLV2-11-01..10`：每项完成须留下定向自审和测试证据，全部完成后再做全量自审并整理外部审计材料。
 
-现场依赖仍有 M05 `AUDIT HOLD`、M08 `WAIT EXTERNAL` 和 M10 `WAIT EXTERNAL RE-REVIEW`。因此 M11 的完整协议模型必须是 **caller-owned、default-OFF 的实验 archive**，不能把 RFC4 Type 26..29 编解码、发送、RX、Authority 或 Adapter 接入默认产品。R01–R06-B 的既有外部复审 GO 仍保留其历史签字范围；但 2026-08-23 新复审发现 R07/R08 后，M11 当前为 **AUDIT HOLD / R07–R08 SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW**，该签字不改变上述依赖或默认产品边界。
+现场依赖仍有 M05 `AUDIT HOLD`、M08 `WAIT EXTERNAL` 和 M10 `WAIT EXTERNAL RE-REVIEW`。因此 M11 的完整协议模型必须是 **caller-owned、default-OFF 的实验 archive**，不能把 RFC4 Type 26..29 编解码、发送、RX、Authority 或 Adapter 接入默认产品。R01–R07 的既有外部复审 GO 保留各自签字范围；R08 原设计因 ABA history-loss 已撤回，R08-A 当前为 **SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW**，M11 整体仍为 `AUDIT HOLD`，不改变上述依赖或默认产品边界。
 
 默认产品允许且必须执行的安全收敛只有两项：
 
@@ -57,16 +57,17 @@ default-OFF ucn_cluster_handover_experimental.a
 8. M11 在接入 M04 Provider submit/reload continuation 前，`TARGET_COMMITTED` 仅是等待持久化证明的无 Authority 状态；deadline 到期即 Abort/Observe，caller 提供相同 Epoch 不能伪造 durable。
 9. caller-owned public transaction 必须先通过固定容量结构校验：`trace_count <= 8`、合法 state/trace、Epoch/Config/txid serial、deadline 和 nonce phase 均成立；失败不得读取 trace 或写 output。
 10. `transaction_begin()` 是新 transaction 的唯一构造入口，但仅可消费零对象；`revoke_authority()` 会写入独立 re-entry Fence，public `transaction_reset()` 对已 Fence 的撤权、Stepdown-sent、Commit-sent transaction 必须 no-op。此类对象只能保留、推进到 Observe/Recovery，不能被 Begin 或 Reset→Begin 清零复活 Authority。
-11. candidate 的 `score_samples` 只能记录同一 proposal 域、同一 local score、improvement percent、required samples 与 required capabilities 输入下连续达到 improvement threshold 的 fresh offer；任一不合格 score 或这些 qualification inputs/domain 改变都必须清零，既有 sample 不能跨 proposal、Config、capability 或 qualification 输入复用。
+11. candidate 的 `score_samples` 只能记录同一 hysteresis context、同一 local score、improvement percent、required samples 与 required capabilities 输入下连续达到 improvement threshold 的 fresh offer；任一不合格 score、size/capacity/capability/wire/Backup-policy 或这些 qualification inputs 改变都必须清零。Epoch+Config 是独立且单调前进的 replay namespace：context 变化不清 nonce high-water，旧 context 不能借 D1→D2→D1 ABA 重放复用历史；只有严格前进的 Epoch/Config 才能从低 nonce 开始。
 
 ## 1.1 R07/R08 补充整改与重新外审边界
 
 最新复审核实两项 candidate 迟滞缺口：过去的实现把任意 fresh nonce 计为 sample，且 replay/history 只绑定 `{cluster_id, head_node_id}`。这会让低质量 packet 累积成资格，也会让新的 Epoch/Config proposal 继承旧 nonce/sample。
 
 - R07：只在 score 满足 `candidate * 100 >= local * (100 + improvement_percent)` 时递增；不满足时清零。local score、improvement 百分比或 required samples 改变同样清零，eligible 检查拒绝任何 stale context。
-- R08：proposal identity 绑定完整 Epoch、Config ID/hash、cluster size/capacity、capabilities、wire format 与 backup policy；这些字段任一改变都建立新 proposal，接受新的 nonce 域但重置 `first_seen` 与连续样本。
+- R08：原整改将 full Epoch、Config ID/hash、cluster size/capacity、capabilities、wire format 与 backup policy 共同当作 proposal/replay 域；其后外审发现 capacity 等可逆字段导致 D1→D2→D1 ABA history-loss，原 R08 结论撤回并由 R08-A 取代。
+- R08-A：replay namespace 仅为 full Epoch + Config ID/hash，必须严格向前。cluster size/capacity、capabilities、wire format 与 Backup policy 为 hysteresis/feasibility context；它们改变时清 `score_samples/first_seen`，但本 namespace nonce 仍严格递增。故 capacity `8→7→8` 必须使用 nonce `100→101→102`，历史 `50/51` 永远不能变成 fresh samples；真正新 Epoch/Config 才可合法从 nonce `1` 开始。
 
-该整改仍不增加生产接线；M11 仅可在外部复审重新签字后恢复受限实验范围 GO。
+R08-A 已完成源码与定向/全量 Host 自审，当前仍不增加生产接线；M11 仅可在 R08-A 外部复审重新签字后恢复受限实验范围 GO。
 
 ## 5. 最终自审和外审材料
 

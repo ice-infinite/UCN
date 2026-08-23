@@ -121,8 +121,16 @@ typedef struct ucn_cluster_handover_policy {
 typedef struct ucn_cluster_handover_candidate {
     bool occupied;
     ucn_cluster_handover_offer_t offer;
-    /* score_samples is a consecutive run, never a fresh-packet count.  The
-     * context records the exact local threshold/policy that qualified it. */
+    /* offer.epoch + offer.config_id/config_hash are the candidate's replay
+     * namespace: nonce can restart only when that namespace strictly
+     * advances.  The remaining feasibility fields are a hysteresis context:
+     * changing one clears score_samples/first_seen_ms, but never lowers the
+     * stored nonce.  This prevents a reversible capacity/capability ABA from
+     * replaying an old proposal as a fresh one.
+     *
+     * score_samples is a consecutive run, never a fresh-packet count.  The
+     * qualification fields record the exact local threshold/policy that
+     * qualified it. */
     uint8_t score_samples;
     uint8_t qualification_improvement_percent;
     uint8_t qualification_required_samples;

@@ -229,25 +229,178 @@ static int test_candidate_qualification_and_proposal_domains(void)
                     &table, &local, 800U, &foreign, &policy, 51U, &candidate) ==
                 UCN_ERR_REPLAY && memcmp(&table, &before, sizeof(table)) == 0);
 
-    /* Compatibility changes also create a fresh proposal instead of
-     * inheriting the sample run; local threshold/policy changes reset only
-     * qualification history while retaining the same-proposal nonce gate. */
+    /* Compatibility changes restart hysteresis without resetting the
+     * Epoch/Config nonce high-water mark; local threshold/policy changes
+     * likewise reset only qualification history. */
     foreign.capabilities |= UINT16_C(0x0002);
+    foreign.nonce = 2U;
     ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
                     &table, &local, 800U, &foreign, &policy, 52U, &candidate) ==
                 UCN_OK && candidate->score_samples == 1U &&
                 candidate->first_seen_ms == 52U);
-    foreign.nonce = 2U;
+    foreign.nonce = 3U;
     ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
                     &table, &local, 805U, &foreign, &policy, 53U, &candidate) ==
                 UCN_OK && candidate->score_samples == 1U &&
                 candidate->first_seen_ms == 53U);
-    foreign.nonce = 3U;
+    foreign.nonce = 4U;
     policy.required_capabilities |= UINT16_C(0x0002);
     ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
                     &table, &local, 805U, &foreign, &policy, 54U, &candidate) ==
                 UCN_OK && candidate->score_samples == 1U &&
                 candidate->first_seen_ms == 54U);
+    return 0;
+}
+
+/* CLV2-11-R08-A: replay namespace and hysteresis context are deliberately
+ * separate.  A capacity/size/capability/wire/Backup-policy change must reset
+ * only consecutive qualification, not the Epoch/Config nonce high-water
+ * mark.  This closes reversible D1 -> D2 -> D1 ABA replay. */
+static int test_r08_replay_namespace_and_hysteresis_context(void)
+{
+    ucn_cluster_epoch_t local = make_epoch(1U, 2U, 1U);
+    ucn_cluster_handover_offer_t foreign =
+        make_offer(2U, 300U, 2U, 30U, 31U, 100U);
+    ucn_cluster_handover_offer_t replay;
+    ucn_cluster_handover_policy_t policy = make_policy();
+    ucn_cluster_handover_candidate_table_t table;
+    ucn_cluster_handover_candidate_table_t before;
+    ucn_cluster_handover_candidate_t *candidate = NULL;
+
+    ucn_cluster_handover_candidate_table_reset(&table);
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 100U, &candidate) ==
+                UCN_OK && candidate != NULL && candidate->score_samples == 1U);
+    foreign.nonce = 101U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 101U, &candidate) ==
+                UCN_OK && candidate->score_samples == 2U);
+
+    /* Every remote feasibility field has a distinct, legal mutation.  Each
+     * one resets the score run/first-seen but needs the next nonce. */
+    foreign.cluster_size = 4U;
+    foreign.nonce = 102U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 102U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U &&
+                candidate->first_seen_ms == 102U);
+    foreign.nonce = 103U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 103U, &candidate) ==
+                UCN_OK && candidate->score_samples == 2U);
+
+    foreign.available_capacity = 7U;
+    foreign.nonce = 104U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 104U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U &&
+                candidate->first_seen_ms == 104U);
+    foreign.nonce = 105U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 105U, &candidate) ==
+                UCN_OK && candidate->score_samples == 2U);
+
+    foreign.capabilities |= UINT16_C(0x0002);
+    foreign.nonce = 106U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 106U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U &&
+                candidate->first_seen_ms == 106U);
+    foreign.nonce = 107U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 107U, &candidate) ==
+                UCN_OK && candidate->score_samples == 2U);
+
+    foreign.wire_format = UINT8_C(3);
+    foreign.nonce = 108U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 108U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U &&
+                candidate->first_seen_ms == 108U);
+    foreign.nonce = 109U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 109U, &candidate) ==
+                UCN_OK && candidate->score_samples == 2U);
+
+    foreign.backup_policy_compatible = false;
+    foreign.nonce = 110U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 110U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U &&
+                candidate->first_seen_ms == 110U);
+
+    /* D1 -> D2 -> D1: capacity is reversible, but nonce is scoped to the
+     * stable Epoch/Config namespace.  D2 therefore needs nonce 101, and old
+     * D1 packets 50/51 cannot recreate a qualifying run. */
+    ucn_cluster_handover_candidate_table_reset(&table);
+    foreign = make_offer(2U, 400U, 2U, 40U, 41U, 100U);
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 200U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U);
+    foreign.available_capacity = 7U;
+    foreign.nonce = 101U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 201U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U &&
+                candidate->first_seen_ms == 201U);
+    replay = make_offer(2U, 400U, 2U, 40U, 41U, 50U);
+    before = table;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &replay, &policy, 202U, &candidate) ==
+                UCN_ERR_REPLAY && memcmp(&table, &before, sizeof(table)) == 0);
+    replay.nonce = 51U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &replay, &policy, 203U, &candidate) ==
+                UCN_ERR_REPLAY && memcmp(&table, &before, sizeof(table)) == 0);
+    foreign.nonce = 102U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 204U, &candidate) ==
+                UCN_OK && candidate->score_samples == 2U);
+    replay.nonce = 103U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &replay, &policy, 205U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U &&
+                candidate->first_seen_ms == 205U);
+
+    /* A truly new namespace may restart nonce at one.  Once advanced, an old
+     * Epoch/Config cannot return even with a nonce greater than the current
+     * namespace's nonce. */
+    ucn_cluster_handover_candidate_table_reset(&table);
+    foreign = make_offer(2U, 500U, 2U, 50U, 51U, 100U);
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 300U, &candidate) ==
+                UCN_OK);
+    foreign.epoch.term = 501U;
+    foreign.config_id = 51U;
+    foreign.config_hash = 52U;
+    foreign.nonce = 1U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 301U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U);
+    /* A Config serial advance within the same Epoch is also a new replay
+     * namespace.  A conflicting hash or old Config cannot reopen it. */
+    foreign.config_id = 52U;
+    foreign.config_hash = 53U;
+    foreign.nonce = 1U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &foreign, &policy, 302U, &candidate) ==
+                UCN_OK && candidate->score_samples == 1U);
+    replay = make_offer(2U, 501U, 2U, 51U, 52U, 2U);
+    before = table;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &replay, &policy, 303U, &candidate) ==
+                UCN_ERR_REPLAY && memcmp(&table, &before, sizeof(table)) == 0);
+    replay = foreign;
+    replay.config_hash = 54U;
+    replay.nonce = 2U;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &replay, &policy, 304U, &candidate) ==
+                UCN_ERR_REPLAY && memcmp(&table, &before, sizeof(table)) == 0);
+    replay = make_offer(2U, 500U, 2U, 50U, 51U, 101U);
+    before = table;
+    ASSERT_TRUE(ucn_cluster_handover_candidate_observe(
+                    &table, &local, 800U, &replay, &policy, 305U, &candidate) ==
+                UCN_ERR_REPLAY && memcmp(&table, &before, sizeof(table)) == 0);
     return 0;
 }
 
@@ -671,6 +824,7 @@ int main(void)
 {
     ASSERT_TRUE(test_offer_candidate_hysteresis_and_feasibility() == 0);
     ASSERT_TRUE(test_candidate_qualification_and_proposal_domains() == 0);
+    ASSERT_TRUE(test_r08_replay_namespace_and_hysteresis_context() == 0);
     ASSERT_TRUE(test_foreign_handover_order_retry_and_member() == 0);
     ASSERT_TRUE(test_same_cluster_planned_transfer_and_timeout() == 0);
     ASSERT_TRUE(test_revoked_head_timeout_requires_observe() == 0);
