@@ -11,6 +11,8 @@ option(UCN_BUILD_SCALE_SIM "Build the host-only UCN scale simulator" ON)
 option(UCN_BUILD_CLUSTER_SIM "Build the host-only UCN Cluster simulator" ON)
 option(UCN_BUILD_CONFIG_CONTRACT_TESTS
     "Build standalone global/default/fallback configuration contract tests" OFF)
+option(UCN_ENABLE_WIRE_V4_RELEASE_GATES
+    "Build test-only optimized RFC4 codec gates (-O1/-O2/-O3 or MSVC equivalents)" OFF)
 set(UCN_PROFILE "FULL" CACHE STRING "UCN feature profile: NANO, LITE, or FULL")
 set_property(CACHE UCN_PROFILE PROPERTY STRINGS NANO LITE FULL)
 option(UCN_FEATURE_SERVICE "Build the orthogonal Service Router/Bridge" ON)
@@ -410,6 +412,48 @@ if(UCN_BUILD_TESTS)
     )
     add_test(NAME ucn_cluster_wire_v4_codec_tests
         COMMAND ucn_cluster_wire_v4_codec_tests)
+
+    # MAJOR-A: the RFC4 typed-offer helpers must retain byte-deterministic
+    # outputs with optimisation enabled.  These are test-only copies of the
+    # isolated codec; they neither enable the production encoder nor link the
+    # production Cluster FSM.  The option is deliberately OFF by default so
+    # product builds stay unaffected.
+    if(UCN_ENABLE_WIRE_V4_RELEASE_GATES)
+        function(ucn_add_wire_v4_optimized_codec_gate target_name)
+            add_executable(${target_name}
+                tests/test_cluster_wire_v4_codec.c
+                src/extended/cluster/ucn_cluster_codec_v3.c
+                src/extended/cluster/ucn_cluster_codec_v4.c
+            )
+            target_include_directories(${target_name} PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/extended/cluster
+            )
+            target_link_libraries(${target_name} PRIVATE ucn_core)
+            target_compile_definitions(${target_name} PRIVATE
+                UCN_CLUSTER_WIRE_V4_ENCODER_ENABLED=1
+                NDEBUG
+            )
+            target_compile_options(${target_name} PRIVATE
+                $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+                ${ARGN}
+            )
+            add_test(NAME ${target_name} COMMAND ${target_name})
+        endfunction()
+
+        if(MSVC)
+            ucn_add_wire_v4_optimized_codec_gate(
+                ucn_cluster_wire_v4_codec_release_o1_tests /O1)
+            ucn_add_wire_v4_optimized_codec_gate(
+                ucn_cluster_wire_v4_codec_release_o2_tests /O2)
+        else()
+            ucn_add_wire_v4_optimized_codec_gate(
+                ucn_cluster_wire_v4_codec_release_o1_tests -O1)
+            ucn_add_wire_v4_optimized_codec_gate(
+                ucn_cluster_wire_v4_codec_release_o2_tests -O2)
+            ucn_add_wire_v4_optimized_codec_gate(
+                ucn_cluster_wire_v4_codec_release_o3_tests -O3)
+        endif()
+    endif()
 
     # CLV2-05-12: a Host-only dual-stack compatibility gate.  It builds its
     # own isolated codecs with the test-only encoder enabled and deliberately

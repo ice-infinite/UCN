@@ -754,7 +754,8 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
 
     [UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT] =
         /* Only a proven higher-Term normal Head offer can re-open a join.
-         * M08 later replaces this Current safe wait with permanent fencing. */
+         * M08 adds immediate Authority fencing, but does not replace this
+         * control-plane safe wait.  The two layers remain complementary. */
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING),
 };
 

@@ -1465,10 +1465,14 @@ ucn_result_t ucn_cluster_wire_v4_wire_offer_from_word(
     if (!wire_offer_is_valid(word)) {
         return UCN_ERR_ARGUMENT;
     }
+    /* The typed helper has an all-bytes deterministic output contract.
+     * Keep this local until validation succeeds so invalid input still leaves
+     * the caller-owned output untouched. */
+    (void)memset(&decoded, 0, sizeof(decoded));
     decoded.minimum_format = (uint8_t)(word >> 24U);
     decoded.maximum_format = (uint8_t)(word >> 16U);
     decoded.capabilities = (uint16_t)word;
-    *output = decoded;
+    (void)memcpy(output, &decoded, sizeof(decoded));
     return UCN_OK;
 }
 
@@ -1503,9 +1507,12 @@ ucn_result_t ucn_cluster_wire_v4_selected_wire_offer_from_word(
     if (!selected_wire_offer_is_valid(word)) {
         return UCN_ERR_ARGUMENT;
     }
+    /* selected_wire_offer has ABI padding on common targets.  Do not expose
+     * indeterminate stack bytes through a successful public typed decode. */
+    (void)memset(&decoded, 0, sizeof(decoded));
     decoded.format = (uint8_t)(word >> 16U);
     decoded.capabilities = (uint16_t)word;
-    *output = decoded;
+    (void)memcpy(output, &decoded, sizeof(decoded));
     return UCN_OK;
 }
 
@@ -1571,9 +1578,12 @@ ucn_result_t ucn_cluster_wire_v4_wire_offer_negotiate(
         (common_capabilities & required_capabilities) != required_capabilities) {
         return UCN_ERR_STATE;
     }
+    /* Preserve the same canonical all-bytes result as from_word().  The
+     * memcpy is intentional: C struct assignment need not overwrite padding. */
+    (void)memset(&selected, 0, sizeof(selected));
     selected.format = maximum_common_format;
     selected.capabilities = common_capabilities;
-    *output = selected;
+    (void)memcpy(output, &selected, sizeof(selected));
     return UCN_OK;
 }
 

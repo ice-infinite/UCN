@@ -3,6 +3,7 @@
 /build-*/
 /build_*/
 /cmake-build-*/
+/.h743cmp/
 CMakeCache.txt
 CMakeFiles/
 CTestTestfile.cmake

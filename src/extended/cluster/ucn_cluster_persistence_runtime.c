@@ -60,10 +60,11 @@ static void persistence_io_leave(ucn_cluster_t *cluster)
 }
 
 /* A head which loses persistence must stop being an authority immediately.
- * TERM_CONFLICT_WAIT is the existing wire-silent FSM containment state: it
- * preserves diagnostic epoch fields but has no outbound Cluster role.  Member
- * and Backup paths need no role rewrite because the universal progress/TX
- * gates below already prevent vote/takeover completion. */
+ * TERM_CONFLICT_WAIT is the complementary wire-silent control-plane
+ * containment state: it preserves diagnostic epoch fields but has no outbound
+ * Cluster role.  M08 Authority Fence does not replace this state.  Member and
+ * Backup paths need no role rewrite because the universal progress/TX gates
+ * below already prevent vote/takeover completion. */
 static void revoke_head_authority_on_persistence_fault(ucn_cluster_t *cluster)
 {
     ucn_cluster_phase_t phase;

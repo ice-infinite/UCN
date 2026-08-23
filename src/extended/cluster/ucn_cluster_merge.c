@@ -299,7 +299,8 @@ static bool begin_higher_authority_join(
     if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
         /* TERM_CONFLICT_WAIT is deliberately sticky for same-Term traffic.
          * A strictly higher same-Cluster Term is the first permitted exit in
-         * this Current-FSM stage; M08 later supplies permanent fencing. */
+         * this Current-FSM stage; M08 adds complementary Authority fencing
+         * but does not replace this control-plane safe wait. */
         if (cluster_transition(cluster,
                                UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT,
                                UCN_CLUSTER_PHASE_JOIN_PENDING,
@@ -328,6 +329,19 @@ static bool begin_higher_authority_join(
          * existing STEPPING_DOWN -> JOIN_PENDING edge and replace the pending
          * epoch immediately instead of waiting for the obsolete deadline. */
         if (cluster_transition(cluster, UCN_CLUSTER_PHASE_STEPPING_DOWN,
+                               UCN_CLUSTER_PHASE_JOIN_PENDING,
+                               UCN_CLUSTER_REASON_HIGHER_AUTHORITY,
+                               now_ms) == UCN_OK) {
+            begin_join_prepare_fields(cluster, candidate, now_ms);
+        }
+        return true;
+    }
+    if (cluster->role == UCN_CLUSTER_ROLE_CANDIDATE) {
+        /* A Candidate already owns a local same-Cluster Election Epoch.
+         * A protected remote higher Term must use the same global authority
+         * transition as Member/Backup, rather than falling through to the
+         * generic Candidate join path with JOIN_INITIATED. */
+        if (cluster_transition(cluster, UCN_CLUSTER_PHASE_ELECTION,
                                UCN_CLUSTER_PHASE_JOIN_PENDING,
                                UCN_CLUSTER_REASON_HIGHER_AUTHORITY,
                                now_ms) == UCN_OK) {
@@ -471,6 +485,9 @@ void consider_head_offer(
     ucn_cluster_candidate_t *candidate,
     uint32_t now_ms)
 {
+    ucn_cluster_epoch_t local_epoch;
+    ucn_cluster_epoch_t remote_epoch;
+
     if (candidate->head_node_id == cluster->config.local_node_id) {
         return;
     }
@@ -484,6 +501,20 @@ void consider_head_offer(
      * implementation from drifting away from process_higher_authority(). */
     if (process_term_conflict(cluster, candidate, now_ms) ||
         process_higher_authority(cluster, candidate, now_ms)) {
+        return;
+    }
+    /* A Candidate can already own a same-Cluster Election Epoch.  Do not let
+     * the legacy role-local join path retarget it to an older Head offer:
+     * only a remote HIGHER Term may cause the global authority transition.
+     * FOREIGN stays outside this comparison domain and detached nodes still
+     * discover a first Cluster normally. */
+    local_epoch = ucn_cluster_active_epoch_get(cluster);
+    remote_epoch.cluster_id = candidate->cluster_id;
+    remote_epoch.term = candidate->term;
+    remote_epoch.head_node_id = candidate->head_node_id;
+    if (ucn_cluster_epoch_compare(&local_epoch, &remote_epoch) ==
+        UCN_CLUSTER_EPOCH_RELATION_HIGHER) {
+        cluster->stats.stale_messages++;
         return;
     }
     /* A full Head must keep refreshing existing members.  Capacity zero only

@@ -687,11 +687,18 @@ static int test_wire_offer_capability_semantics(void)
     ucn_cluster_wire_v4_wire_offer_t untouched_offer;
     ucn_cluster_wire_v4_selected_wire_offer_t selected_offer;
     ucn_cluster_wire_v4_selected_wire_offer_t decoded_selected;
+    ucn_cluster_wire_v4_selected_wire_offer_t expected_selected;
     ucn_cluster_wire_v4_selected_wire_offer_t untouched_selected;
     ucn_cluster_wire_v4_frame_t frame;
     uint32_t word;
     uint32_t untouched_word;
 
+    (void)memset(&local_offer, 0, sizeof(local_offer));
+    (void)memset(&peer_offer, 0, sizeof(peer_offer));
+    (void)memset(&decoded_offer, 0xA5, sizeof(decoded_offer));
+    (void)memset(&selected_offer, 0xA5, sizeof(selected_offer));
+    (void)memset(&decoded_selected, 0xA5, sizeof(decoded_selected));
+    (void)memset(&expected_selected, 0, sizeof(expected_selected));
     local_offer.minimum_format = 4U;
     local_offer.maximum_format = 6U;
     local_offer.capabilities = (uint16_t)(
@@ -713,18 +720,24 @@ static int test_wire_offer_capability_semantics(void)
     peer_offer.capabilities = (uint16_t)(
         UCN_CLUSTER_WIRE_V4_CAPABILITY_BACKUP |
         UCN_CLUSTER_WIRE_V4_CAPABILITY_PERSISTENCE);
+    expected_selected.format = 5U;
+    expected_selected.capabilities = UCN_CLUSTER_WIRE_V4_CAPABILITY_BACKUP;
     ASSERT_TRUE(ucn_cluster_wire_v4_wire_offer_negotiate(
                     &local_offer, &peer_offer,
                     UCN_CLUSTER_WIRE_V4_CAPABILITY_BACKUP,
                     &selected_offer) == UCN_OK);
     ASSERT_TRUE(selected_offer.format == 5U &&
                 selected_offer.capabilities == UCN_CLUSTER_WIRE_V4_CAPABILITY_BACKUP);
+    /* Success must canonically overwrite the complete object, including ABI
+     * padding, even if the caller supplied nonzero bytes. */
+    ASSERT_TRUE(memcmp(&selected_offer, &expected_selected,
+                       sizeof(selected_offer)) == 0);
     ASSERT_TRUE(ucn_cluster_wire_v4_selected_wire_offer_to_word(
                     &selected_offer, &word) == UCN_OK);
     ASSERT_TRUE(word == UINT32_C(0x00050001));
     ASSERT_TRUE(ucn_cluster_wire_v4_selected_wire_offer_from_word(
                     word, &decoded_selected) == UCN_OK);
-    ASSERT_TRUE(memcmp(&decoded_selected, &selected_offer,
+    ASSERT_TRUE(memcmp(&decoded_selected, &expected_selected,
                        sizeof(selected_offer)) == 0);
 
     /* Selection is a pure common-set operation. Missing required capability

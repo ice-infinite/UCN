@@ -9098,6 +9098,118 @@ static int cluster_test_global_term_conflict_pre_dispatch(void)
     return 0;
 }
 
+/* M03 audit minor closure: pin the Candidate sequence explicitly instead of
+ * relying on the broad multi-phase matrix.  A lower remote Epoch must not
+ * perturb the local election; a later same-cluster higher Epoch must use the
+ * one global higher-authority path and become JOIN_PENDING. */
+static int cluster_test_candidate_lower_authority_sequence(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *node;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    ucn_node_id_t source;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 100U;
+    node = &network.nodes[0];
+    source = network.nodes[1].node_id;
+    node->cluster.role = UCN_CLUSTER_ROLE_CANDIDATE;
+    node->cluster.cluster_id = 1U;
+    node->cluster.term = 5U;
+    node->cluster.head_node_id = node->node_id;
+    node->cluster.election_deadline_ms = 200U;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_ELECTION;
+    node->cluster.transition_reason = UCN_CLUSTER_REASON_INIT;
+    node->cluster.shadow_transition_count = 0U;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_ADVERTISE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 4U;
+    message.head_node_id = source;
+    message.head_score = UCN_CLUSTER_SCORE_MAX;
+    message.available_capacity = 4U;
+    message.lease_ms = 8000U;
+    message.nonce = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, source, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_CANDIDATE);
+    TEST_ASSERT(node->cluster.shadow_phase == UCN_CLUSTER_PHASE_ELECTION);
+    TEST_ASSERT(node->cluster.term == 5U);
+    TEST_ASSERT(node->cluster.shadow_transition_count == 0U);
+    TEST_ASSERT(network.queue_count == 0U);
+
+    message.term = 6U;
+    message.nonce = 2U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, source, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_JOIN_PENDING);
+    TEST_ASSERT(node->cluster.shadow_phase == UCN_CLUSTER_PHASE_JOIN_PENDING);
+    TEST_ASSERT(node->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_HIGHER_AUTHORITY);
+    TEST_ASSERT(node->cluster.pending_head_node_id == source);
+    TEST_ASSERT(node->cluster.pending_cluster_id == 1U);
+    TEST_ASSERT(node->cluster.pending_term == 6U);
+    TEST_ASSERT(node->cluster.shadow_transition_count == 1U);
+    return 0;
+}
+
+/* M03 audit minor closure: the legality-table edge must also be proven by
+ * real RX.  A stepping-down Head that receives a competing same-Term Head
+ * cannot finish its ordered transition or resume control activity. */
+static int cluster_test_stepdown_term_conflict_rx(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *node;
+    ucn_cluster_message_t message;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    ucn_node_id_t source;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
+    network.now_ms = 100U;
+    node = &network.nodes[0];
+    source = network.nodes[1].node_id;
+    node->cluster.role = UCN_CLUSTER_ROLE_STEPPING_DOWN;
+    node->cluster.cluster_id = 1U;
+    node->cluster.term = 5U;
+    node->cluster.head_node_id = node->node_id;
+    node->cluster.pending_cluster_id = 1U;
+    node->cluster.pending_term = 5U;
+    node->cluster.pending_head_node_id = network.nodes[2].node_id;
+    node->cluster.stepdown_deadline_ms = 200U;
+    node->cluster.shadow_phase = UCN_CLUSTER_PHASE_STEPPING_DOWN;
+    node->cluster.transition_reason = UCN_CLUSTER_REASON_STEPDOWN_ORDERED;
+    node->cluster.shadow_transition_count = 0U;
+
+    (void)memset(&message, 0, sizeof(message));
+    message.type = UCN_CLUSTER_MSG_ADVERTISE;
+    message.role = UCN_CLUSTER_ROLE_HEAD;
+    message.cluster_id = 1U;
+    message.term = 5U;
+    message.head_node_id = source;
+    message.head_score = UCN_CLUSTER_SCORE_MAX;
+    message.available_capacity = 4U;
+    message.lease_ms = 8000U;
+    message.nonce = 1U;
+    TEST_ASSERT(ucn_cluster_message_encode(&message, encoded) == UCN_OK);
+    TEST_ASSERT(ucn_cluster_receive(&node->cluster, source, true,
+                                    encoded, sizeof(encoded)) == UCN_OK);
+    TEST_ASSERT(node->cluster.role == UCN_CLUSTER_ROLE_TERM_CONFLICT);
+    TEST_ASSERT(node->cluster.shadow_phase ==
+                UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT);
+    TEST_ASSERT(node->cluster.transition_reason ==
+                UCN_CLUSTER_REASON_TERM_CONFLICT);
+    TEST_ASSERT(node->cluster.stepdown_deadline_ms == 0U);
+    TEST_ASSERT(node->cluster.shadow_transition_count == 1U);
+    TEST_ASSERT(ucn_cluster_step(&node->cluster) == UCN_OK);
+    TEST_ASSERT(network.queue_count == 0U);
+    return 0;
+}
+
 /* CLV2-M03 (03-07): no Cluster safety serial may wrap inside one identity.
  * Until M13 Rekey exists, Term exhaustion is an explicit public error and
  * leaves the pre-existing role/epoch/transition untouched.  Backup
@@ -11920,6 +12032,8 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_epoch_classified_head_offer() == 0);
     TEST_ASSERT(cluster_test_global_higher_authority_pre_dispatch() == 0);
     TEST_ASSERT(cluster_test_global_term_conflict_pre_dispatch() == 0);
+    TEST_ASSERT(cluster_test_candidate_lower_authority_sequence() == 0);
+    TEST_ASSERT(cluster_test_stepdown_term_conflict_rx() == 0);
     TEST_ASSERT(cluster_test_serial_exhaustion_fails_closed() == 0);
     TEST_ASSERT(cluster_test_cluster_id_provider() == 0);
     TEST_ASSERT(cluster_test_detach_history_rejects_old_term() == 0);
