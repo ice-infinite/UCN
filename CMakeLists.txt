@@ -155,6 +155,12 @@ add_library(ucn_cluster STATIC EXCLUDE_FROM_ALL
     # CLV2-M02 (02-05): the Backup selection/snapshot/heartbeat/resync and
     # Takeover prepare/ACK/complete lifecycle.
     src/extended/cluster/ucn_cluster_backup.c
+    # CLV2-M09 (09-01): isolated committed/staging Backup mirror value model.
+    src/extended/cluster/ucn_cluster_backup_mirror.c
+    # CLV2-M09 (09-03): wire-agnostic strict Backup snapshot owner.
+    src/extended/cluster/ucn_cluster_backup_sync.c
+    # CLV2-M09 (09-10): pure strict Backup capability/profile gate.
+    src/extended/cluster/ucn_cluster_backup_profile.c
     # CLV2-M02 (02-06): the RECOVERY_HEAD quorum/declaration/arbitration/TTL.
     src/extended/cluster/ucn_cluster_recovery.c
     # CLV2-M02 (02-06): the candidate table / head offer / stepdown / score.
@@ -491,6 +497,42 @@ if(UCN_BUILD_TESTS)
     )
     add_test(NAME ucn_cluster_membership_model_tests
         COMMAND ucn_cluster_membership_model_tests)
+
+    # CLV2-M09 (09-01): this target validates only the fixed-storage mirror
+    # model.  It does not compile a v4 encoder or invoke Cluster RX/TX/FSM.
+    add_executable(ucn_cluster_backup_mirror_tests
+        tests/test_cluster_backup_mirror.c
+    )
+    target_link_libraries(ucn_cluster_backup_mirror_tests PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_backup_mirror_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_cluster_backup_mirror_tests
+        COMMAND ucn_cluster_backup_mirror_tests)
+
+    # CLV2-M09 (09-03): source/Epoch/Config-gated SYNC_BEGIN only.  This
+    # target never enables a v4 encoder or production Cluster RX/TX/FSM.
+    add_executable(ucn_cluster_backup_sync_tests
+        tests/test_cluster_backup_sync.c
+    )
+    target_link_libraries(ucn_cluster_backup_sync_tests PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_backup_sync_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_cluster_backup_sync_tests
+        COMMAND ucn_cluster_backup_sync_tests)
+
+    # CLV2-M09 (09-10): v4-capability/profile selection only; no wire codec
+    # or Cluster production RX/TX/FSM is linked through this test.
+    add_executable(ucn_cluster_backup_profile_tests
+        tests/test_cluster_backup_profile.c
+    )
+    target_link_libraries(ucn_cluster_backup_profile_tests PRIVATE ucn_cluster)
+    target_compile_options(ucn_cluster_backup_profile_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_cluster_backup_profile_tests
+        COMMAND ucn_cluster_backup_profile_tests)
 
     # CLV2-07-01: independent production-archive value-model gate. It has no
     # test bridge and no v4 encoder/dispatcher definition.

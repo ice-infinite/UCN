@@ -20,7 +20,7 @@
 > | M06 Provisional | DONE / 外部复审 GO（受限软件范围） | 06-01..09 与 R01 已完成；外审确认 production RX 在任何状态/计时/统计/shadow 写入前拒绝 v3 Backup/Takeover authority frame，且 legacy bridge 为 target-private。M05 05-01..12 的 codec/contract 子项均已受限签字，但 M05 顶层仍 AUDIT HOLD | 当前明确产品姿态：v3 仅临时 non-voting，10 s 清扫，不得成为 Backup/failover；v3 keepalive 不得续期 provisional deadline。不得据此接入 production v4 RX/TX/FSM、Authority 或 Adapter，也不构成实机、Flash/掉电或互通放行。 |
 > | M07 Joint Config | DONE / 外部复审 GO（受限实验软件范围） | 07-00..12 + R24..R30 已完成；外审确认 R25/R26 最终旁路已关闭，未发现新的 P0/P1 | 只签实验 Config/Joint/Persistence 软件范围；M05 顶层 AUDIT HOLD 不解除，默认产品仍不启用 v4 encoder、production v4 RX/TX/FSM、Authority、Adapter，真实 Flash/掉电/MCU/互通也未验收。 |
 > | M08 Authority/Fence | SELF-AUDIT PASS / WAIT EXTERNAL | 08-01..12、R31/R32 已完成（已提交 `5a237a0`） | Authority Fence 负责即时撤销数据面 Authority；`TERM_CONFLICT_WAIT` 保留为控制面安全等待，两者并存。M05 顶层 `AUDIT HOLD` 不解除。 |
-> | M09 Backup 双缓冲 | TODO | — | — |
+> | M09 Backup 双缓冲 | SELF-AUDIT PASS / WAIT EXTERNAL（受限实验软件范围） | 09-01..11 已完成分项和全量自审；M08 仍为 SELF-AUDIT PASS / WAIT EXTERNAL，M05 顶层 AUDIT HOLD 不解除 | 仅建立独立 Backup mirror/同步合同与 production-archive 单元测试；不接入 v4 production RX/TX/FSM、Authority 或 Takeover 提交。外部审前不得进入 M10。 |
 > | M10 Final Takeover | TODO | — | — |
 > | M11 Merge/Handover | TODO | — | — |
 > | M12 RecoveryLineage | TODO | — | — |
@@ -637,21 +637,23 @@ duplicate/replay/reorder
 
 **依赖：** M08
 
+**状态：** **AUDIT HOLD / BLOCKED BY M08 WAIT EXTERNAL（M09-R01 已获外部复审 GO）**。09-01..11 已完成；外审发现的 Coverage 缺失 protected voter 借用 grace 问题已由 R01 修复并签署 GO（受限范围）。但依赖 M08 仍为 `WAIT EXTERNAL`，因此不进入 M10，M05 `AUDIT HOLD` 不解除。
+
 **里程碑门禁：** SYNC_BEGIN 不再清 committed mirror；BACKUP_READY 只对应原子提交后的 exact SnapshotEpoch/Config。
 
 | 任务 ID | 优先级 | 依赖 | 主要文件/位置 | 具体修改任务 | 完成定义 / 测试 |
 |---|---:|---|---|---|---|
-| `CLV2-09-01` | P0 | M08 | Backup state | 新增 committed mirror、staging mirror、committed_valid、staging_active；利用 Role-state union 控制 RAM，避免 Head 同时持有无用双表。 | size report 符合预算；初次 Sync 与刷新可区分。 |
-| `CLV2-09-02` | P0 | 09-01 | SnapshotEpoch | 每次 full snapshot 分配 `snapshot_id`，绑定 BackupEpoch + config_id/config_phase；Delta 也绑定 committed snapshot/config。 | 旧 snapshot/delta/ready 全部 replay。 |
-| `CLV2-09-03` | P0 | 09-01 | SYNC_BEGIN | 只清 staging，committed 保持；若 committed config 仍是 Active Config，Primary 在刷新中故障时 Backup 仍可用 committed mirror takeover。 | 刷新中故障的可用性测试。 |
-| `CLV2-09-04` | P0 | 09-01 | SYNC_MEMBER/END | 严格 sequence、count、hash、member nonce、config hash、coverage 校验；全部成功后 atomic swap。 | 任一记录缺失/乱序/篡改都不污染 committed。 |
-| `CLV2-09-05` | P0 | 09-04 | BACKUP_READY | 绑定 source、cluster、term、backup id、generation、snapshot_id、final sequence、config_id/phase/hash。 | 延迟 READY 不会完成新的 sync。 |
-| `CLV2-09-06` | P0 | 09-02 | Delta | Delta 只更新与 committed snapshot/config 相符的 mirror；gap 触发 full resync，stale ignore，不能直接跨 sequence。 | 现有 gap test 扩展 snapshot/config 维度。 |
-| `CLV2-09-07` | P0 | 09-01 | Coverage initial | 首次 READY 要求 required committed members 在 Core peer 中为 ADMITTED；明确哪些非 voter/provisional 是否需要一跳覆盖。 | 覆盖定义表驱动测试。 |
-| `CLV2-09-08` | P1 | 09-07 | Coverage grace | 已 READY 后 ADMITTED->SUSPECT 启动 `backup_coverage_grace_ms`，短抖动不立刻失效；持续 SUSPECT/REMOVED 后标记 takeover_ineligible 并重选 Backup。 | Neighbor flapping 测试。 |
-| `CLV2-09-09` | P0 | 09-02 | Snapshot/generation no-wrap | snapshot_id 到阈值先 rotate generation 并 full sync；generation 到阈值触发 M13 Rekey；禁止回绕。 | 边界和 CI grep。 |
-| `CLV2-09-10` | P1 | 09-01..09 | Backup capability/profile | 只有支持 v4、Persistence、Joint Config、足够 mirror capacity 的节点可成为 Strict Backup；Reject reason 可诊断。 | 能力不足时确定性选择下一候选。 |
-| `CLV2-09-11` | P0 | 09-01..10 | Failure matrix | Primary 在 BEGIN、Member N、END、Ready、Delta、Config refresh 每个边界故障；验证使用最后 committed snapshot 或安全 Recovery。 | 无部分镜像 takeover。 |
+| `CLV2-09-01` | P0 | M08 | Backup state | **CODE COMPLETE / SELF-AUDIT PASS（受限 value-model）**：新增 committed/staging mirror、`committed_valid`、`staging_active`、canonical reset/validity 与 Role-state union。模型暂不接入旧 v3 Backup handler，避免在 09-02..04 的 SnapshotEpoch/Config/coverage 证明完成前改变 production 控制语义。 | 断言 begin/abort 只清 staging、committed 逐字节保持、invalid state 无写回、Role union 不大于 Backup pair；Full/Lite `38/38`、Nano `28/28`、Service OFF `14/14`。见 `UCN_V5_Cluster_M09_01_BackupMirrorState_自审报告_2026-08-23.md`。 |
+| `CLV2-09-02` | P0 | 09-01 | SnapshotEpoch | **CODE COMPLETE / SELF-AUDIT PASS（受限 value-model）**：新增 exact `BackupEpoch={cluster,term,head,backup,generation}` 与 `SnapshotEpoch={BackupEpoch,snapshot_id,config_id,config_phase,config_hash}`；Config ref 从 canonical ConfigState 派生，staging 必须用 exact Epoch，已 committed 时只接受同 BackupEpoch 的严格递增 snapshot。 | 配置错绑、旧 snapshot、active staging overwrite、脏 Epoch 均 fail-closed/no-write；Full/Lite/Nano/Service OFF 各 `14/14`。见 `UCN_V5_Cluster_M09_02_SnapshotEpoch_自审报告_2026-08-23.md`。 |
+| `CLV2-09-03` | P0 | 09-01 | SYNC_BEGIN | **CODE COMPLETE / SELF-AUDIT PASS（受限 sync owner）**：新增 wire-agnostic snapshot receiver owner；只在 source=assigned Head、BackupEpoch exact、Snapshot Config ref=active canonical Config 且 `BEGIN.sequence==0` 时允许 begin。begin 仅开启/清 staging，永不写 committed；新 assignment 初始化原子丢弃旧本地 mirror。 | wrong source/Epoch/Config、nonzero BEGIN、active overwrite 均 no-write；刷新中 committed 字节保持。Full/Lite/Nano 各 `16/16`，Service OFF `37/37`。见 `UCN_V5_Cluster_M09_03_SyncBegin_自审报告_2026-08-23.md`。 |
+| `CLV2-09-04` | P0 | 09-01 | SYNC_MEMBER/END | **CODE COMPLETE / SELF-AUDIT PASS（受限 sync owner）**：严格固定单 Snapshot 控制序列：`BEGIN=0`、`MEMBER=1..N`、`END=N+1`。Member 必须 exact source/Epoch/active Config、unique Node ID、valid nonzero nonce；END 同时核对 final sequence、count、padding-free FNV hash 与 coverage，全部通过后才 atomic staging→committed swap。 | 乱序、把最后 Member sequence 当 END、空 Snapshot END=0、缺失、hash/Config/coverage 错误均保留 committed、staging 可显式 abort。见 `UCN_V5_Cluster_M09_04-11_分项自审报告_2026-08-23.md`。 |
+| `CLV2-09-05` | P0 | 09-04 | BACKUP_READY | **CODE COMPLETE / SELF-AUDIT PASS（pure verifier）**：READY 绑定 sender=assigned Backup、exact committed SnapshotEpoch、final sequence、hash 和 active Config；无任何字段写回。 | wrong sender/sequence/snapshot/config/hash 与延迟 READY 均 `REPLAY`。见 M09 04-11 分项报告。 |
+| `CLV2-09-06` | P0 | 09-02 | Delta | **CODE COMPLETE / SELF-AUDIT PASS（受限 sync owner）**：Delta 只更新 exact committed SnapshotEpoch/Config/hash 下的**既有成员动态 freshness 字段**（nonce/lease/keepalive），且 sequence 必须连续；禁止新增成员、改变 static membership/eligibility 或 nonce 回退。stale 无写回，gap 保留 committed 并置 `resync_required`，staging 时拒绝 Delta。 | sequence/config/hash/snapshot/gap、unknown member、static-field mutation、nonce rollback 矩阵覆盖。见 M09 04-11 分项报告。 |
+| `CLV2-09-07` | P0 | 09-01 | Coverage initial | **CODE COMPLETE / SELF-AUDIT PASS（pure coverage predicate）**：Active Stable/Joint Config 的 old/new protected voter sets 全部必须在 canonical Core-peer view 为 `ADMITTED`；non-voter/provisional legacy 不参与首次 READY predicate。 | `SUSPECT/REMOVED`、缺 entry、乱序/脏 tail 均拒绝 atomic commit。见 M09 04-11 分项报告。 |
+| `CLV2-09-08` | P1 | 09-07 | Coverage grace | **DONE / 外部复审 GO（受限范围）**：committed 后**只有明确的**受保护 voter `SUSPECT` 才启动 wrap-safe grace；grace 内恢复保持 eligible，deadline 到期将该 assignment 永久标记 `takeover_ineligible`。已 Core 确认的 `REMOVED` **或缺失的 protected-voter coverage entry** 都立即清 grace、永久失去资格，后续 ADMITTED 也不能复活，直到新 Backup assignment。 | SUSPECT flap、REMOVED immediate fence、Stable/Joint missing voter、ADMITTED-after-missing no-revive、`UINT32_MAX` 回绕 deadline 覆盖；R01 外审已签署 GO。见 `UCN_V5_Cluster_M09_R01_Coverage缺失整改自审报告_2026-08-23.md`。 |
+| `CLV2-09-09` | P0 | 09-02 | Snapshot/generation no-wrap | **CODE COMPLETE / SELF-AUDIT PASS（pure serial gate）**：新 snapshot 到 rotation threshold 前 fail-closed；显式 `next_generation()` 只能严格递增并从 snapshot 1 重新 full sync；generation 接近阈值返回 `EXHAUSTED`，指向 M13 Rekey。 | threshold/no-write/new-generation 与 delta serial 边界覆盖。见 M09 04-11 分项报告。 |
+| `CLV2-09-10` | P1 | 09-01..09 | Backup capability/profile | **CODE COMPLETE / SELF-AUDIT PASS（pure profile gate）**：Strict Backup 必须 Runtime member、committed/eligible、Head-capable、Core ADMITTED、无 cooldown/blacklist、v4 + Backup/Joint/Persistence capability、足够 mirror capacity，且 score 合法；确定性排序为 `head_score DESC, node_id ASC`。失败提供 reason 且 output 无写回。 | 每项资格 reject、v3、缺 capability、容量不足、score 越界、score/node tie-break、混合候选和无候选矩阵覆盖。见 M09 04-11 分项报告。 |
+| `CLV2-09-11` | P0 | 09-01..10 | Failure matrix | **CODE COMPLETE / SELF-AUDIT PASS；R01 外审 GO 已并入**：BEGIN、Member N、END、旧 READY、bad Delta、Config refresh、REMOVED/missing immediate fence 与 Profile reject 边界均验证保留 last committed 或原子清空进入安全 Recovery；staging 从不进入 committed/M10 input。M09 整体仍受 M08 `WAIT EXTERNAL` 阻断。 | Windows GCC Full/Lite/Nano 各 `16/16`、Service OFF `37/37`；Release `37/37`、WSL ASan/UBSan `37/37`、Windows GCC analyzer `37/37`。见 R01 报告与全量自审报告。 |
 
 ## 本里程碑禁止事项
 - 禁止 BEGIN 清 committed mirror。
