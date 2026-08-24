@@ -70,11 +70,11 @@ static void revoke_head_authority_on_persistence_fault(ucn_cluster_t *cluster)
     ucn_cluster_phase_t phase;
 
     if (cluster == NULL ||
-        (cluster->role != UCN_CLUSTER_ROLE_HEAD &&
-         cluster->role != UCN_CLUSTER_ROLE_RECOVERY_HEAD)) {
+        (ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_HEAD &&
+         ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_RECOVERY_HEAD)) {
         return;
     }
-    phase = cluster_phase_from_legacy_state(cluster, cluster_now(cluster));
+    phase = cluster->phase;
     (void)cluster_transition(cluster, phase,
                              UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT,
                              UCN_CLUSTER_REASON_TERM_CONFLICT,

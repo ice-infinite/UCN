@@ -28,87 +28,82 @@ uint32_t cluster_now(const ucn_cluster_t *cluster)
     return cluster->config.now_ms(cluster->config.now_context);
 }
 
-/* ================= CLV2-01-01..03: M01 shadow phase ===================
- *
- * During M01 the legacy role+bool+deadline fields still drive the FSM.
- * cluster_phase_from_legacy_state() derives the explicit phase name for
- * every implicit combination, and cluster_shadow_sync() keeps the
- * shadow mirror aligned after each Step/RX.  Production logic MUST NOT
- * read shadow_phase to make decisions until CLV2-01-04+; the mirror only
- * exists so tests can prove the mapping is total, unique and consistent
- * under the fault model. */
-
-ucn_cluster_phase_t cluster_phase_from_legacy_state(
-    const ucn_cluster_t *cluster, uint32_t now_ms)
+ucn_cluster_role_t ucn_cluster_phase_to_role(ucn_cluster_phase_t phase)
 {
-    if (!cluster->config.enabled) {
-        return UCN_CLUSTER_PHASE_DISABLED;
-    }
-    switch (cluster->role) {
-    case UCN_CLUSTER_ROLE_DISABLED:
-        return UCN_CLUSTER_PHASE_DISABLED;
-    case UCN_CLUSTER_ROLE_DETACHED:
-        if (cluster->recovery_eligible) {
-            /* Cooling down after a Recovery stepdown still observes;
-             * once the backoff timer is armed the node is walking the
-             * recovery election path. */
-            if (cluster->recovery_backoff_deadline_ms != 0U &&
-                (cluster->recovery_cooldown_until_ms == 0U ||
-                 ucn_deadline_expired(now_ms,
-                                      cluster->recovery_cooldown_until_ms))) {
-                return UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
-            }
-            return UCN_CLUSTER_PHASE_RECOVERY_OBSERVE;
-        }
-        return UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
-    case UCN_CLUSTER_ROLE_CANDIDATE:
-        return UCN_CLUSTER_PHASE_ELECTION;
-    case UCN_CLUSTER_ROLE_JOIN_PENDING:
-        return UCN_CLUSTER_PHASE_JOIN_PENDING;
-    case UCN_CLUSTER_ROLE_MEMBER:
-        /* CLV2-M01.0.1: arming the grace deadline IS the phase change.
-         * Timer expiry is an event the FSM owner consumes (timeout
-         * action -> DETACHED/RECOVERY); it must never silently derive
-         * the phase back to MEMBER_ACTIVE. */
-        if (cluster->head_grace_deadline_ms != 0U) {
-            return UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE;
-        }
-        return UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
-    case UCN_CLUSTER_ROLE_HEAD:
-        /* CLV2-M01.0.1: the Head-side phase ladder follows the REAL
-         * assignment/snapshot fields: no Backup yet -> NO_BACKUP;
-         * assignment cycle armed -> ASSIGNING; assignment done but no
-         * READY yet -> SYNCING (snapshot in flight); READY -> STABLE.
-         * The mirror flag backup_syncing is Backup-side state and must
-         * never drive the Head phase. */
-        if (cluster->backup_node_id == 0U) {
-            return UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
-        }
-        if (cluster->backup_ready) {
-            return UCN_CLUSTER_PHASE_HEAD_STABLE;
-        }
-        if (cluster->backup_assign_pending) {
-            return UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING;
-        }
-        return UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
-    case UCN_CLUSTER_ROLE_BACKUP:
-        if (cluster->backup_takeover_active) {
-            return UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
-        }
-        if (cluster->backup_ready) {
-            return UCN_CLUSTER_PHASE_BACKUP_READY;
-        }
-        return UCN_CLUSTER_PHASE_BACKUP_SYNCING;
-    case UCN_CLUSTER_ROLE_STEPPING_DOWN:
-        return UCN_CLUSTER_PHASE_STEPPING_DOWN;
-    case UCN_CLUSTER_ROLE_RECOVERY_HEAD:
-        return UCN_CLUSTER_PHASE_RECOVERY_HEAD;
-    case UCN_CLUSTER_ROLE_TERM_CONFLICT:
-        return UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT;
+    switch (phase) {
+    case UCN_CLUSTER_PHASE_DISABLED:
+        return UCN_CLUSTER_ROLE_DISABLED;
+    case UCN_CLUSTER_PHASE_DETACHED_OBSERVE:
+    case UCN_CLUSTER_PHASE_RECOVERY_OBSERVE:
+    case UCN_CLUSTER_PHASE_RECOVERY_ELECTION:
+        return UCN_CLUSTER_ROLE_DETACHED;
+    case UCN_CLUSTER_PHASE_ELECTION:
+        return UCN_CLUSTER_ROLE_CANDIDATE;
+    case UCN_CLUSTER_PHASE_JOIN_PENDING:
+        return UCN_CLUSTER_ROLE_JOIN_PENDING;
+    case UCN_CLUSTER_PHASE_MEMBER_ACTIVE:
+    case UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE:
+        return UCN_CLUSTER_ROLE_MEMBER;
+    case UCN_CLUSTER_PHASE_HEAD_NO_BACKUP:
+    case UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING:
+    case UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING:
+    case UCN_CLUSTER_PHASE_HEAD_STABLE:
+    case UCN_CLUSTER_PHASE_HEAD_RECONFIGURING:
+    case UCN_CLUSTER_PHASE_HEAD_QUORUM_GRACE:
+    case UCN_CLUSTER_PHASE_HEAD_FENCED:
+    case UCN_CLUSTER_PHASE_HEAD_REKEYING:
+        return UCN_CLUSTER_ROLE_HEAD;
+    case UCN_CLUSTER_PHASE_BACKUP_SYNCING:
+    case UCN_CLUSTER_PHASE_BACKUP_READY:
+    case UCN_CLUSTER_PHASE_BACKUP_TAKEOVER:
+        return UCN_CLUSTER_ROLE_BACKUP;
+    case UCN_CLUSTER_PHASE_STEPPING_DOWN:
+        return UCN_CLUSTER_ROLE_STEPPING_DOWN;
+    case UCN_CLUSTER_PHASE_RECOVERY_HEAD:
+        return UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    case UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT:
+        return UCN_CLUSTER_ROLE_TERM_CONFLICT;
     default:
-        return UCN_CLUSTER_PHASE_DISABLED;
+        return UCN_CLUSTER_ROLE_DISABLED;
     }
 }
+
+bool cluster_phase_backup_ready(ucn_cluster_phase_t phase)
+{
+    return phase == UCN_CLUSTER_PHASE_HEAD_STABLE ||
+           phase == UCN_CLUSTER_PHASE_BACKUP_READY;
+}
+
+bool cluster_phase_backup_syncing(ucn_cluster_phase_t phase)
+{
+    return phase == UCN_CLUSTER_PHASE_BACKUP_SYNCING;
+}
+
+bool cluster_backup_assignment_pending(const ucn_cluster_t *cluster)
+{
+    /* The assignment sweep is bounded transaction work, not a second
+     * lifecycle state.  A stable Head may periodically refresh the Backup
+     * binding without revoking the already-proved snapshot.  The former
+     * backup_assign_pending bool merely mirrored this remaining counter. */
+    return cluster != NULL && cluster->backup_assign_remaining != 0U;
+}
+
+bool cluster_phase_backup_takeover_active(ucn_cluster_phase_t phase)
+{
+    return phase == UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
+}
+
+bool cluster_phase_recovery_eligible(ucn_cluster_phase_t phase)
+{
+    return phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE ||
+           phase == UCN_CLUSTER_PHASE_RECOVERY_ELECTION ||
+           phase == UCN_CLUSTER_PHASE_RECOVERY_HEAD;
+}
+
+/* CLV2-M14 (14-01): phase is the sole lifecycle state.  The former
+ * role+bool -> phase reverse mapper and end-of-Step/RX shadow repair were
+ * intentionally deleted.  A lifecycle change that does not pass through
+ * cluster_transition() can therefore no longer be hidden by a later sync. */
 
 /* BEST-EFFORT ONLY reason inference for a legacy transition, from the
  * phase pair alone.  NOT AUTHORITATIVE: the same old/new pair can be
@@ -305,6 +300,9 @@ static ucn_cluster_transition_reason_t cluster_reason_from_diff(
         }
         return UCN_CLUSTER_REASON_UNKNOWN;
     case UCN_CLUSTER_PHASE_RECOVERY_OBSERVE:
+        if (new_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE) {
+            return UCN_CLUSTER_REASON_RECOVERY_SERIAL_EXHAUSTED;
+        }
         if (new_phase == UCN_CLUSTER_PHASE_RECOVERY_ELECTION) {
             return UCN_CLUSTER_REASON_RECOVERY_BACKOFF;
         }
@@ -384,63 +382,6 @@ ucn_cluster_transition_reason_t cluster_rx_reason_from_type(
     }
 }
 
-/* CLV2-M01.0.1: contradictory legacy combinations the current FSM must
- * never produce.  The shadow gate refuses to mint a transition from an
- * invalid combination instead of silently naming it. */
-bool cluster_legacy_state_is_valid(const ucn_cluster_t *cluster)
-{
-    if (cluster->role == UCN_CLUSTER_ROLE_HEAD) {
-        /* READY without a selected Backup is contradictory. */
-        if (cluster->backup_ready && cluster->backup_node_id == 0U) {
-            return false;
-        }
-        /* backup_syncing is Backup-side mirror state; a Head must never
-         * carry it. */
-        if (cluster->backup_syncing) {
-            return false;
-        }
-    }
-    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
-        /* The mirror is either syncing or ready, never both. */
-        if (cluster->backup_ready && cluster->backup_syncing) {
-            return false;
-        }
-        /* NOTE (M01.0.2): takeover_active && backup_syncing is REACHABLE
-         * in the Current FSM: a delayed same-generation Type12 from the
-         * old Primary (e.g. SYNC_BEGIN) can re-arm backup_syncing while
-         * takeover is already active, because handle_backup_member_sync()
-         * has no takeover guard.  Shadow must express it, not reject it;
-         * the late-sync-can-mutate-mirror deficiency is deferred to the
-         * M09 committed/staging mirror + M10 frozen TakeoverConfig. */
-    }
-    return true;
-}
-
-void cluster_shadow_sync(ucn_cluster_t *cluster,
-                                ucn_cluster_transition_reason_t hint)
-{
-    uint32_t now_ms = cluster_now(cluster);
-    ucn_cluster_phase_t derived;
-    ucn_cluster_transition_reason_t reason;
-
-    if (!cluster_legacy_state_is_valid(cluster)) {
-        /* Fail closed: never mint a shadow transition from a
-         * contradictory legacy combination. */
-        return;
-    }
-    derived = cluster_phase_from_legacy_state(cluster, now_ms);
-    if (derived == cluster->shadow_phase) {
-        return;
-    }
-    reason = cluster_reason_from_diff(cluster->shadow_phase, derived);
-    if (reason == UCN_CLUSTER_REASON_UNKNOWN) {
-        reason = hint;
-    }
-    cluster->shadow_phase = derived;
-    cluster->transition_reason = reason;
-    cluster->shadow_transition_count++;
-}
-
 /* ================= CLV2-01-04a: single transition entry point ===========
  *
  * M01 proved the 17-phase mapping is total and consistent.  This stage
@@ -505,9 +446,9 @@ void cluster_shadow_sync(ucn_cluster_t *cluster,
  *   HEAD_STABLE -> DETACHED_OBSERVE : set_detached() is never called
  *       from a HEAD-role site.
  *   RECOVERY_OBSERVE -> ELECTION : a recovery-eligible node never elects.
- *   RECOVERY_OBSERVE -> DETACHED_OBSERVE, RECOVERY_ELECTION ->
- *   DETACHED_OBSERVE  : no site clears recovery_eligible while keeping
- *       role DETACHED.
+ *   RECOVERY_ELECTION -> DETACHED_OBSERVE: serial exhaustion is checked
+ *       before RECOVERY_OBSERVE enters ELECTION; no committed Election can
+ *       later clear eligibility in place.
  *   RECOVERY_ELECTION -> RECOVERY_OBSERVE : no site clears the armed
  *       backoff while staying DETACHED+eligible.
  *   STEPPING_DOWN -> ELECTION : the only stepdown exit is the deadline.
@@ -724,6 +665,9 @@ static const uint32_t CLUSTER_TRANSITION_DIRECT_ALLOWED[UCN_CLUSTER_PHASE_COUNT]
         (UINT32_C(1) << UCN_CLUSTER_PHASE_JOIN_PENDING),
 
     [UCN_CLUSTER_PHASE_RECOVERY_OBSERVE] =
+        /* M13 replay-domain exhaustion: fail closed until a fresh identity
+         * domain can be persisted/created. */
+        (UINT32_C(1) << UCN_CLUSTER_PHASE_DETACHED_OBSERVE) |
         /* backoff armed: start_recovery_backoff() L3591 (deadline L3594) via step L5060 */
 
         (UINT32_C(1) << UCN_CLUSTER_PHASE_RECOVERY_ELECTION) |
@@ -807,19 +751,18 @@ static bool cluster_transition_is_allowed(ucn_cluster_phase_t old_phase,
  * phase-defining invariant (assign_pending == true) IS provably common to
  * every inbound edge (assign_backup / complete_election caller state /
  * periodic re-assign), so apply_legacy arms it there - see the case. */
-static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
-                                            ucn_cluster_phase_t new_phase,
-                                            uint32_t now_ms)
+static void cluster_transition_apply_phase(ucn_cluster_t *cluster,
+                                           ucn_cluster_phase_t new_phase,
+                                           uint32_t now_ms)
     CLV2_01_04_UNUSED;
 
-static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
-                                            ucn_cluster_phase_t new_phase,
-                                            uint32_t now_ms)
+static void cluster_transition_apply_phase(ucn_cluster_t *cluster,
+                                           ucn_cluster_phase_t new_phase,
+                                           uint32_t now_ms)
 {
     switch (new_phase) {
     case UCN_CLUSTER_PHASE_DISABLED:
         /* init-only; no runtime site toggles enabled. */
-        cluster->role = UCN_CLUSTER_ROLE_DISABLED;
         break;
     case UCN_CLUSTER_PHASE_DETACHED_OBSERVE:
         /* Every inbound edge goes through set_detached() L2006
@@ -827,8 +770,6 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
          * recovery_eligible is false on every inbound edge (the only
          * eligible=true writers produce RECOVERY_OBSERVE) and no inbound
          * edge arms backoff. */
-        cluster->role = UCN_CLUSTER_ROLE_DETACHED;
-        cluster->recovery_eligible = false;
         cluster->recovery_backoff_deadline_ms = 0U;
         cluster->head_grace_deadline_ms = 0U;
         cluster->known_backup_node_id = 0U;
@@ -840,7 +781,6 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
          * clears are site-owned and
          * must NOT be replayed here (members[]/backup_generation survive
          * a challenge, exactly as the real site leaves them). */
-        cluster->role = UCN_CLUSTER_ROLE_CANDIDATE;
         break;
     case UCN_CLUSTER_PHASE_JOIN_PENDING:
         /* CLV2-01-04b.3 + 01-04c.4 + 01-04f: DETACHED/ELECTION
@@ -853,8 +793,6 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
          * begin_join() does NOT clear the mirror/known_backup (only the
          * BACKUP higher-Term path does backup_clear_sync() BEFORE the
          * join, at the site). */
-        cluster->role = UCN_CLUSTER_ROLE_JOIN_PENDING;
-        cluster->recovery_eligible = false;
         cluster->recovery_backoff_deadline_ms = 0U;
         break;
     case UCN_CLUSTER_PHASE_MEMBER_ACTIVE:
@@ -863,16 +801,13 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
          * grace=0 L3578) both write role+grace; recovery_eligible is
          * false on every inbound edge.  known_backup_* are NOT cleared
          * by handle_join_accept() (retained-state Test A). */
-        cluster->role = UCN_CLUSTER_ROLE_MEMBER;
         cluster->head_grace_deadline_ms = 0U;
-        cluster->recovery_eligible = false;
         break;
     case UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE:
 
         /* Sole inbound edge: ucn_cluster_step_inner() L4899 arms the
          * grace deadline L4935. */
 
-        cluster->role = UCN_CLUSTER_ROLE_MEMBER;
         if (cluster->head_grace_deadline_ms == 0U) {
             cluster->head_grace_deadline_ms = ucn_deadline_from_now(
                 now_ms, cluster->config.keepalive_interval_ms);
@@ -893,9 +828,7 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
          * dispatch on that caller state (NO_BACKUP only when node_id==0,
          * otherwise ASSIGNING/SYNCING/STABLE).  syncing/takeover/primary/
          * known_backup are NOT cleared here - site-owned. */
-        cluster->role = UCN_CLUSTER_ROLE_HEAD;
         cluster->backup_node_id = 0U;
-        cluster->backup_ready = false;
         break;
     case UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING:
         /* CLV2-01-04d.1: role + the phase-defining invariant.  ASSIGNING is
@@ -912,8 +845,6 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
          * end-of-step sync would mint a bogus ASSIGNING->SYNCING pair.  The
          * site's own assign_pending=true in start_backup_assignment_cycle()
          * stays (idempotent same value). */
-        cluster->role = UCN_CLUSTER_ROLE_HEAD;
-        cluster->backup_assign_pending = true;
         break;
     case UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING:
         /* role only: caller-provided node_id/assign_pending/ready state
@@ -921,12 +852,10 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
          * decides the sub-phase (complete_election / backup_resync /
          * assignment sweep; line numbers best-effort per drift policy). */
 
-        cluster->role = UCN_CLUSTER_ROLE_HEAD;
         break;
     case UCN_CLUSTER_PHASE_HEAD_STABLE:
         /* role only: the caller provides ready=true (handle_backup_ready
          * L3014 / complete_election caller state). */
-        cluster->role = UCN_CLUSTER_ROLE_HEAD;
         break;
     case UCN_CLUSTER_PHASE_BACKUP_SYNCING:
         /* handle_backup_assign() (e.1 transition, role=BACKUP, syncing=true,
@@ -936,23 +865,15 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
          * transition - self / M01.0.2 takeover precedence) both write
          * role+syncing+ready; takeover is never set on an inbound edge of
          * this phase. */
-        cluster->role = UCN_CLUSTER_ROLE_BACKUP;
-        cluster->backup_ready = false;
-        cluster->backup_syncing = true;
         break;
     case UCN_CLUSTER_PHASE_BACKUP_READY:
         /* handle_backup_member_sync() SYNC_END (e.2 transition, then
          * syncing=false/ready=true site writes). */
-        cluster->role = UCN_CLUSTER_ROLE_BACKUP;
-        cluster->backup_ready = true;
-        cluster->backup_syncing = false;
         break;
     case UCN_CLUSTER_PHASE_BACKUP_TAKEOVER:
         /* start_takeover() L3293: role=BACKUP, takeover=true L3315;
          * ready/syncing are NOT cleared (CLV2-M01.0.2: the takeover_active
          * && syncing combo is reachable and must be expressed). */
-        cluster->role = UCN_CLUSTER_ROLE_BACKUP;
-        cluster->backup_takeover_active = true;
         break;
     case UCN_CLUSTER_PHASE_STEPPING_DOWN:
         /* begin_ordered_stepdown() L2356: role=STEPPING_DOWN (via
@@ -960,8 +881,6 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
          * 01-04d.6/01-04f; the site's own role write stays, idempotent),
          * yields Recovery candidacy L2387-2317; the Head keeps its Backup
          * selection (node_id/ready) until the deadline. */
-        cluster->role = UCN_CLUSTER_ROLE_STEPPING_DOWN;
-        cluster->recovery_eligible = false;
         cluster->recovery_backoff_deadline_ms = 0U;
         break;
     case UCN_CLUSTER_PHASE_RECOVERY_OBSERVE:
@@ -972,8 +891,6 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
 
          * L2006) results in role=DETACHED, eligible=true, backoff=0, and
          * set_detached() clears grace + known_backup. */
-        cluster->role = UCN_CLUSTER_ROLE_DETACHED;
-        cluster->recovery_eligible = true;
         cluster->recovery_backoff_deadline_ms = 0U;
         cluster->head_grace_deadline_ms = 0U;
         cluster->known_backup_node_id = 0U;
@@ -984,17 +901,13 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
          * backoff deadline is CALLER-PROVIDED - the 01-04f recovery site
          * supplies the Current-computed deadline/nonce; apply_legacy never
          * mints one, and no inbound edge writes the cooldown here. */
-        cluster->role = UCN_CLUSTER_ROLE_DETACHED;
-        cluster->recovery_eligible = true;
         break;
     case UCN_CLUSTER_PHASE_RECOVERY_HEAD:
-        cluster->role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
         break;
     case UCN_CLUSTER_PHASE_TERM_CONFLICT_WAIT:
         /* Preserve the conflicting epoch for comparison and diagnostics, but
          * revoke all role-driven control activity.  This role has no v3 wire
          * representation and cannot be reactivated by a same-Term message. */
-        cluster->role = UCN_CLUSTER_ROLE_TERM_CONFLICT;
         cluster->role_since_ms = now_ms;
         cluster->next_advertise_ms = 0U;
         cluster->next_keepalive_ms = 0U;
@@ -1002,10 +915,8 @@ static void cluster_transition_apply_legacy(ucn_cluster_t *cluster,
         cluster->election_deadline_ms = 0U;
         cluster->stepdown_deadline_ms = 0U;
         cluster->head_grace_deadline_ms = 0U;
-        cluster->backup_takeover_active = false;
         cluster->backup_takeover_announce_active = false;
         cluster->backup_takeover_announce_remaining = 0U;
-        cluster->recovery_eligible = false;
         cluster->recovery_backoff_deadline_ms = 0U;
         break;
     default:
@@ -1062,6 +973,7 @@ static ucn_result_t cluster_transition_validate(ucn_cluster_t *cluster,
                                                 ucn_cluster_phase_t new_phase,
                                                 uint32_t now_ms)
 {
+    (void)now_ms;
     if (cluster == NULL) {
         return UCN_ERR_ARGUMENT;
     }
@@ -1070,31 +982,10 @@ static ucn_result_t cluster_transition_validate(ucn_cluster_t *cluster,
      * checks pass, so a rejection leaves every field untouched. */
     if ((unsigned int)old_phase >= (unsigned int)UCN_CLUSTER_PHASE_COUNT ||
         (unsigned int)new_phase >= (unsigned int)UCN_CLUSTER_PHASE_COUNT ||
-        cluster->shadow_phase != old_phase ||
+        cluster->phase != old_phase ||
         !cluster_transition_is_allowed(old_phase, new_phase)) {
         CLV2_01_04_ASSERT_FAIL(
             "cluster_transition: illegal or mismatched phase transition");
-        return UCN_ERR_STATE;
-    }
-    /* CLV2-01-04a.1 (Item 3) + CLV2-01-04b.2 (human MINOR): the
-     * pre-transition discipline is now a REAL runtime validation in BOTH
-     * build modes, before any write - the current legacy state must be
-     * valid and must still derive the claimed old phase, so a site that
-     * already mutated phase-relevant legacy fields is caught and fails
-     * closed (UCN_ERR_STATE, nothing committed).  A migrated site may
-     * perform caller-owned post-transition writes only when they preserve
-     * the committed new phase; migrated phase changes must not rely on
-     * shadow_sync minting (CLV2-01-04e NIT, human auditor). */
-    if (!cluster_legacy_state_is_valid(cluster) ||
-        cluster_phase_from_legacy_state(cluster, now_ms) != old_phase) {
-        /* CLV2-01-04d.7 (ITEM 7d): the pre-derive failure is knob-gated so
-         * rejection tests can exercise the fail-closed release path - the
-         * runtime UCN_ERR_STATE is identical in both build modes, and in
-         * production the macro expands to the plain debug assert (or a
-         * no-op under NDEBUG) exactly as before. */
-        CLV2_01_04_ASSERT_FAIL(
-            "cluster_transition: legacy does not derive old_phase "
-            "(site pre-mutated phase-relevant fields?)");
         return UCN_ERR_STATE;
     }
     return UCN_OK;
@@ -1136,8 +1027,7 @@ ucn_result_t cluster_transition(ucn_cluster_t *cluster,
     if (result != UCN_OK) {
         return result;
     }
-    /* 1) Commit the shadow mirror (explicit reason replaces the M01
-     *    BEST-EFFORT diff inference).  CLV2-01-04a review A (F4): an
+    /* 1) Commit the authoritative phase.  CLV2-01-04a review A (F4): an
      *    UNKNOWN or out-of-range reason must never be recorded on an
      *    accepted transition, so fall back to the BEST-EFFORT pair table.
      *    A non-UNKNOWN caller reason is accepted as-is (the table is not
@@ -1147,13 +1037,12 @@ ucn_result_t cluster_transition(ucn_cluster_t *cluster,
         (unsigned int)reason >= (unsigned int)UCN_CLUSTER_REASON_COUNT) {
         reason = cluster_reason_from_diff(old_phase, new_phase);
     }
-    cluster->shadow_phase = new_phase;
+    cluster->phase = new_phase;
     cluster->transition_reason = reason;
-    cluster->shadow_transition_count++;
-    /* 2) Keep the legacy fields consistent with the new phase (entry
-     *    actions).  Exit actions are added by the wiring stages that
-     *    replace the direct legacy writes site by site. */
-    cluster_transition_apply_legacy(cluster, new_phase, now_ms);
+    cluster->transition_count++;
+    /* 2) Apply phase entry invariants.  These are bounded side effects of
+     *    the validated edge; they must never recreate a second role state. */
+    cluster_transition_apply_phase(cluster, new_phase, now_ms);
     return UCN_OK;
 }
 

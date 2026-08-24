@@ -2,6 +2,8 @@
 #include <string.h>
 
 #include "ucn/ucn_cluster_authority.h"
+#include "ucn/ucn_cluster_invariant.h"
+#include "ucn/ucn_cluster_storage.h"
 
 #define ASSERT_TRUE(condition) \
     do { \
@@ -66,7 +68,7 @@ static int fixture_init(authority_fixture_t *fixture)
     config.persistence_mode = UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
     ASSERT_TRUE(ucn_cluster_init(&fixture->cluster, &config) == UCN_OK);
     fixture->cluster.config.enabled = true;
-    fixture->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    fixture->cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     fixture->cluster.cluster_id = 77U;
     fixture->cluster.term = 5U;
     fixture->cluster.head_node_id = 1U;
@@ -141,6 +143,7 @@ static int test_authority_stable_quorum_and_same_step_fence(void)
     };
     authority_fixture_t fixture;
     ucn_cluster_view_t view;
+    uint32_t invariant_mask;
     size_t index;
 
     if (fixture_init(&fixture) != 0) {
@@ -157,6 +160,9 @@ static int test_authority_stable_quorum_and_same_step_fence(void)
                 ucn_cluster_authority_runtime_tx_allowed(
                     &fixture.runtime, UCN_CLUSTER_MSG_ADVERTISE,
                     UCN_CLUSTER_ROLE_HEAD));
+    ASSERT_TRUE(ucn_cluster_invariant_check(&fixture.cluster, 0U,
+                                             &invariant_mask) == UCN_OK &&
+                invariant_mask == 0U);
     /* Neighbor state is not a voter lease evidence source. */
     fixture.cluster.peers[0].occupied = true;
     fixture.cluster.peers[0].node_id = 2U;
@@ -177,6 +183,9 @@ static int test_authority_stable_quorum_and_same_step_fence(void)
                 ucn_cluster_authority_runtime_tx_allowed(
                     &fixture.runtime, UCN_CLUSTER_MSG_KEEPALIVE,
                     UCN_CLUSTER_ROLE_MEMBER));
+    ASSERT_TRUE(ucn_cluster_invariant_check(&fixture.cluster, 91U,
+                                             &invariant_mask) == UCN_OK &&
+                invariant_mask == 0U);
     for (index = 0U; index < sizeof(authority_messages) /
                                sizeof(authority_messages[0U]); ++index) {
         ASSERT_TRUE(!ucn_cluster_authority_runtime_tx_allowed(
@@ -480,7 +489,7 @@ static int test_fence_causes_and_invalid_profile_no_write(void)
     ASSERT_TRUE(ucn_cluster_init(&unbound_cluster, &config) == UCN_OK);
     unbound_cluster.config.enabled = true;
     unbound_cluster.config.lease_ms = fixture.timing.voter_lease_ms - 1U;
-    unbound_cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    unbound_cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     unbound_cluster.cluster_id = 77U;
     unbound_cluster.term = 5U;
     unbound_cluster.head_node_id = 1U;
@@ -533,7 +542,7 @@ static int test_partition_quorum_property(void)
             config.persistence_mode = UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
             ASSERT_TRUE(ucn_cluster_init(&cluster, &config) == UCN_OK);
             cluster.config.enabled = true;
-            cluster.role = UCN_CLUSTER_ROLE_HEAD;
+            cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
             cluster.cluster_id = 500U + voter_count;
             cluster.term = 1U;
             cluster.head_node_id = 1U;
@@ -581,7 +590,7 @@ static int test_recovery_scoped_cluster_never_gets_authority(void)
 
     /* A recovery control domain: role RECOVERY_HEAD, active identity is
      * the recovery domain ID. */
-    fixture.cluster.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    fixture.cluster.phase = UCN_CLUSTER_PHASE_RECOVERY_HEAD;
     fixture.cluster.cluster_id = 77U;
     fixture.cluster.recovery_cluster_id = 77U;
     fixture.cluster.parent_cluster_id = 5U;
@@ -596,7 +605,7 @@ static int test_recovery_scoped_cluster_never_gets_authority(void)
     ASSERT_TRUE(fixture.cluster.authority_active == false);
 
     /* A recovery-domain MEMBER is equally excluded. */
-    fixture.cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    fixture.cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     fixture.cluster.cluster_id = 77U;
     fixture.cluster.recovery_cluster_id = 77U;
     ASSERT_TRUE(ucn_cluster_recovery_scoped(&fixture.cluster));
@@ -610,7 +619,7 @@ static int test_recovery_scoped_cluster_never_gets_authority(void)
     /* The same cluster identity is NOT recovery-scoped once the domain
      * dissolves (recovery_cluster_id cleared) - the normal stable bind
      * path stays available for a future stable identity. */
-    fixture.cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    fixture.cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     fixture.cluster.recovery_cluster_id = 0U;
     ASSERT_TRUE(!ucn_cluster_recovery_scoped(&fixture.cluster));
     return 0;

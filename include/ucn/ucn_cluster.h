@@ -89,6 +89,11 @@ typedef char ucn_cluster_serial_rotation_threshold_must_leave_valid_range[
 
 #define UCN_CLUSTER_FORMAT_VERSION ((uint8_t)3U)
 
+/* Public Cluster API generation.  Version 2 makes ucn_cluster_t opaque in
+ * this header; the one static owner translation unit includes
+ * ucn_cluster_storage.h.  This is a source/ABI break, not a Wire change. */
+#define UCN_CLUSTER_API_VERSION ((uint16_t)2U)
+
 /* C07.2 Backup sync control. */
 #ifndef UCN_CLUSTER_BACKUP_MISS_LIMIT
 #define UCN_CLUSTER_BACKUP_MISS_LIMIT ((uint8_t)3U)
@@ -216,11 +221,10 @@ typedef enum ucn_cluster_timing_profile {
     UCN_CLUSTER_TIMING_PROFILE_FAST_FIXED = 1
 } ucn_cluster_timing_profile_t;
 
-/* CLV2-01-01..CLV2-08-01: explicit phase names for the Cluster lifecycle.
- * Values 0..17 are frozen Current-FSM diagnostics; M08 appends rather than
- * renumbers its Head phases.  The Current FSM still owns shadow_phase; M08
- * uses the separate authority_phase state until the Authority Owner is
- * explicitly installed. */
+/* CLV2-01-01..CLV2-14-01: explicit Cluster lifecycle state. Values 0..17
+ * preserve the frozen Current-FSM numbering; later milestones append rather
+ * than renumber. Since M14 this is the sole runtime role/lifecycle source:
+ * public Role is a pure view returned by ucn_cluster_phase_to_role(). */
 typedef enum ucn_cluster_phase {
     UCN_CLUSTER_PHASE_DISABLED = 0,
     UCN_CLUSTER_PHASE_DETACHED_OBSERVE = 1,
@@ -269,10 +273,7 @@ typedef enum ucn_cluster_authority_fence_reason {
     UCN_CLUSTER_AUTHORITY_FENCE_REKEY_COMMIT = 7
 } ucn_cluster_authority_fence_reason_t;
 
-/* CLV2-01-03 (M01 shadow phase): why the last shadow phase transition
- * happened.  During the shadow stage the reason is inferred from the
- * message type / legacy field delta; after CLV2-01-04 it will be set
- * explicitly by the single transition entry point. */
+/* Why the last authoritative phase transition happened. */
 typedef enum ucn_cluster_transition_reason {
     UCN_CLUSTER_REASON_UNKNOWN = 0,
     UCN_CLUSTER_REASON_INIT = 1,
@@ -319,16 +320,19 @@ typedef enum ucn_cluster_transition_reason {
      * stable Head of its parent lineage (stable precedence; no score
      * comparison is involved). */
     UCN_CLUSTER_REASON_STABLE_RECLAIM = 32,
-    UCN_CLUSTER_REASON_COUNT = 33
+    /* M14 phase-only migration: the former recovery_eligible=false write at
+     * replay-domain exhaustion is now an explicit fail-closed transition. */
+    UCN_CLUSTER_REASON_RECOVERY_SERIAL_EXHAUSTED = 33,
+    UCN_CLUSTER_REASON_COUNT = 34
 } ucn_cluster_transition_reason_t;
 
 /* CLV2-01-01: compile-time fences so an accidental enum extension is
  * caught at build time, not in a test run (C99-compatible assertion). */
 typedef char ucn_cluster_phase_count_must_be_22[
     UCN_CLUSTER_PHASE_COUNT == 22 ? 1 : -1];
-/* CLV2-M12 (12-07): extended by exactly one reason (STABLE_RECLAIM). */
-typedef char ucn_cluster_reason_count_must_be_33[
-    UCN_CLUSTER_REASON_COUNT == 33 ? 1 : -1];
+/* CLV2-M14 (14-01): Phase-only serial exhaustion adds one explicit reason. */
+typedef char ucn_cluster_reason_count_must_be_34[
+    UCN_CLUSTER_REASON_COUNT == 34 ? 1 : -1];
 
 typedef enum ucn_cluster_message_type {
     UCN_CLUSTER_MSG_ADVERTISE = 1,
@@ -656,179 +660,10 @@ typedef struct ucn_cluster_stats {
     uint32_t provisional_members_expired;
 } ucn_cluster_stats_t;
 
-typedef struct ucn_cluster {
-    ucn_cluster_config_t config;
-    /* M04 runtime transaction metadata.  The full logical Record remains
-     * Provider-owned: after a PENDING completion UCN reloads it and verifies
-     * this durable journal identity before any FSM action can proceed. */
-    bool persistence_pending;
-    bool persistence_faulted;
-    bool persistence_retry_pending;
-    /* Covers the dynamic extent of every Provider load/submit/poll callback.
-     * A callback cannot synchronously re-enter the Cluster state machine. */
-    bool persistence_io_active;
-    bool persistence_retry_dispatch;
-    uint8_t persistence_pending_action;
-    uint8_t persistence_pending_operation;
-    uint8_t persistence_retry_action;
-    ucn_result_t persistence_failure;
-    ucn_node_id_t persistence_pending_destination;
-    ucn_node_id_t persistence_retry_destination;
-    uint32_t persistence_pending_token;
-    uint32_t persistence_pending_operation_id;
-    uint32_t persistence_pending_fingerprint;
-    ucn_cluster_role_t role;
-    uint32_t cluster_id;
-    uint32_t term;
-    ucn_node_id_t head_node_id;
-    /* CLV2-M03 (03-06): volatile safety history intentionally survives
-     * set_detached().  It guards one most-recent stable Cluster domain until
-     * M04 replaces this RAM-only state with a persistence-backed record. */
-    uint32_t last_cluster_id;
-    uint32_t max_seen_term;
-    ucn_node_id_t last_stable_head;
-    /* Monotonic allocation round for optional Cluster ID generation.  It is
-     * RAM-only until M04 persistence; never reuse within this object. */
-    uint32_t cluster_id_round;
-    uint16_t current_head_score;
-    uint32_t observation_deadline_ms;
-    uint32_t role_since_ms;
-    uint32_t election_deadline_ms;
-    uint32_t head_lease_expires_at_ms;
-    uint32_t head_grace_deadline_ms;
-    uint32_t next_advertise_ms;
-    uint32_t next_join_retry_ms;
-    uint32_t next_keepalive_ms;
-    uint32_t next_nonce;
-    uint8_t advertise_cursor;
-    ucn_node_id_t pending_head_node_id;
-    uint32_t pending_cluster_id;
-    uint32_t pending_term;
-    uint16_t pending_head_score;
-    ucn_cluster_peer_t peers[UCN_CLUSTER_MAX_PEERS];
-    ucn_cluster_candidate_t candidates[UCN_CLUSTER_MAX_CANDIDATES];
-    /* CLV2-M06 (06-02): a single fixed primary table is retained for RAM
-     * compatibility.  Head/Recovery Head interpret it as their Runtime
-     * Member table; Backup interprets it as its committed mirror.  M09 will
-     * add an explicit staging mirror instead of overloading this table. */
-    ucn_cluster_member_table_t primary_members;
-    /* CLV2-M06 (06-03): future protected configuration data is physically
-     * separate from the Runtime member table.  M06 does not yet let this
-     * value grant a vote, a certificate, Backup eligibility or Authority;
-     * M07/M10 own those transition and quorum semantics. */
-    ucn_cluster_voter_set_t active_voter_set;
-    /* C07.2 Backup state.  Only the assigned Backup keeps this primary
-     * table as a live synchronized committed mirror. */
-    ucn_node_id_t backup_node_id;
-    uint32_t backup_generation;
-    uint32_t membership_sequence;
-    bool backup_ready;
-    bool backup_syncing;
-    bool backup_assign_pending;
-    uint8_t backup_assign_cursor;
-    uint8_t backup_assign_remaining;
-    uint32_t next_backup_assign_ms;
-    ucn_node_id_t backup_primary_node_id;
-    uint32_t backup_sync_cursor;
-    uint32_t next_backup_heartbeat_ms;
-    uint32_t next_backup_sync_ms;
-    /* C07.7 P1: post-READY incremental refresh state (round-robin DELTA). */
-    uint8_t backup_delta_cursor;
-    uint32_t next_backup_delta_ms;
-    uint32_t backup_resync_deadline_ms;
-    uint32_t backup_primary_deadline_ms;
-    uint32_t backup_primary_lease_deadline_ms;
-    uint8_t backup_missed_heartbeats;
-    /* C07.3 majority-confirmed takeover. */
-    bool backup_takeover_active;
-    uint32_t backup_takeover_deadline_ms;
-    uint8_t backup_takeover_ack_count;
-    uint32_t backup_takeover_acked;
-    uint8_t backup_takeover_prepare_cursor;
-    uint8_t backup_takeover_announce_cursor;
-    uint8_t backup_takeover_announce_remaining;
-    bool backup_takeover_announce_active;
-    ucn_node_id_t known_backup_node_id;
-    uint32_t known_backup_generation;
-    /* C07.7 P1: the nonce of the JOIN_REQUEST this node last sent;
-     * JOIN_ACCEPT/JOIN_REJECT must echo it back as the join transaction
-     * id so a stale reject of an earlier attempt cannot abort a new one. */
-    uint32_t pending_join_nonce;
-    /* C07.7 P1: last accepted HEAD_STEPDOWN nonce (member side) so a
-     * replayed stepdown of the same epoch is ignored. */
-    uint32_t last_stepdown_nonce;
-    /* C07.7 P1: Head-side cooldown for a Backup candidate that rejected
-     * the assignment; skip it while cooling down. */
-    uint32_t backup_candidate_cooldown_until_ms;
-    ucn_node_id_t backup_rejected_node_id;
-    /* C07.7 P1: the member's takeover vote is keyed on
-     * (cluster_id, term, backup_generation), not term alone, so a vote in
-     * one Cluster cannot block a legitimate takeover in another Cluster
-     * that happens to share the same term number. */
-    uint32_t member_voted_term;
-    uint32_t member_voted_cluster_id;
-    uint32_t member_voted_generation;
-    /* C07.5 control-plane token bucket. */
-    ucn_cluster_token_bucket_t token_bucket;
-    /* C07.5 RECOVERY_HEAD state. */
-    bool recovery_eligible;
-    uint32_t stepdown_deadline_ms;
-    uint32_t recovery_cluster_id;
-    uint32_t recovery_deadline_ms;
-    uint32_t recovery_cooldown_until_ms;
-    uint32_t recovery_backoff_deadline_ms;
-    uint32_t recovery_nonce;
-    /* C07.7 P0-3: the remote recovery nonce this node accepted, kept
-     * separate from the local election nonce so a remote RECOVERY_DECLARE
-     * can never clobber our own candidacy nonce. */
-    uint32_t accepted_recovery_nonce;
-    ucn_node_id_t known_recovery_source;
-    /* Saturating diagnostic evidence for the current Recovery identity.
-     * It is not a live-quorum counter: current member liveness and expiry
-     * are owned by the membership table. */
-    uint8_t recovery_ack_count;
-    uint32_t recovery_acked;
-    /* CLV2-M12 (12-01): recovery lineage captured at the fence exit from
-     * the parent cluster, BEFORE Active/Pending identity is cleared.  It
-     * survives detach (like the 03-06 history) and drives recovery ID
-     * generation (12-02), same-parent rank arbitration (12-04) and stable
-     * reclaim precedence (12-07).  Cleared only after a sustained stable
-     * join (12-03 reset).  A recovery domain itself is never a parent. */
-    uint32_t parent_cluster_id;
-    uint32_t parent_term;
-    uint32_t parent_config_id;
-    uint32_t recovery_round;
-    /* Pending canonical config_id binding consumed by the next lineage
-     * capture (ucn_cluster_lineage_bind_config).  0 = no config lineage
-     * (the v3 default product has no Config owner). */
-    uint32_t lineage_config_binding;
-    /* CLV2-M12 (12-03): armed when a stable join completes; expiry resets
-     * the recovery lineage + round.  Cancelled by any detach. */
-    uint32_t lineage_reset_deadline_ms;
-    ucn_cluster_stats_t stats;
-    /* CLV2-01-01..03 (M01 shadow): derived-only mirror of the legacy
-     * role+bool+deadline state.  Production logic MUST NOT read these
-     * fields to make decisions during M01; they exist so the shadow
-     * consistency gate can prove the phase mapping before CLV2-01-04
-     * makes Phase the real driver. */
-    ucn_cluster_phase_t shadow_phase;
-    ucn_cluster_transition_reason_t transition_reason;
-    uint32_t shadow_transition_count;
-    /* CLV2-08-01: M08 Authority/Fence skeleton.  authority_active stays
-     * false until 08-02/03 bind a canonical Config and lease Owner; no old
-     * role-derived path is allowed to set it. */
-    bool authority_active;
-    ucn_cluster_phase_t authority_phase;
-    ucn_cluster_authority_fence_reason_t authority_fence_reason;
-    ucn_cluster_phase_t head_resume_phase;
-    uint32_t quorum_loss_deadline_ms;
-    uint32_t quorum_restore_since_ms;
-    uint32_t fenced_dissolve_deadline_ms;
-    /* Non-NULL only after a caller explicitly installs the M08 controlled
-     * Authority Owner.  This keeps M05's production-v4 hold separate from
-     * Host/experiment authority tests. */
-    struct ucn_cluster_authority_runtime *authority_runtime;
-} ucn_cluster_t;
+/* Opaque public handle.  Static MCU owners include ucn_cluster_storage.h in
+ * exactly one owner translation unit; pointer-only users must not include the
+ * storage header or depend on its fields. */
+typedef struct ucn_cluster ucn_cluster_t;
 
 ucn_result_t ucn_cluster_message_encode(
     const ucn_cluster_message_t *message,
@@ -866,6 +701,8 @@ ucn_result_t ucn_cluster_receive(
     const uint8_t *payload,
     size_t payload_length);
 ucn_result_t ucn_cluster_step(ucn_cluster_t *cluster);
+ucn_cluster_role_t ucn_cluster_phase_to_role(ucn_cluster_phase_t phase);
+ucn_cluster_phase_t ucn_cluster_get_phase(const ucn_cluster_t *cluster);
 ucn_cluster_role_t ucn_cluster_get_role(const ucn_cluster_t *cluster);
 /* The only public write-authority predicate.  It returns false for NULL and
  * for every Cluster without an installed M08 Authority Owner. */
@@ -895,18 +732,14 @@ ucn_result_t ucn_cluster_get_member_capacity_view(
     ucn_cluster_member_capacity_view_t *view);
 const ucn_cluster_stats_t *ucn_cluster_get_stats(const ucn_cluster_t *cluster);
 
-/* CLV2-M03 (03-02): the ACTIVE epoch - the logical unification of the
- * node's current cluster_id / term / head_node_id.  PHYSICAL STORAGE IS
- * UNCHANGED (the struct still holds the three scalar fields; the struct
- * size / cluster_bytes is frozen by the M01/M02 gates).  This accessor is
- * the single read point for the active epoch, and 03-03+ will drive
- * Head-Offer / Merge / Higher-Authority decisions through
- * ucn_cluster_epoch_compare() on it instead of hand-written combined
- * comparisons.
+/* Return the ACTIVE epoch projection without exposing owner storage.  The
+ * three identity scalars are private to ucn_cluster_storage.h; applications
+ * and extensions compare the returned value with ucn_cluster_epoch_compare()
+ * instead of reading or combining storage fields.
  *
  * CONTRACT (03-02 MINOR cleanup, human audit): returns {0,0,0} for NULL.
- * For a non-NULL object this is a RAW READ PROJECTION of cluster_id /
- * term / head_node_id - it does NOT inspect the role and does NOT
+ * For a non-NULL object this is a raw read projection - it does NOT inspect
+ * the role and does NOT
  * validate liveness or validity (comparator != validator, 03-01).  Under
  * normal Cluster invariants a DETACHED node exposes {0,0,0} because
  * set_detached() clears those three fields - that is a STATE INVARIANT,

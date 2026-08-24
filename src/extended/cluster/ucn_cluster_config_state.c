@@ -5,6 +5,14 @@
 #define UCN_CLUSTER_CONFIG_HASH_OFFSET UINT32_C(2166136261)
 #define UCN_CLUSTER_CONFIG_HASH_PRIME UINT32_C(16777619)
 
+#if defined(_MSC_VER)
+#define UCN_CLUSTER_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define UCN_CLUSTER_NOINLINE __attribute__((noinline))
+#else
+#define UCN_CLUSTER_NOINLINE
+#endif
+
 static bool config_serial_is_valid(uint32_t value)
 {
     return value != 0U && value <= UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD;
@@ -39,7 +47,7 @@ bool ucn_cluster_config_phase_is_valid(ucn_cluster_config_phase_t phase)
            phase == UCN_CLUSTER_CONFIG_PHASE_JOINT;
 }
 
-bool ucn_cluster_config_state_is_valid(
+UCN_CLUSTER_NOINLINE bool ucn_cluster_config_state_is_valid(
     const ucn_cluster_config_state_t *state)
 {
     ucn_cluster_config_phase_t phase;
@@ -185,7 +193,8 @@ uint32_t ucn_cluster_config_state_hash(
     return hash == 0U ? 1U : hash;
 }
 
-static void write_u32_be(uint8_t *output, uint32_t value)
+static UCN_CLUSTER_NOINLINE void write_u32_be(uint8_t *output,
+                                              uint32_t value)
 {
     output[0U] = (uint8_t)(value >> 24U);
     output[1U] = (uint8_t)(value >> 16U);

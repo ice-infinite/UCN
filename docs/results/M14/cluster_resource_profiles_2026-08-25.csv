@@ -1,0 +1,4 @@
+profile,object_bytes,text,rodata,data,bss,max_static_stack_frame
+full,1608,133559,992,0,8,1840
+lite,1608,133559,992,0,8,1840
+nano,1608,133559,992,0,8,1840

@@ -6,6 +6,7 @@
  * production v4 RX/TX/FSM integration. */
 
 #include "ucn/ucn_cluster_authority.h"
+#include "ucn/ucn_cluster_storage.h"
 
 #include <string.h>
 
@@ -64,7 +65,7 @@ static ucn_cluster_phase_t runtime_head_phase(const ucn_cluster_t *cluster,
                                               const ucn_cluster_config_state_t *config)
 {
     if (cluster == NULL || config == NULL ||
-        cluster->role != UCN_CLUSTER_ROLE_HEAD ||
+        ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_HEAD ||
         cluster->head_node_id != cluster->config.local_node_id) {
         return UCN_CLUSTER_PHASE_DISABLED;
     }
@@ -74,10 +75,10 @@ static ucn_cluster_phase_t runtime_head_phase(const ucn_cluster_t *cluster,
     if (cluster->backup_node_id == 0U) {
         return UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     }
-    if (cluster->backup_ready) {
+    if (cluster->phase == UCN_CLUSTER_PHASE_HEAD_STABLE) {
         return UCN_CLUSTER_PHASE_HEAD_STABLE;
     }
-    if (cluster->backup_assign_pending) {
+    if (cluster->phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING) {
         return UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING;
     }
     return UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
@@ -479,7 +480,7 @@ ucn_result_t ucn_cluster_authority_runtime_step(
                                now_ms);
         return UCN_OK;
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
         authority_enter_fenced(runtime,
                                UCN_CLUSTER_AUTHORITY_FENCE_TERM_CONFLICT,
                                now_ms);
@@ -519,7 +520,7 @@ ucn_result_t ucn_cluster_authority_runtime_step(
     }
     runtime->owner_step_seen = true;
     runtime->last_owner_step_ms = now_ms;
-    if (cluster->role != UCN_CLUSTER_ROLE_HEAD ||
+    if (ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_HEAD ||
         cluster->head_node_id != cluster->config.local_node_id) {
         authority_enter_fenced(runtime,
                                UCN_CLUSTER_AUTHORITY_FENCE_HIGHER_AUTHORITY,

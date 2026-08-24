@@ -25,7 +25,7 @@
 > | M11 Merge/Handover | DONE / EXTERNAL RE-REVIEW PASS / LIMITED EXPERIMENTAL GO | R01–R08-B 全部获外审签字；R08-A 关闭同槽 ABA，R08-B 关闭 expiry 删除 replay-history / hold-down 的生命周期旁路。 | 仅限 caller-owned、default-OFF 实验 archive。M05 顶层 `AUDIT HOLD`、M08 `WAIT EXTERNAL`、M10 外审等待仍不解除；M12 不因此获授权，且不得把 M11 接入 production v4 RX/TX/FSM、Authority、Adapter 或实机结论。 |
 > | M12 RecoveryLineage | AUDIT HOLD / M12.3 SELF-AUDIT PASS / WAIT EXTERNAL | 12-01..12-08、12-10 的运行期软件范围已实现；12-09 仍 PARTIAL。M12.2 lineage-adoption 保留，M12.3 关闭运行期缺口，并把 Record scope、allocation history 与 Recovery no-wrap 三项结构阻断转交 `13-11..13`；这些转交项现已在 M13 实验范围实现并自审。 | M13 的后续实现不构成 M12 外审追认；M12 原签字范围与 `AUDIT HOLD` 不变，仍不得接入 v4/Authority/Adapter 生产路径。 |
 > | M13 Rekey/No-wrap | CODE COMPLETE / SELF-AUDIT PASS / WAIT EXTERNAL REVIEW（受限实验软件范围） | 候选提交 `5c23078`；`CLV2-13-01..13` 已连续完成，每项均有独立自审报告，并完成一次跨事务、持久化、no-wrap、Profile 与默认产品隔离的全体自审。 | 仅允许 default-OFF 实验 archive 与受控测试；M05 顶层 `AUDIT HOLD`、production v4 RX/TX/FSM/Authority/Adapter/default encoder 继续冻结。 |
-> | M14 收敛/发布 | TODO | — | — |
+> | M14 收敛/发布 | SOFTWARE SELF-AUDIT COMPLETE / PARTIAL / RELEASE NO-GO | 14-01/02/04/05/06/09/10 软件完成；14-03/07 partial；14-08 blocked；14-11 checklist NO-GO；14-12 no tag | 全体矩阵 Full 57、Lite 50、Nano 40、Service-OFF 50、ASan/UBSan 54、Analyzer 36、MSVC Release 50 全绿；M05 顶层 `AUDIT HOLD` 与各里程碑外审状态不解除，真实四板/Flash/掉电缺失，等待 M14 外部软件审计。 |
 >
 > 状态取值：TODO / IN_PROGRESS / BLOCKED / AUDIT HOLD / DONE（DONE 须审计后由人更新）。每个任务完成时在 `docs/01-项目操作记录.md` 记录提交、测试证据与操作编号。
 >
@@ -824,18 +824,18 @@ duplicate/replay/reorder
 
 | 任务 ID | 优先级 | 依赖 | 主要文件/位置 | 具体修改任务 | 完成定义 / 测试 |
 |---|---:|---|---|---|---|
-| `CLV2-14-01` | P0 | M13 | Legacy state cleanup | 删除由 Phase 可推导的 `role+bool` 镜像、Shadow mapper 和所有直接 role 写；Role 只由 `phase_to_role()` 生成。 | grep/CI 确认唯一 Phase source of truth。 |
-| `CLV2-14-02` | P1 | 14-01 | Public storage/API | 完成 public handle/storage 分离；应用不得访问内部 member/backup/epoch；API version bump 并要求全量重编译。 | 示例产品只 include 正确 public/storage 头。 |
-| `CLV2-14-03` | P1 | M05 | v3 compatibility | Strict v4 成为推荐默认；v3 decoder 作为可裁剪兼容模块，不能参与 voter/Backup safety。若产品不需要则完全不链接。 | v3 OFF 尺寸报告和 v3 ON 混合测试。 |
-| `CLV2-14-04` | P0 | M08..13 | Invariant engine | 每次 Step Debug 检查 Target Safety-1~10：Authority、Config、Vote、Snapshot、Recovery、No-wrap、Persistence。 | Fault model 运行无 invariant violation。 |
-| `CLV2-14-05` | P0 | M00 | Property/model test | 增加随机状态机 property test；建议再建立 TLA+/PlusCal 或精简状态模型，验证 Single Authority、Joint Config、Takeover/Fence。 | 模型探索无反例，或所有反例均修复/记录。 |
-| `CLV2-14-06` | P0 | M05 | Codec fuzz | 对 v3/v4 decoder、type-specific parser、stateful replay 做长时间 fuzz；输入不得崩溃、越界或越权改变状态。 | Sanitizer/fuzzer gate。 |
-| `CLV2-14-07` | P0 | M08..13 | Scale simulation | 64/256/1000 Node clean/impaired、分区/恢复、Config churn、Backup churn、Recovery/Rekey；输出收敛时间与控制流量。 | 结果进入 docs/results，未达到边界不宣称支持。 |
-| `CLV2-14-08` | P0 | M08..13 | Real hardware C07.7+ | 至少 4 板合格一跳 Backup 覆盖拓扑：正常、Primary fault、Backup fault、抖动、掉电重启、持久化、Wire v4；再扩 UART/CAN/ESP-NOW Bearer。 | 实机日志、固件 Hash、拓扑和重复轮次可复现。 |
-| `CLV2-14-09` | P1 | M00 | Resource gate | 比较每 Profile RAM/Flash/栈和控制流量；Feature OFF 不付费，Full 增量有明确预算；无动态内存。 | CI size threshold。 |
-| `CLV2-14-10` | P0 | M00 | Docs | 更新 CURRENT_FSM、TARGET_FSM、Wire v4、Persistence、Config、Timer Algebra、API migration、调用关系树和操作记录。 | 文档与代码 message/phase/task ID 自动检查一致。 |
-| `CLV2-14-11` | P0 | M00 | Final safety review | 逐条关闭本文任务、Target v2 10 条 Safety、5 条 Liveness；未完成项必须降级声明，不以测试数量替代协议证据。 | 签署 review checklist。 |
-| `CLV2-14-12` | P1 | 14-01..11 | Release gate | 建立 Cluster v4/Target v2 release tag；保存 baseline->final diff、兼容矩阵和 rollback 指南。 | 发布包可从空构建环境复现。 |
+| `CLV2-14-01` | P0 | M13 | Legacy state cleanup | **DONE / SELF-AUDIT PASS / WAIT M14 EXTERNAL REVIEW**：删除由 Phase 可推导的 `role+bool` 镜像、Shadow mapper 和所有直接 role 写；Role 只由 `phase_to_role()` 生成。 | `ucn_cluster_phase_source_gate` PASS；Full 21/21、Lite/Nano/Service-OFF 各 19/19；Host `cluster_bytes=1608`。 |
+| `CLV2-14-02` | P1 | 14-01 | Public storage/API | **DONE / SELF-AUDIT PASS / WAIT M14 EXTERNAL REVIEW**：public `ucn_cluster_t` opaque；唯一 Owner 用 `ucn_cluster_storage.h` 静态分配；API/storage v2，必须全量重编译。 | storage boundary gate PASS；Full 22/22、Lite/Nano/Service-OFF 各 20/20、MSVC Release 40/40。 |
+| `CLV2-14-03` | P1 | M05 | v3 compatibility | **PARTIAL / MODULE SPLIT SELF-AUDIT PASS / BLOCKED BY M05**：v4、v3 compatibility、dual-stack dispatcher 已物理拆为三个 archive；v3 OFF 的 strict-v4 archive 无 v3 未解析符号。production v4 RX/TX/FSM/Authority/default encoder 仍冻结。 | Full 47/47、Lite/Service-OFF 41/41、Nano 31/31；v3 OFF/ON archive 与符号表门禁通过。生产切换须等待 M05。 |
+| `CLV2-14-04` | P0 | M08..13 | Invariant engine | **DONE / SELF-AUDIT PASS / WAIT M14 EXTERNAL REVIEW**：只读 Safety-1..10 位图引擎；Debug 每 Step/RX 后 fail-fast，跨节点 checker 验证同 Cluster Single Authority。 | 十类确定性 fault 注入、真实 M08 Authority/Grace、64/256/1000 Debug 仿真通过；Full 实验构建 44/44。形式化/跨事务证据继续由 14-05/11 承担。 |
+| `CLV2-14-05` | P0 | M00 | Property/model test | **DONE / SELF-AUDIT PASS / WAIT M14 EXTERNAL REVIEW**：真实 M08/M10 组合的 bounded executable model；穷举分区/Joint vote subset，并跑固定 seed 状态序列。 | 27 个 Authority 分区、16 个 Stable/Joint subset、131072 个 M10 event 通过；Single Authority、双 quorum、durable terminal、Fence/replay 均逐步断言。 |
+| `CLV2-14-06` | P0 | M05 | Codec fuzz | **DONE / SELF-AUDIT PASS / WAIT M14 EXTERNAL REVIEW**：v3/v4 decoder、semantic parser 与 pending replay 采用固定 seed 长序列；拒绝路径完整对象不写回，成功状态逐步校验 canonical mask/Config/deadline。 | v3 20000 mutation/live-RX；v4 4096 raw mutation + 65536 stateful event；Debug/O1/O2/O3 与 WSL ASan/UBSan 44/44 PASS。 |
+| `CLV2-14-07` | P0 | M08..13 | Scale simulation | **PARTIAL / CURRENT-FSM MATRIX PASS / BLOCKED BY M05**：64/256/1000 clean、impaired、mobility、score-shift 与 v3 Authority-fence 共 15 个 CTest 已完成并输出结果；Config/Backup/Recovery/Rekey 的 Target 规模接线继续冻结。 | `docs/results/M14/cluster_scale_matrix_2026-08-25.csv`；不得把 v3 Primary fault 后 0 Head 写成 failover 成功。 |
+| `CLV2-14-08` | P0 | M08..13 | Real hardware C07.7+ | **BLOCKED / REAL HARDWARE REQUIRED**：软件侧已冻结四板拓扑、故障/抖动/重启/持久化/Wire v4 证据清单；当前没有可控制的四板、真实 Flash Provider、断电装置与串口日志，禁止以 Host 仿真代替。 | 阻断记录：`UCN_V5_Cluster_M14_14-08_实机门禁阻断记录_2026-08-25.md`；解除条件为固件 Hash、接线、介质、原始日志和重复轮次齐全。 |
+| `CLV2-14-09` | P1 | M00 | Resource gate | **DONE / SELF-AUDIT PASS / WAIT M14 EXTERNAL REVIEW**：固定 2048 B Cluster storage 预算；Release Profile/模块 Flash-RAM-静态栈阈值、动态分配扫描和 core-only 不链接 Cluster 门禁已进入 CTest/脚本。 | Host `object=1608 B`、`text=133559 B`、`max frame=1840 B`；Full/Lite/Nano 显式链接 Cluster 成本相同是已知裁剪限制；结果见 `docs/results/M14/cluster_resource_*.csv`。 |
+| `CLV2-14-10` | P0 | M00 | Docs | **DONE / SELF-AUDIT PASS / WAIT M14 EXTERNAL REVIEW**：重写 Current FSM/Cluster calltree；同步 Target/Wire 实现边界；新增 Persistence、Config、Timer、API v2 迁移和代码—文档冻结契约。 | `ucn_cluster_docs_contract_gate` 自动核对 22 Phase、33 Type、8 个版本/尺寸和 12 个 M14 task；五项 source/docs gates PASS。 |
+| `CLV2-14-11` | P0 | M00 | Final safety review | **PARTIAL / SOFTWARE CHECKLIST COMPLETE / RELEASE NO-GO**：10 条 Safety 均有组件级可执行证据，但 production v4 end-to-end 证明受 M05 阻断；5 条 Liveness 中仅 Current 稳态/Recovery 有受限证据，Takeover/Merge/Target churn 未生产接线，四板实机缺失。 | `UCN_V5_Cluster_M14_14-11_最终SafetyLiveness自审清单_2026-08-25.md`；明确列出 PASS/PARTIAL/BLOCKED，不以测试数量替代协议证据。 |
+| `CLV2-14-12` | P1 | 14-01..11 | Release gate | **BLOCKED / NO TAG / NO RELEASE**：兼容矩阵与 rollback 草案已保存；14-03、14-07 partial，14-08 hardware blocked，14-11 NO-GO，且 M05/M08/M09/M10/M12/M13 仍有外审边界。 | 解除全部阻断后才允许从干净环境复现、建立 Cluster v4/Target v2 tag；当前禁止打 tag。 |
 
 ## 本里程碑禁止事项
 - 禁止用测试数量代替 Safety 证明。

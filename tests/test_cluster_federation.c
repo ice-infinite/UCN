@@ -4,6 +4,7 @@
 
 #include "ucn/ucn_cluster_authority.h"
 #include "ucn/ucn_cluster_federation.h"
+#include "ucn/ucn_cluster_storage.h"
 
 static void federation_test_common(ucn_cluster_federation_message_t *message,
                                    ucn_cluster_federation_kind_t kind)
@@ -172,7 +173,7 @@ static int federation_test_malformed_and_cluster_view(void)
     TEST_ASSERT(ucn_cluster_get_view(NULL, &view) == UCN_ERR_ARGUMENT);
     TEST_ASSERT(ucn_cluster_get_view(&cluster, &view) == UCN_OK &&
                 !view.enabled && view.local_node_id == config.local_node_id);
-    cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster.cluster_id = UINT32_C(0x10000001);
     cluster.term = 2U;
     cluster.head_node_id = config.local_node_id;
@@ -485,7 +486,7 @@ static int federation_runtime_init_cluster(ucn_cluster_t *cluster,
     /* Federation only consumes the documented owner-context view; this test
      * fixture intentionally bypasses election to isolate C06.2. */
     cluster->config.enabled = true;
-    cluster->role = UCN_CLUSTER_ROLE_HEAD;
+    cluster->phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster->cluster_id = cluster_id;
     cluster->term = term;
     cluster->head_node_id = local_node_id;
@@ -573,7 +574,7 @@ static int federation_runtime_init_member_node(
     cluster_config.persistence_mode = UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
     TEST_ASSERT(ucn_cluster_init(&node->cluster, &cluster_config) == UCN_OK);
     node->cluster.config.enabled = true;
-    node->cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    node->cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     node->cluster.cluster_id = cluster_id;
     node->cluster.term = term;
     node->cluster.head_node_id = head_node_id;
@@ -1297,7 +1298,7 @@ static int federation_test_handover_autopublish(void)
                         sizeof(HANDOVER_AUTH[0])) == 0);
 
     /* Promote to Head (takeover): role/head/term change. */
-    promoted->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    promoted->cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     promoted->cluster.head_node_id = FEDERATION_TUNNEL_HEAD_A;
     promoted->cluster.term = 4U;
     /* The first send is refused by the transport.  C07.4 must retain the

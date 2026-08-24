@@ -4,7 +4,7 @@
 > 状态：**FROZEN；外部冻结复审 GO（仅 CLV2-05-01 / RFC 范围）**  
 > 日期：2026-08-21  
 > 适用分支：`codex/v5-adaptive-wire`  
-> 实现状态：**本文件不修改任何常量、编解码器、发送路径或 Cluster FSM。**
+> 实现状态（2026-08-25）：**RFC4 已冻结；strict codec、semantic builder/parser、dual dispatcher、capability/diagnostic、Carrier 40 B 与 fuzz 门禁已在隔离 archive 完成。encoder 默认关闭，生产 Cluster RX/TX/FSM/Authority 仍未接线，M05 顶层继续 `AUDIT HOLD`。**
 
 > 修订说明：RFC1 的 Handover 仅绑定了旧 Epoch、`HANDOVER_READY` 错置为 Backup，且单 32-bit Takeover bitmap 无法覆盖 `MAX_MEMBERS + 1` 与 Joint Config；RFC2 仍未定义 `HEAD_TAKEOVER.P2` 的 Joint 语义，且误把 Handover 限制为跨 Cluster；RFC3 又使同簇目标 Backup 以未持久化的 `HEAD` 角色发送 READY，并让未收到 READY 的成员错误承担 READY 匹配责任。RFC4 使 Type 27 角色随 Handover 模式严格分派，并分离 A、B、成员三方的 READY/Stepdown 验证责任。外部冻结复审已于 2026-08-21 对 RFC/05-01 签署 GO；RFC1/RFC2/RFC3 不得作为实现依据。
 

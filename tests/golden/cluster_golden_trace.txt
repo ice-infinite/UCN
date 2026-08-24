@@ -31,8 +31,8 @@ t=126 node=1 event=STEP old={role=5 cid=1 term=1 gen=1 seq=8 ready=1 syncing=0 t
 t=126 node=2 event=RX:12 old={role=6 cid=1 term=1 gen=1 seq=8 ready=1 syncing=0 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=9 ready=1 syncing=0 takeover=0 recovery=0}
 t=136 node=1 event=STEP old={role=5 cid=1 term=1 gen=1 seq=9 ready=1 syncing=0 takeover=0 recovery=0} new={role=5 cid=1 term=1 gen=1 seq=10 ready=1 syncing=0 takeover=0 recovery=0}
 t=136 node=2 event=RX:12 old={role=6 cid=1 term=1 gen=1 seq=9 ready=1 syncing=0 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=10 ready=1 syncing=0 takeover=0 recovery=0}
-t=179 node=2 event=STEP old={role=6 cid=1 term=1 gen=1 seq=10 ready=1 syncing=0 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=10 ready=1 syncing=0 takeover=1 recovery=0}
-t=179 node=2 event=RX:15 old={role=6 cid=1 term=1 gen=1 seq=10 ready=1 syncing=0 takeover=1 recovery=0} new={role=5 cid=1 term=2 gen=1 seq=10 ready=0 syncing=0 takeover=0 recovery=0}
+t=179 node=2 event=STEP old={role=6 cid=1 term=1 gen=1 seq=10 ready=1 syncing=0 takeover=0 recovery=0} new={role=6 cid=1 term=1 gen=1 seq=10 ready=0 syncing=0 takeover=1 recovery=0}
+t=179 node=2 event=RX:15 old={role=6 cid=1 term=1 gen=1 seq=10 ready=0 syncing=0 takeover=1 recovery=0} new={role=5 cid=1 term=2 gen=1 seq=10 ready=0 syncing=0 takeover=0 recovery=0}
 t=180 node=4 event=RX:1 old={role=3 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=2 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
 t=180 node=3 event=RX:8 old={role=3 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=3 cid=1 term=2 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}
 t=181 node=4 event=RX:8 old={role=2 cid=1 term=1 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0} new={role=3 cid=1 term=2 gen=0 seq=0 ready=0 syncing=0 takeover=0 recovery=0}

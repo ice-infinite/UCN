@@ -62,6 +62,8 @@ int main(void)
     result |= test_profile();
     result |= test_public_headers();
     result |= test_node_storage_header();
+    result |= test_cluster_storage_header();
+    result |= test_cluster_invariant();
     result |= test_transfer();
     result |= test_cluster();
     result |= test_cluster_wire_v4_encoder_closed();

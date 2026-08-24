@@ -17,6 +17,10 @@ extern "C" {
 
 #define UCN_CLUSTER_WIRE_V3_FORMAT_VERSION ((uint8_t)3U)
 #define UCN_CLUSTER_WIRE_V4_FORMAT_VERSION ((uint8_t)4U)
+/* M14 recommendation only.  This does not bypass M05's production encoder,
+ * RX, FSM or Authority hold. */
+#define UCN_CLUSTER_RECOMMENDED_WIRE_FORMAT \
+    UCN_CLUSTER_WIRE_V4_FORMAT_VERSION
 #define UCN_CLUSTER_WIRE_V4_MESSAGE_BYTES ((size_t)40U)
 /* Capacity-only upper bound for code that deliberately carries either frozen
  * Cluster wire format.  It does not alter UCN_CLUSTER_MESSAGE_BYTES and does

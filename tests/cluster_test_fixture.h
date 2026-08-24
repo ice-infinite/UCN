@@ -10,7 +10,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "ucn/ucn_cluster.h"
+#include "ucn/ucn_cluster_storage.h"
 
 #ifdef __cplusplus
 extern "C" {

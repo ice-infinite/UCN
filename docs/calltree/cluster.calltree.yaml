@@ -1,94 +1,136 @@
 module: cluster
-description: 可选单层分簇 Extended；只读邻居输入、确定性评分选举、加入/容量、租约和 Head 失效重选。
+description: 可选 MCU-first Cluster；Phase 唯一状态源、opaque static storage、Current v3 FSM 与隔离的 Target 组件。
 entry: cluster.ucn_cluster_step
 source_files:
   - src/extended/ucn_cluster.c
+  - src/extended/cluster/ucn_cluster_fsm.c
+  - src/extended/cluster/ucn_cluster_codec_v3.c
+  - src/extended/cluster/ucn_cluster_authority.c
+  - src/extended/cluster/ucn_cluster_persistence_runtime.c
 
 nodes:
-  - id: cluster.ucn_node_copy_neighbor_summaries
-    symbol: ucn_node_copy_neighbor_summaries
-    type: function
-    file: src/node/ucn_node.c
-    layer: core
-    role: 在唯一 Owner 上下文复制非空 Neighbor 的只读摘要，隔离 Extended 与 Node 私有存储。
-    called_by:
-      - cluster.ucn_cluster_sync_node_neighbors
+  - id: cluster.owner_storage
+    symbol: ucn_cluster_t
+    type: opaque_storage
+    file: include/ucn/ucn_cluster_storage.h
+    layer: extended
+    role: 唯一 Protocol Owner 的固定静态存储；应用只通过 public view/API 访问。
+    called_by: [external.unique_protocol_owner]
     calls: []
     notes:
-      - Full/Lite 返回动态邻居；Nano 没有动态 Neighbor，返回 0。
+      - API/storage layout v2；默认预算 2048 B，当前 Host object 1608 B。
+      - Cluster 源码禁止动态分配。
 
   - id: cluster.ucn_cluster_sync_node_neighbors
     symbol: ucn_cluster_sync_node_neighbors
     type: function
     file: src/extended/ucn_cluster.c
     layer: extended
-    role: 把 ADMITTED/SUSPECT 一跳邻居同步到固定 Peer 表。
-    called_by:
-      - external.unique_protocol_owner
+    role: 从 Core 只读复制一跳 Neighbor 摘要到固定 Peer 表。
+    called_by: [external.unique_protocol_owner]
     calls:
-      - target: cluster.ucn_node_copy_neighbor_summaries
+      - target: external.ucn_node_copy_neighbor_summaries
         type: direct
-        reason: 获取只读、固定容量的选举输入。
-    notes:
-      - 不使用 Node Snapshot，不进行全网诊断泛洪。
-
-  - id: cluster.ucn_cluster_set_head_score
-    symbol: ucn_cluster_set_head_score
-    type: function
-    file: src/extended/ucn_cluster.c
-    layer: extended
-    role: 在唯一 Owner 上下文更新产品计算并滤波后的 Head Score。
-    called_by:
-      - external.unique_protocol_owner_quality_update
-    calls: []
-    notes:
-      - 更新后续 Candidate/Head 广告；不会仅凭一次变化强迫既有 Head 退位。
-      - 完整运行期迁移、拆并与备用策略属于 C07。
+        reason: 获取 bounded ADMITTED/SUSPECT 输入。
 
   - id: cluster.ucn_cluster_receive
     symbol: ucn_cluster_receive
     type: callback
     file: src/extended/ucn_cluster.c
     layer: extended
-    role: 解码 Endpoint 0xA0 的 28 B 控制载荷，执行来源、安全、Term/Nonce 和角色门禁。
-    called_by:
-      - external.cluster_endpoint_handler
+    role: 默认生产入口；严格解码 32 B format v3，并在任何副作用前执行 source/Authority/Persistence/Phase 门禁。
+    called_by: [external.cluster_endpoint_handler]
     calls:
       - target: cluster.ucn_cluster_message_decode
         type: direct
-        reason: 校验 Cluster Format v1 与固定 Schema。
-      - target: external.cluster_send_callback
-        type: callback
-        reason: 发送 Join 响应或状态控制消息。
+        reason: 严格 v3 Type 1..19 解析。
+      - target: cluster.cluster_transition
+        type: direct
+        reason: 唯一 Phase commit 入口。
+      - target: cluster.invariant_check
+        type: debug
+        reason: Debug RX 完成后 fail-fast。
     notes:
-      - 产品可要求 E2E protected；生产 Provider 仍在 Core Security 边界。
-
-  - id: cluster.ucn_cluster_message_decode
-    symbol: ucn_cluster_message_decode
-    type: function
-    file: src/extended/ucn_cluster.c
-    layer: extended
-    role: 解码并校验固定大端 Cluster Payload。
-    called_by:
-      - cluster.ucn_cluster_receive
-    calls: []
+      - production v3 Backup/Takeover Authority Type 8,10..15,18,19 fail-closed。
+      - production v4 RX 尚受 M05 AUDIT HOLD 冻结。
 
   - id: cluster.ucn_cluster_step
     symbol: ucn_cluster_step
     type: scheduler
     file: src/extended/ucn_cluster.c
     layer: extended
-    role: 推进观察、候选、Head/Member 租约、Join 重试、Keepalive 和轮转广告。
-    called_by:
-      - external.unique_protocol_owner
+    role: 推进 Current FSM、Persistence continuation、Authority preflight、租约和 bounded TX。
+    called_by: [external.unique_protocol_owner]
     calls:
       - target: external.authoritative_monotonic_clock
         type: callback
-        reason: 所有选举窗口和租约使用同一权威单调时钟。
+        reason: uint32 half-range 时间代数。
+      - target: cluster.cluster_transition
+        type: direct
+        reason: 提交唯一生命周期 Phase。
       - target: external.cluster_send_callback
         type: callback
-        reason: 每次 Step 最多向一个轮转 Peer 广告，或发送一次到期 Join/Keepalive。
+        reason: 发送默认 32 B v3 控制帧。
+      - target: cluster.invariant_check
+        type: debug
+        reason: Debug Step 完成后 Safety-1..10 fail-fast。
+
+  - id: cluster.cluster_transition
+    symbol: cluster_transition
+    type: internal_function
+    file: src/extended/cluster/ucn_cluster_fsm.c
+    layer: extended
+    role: 验证转换矩阵并原子提交 Phase/reason/count；Role 由 Phase 纯派生。
+    called_by:
+      - cluster.ucn_cluster_receive
+      - cluster.ucn_cluster_step
+    calls: []
+
+  - id: cluster.invariant_check
+    symbol: ucn_cluster_invariant_check
+    type: diagnostic
+    file: src/extended/cluster/ucn_cluster_invariant.c
+    layer: extended
+    role: 只读 Safety-1..10 位图检查，不修复状态。
+    called_by:
+      - cluster.ucn_cluster_receive
+      - cluster.ucn_cluster_step
+    calls: []
+
+  - id: cluster.persistence
+    symbol: cluster_persistence_submit
+    type: provider_boundary
+    file: src/extended/cluster/ucn_cluster_persistence_runtime.c
+    layer: extended
+    role: load-before-init、persist-before-promise、PENDING fence、reload+journal 验证和重入门。
+    called_by:
+      - cluster.ucn_cluster_receive
+      - cluster.ucn_cluster_step
+    calls:
+      - target: external.cluster_persist_provider
+        type: callback
+        reason: 产品实现的同步/异步 durable storage。
+
+  - id: cluster.wire_v4_isolated
+    symbol: ucn_cluster_wire_v4_decode
+    type: isolated_archive
+    file: src/extended/cluster/ucn_cluster_codec_v4.c
+    layer: extended_experimental
+    role: 40 B Type 1..33 strict codec、semantic 和 replay pending；默认 encoder 关闭。
+    called_by: [tests.only]
+    calls: []
     notes:
-      - Cluster 对象、Peer/Candidate/Member 表均为静态容量。
-      - 丢包造成重复 Head 时，确定性更差者在连续样本和最小任期后加入更优 Head；旧成员靠租约恢复。
-      - 完整 BACKUP、协同拆分/合并、Locator/Tunnel 和多级簇未闭环。
+      - 与 v3 compat、dual dispatcher 分 archive。
+      - 不接 production RX/TX/FSM/Authority。
+
+  - id: cluster.target_experimental
+    symbol: target_owners
+    type: isolated_archives
+    file: src/extended/cluster/
+    layer: extended_experimental
+    role: Config、Takeover、Handover、Rekey 的 default-OFF owner/model。
+    called_by: [tests.only]
+    calls:
+      - target: cluster.persistence
+        type: contract
+        reason: 复用 durable proof 和 Fence 合同。

@@ -2,6 +2,7 @@
  * No function in this file is referenced by the production Cluster FSM. */
 
 #include "ucn/ucn_cluster_rekey.h"
+#include "ucn/ucn_cluster_storage.h"
 
 #include <string.h>
 

@@ -307,7 +307,7 @@ static int test_verified_v4_join_is_provisional_only(void)
     const ucn_cluster_member_t *member;
 
     (void)memset(&cluster, 0, sizeof(cluster));
-    cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster.config.local_node_id = 2U;
     cluster.config.member_capacity = 2U;
     cluster.config.provisional_timeout_ms = 50U;
@@ -339,10 +339,10 @@ static int test_verified_v4_join_is_provisional_only(void)
     ASSERT_TRUE(member->joined_at_ms == 100U);
 
     before_failure = cluster;
-    cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     ASSERT_TRUE(cluster_admit_verified_v4_provisional_member(
                     &cluster, 22U, 0U, 300U, NULL) == UCN_ERR_ACCESS);
-    cluster.role = before_failure.role;
+    cluster.phase = before_failure.phase;
     ASSERT_TRUE(memcmp(&cluster, &before_failure, sizeof(cluster)) == 0);
     ASSERT_TRUE(cluster_admit_verified_v4_provisional_member(
                     &cluster, 0U, 0U, 300U, NULL) == UCN_ERR_ARGUMENT);
@@ -359,7 +359,7 @@ static int test_provisional_deadline_releases_runtime_capacity(void)
     ucn_cluster_t cluster;
 
     (void)memset(&cluster, 0, sizeof(cluster));
-    cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster.config.member_capacity = 1U;
     cluster.config.provisional_timeout_ms = 50U;
     ASSERT_TRUE(cluster_admit_verified_v4_provisional_member(
@@ -392,8 +392,8 @@ static int test_legacy_v3_never_becomes_production_backup(void)
     ucn_cluster_member_t *member;
 
     (void)memset(&cluster, 0, sizeof(cluster));
-    cluster.role = UCN_CLUSTER_ROLE_HEAD;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster.config.local_node_id = 2U;
     cluster.config.enabled = true;
     cluster.config.member_capacity = 2U;
@@ -483,7 +483,7 @@ static int test_runtime_and_voter_capacities_are_independent(void)
     ucn_cluster_voter_set_t voters_before;
 
     (void)memset(&cluster, 0, sizeof(cluster));
-    cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster.config.member_capacity = 1U;
     cluster.config.voter_capacity = 2U; /* includes Head 2 and voter 7 */
     cluster.config.provisional_timeout_ms = 50U;
@@ -582,11 +582,11 @@ static int test_production_v3_backup_authority_rx_is_fenced(void)
     /* Establish an internally consistent ordinary Member so the RX wrapper's
      * shadow sync itself is a no-op.  The frames below are then rejected by
      * the production authority fence, not by an unrelated setup failure. */
-    cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     cluster.cluster_id = 10U;
     cluster.term = 3U;
     cluster.head_node_id = 1U;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     cluster.known_backup_node_id = 3U;
     cluster.known_backup_generation = 4U;
 
@@ -627,14 +627,14 @@ static int test_production_v3_backup_authority_rx_is_fenced(void)
     /* The public wrapper normally repairs a stale diagnostic shadow after
      * rejected RX.  An authority-fenced frame is stricter: even a deliberately
      * desynchronised shadow must remain untouched. */
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
+    cluster.phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
     ASSERT_TRUE(production_rx_encode_backup_control(
         &message, UCN_CLUSTER_MSG_BACKUP_ASSIGN, 1U, encoded));
     before = cluster;
     ASSERT_TRUE(ucn_cluster_receive(&cluster, 1U, true, encoded,
                                     sizeof(encoded)) == UCN_ERR_ACCESS);
     ASSERT_TRUE(memcmp(&cluster, &before, sizeof(cluster)) == 0);
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
 
     /* A complete v3 Type12 BEGIN/data/END stream must never move this
      * production Member to BACKUP_READY or allocate its mirror. */
@@ -654,8 +654,8 @@ static int test_production_v3_backup_authority_rx_is_fenced(void)
                                         sizeof(encoded)) == UCN_ERR_ACCESS);
         ASSERT_TRUE(memcmp(&cluster, &before, sizeof(cluster)) == 0);
     }
-    ASSERT_TRUE(cluster.role == UCN_CLUSTER_ROLE_MEMBER);
-    ASSERT_TRUE(!cluster.backup_ready);
+    ASSERT_TRUE(ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_MEMBER);
+    ASSERT_TRUE(!cluster_phase_backup_ready(cluster.phase));
     ASSERT_TRUE(primary_member_count_u16(&cluster) == 0U);
     return 0;
 }
@@ -697,11 +697,11 @@ static int test_production_v3_join_request_stays_provisional(void)
     /* Establish a coherent Head-only fixture.  This is not a v4 authority
      * path: the test verifies that the remaining v3 join admission has no
      * authority side effect. */
-    cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster.cluster_id = 10U;
     cluster.term = 3U;
     cluster.head_node_id = config.local_node_id;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
 
     (void)memset(&message, 0, sizeof(message));
     message.type = UCN_CLUSTER_MSG_JOIN_REQUEST;
@@ -763,14 +763,14 @@ static int test_production_recovery_provisional_member_expires(void)
     neighbor.peer_node_id = 1U;
     ASSERT_TRUE(ucn_cluster_sync_neighbors(&cluster, &neighbor, 1U) == UCN_OK);
 
-    cluster.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    cluster.phase = UCN_CLUSTER_PHASE_RECOVERY_HEAD;
     cluster.cluster_id = 20U;
     cluster.recovery_cluster_id = 20U;
     cluster.term = 3U;
     cluster.head_node_id = config.local_node_id;
     cluster.recovery_nonce = 9U;
     cluster.parent_cluster_id = 10U;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_HEAD;
+    cluster.phase = UCN_CLUSTER_PHASE_RECOVERY_HEAD;
 
     (void)memset(&ack, 0, sizeof(ack));
     ack.type = UCN_CLUSTER_MSG_RECOVERY_ACK;

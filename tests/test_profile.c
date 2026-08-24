@@ -3,6 +3,7 @@
 
 #include "ucn/ucn.h"
 #include "ucn/ucn_cluster.h"
+#include "ucn/ucn_cluster_storage.h"
 #include "ucn/ucn_cluster_federation.h"
 #include "ucn/ucn_node.h"
 #include "ucn/ucn_transfer.h"
@@ -276,6 +277,7 @@ int test_profile(void)
     TEST_ASSERT(UCN_PROFILE <= UCN_PROFILE_FULL);
     TEST_ASSERT(test_public_headers() == 0);
     TEST_ASSERT(test_node_storage_header() == 0);
+    TEST_ASSERT(test_cluster_storage_header() == 0);
     TEST_ASSERT(test_profile_contract() == 0);
     TEST_ASSERT(test_profile_three_node_delivery() == 0);
 #if UCN_FEATURE_SERVICE

@@ -261,7 +261,15 @@ ucn_result_t start_recovery_backoff(ucn_cluster_t *cluster, uint32_t now_ms)
         /* CLV2-13-13: an exhausted Recovery replay domain is not allowed to
          * wrap through the generic message nonce generator.  The caller may
          * only continue after a persisted identity rotation/rekey. */
-        cluster->recovery_eligible = false;
+        if (cluster->phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) {
+            if (cluster_transition(
+                    cluster, UCN_CLUSTER_PHASE_RECOVERY_OBSERVE,
+                    UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                    UCN_CLUSTER_REASON_RECOVERY_SERIAL_EXHAUSTED,
+                    now_ms) != UCN_OK) {
+                return UCN_ERR_STATE;
+            }
+        }
         cluster->recovery_backoff_deadline_ms = 0U;
         return result;
     }
@@ -282,7 +290,6 @@ void declare_recovery_head(ucn_cluster_t *cluster,
          * changing phase. Keep the assignment checked here as a second,
          * no-wrap safety boundary. */
         if (cluster_serial_next_checked(0U, &first_nonce) != UCN_OK) {
-            cluster->recovery_eligible = false;
             return;
         }
         cluster->recovery_nonce = first_nonce;
@@ -291,7 +298,6 @@ void declare_recovery_head(ucn_cluster_t *cluster,
      * The Term is adopted from the persisted recovery Epoch - it is never
      * recomputed from mutable lineage state, so persist-before-promise
      * (M04) and the published authority Epoch can never diverge. */
-    cluster->role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
     cluster->recovery_cluster_id = durable_epoch->cluster_id;
     cluster->cluster_id = durable_epoch->cluster_id;
     cluster->term = durable_epoch->term;
@@ -328,7 +334,12 @@ void stepdown_recovery_head(ucn_cluster_t *cluster, uint32_t now_ms)
         /* Fail closed at the reserved serial boundary. A later M13 runtime
          * owner may persist a fresh identity domain, but this Recovery FSM
          * must never roll the round back to zero/one on its own. */
-        cluster->recovery_eligible = false;
+        if (cluster->phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE) {
+            (void)cluster_transition(
+                cluster, UCN_CLUSTER_PHASE_RECOVERY_OBSERVE,
+                UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                UCN_CLUSTER_REASON_RECOVERY_SERIAL_EXHAUSTED, now_ms);
+        }
     }
     cluster->recovery_cooldown_until_ms = ucn_deadline_from_now(
         now_ms, cluster->config.recovery_observation_ms);
@@ -362,18 +373,18 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
      * declaration; a node already under a live Head stays put.  A
      * RECOVERY_HEAD also participates so two contenders can converge on
      * the deterministic winner (see the arbitration below). */
-    if (cluster->role != UCN_CLUSTER_ROLE_MEMBER &&
-        cluster->role != UCN_CLUSTER_ROLE_BACKUP &&
-        cluster->role != UCN_CLUSTER_ROLE_DETACHED &&
-        cluster->role != UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+    if (ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_MEMBER &&
+        ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_BACKUP &&
+        ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_DETACHED &&
+        ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
         return UCN_ERR_ACCESS;
     }
     follows_recovery_head =
-        cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+        ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_MEMBER &&
         ucn_cluster_recovery_scoped(cluster) &&
         cluster->known_recovery_source != 0U &&
         cluster->accepted_recovery_nonce != 0U;
-    if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_MEMBER &&
         !ucn_cluster_recovery_scoped(cluster) &&
         !ucn_deadline_expired(now_ms, cluster->head_lease_expires_at_ms)) {
         return UCN_ERR_ACCESS;
@@ -383,8 +394,8 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
      * away before the existing Backup FSM has fenced that Primary.  Once
      * the lease has expired (and takeover is not already active), the
      * headless Backup may use the legacy Recovery join path. */
-    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP &&
-        (cluster->backup_takeover_active ||
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_BACKUP &&
+        (cluster_phase_backup_takeover_active(cluster->phase) ||
          cluster->backup_primary_lease_deadline_ms == 0U ||
          !ucn_deadline_expired(now_ms,
                                cluster->backup_primary_lease_deadline_ms))) {
@@ -501,7 +512,7 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
                   source < cluster->config.local_node_id))) {
         return UCN_OK; /* legacy fallback: we keep contending */
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
         /* CLV2-01-04f.4: losing the Recovery arbitration to a strictly
          * smaller (nonce, node_id) contender IS the RECOVERY_HEAD ->
          * MEMBER_ACTIVE transition (RECOVERY_YIELDED, a DIRECT edge).  It
@@ -554,7 +565,7 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
      * run AFTER the transition so a rejection leaves them untouched too. */
     if (!phase_committed) {
         ucn_cluster_phase_t pre_phase =
-            cluster_phase_from_legacy_state(cluster, now_ms);
+            cluster->phase;
 
         if (pre_phase != UCN_CLUSTER_PHASE_MEMBER_ACTIVE) {
             if (cluster_transition(cluster, pre_phase,
@@ -579,7 +590,7 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
      * allocated by the declaring node's M03-08 provider; it never
      * impersonates the lost Cluster.  The member keeps its role_since/lease
      * so the recovery domain has a live membership. */
-    if (cluster->role != UCN_CLUSTER_ROLE_MEMBER ||
+    if (ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_MEMBER ||
         cluster->cluster_id != message->cluster_id ||
         cluster->recovery_cluster_id != message->cluster_id) {
         cluster->recovery_cluster_id = message->cluster_id;
@@ -587,7 +598,6 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
         cluster->term = message->term;
         cluster->head_node_id = source;
         cluster->current_head_score = cluster->config.head_score;
-        cluster->role = UCN_CLUSTER_ROLE_MEMBER;
         cluster->role_since_ms = now_ms;
         cluster->election_deadline_ms = 0U;
     }
@@ -599,13 +609,12 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
      * lineage. */
     cluster->lineage_reset_deadline_ms = 0U;
     /* Joining a recovery Head abandons our own recovery candidacy. */
-    cluster->recovery_eligible = false;
     cluster->recovery_backoff_deadline_ms = 0U;
 #if !defined(NDEBUG)
     /* CLV2-01-04f.4 post-commit derive assert: after the transition AND
      * every site side effect the legacy state must still derive
      * MEMBER_ACTIVE (derive depends only on role/grace/eligible). */
-    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+    assert(cluster->phase ==
            UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
 #endif
     return send_recovery_ack(cluster, source, message);
@@ -618,7 +627,7 @@ ucn_result_t handle_recovery_ack(ucn_cluster_t *cluster,
 {
     ucn_cluster_member_t *member;
 
-    if (cluster->role != UCN_CLUSTER_ROLE_RECOVERY_HEAD ||
+    if (ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_RECOVERY_HEAD ||
         message->role != UCN_CLUSTER_ROLE_MEMBER ||
         message->cluster_id != cluster->recovery_cluster_id ||
         message->head_node_id != cluster->config.local_node_id) {

@@ -25,6 +25,8 @@
 #define V4_TEST_NO_ZERO_TAIL UINT8_MAX
 #define V4_TEST_FUZZ_SEED UINT32_C(0xC15A4E5D)
 #define V4_TEST_FUZZ_ITERATIONS ((size_t)4096U)
+#define V4_TEST_STATEFUL_FUZZ_SEED UINT32_C(0x14F00D06)
+#define V4_TEST_STATEFUL_FUZZ_ITERATIONS ((size_t)65536U)
 
 static void test_write_u32_be(uint8_t *output, uint32_t value)
 {
@@ -2553,6 +2555,170 @@ static int test_pending_cache(void)
     return 0;
 }
 
+static bool pending_state_is_consistent(
+    const ucn_cluster_wire_v4_pending_t *pending)
+{
+    size_t set_index;
+    bool expected_complete = true;
+
+    if (pending == NULL) {
+        return false;
+    }
+    if (!pending->occupied) {
+        ucn_cluster_wire_v4_pending_t empty;
+
+        (void)memset(&empty, 0, sizeof(empty));
+        return memcmp(pending, &empty, sizeof(empty)) == 0 &&
+               !ucn_cluster_wire_v4_pending_has_all_fragments(pending);
+    }
+    if (!ucn_cluster_wire_v4_frame_is_valid(&pending->takeover) ||
+        pending->takeover.type != UCN_CLUSTER_WIRE_V4_MSG_HEAD_TAKEOVER ||
+        !ucn_cluster_wire_v4_certificate_admission_is_valid(
+            &pending->admission) ||
+        pending->deadline_ms == 0U) {
+        return false;
+    }
+    for (set_index = 0U; set_index < 2U; ++set_index) {
+        uint16_t count = pending->fragment_counts[set_index];
+        uint16_t mask = pending->received_fragment_masks[set_index];
+        bool required = (pending->takeover.words[4U] &
+                         (set_index == 0U ? UINT32_C(1) : UINT32_C(2))) != 0U;
+
+        if (count > UCN_CLUSTER_WIRE_V4_MAX_CERTIFICATE_FRAGMENTS ||
+            (count == 0U && (mask != 0U || pending->set_config_ids[set_index] != 0U))) {
+            return false;
+        }
+        if (count != 0U) {
+            uint16_t expected_mask =
+                (uint16_t)((UINT16_C(1) << count) - UINT16_C(1));
+
+            if ((mask & (uint16_t)~expected_mask) != 0U ||
+                pending->set_config_ids[set_index] == 0U) {
+                return false;
+            }
+            if (required && mask != expected_mask) {
+                expected_complete = false;
+            }
+        } else if (required) {
+            expected_complete = false;
+        }
+    }
+    return ucn_cluster_wire_v4_pending_has_all_fragments(pending) ==
+           expected_complete;
+}
+
+static int test_stateful_pending_fuzz(void)
+{
+    ucn_cluster_wire_v4_frame_t takeover;
+    ucn_cluster_wire_v4_frame_t fragment;
+    ucn_cluster_wire_v4_certificate_admission_t admission;
+    ucn_cluster_wire_v4_pending_t pending;
+    uint32_t state = V4_TEST_STATEFUL_FUZZ_SEED;
+    uint32_t now_ms = 1U;
+    size_t iteration;
+
+    ASSERT_TRUE(make_valid_frame(UCN_CLUSTER_WIRE_V4_MSG_HEAD_TAKEOVER,
+                                 &takeover));
+    ASSERT_TRUE(make_valid_frame(UCN_CLUSTER_WIRE_V4_MSG_TAKEOVER_CERTIFICATE,
+                                 &fragment));
+    takeover.words[4U] = 1U;
+    fragment.words[4U] = 2U;
+    (void)memset(&admission, 0, sizeof(admission));
+    admission.outer_source = takeover.head_node_id;
+    admission.old_config_id = takeover.words[2U];
+    admission.source_admitted = true;
+    admission.frozen_config_admitted = true;
+    ucn_cluster_wire_v4_pending_reset(&pending);
+
+    for (iteration = 0U; iteration < V4_TEST_STATEFUL_FUZZ_ITERATIONS;
+         ++iteration) {
+        uint32_t event = next_fuzz_word(&state) % 12U;
+        ucn_cluster_wire_v4_pending_t before = pending;
+        ucn_result_t result;
+
+        if (!pending.occupied) {
+            if ((event & 1U) == 0U) {
+                ucn_cluster_wire_v4_certificate_admission_t rejected = admission;
+
+                rejected.outer_source++;
+                result = ucn_cluster_wire_v4_pending_begin(
+                    &pending, &takeover, &rejected, now_ms);
+                ASSERT_TRUE(result == UCN_ERR_STATE &&
+                            memcmp(&pending, &before, sizeof(pending)) == 0);
+            } else {
+                ASSERT_TRUE(ucn_cluster_wire_v4_pending_begin(
+                                &pending, &takeover, &admission, now_ms) == UCN_OK);
+            }
+        } else if (event <= 2U) {
+            ucn_cluster_wire_v4_frame_t accepted = fragment;
+            uint32_t index = next_fuzz_word(&state) & UINT32_C(1);
+
+            accepted.words[4U] = (index << 16U) | UINT32_C(2);
+            accepted.words[5U] = UINT32_C(0xA5000000) | index;
+            result = ucn_cluster_wire_v4_pending_accept_fragment(
+                &pending, &accepted, &admission, now_ms);
+            ASSERT_TRUE(result == UCN_OK || result == UCN_ERR_NOT_FOUND);
+        } else if (event == 3U || event == 4U) {
+            ucn_cluster_wire_v4_certificate_admission_t rejected = admission;
+            uint32_t rejected_now = pending.deadline_ms;
+
+            if (event == 3U) {
+                rejected.outer_source++;
+            } else {
+                rejected.frozen_config_admitted = false;
+            }
+            result = ucn_cluster_wire_v4_pending_accept_fragment(
+                &pending, &fragment, &rejected, rejected_now);
+            ASSERT_TRUE(result == UCN_ERR_STATE &&
+                        memcmp(&pending, &before, sizeof(pending)) == 0);
+        } else if (event == 5U || event == 6U) {
+            ucn_cluster_wire_v4_frame_t rejected = fragment;
+            uint32_t rejected_now = pending.deadline_ms;
+
+            if (event == 5U) {
+                rejected.words[1U]++;
+            } else {
+                rejected.words[2U]++;
+            }
+            result = ucn_cluster_wire_v4_pending_accept_fragment(
+                &pending, &rejected, &admission, rejected_now);
+            ASSERT_TRUE((result == UCN_ERR_MALFORMED || result == UCN_ERR_STATE) &&
+                        memcmp(&pending, &before, sizeof(pending)) == 0);
+        } else if (event == 7U) {
+            ucn_cluster_wire_v4_frame_t same = takeover;
+
+            ASSERT_TRUE(ucn_cluster_wire_v4_pending_begin(
+                            &pending, &same, &admission, now_ms) == UCN_OK);
+            ASSERT_TRUE(pending.deadline_ms == before.deadline_ms);
+        } else if (event == 8U) {
+            ucn_cluster_wire_v4_frame_t other = takeover;
+
+            other.words[3U]++;
+            result = ucn_cluster_wire_v4_pending_begin(
+                &pending, &other, &admission, now_ms);
+            ASSERT_TRUE(result == UCN_ERR_NO_SPACE &&
+                        memcmp(&pending, &before, sizeof(pending)) == 0);
+        } else if (event == 9U) {
+            (void)ucn_cluster_wire_v4_pending_expire(&pending,
+                                                     pending.deadline_ms);
+            ASSERT_TRUE(!pending.occupied);
+        } else if (event == 10U) {
+            ucn_cluster_wire_v4_pending_on_active_epoch_change(&pending);
+            ASSERT_TRUE(!pending.occupied);
+        } else {
+            ucn_cluster_wire_v4_frame_t accepted = fragment;
+
+            accepted.words[4U] = UINT32_C(2);
+            result = ucn_cluster_wire_v4_pending_accept_fragment(
+                &pending, &accepted, &admission, pending.deadline_ms);
+            ASSERT_TRUE(result == UCN_ERR_NOT_FOUND && !pending.occupied);
+        }
+        ASSERT_TRUE(pending_state_is_consistent(&pending));
+        now_ms++;
+    }
+    return 0;
+}
+
 int main(void)
 {
     int result = 0;
@@ -2570,6 +2736,7 @@ int main(void)
     result |= test_snapshot_semantic_binding();
     result |= test_takeover_certificate_semantic_binding();
     result |= test_pending_cache();
+    result |= test_stateful_pending_fuzz();
     if (result == 0) {
         printf("Cluster Wire v4 codec tests passed.\n");
     }

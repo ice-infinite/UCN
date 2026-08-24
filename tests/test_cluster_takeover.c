@@ -741,6 +741,7 @@ static int test_staging_and_frozen_quorum_property(void)
     ucn_node_id_t voters[UCN_CLUSTER_MAX_VOTERS];
     size_t count;
 
+    (void)memset(voters, 0, sizeof(voters));
     for (count = 1U; count <= UCN_CLUSTER_MAX_VOTERS; ++count) {
         ucn_cluster_takeover_transaction_t transaction;
         ucn_cluster_backup_sync_owner_t owner;
@@ -771,6 +772,7 @@ static int test_staging_and_frozen_quorum_property(void)
         ASSERT_TRUE(ucn_cluster_takeover_transaction_mark_self_vote_durable_internal(
                         &transaction, &transaction.vote_id) == UCN_OK);
         quorum = ucn_cluster_voter_set_quorum(&config.old_set);
+        ASSERT_TRUE(quorum > 0U && (size_t)quorum <= count);
         for (index = 1U; index < (size_t)quorum; ++index) {
             ASSERT_TRUE(note_remote_vote(&transaction, &transaction.vote_id,
                                          voters[index]) == UCN_OK);

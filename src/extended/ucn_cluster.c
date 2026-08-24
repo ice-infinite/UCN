@@ -1,5 +1,6 @@
 #include "ucn/ucn_cluster.h"
 #include "ucn/ucn_cluster_authority.h"
+#include "ucn/ucn_cluster_invariant.h"
 #include "ucn/ucn_cluster_persist.h"
 
 #include <assert.h>
@@ -13,6 +14,31 @@
  * keepalive handlers live in the membership module; this file calls them
  * through the same internal header. */
 #include "cluster/ucn_cluster_internal.h"
+
+#if !defined(NDEBUG) && !defined(UCN_CLUSTER_ENABLE_TEST_HOOKS)
+static void cluster_debug_assert_target_invariants(
+    const ucn_cluster_t *cluster,
+    const char *boundary)
+{
+    uint32_t violations = 0U;
+    uint32_t audit_now_ms = 0U;
+
+    (void)boundary;
+    if (cluster == NULL) {
+        return;
+    }
+    if (cluster->authority_runtime != NULL &&
+        cluster->authority_runtime->owner_step_seen) {
+        audit_now_ms = cluster->authority_runtime->last_owner_step_ms;
+    }
+    assert(ucn_cluster_invariant_check(cluster, audit_now_ms,
+                                       &violations) == UCN_OK);
+    assert(violations == 0U && boundary);
+}
+#else
+#define cluster_debug_assert_target_invariants(cluster, boundary) \
+    do { (void)(cluster); (void)(boundary); } while (0)
+#endif
 
 /* CLV2-M02 (02-05): the Backup/Takeover module owns the backup senders,
  * handlers and takeover lifecycle; only the send infra that stays here
@@ -721,8 +747,9 @@ ucn_result_t ucn_cluster_init(
     if (cluster->config.enabled) {
         now_ms = cluster_now(cluster);
     }
-    cluster->role = cluster->config.enabled ? UCN_CLUSTER_ROLE_DETACHED :
-                                               UCN_CLUSTER_ROLE_DISABLED;
+    cluster->phase = cluster->config.enabled
+                         ? UCN_CLUSTER_PHASE_DETACHED_OBSERVE
+                         : UCN_CLUSTER_PHASE_DISABLED;
     cluster->observation_deadline_ms = ucn_deadline_from_now(
         now_ms, cluster->config.observation_ms);
     cluster->role_since_ms = now_ms;
@@ -734,11 +761,9 @@ ucn_result_t ucn_cluster_init(
      * persistence gate freezes every role-driven action until poll() reloads
      * and verifies the matching REPLAY_INCARNATION journal entry. */
     (void)boot_incarnation_committed;
-    /* CLV2-01-02: seed the shadow phase mirror from the initial legacy
-     * state (DETACHED_OBSERVE or DISABLED). */
-    cluster->shadow_phase = cluster_phase_from_legacy_state(cluster, now_ms);
+    /* Phase was initialized directly above; no role/bool projection exists. */
     cluster->transition_reason = UCN_CLUSTER_REASON_INIT;
-    cluster->shadow_transition_count = 0U;
+    cluster->transition_count = 0U;
     return UCN_OK;
 }
 
@@ -750,8 +775,8 @@ ucn_result_t ucn_cluster_set_head_score(
         return UCN_ERR_ARGUMENT;
     }
     cluster->config.head_score = head_score;
-    if ((cluster->role == UCN_CLUSTER_ROLE_CANDIDATE ||
-         cluster->role == UCN_CLUSTER_ROLE_HEAD) &&
+    if ((ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_CANDIDATE ||
+         ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_HEAD) &&
         cluster->head_node_id == cluster->config.local_node_id) {
         cluster->current_head_score = head_score;
     }
@@ -846,14 +871,13 @@ void set_detached(
      * same-Cluster offer cannot re-enter after a detach/rejoin cycle.  A
      * Recovery domain is not a stable Cluster and therefore must not erase
      * the remembered stable domain.  M04 persists this boundary across boot. */
-    if (cluster->role != UCN_CLUSTER_ROLE_CANDIDATE &&
+    if (ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_CANDIDATE &&
         (cluster->recovery_cluster_id == 0U ||
          cluster->recovery_cluster_id != cluster->cluster_id)) {
         cluster_history_note_stable_epoch(cluster, cluster->cluster_id,
                                           cluster->term,
                                           cluster->head_node_id);
     }
-    cluster->role = UCN_CLUSTER_ROLE_DETACHED;
     cluster->cluster_id = 0U;
     cluster->term = 0U;
     cluster->head_node_id = 0U;
@@ -972,7 +996,7 @@ bool ucn_cluster_recovery_scoped(const ucn_cluster_t *cluster)
     if (cluster == NULL) {
         return false;
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
         return true;
     }
     return cluster->recovery_cluster_id != 0U &&
@@ -1049,7 +1073,6 @@ void begin_join_prepare_fields(
     uint32_t now_ms)
 {
     /* Joining a live Head abandons any pending Recovery candidacy. */
-    cluster->recovery_eligible = false;
     cluster->recovery_backoff_deadline_ms = 0U;
     cluster->role_since_ms = now_ms;
     cluster->pending_head_node_id = candidate->head_node_id;
@@ -1067,7 +1090,6 @@ void begin_join(
     /* CLV2-01-04b.3: role write + the field payload; the write order is
      * irrelevant (all plain field writes, no interleaved side effects),
      * so the shared helper is reused as-is. */
-    cluster->role = UCN_CLUSTER_ROLE_JOIN_PENDING;
     begin_join_prepare_fields(cluster, candidate, now_ms);
 }
 
@@ -1210,7 +1232,7 @@ static ucn_result_t ucn_cluster_receive_inner(
     }
     if (ucn_cluster_authority_is_managed(cluster) &&
         !ucn_cluster_authority_active(cluster) &&
-        cluster->role == UCN_CLUSTER_ROLE_HEAD &&
+        ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_HEAD &&
         (message.type == UCN_CLUSTER_MSG_JOIN_REQUEST ||
          message.type == UCN_CLUSTER_MSG_KEEPALIVE ||
          message.type == UCN_CLUSTER_MSG_LEAVE ||
@@ -1228,7 +1250,7 @@ static ucn_result_t ucn_cluster_receive_inner(
      * same-Cluster Term can start the controlled JOIN_PENDING recovery.
      * M08 later replaces this temporary Current-FSM hold with persisted
      * fencing and quorum-based convergence. */
-    if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT &&
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_TERM_CONFLICT &&
         message.type != UCN_CLUSTER_MSG_ADVERTISE &&
         message.type != UCN_CLUSTER_MSG_HEAD_DECLARE) {
         return UCN_ERR_STATE;
@@ -1255,7 +1277,7 @@ static ucn_result_t ucn_cluster_receive_inner(
                     cluster->stats.stale_messages++;
                     return UCN_ERR_REPLAY;
                 }
-                if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+                if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_MEMBER &&
                     candidate->cluster_id == cluster->cluster_id &&
                     candidate->term < cluster->term) {
                     cluster->stats.stale_messages++;
@@ -1285,7 +1307,7 @@ static ucn_result_t ucn_cluster_receive_inner(
         case UCN_CLUSTER_MSG_JOIN_REJECT:
             /* C07.7 P1: only a REJECT of the exact pending Head epoch
              * ends the join attempt; a stale REJECT is ignored. */
-            if (cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING &&
+            if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_JOIN_PENDING &&
                 source == cluster->pending_head_node_id &&
                 message.cluster_id == cluster->pending_cluster_id &&
                 message.term == cluster->pending_term &&
@@ -1317,7 +1339,7 @@ static ucn_result_t ucn_cluster_receive_inner(
                 /* CLV2-01-04b.4 post-commit derive assert: after the
                  * transition AND set_detached() the legacy state must
                  * still derive DETACHED_OBSERVE. */
-                assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                assert(cluster->phase ==
                        UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
 #endif
                 return UCN_OK;
@@ -1326,7 +1348,7 @@ static ucn_result_t ucn_cluster_receive_inner(
         case UCN_CLUSTER_MSG_KEEPALIVE:
             return handle_keepalive(cluster, source, &message, now_ms);
         case UCN_CLUSTER_MSG_LEAVE:
-            if (cluster->role != UCN_CLUSTER_ROLE_HEAD ||
+            if (ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_HEAD ||
                 message.cluster_id != cluster->cluster_id ||
                 message.term != cluster->term) {
                 return UCN_ERR_ACCESS;
@@ -1351,16 +1373,16 @@ static ucn_result_t ucn_cluster_receive_inner(
              * ordered stepdown (it cannot ACK its own takeover against a
              * Head that is deliberately switching away).  The epoch must
              * match to fence stale STEPDOWN frames. */
-            if ((cluster->role == UCN_CLUSTER_ROLE_MEMBER ||
-                 cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING ||
-                 cluster->role == UCN_CLUSTER_ROLE_BACKUP) &&
+            if ((ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_MEMBER ||
+                 ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_JOIN_PENDING ||
+                 ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_BACKUP) &&
                 source == cluster->head_node_id &&
                 message.cluster_id == cluster->cluster_id &&
                 message.term == cluster->term &&
                 /* C07.7 P1: a replayed STEPDOWN of the same epoch is
                  * ignored via the strictly increasing stepdown nonce. */
                 message.nonce > cluster->last_stepdown_nonce) {
-                if (cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING) {
+                if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_JOIN_PENDING) {
                     /* CLV2-01-04b.6 (human MAJOR): the JOIN_PENDING
                      * sub-branch consumes the anti-replay fence ONLY AFTER
                      * the transition succeeds.  Previously the nonce
@@ -1392,10 +1414,10 @@ static ucn_result_t ucn_cluster_receive_inner(
                     set_detached(cluster, now_ms,
                                  cluster->config.observation_ms);
 #if !defined(NDEBUG)
-                    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                    assert(cluster->phase ==
                            UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
 #endif
-                } else if (cluster->role == UCN_CLUSTER_ROLE_MEMBER) {
+                } else if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_MEMBER) {
                     /* CLV2-01-04c.5: the MEMBER sub-branch migrates with
                      * the b.6 fail-closed lesson.  The old phase is
                      * derived from the PRE-CALL state (role==MEMBER: an
@@ -1432,7 +1454,7 @@ static ucn_result_t ucn_cluster_receive_inner(
                     /* CLV2-01-04c.5 post-commit derive assert: after the
                      * transition AND set_detached() the legacy state must
                      * still derive DETACHED_OBSERVE. */
-                    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                    assert(cluster->phase ==
                            UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
 #endif
                 } else {
@@ -1458,8 +1480,7 @@ static ucn_result_t ucn_cluster_receive_inner(
                      * for phase reasons (a late Type12 during takeover is
                      * fine - the DIRECT edge TAKEOVER->DETACHED exists for
                      * the stepdown path). */
-                    ucn_cluster_phase_t pre_phase =
-                        cluster_phase_from_legacy_state(cluster, now_ms);
+                    ucn_cluster_phase_t pre_phase = cluster->phase;
 
                     if (cluster_transition(cluster, pre_phase,
                                            UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
@@ -1477,7 +1498,7 @@ static ucn_result_t ucn_cluster_receive_inner(
                     /* CLV2-01-04e.7 post-commit derive assert: after the
                      * transition AND backup_clear_sync() the legacy state
                      * must still derive DETACHED_OBSERVE. */
-                    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                    assert(cluster->phase ==
                            UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
 #endif
                 }
@@ -1516,27 +1537,14 @@ ucn_result_t ucn_cluster_receive(
     const uint8_t *payload,
     size_t payload_length)
 {
-    ucn_cluster_transition_reason_t hint = UCN_CLUSTER_REASON_UNKNOWN;
-    ucn_result_t result;
     bool authority_fenced = false;
+    ucn_result_t result;
 
-    /* Peek the wire type (payload byte 1) for a best-effort reason hint;
-     * the hint is only used when the exact diff table has no entry. */
-    if (cluster != NULL && payload != NULL && payload_length >= 2U &&
-        cluster->config.enabled) {
-        hint = cluster_rx_reason_from_type(
-            (ucn_cluster_message_type_t)payload[1U]);
-    }
     result = ucn_cluster_receive_inner(cluster, source, protected_control,
                                        payload, payload_length,
                                        &authority_fenced);
-    /* CLV2-01-02: keep the shadow mirror aligned after every RX that could
-     * have changed state (rejections like ERR_REPLAY may still have moved
-     * backup sync flags, so sync on everything except ARGUMENT). */
-    if (!authority_fenced && cluster != NULL && cluster->config.enabled &&
-        result != UCN_ERR_ARGUMENT) {
-        cluster_shadow_sync(cluster, hint);
-    }
+    cluster_debug_assert_target_invariants(
+        cluster, "Target Safety invariant failed after Cluster RX");
     return result;
 }
 
@@ -1582,7 +1590,7 @@ static ucn_result_t start_election_after_persistence(
      * transition AND every site side effect, the legacy state must still
      * derive ELECTION (derive depends only on role == CANDIDATE). */
 #if !defined(NDEBUG)
-    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+    assert(cluster->phase ==
            UCN_CLUSTER_PHASE_ELECTION);
 #endif
     return UCN_OK;
@@ -1677,7 +1685,7 @@ static ucn_result_t declare_recovery_after_persistence(
     }
     declare_recovery_head(cluster, &durable_state->active_epoch, now_ms);
 #if !defined(NDEBUG)
-    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+    assert(cluster->phase ==
            UCN_CLUSTER_PHASE_RECOVERY_HEAD);
 #endif
     return UCN_OK;
@@ -1721,7 +1729,7 @@ static void complete_election(ucn_cluster_t *cluster, uint32_t now_ms)
         }
         set_detached(cluster, now_ms, cluster->config.observation_ms);
 #if !defined(NDEBUG)
-        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+        assert(cluster->phase ==
                UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
 #endif
         return;
@@ -1732,9 +1740,9 @@ static void complete_election(ucn_cluster_t *cluster, uint32_t now_ms)
      * backup_node_id=0, so post-call reads would be wrong). */
     if (cluster->backup_node_id == 0U) {
         target_phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
-    } else if (cluster->backup_ready) {
+    } else if (cluster_phase_backup_ready(cluster->phase)) {
         target_phase = UCN_CLUSTER_PHASE_HEAD_STABLE;
-    } else if (cluster->backup_assign_pending) {
+    } else if (cluster_backup_assignment_pending(cluster)) {
         target_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING;
     } else {
         target_phase = UCN_CLUSTER_PHASE_HEAD_BACKUP_SYNCING;
@@ -1754,7 +1762,7 @@ static void complete_election(ucn_cluster_t *cluster, uint32_t now_ms)
                                       cluster->head_node_id);
     cluster->stats.elections_won++;
 #if !defined(NDEBUG)
-    assert(cluster_phase_from_legacy_state(cluster, now_ms) == target_phase);
+    assert(cluster->phase == target_phase);
 #endif
 }
 
@@ -1861,10 +1869,10 @@ static void send_next_advertisement(ucn_cluster_t *cluster, uint32_t now_ms)
             continue;
         }
         (void)send_message(cluster, peer->node_id, UCN_CLUSTER_MSG_ADVERTISE,
-                           cluster->role, cluster->cluster_id, cluster->term,
+                           ucn_cluster_get_role(cluster), cluster->cluster_id, cluster->term,
                            cluster->config.local_node_id,
                            cluster->config.head_score,
-                           cluster->role == UCN_CLUSTER_ROLE_HEAD ?
+                           ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_HEAD ?
                                primary_member_available_capacity(cluster) :
                                cluster->config.member_capacity);
         cluster->advertise_cursor =
@@ -1939,19 +1947,19 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
      * Head/Member/Backup control traffic, starts no election/takeover and
      * cannot leave on same-Term traffic; only the RX higher-authority gate
      * may transition it to JOIN_PENDING. */
-    if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
         return UCN_OK;
     }
     /* CLV2-M12 (12-03): a sustained stable join consumes the recovery
      * lineage.  This is a pure site effect on phase-preserving state - no
      * transition - and it runs before any Member control activity. */
-    if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_MEMBER &&
         !ucn_cluster_recovery_scoped(cluster) &&
         cluster->lineage_reset_deadline_ms != 0U &&
         ucn_deadline_expired(now_ms, cluster->lineage_reset_deadline_ms)) {
         cluster_lineage_reset(cluster);
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_MEMBER &&
         ucn_deadline_expired(now_ms, cluster->head_lease_expires_at_ms)) {
         /* Grace period: a Backup may be mid-takeover exactly when the
          * member lease lapses; stay MEMBER briefly so the member can still
@@ -1983,7 +1991,7 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
              * transition AND the site's deadline write the node must
              * still derive MEMBER_TAKEOVER_GRACE (role == MEMBER with an
              * armed grace deadline). */
-            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+            assert(cluster->phase ==
                    UCN_CLUSTER_PHASE_MEMBER_TAKEOVER_GRACE);
 #endif
         } else if (ucn_deadline_expired(now_ms,
@@ -2007,7 +2015,6 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                  * the node stays in grace and the next Step re-visits. */
                 return UCN_ERR_STATE;
             }
-            cluster->recovery_eligible = true;
             /* CLV2-M12 (12-01): capture the parent lineage BEFORE the
              * detach clears Active/Pending identity (site-owned, in the
              * original order the grace timeout already used). */
@@ -2018,12 +2025,12 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
             /* CLV2-01-04c.3 post-commit derive assert: after the
              * transition AND every site effect the node must derive
              * RECOVERY_OBSERVE (role == DETACHED, eligible, no backoff). */
-            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+            assert(cluster->phase ==
                    UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
 #endif
         }
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_HEAD) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_HEAD) {
         expire_members(cluster, now_ms);
         if (cluster->next_advertise_ms == 0U ||
             ucn_deadline_expired(now_ms, cluster->next_advertise_ms)) {
@@ -2038,7 +2045,7 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
              * itself stays candidate/score ordered and idempotent. */
             assign_backup(cluster, now_ms);
         }
-        if (cluster->backup_node_id != 0U && !cluster->backup_assign_pending &&
+        if (cluster->backup_node_id != 0U && !cluster_backup_assignment_pending(cluster) &&
             (cluster->next_backup_assign_ms == 0U ||
              ucn_deadline_expired(now_ms,
                                   cluster->next_backup_assign_ms))) {
@@ -2057,7 +2064,7 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
         }
         /* Bounded snapshot retransmit: if a frame was dropped the Backup
          * never becomes READY, so resend the snapshot on a fixed timer. */
-        if (cluster->backup_node_id != 0U && !cluster->backup_ready &&
+        if (cluster->backup_node_id != 0U && !cluster_phase_backup_ready(cluster->phase) &&
             cluster->backup_sync_cursor > primary_member_count_u16(cluster) + 1U &&
             ucn_deadline_expired(now_ms,
                                   cluster->backup_resync_deadline_ms)) {
@@ -2065,12 +2072,12 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
             backup_resync(cluster);
         }
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP &&
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_BACKUP &&
         cluster->backup_primary_deadline_ms != 0U &&
         ucn_deadline_expired(now_ms, cluster->backup_primary_deadline_ms)) {
         cluster->backup_missed_heartbeats++;
         if (cluster->backup_missed_heartbeats >= UCN_CLUSTER_BACKUP_MISS_LIMIT) {
-            if (cluster->backup_ready && !cluster->backup_takeover_active) {
+            if (cluster_phase_backup_ready(cluster->phase) && !cluster_phase_backup_takeover_active(cluster->phase)) {
                 if (ucn_deadline_expired(
                         now_ms, cluster->backup_primary_lease_deadline_ms)) {
                     /* §5.1: also wait for the Primary lease to expire so
@@ -2079,7 +2086,7 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                     start_takeover(cluster, now_ms);
                 }
                 /* else: keep waiting for the lease; stay BACKUP. */
-            } else if (!cluster->backup_takeover_active) {
+            } else if (!cluster_phase_backup_takeover_active(cluster->phase)) {
                 /* CLV2-01-04f.2: the missed-heartbeat limit hit IS the
                  * BACKUP_SYNCING -> RECOVERY_OBSERVE transition (the
                  * eligible branch only fires when !ready && !takeover) -
@@ -2105,7 +2112,6 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                     return UCN_ERR_STATE;
                 }
                 cluster->stats.head_leases_expired++;
-                cluster->recovery_eligible = true;
                 /* CLV2-M12 (12-01): capture the parent lineage BEFORE
                  * backup_clear_sync() detaches and clears identity. */
                 cluster_lineage_capture(cluster);
@@ -2115,7 +2121,7 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                  * transition AND every site effect the node must derive
                  * RECOVERY_OBSERVE (role == DETACHED, eligible, no
                  * backoff). */
-                assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+                assert(cluster->phase ==
                        UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
 #endif
                 return UCN_OK;
@@ -2124,8 +2130,8 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
         cluster->backup_primary_deadline_ms =
             ucn_deadline_from_now(now_ms, cluster->config.keepalive_interval_ms);
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP &&
-        cluster->backup_takeover_active &&
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_BACKUP &&
+        cluster_phase_backup_takeover_active(cluster->phase) &&
         ucn_deadline_expired(now_ms, cluster->backup_takeover_deadline_ms)) {
         /* CLV2-01-04e.5: the expired takeover window IS the BACKUP_TAKEOVER
          * -> DETACHED_OBSERVE transition - call it FIRST, UNCONDITIONALLY,
@@ -2152,24 +2158,24 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
         /* CLV2-01-04e.5 post-commit derive assert: after the transition
          * AND every site effect the node must derive DETACHED_OBSERVE
          * (role == DETACHED, recovery_eligible == false, no backoff). */
-        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+        assert(cluster->phase ==
                UCN_CLUSTER_PHASE_DETACHED_OBSERVE);
 #endif
         return UCN_OK;
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP &&
-        cluster->backup_takeover_active) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_BACKUP &&
+        cluster_phase_backup_takeover_active(cluster->phase)) {
         send_takeover_prepare_step(cluster);
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_DETACHED &&
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_DETACHED &&
         cluster->config.head_capable &&
          ucn_deadline_expired(now_ms, cluster->observation_deadline_ms)) {
-        if (cluster->recovery_eligible &&
+        if (cluster_phase_recovery_eligible(cluster->phase) &&
             cluster->recovery_cooldown_until_ms != 0U &&
             !ucn_deadline_expired(now_ms,
                                   cluster->recovery_cooldown_until_ms)) {
             /* Still cooling down after a Recovery stepdown: wait. */
-        } else if (cluster->recovery_eligible) {
+        } else if (cluster_phase_recovery_eligible(cluster->phase)) {
             if (cluster->recovery_backoff_deadline_ms == 0U) {
                 /* CLV2-01-04f: arming a NON-ZERO backoff IS the
                  * RECOVERY_OBSERVE -> RECOVERY_ELECTION transition - call
@@ -2203,7 +2209,15 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                         result = cluster_serial_next_checked(
                             cluster->recovery_nonce, &next_recovery_nonce);
                         if (result != UCN_OK) {
-                            cluster->recovery_eligible = false;
+                            if (cluster_transition(
+                                    cluster,
+                                    UCN_CLUSTER_PHASE_RECOVERY_OBSERVE,
+                                    UCN_CLUSTER_PHASE_DETACHED_OBSERVE,
+                                    UCN_CLUSTER_REASON_RECOVERY_SERIAL_EXHAUSTED,
+                                    now_ms) != UCN_OK) {
+                                return UCN_ERR_STATE;
+                            }
+                            cluster->recovery_backoff_deadline_ms = 0U;
                             return result;
                         }
                         if (cluster_transition(
@@ -2237,8 +2251,7 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                      * zero-backoff config skips it entirely (see the
                      * guard comment above) and derives RECOVERY_OBSERVE. */
                     if (backoff_is_nonzero) {
-                        assert(cluster_phase_from_legacy_state(cluster,
-                                                               now_ms) ==
+                        assert(cluster->phase ==
                                UCN_CLUSTER_PHASE_RECOVERY_ELECTION);
                     }
 #endif
@@ -2302,11 +2315,11 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
             }
         }
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_CANDIDATE &&
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_CANDIDATE &&
         ucn_deadline_expired(now_ms, cluster->election_deadline_ms)) {
         complete_election(cluster, now_ms);
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
         /* C07.7 P0-1: the recovery Cluster is a real (short-lived) Cluster:
          * expire members and periodically re-advertise the declaration so
          * surviving members keep their leases and late survivors can join. */
@@ -2342,13 +2355,13 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
             /* CLV2-01-04f post-commit derive assert: after the transition
              * AND every site effect the node must derive RECOVERY_OBSERVE
              * (role == DETACHED, eligible, no backoff, cooldown armed). */
-            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+            assert(cluster->phase ==
                    UCN_CLUSTER_PHASE_RECOVERY_OBSERVE);
 #endif
             return UCN_OK;
         }
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_STEPPING_DOWN &&
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_STEPPING_DOWN &&
         ucn_deadline_expired(now_ms, cluster->stepdown_deadline_ms)) {
         /* CLV2-01-04f.2: the expired stepdown deadline IS the
          * STEPPING_DOWN -> JOIN_PENDING transition - call it FIRST,
@@ -2371,29 +2384,28 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
         /* Ordered switchback completes: leave members, join the better
          * Head that was already announced via HEAD_STEPDOWN. */
         primary_member_table_clear(cluster);
-        cluster->role = UCN_CLUSTER_ROLE_JOIN_PENDING;
         cluster->role_since_ms = now_ms;
         cluster->next_join_retry_ms = now_ms;
         cluster->stepdown_deadline_ms = 0U;
 #if !defined(NDEBUG)
         /* CLV2-01-04f.2 post-commit derive assert: after the transition
          * AND every site effect the node must derive JOIN_PENDING. */
-        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+        assert(cluster->phase ==
                UCN_CLUSTER_PHASE_JOIN_PENDING);
 #endif
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_CANDIDATE &&
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_CANDIDATE &&
         (cluster->next_advertise_ms == 0U ||
          ucn_deadline_expired(now_ms, cluster->next_advertise_ms))) {
         send_next_advertisement(cluster, now_ms);
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING &&
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_JOIN_PENDING &&
         (cluster->next_join_retry_ms == 0U ||
          ucn_deadline_expired(now_ms, cluster->next_join_retry_ms))) {
         send_join_request(cluster, now_ms);
     }
-    if ((cluster->role == UCN_CLUSTER_ROLE_MEMBER ||
-         cluster->role == UCN_CLUSTER_ROLE_BACKUP) &&
+    if ((ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_MEMBER ||
+         ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_BACKUP) &&
         (cluster->next_keepalive_ms == 0U ||
          ucn_deadline_expired(now_ms, cluster->next_keepalive_ms))) {
         send_keepalive(cluster, now_ms);
@@ -2405,18 +2417,19 @@ ucn_result_t ucn_cluster_step(ucn_cluster_t *cluster)
 {
     ucn_result_t result = ucn_cluster_step_inner(cluster);
 
-    /* CLV2-01-02: keep the shadow phase mirror aligned after every
-     * Step.  The mirror never drives behaviour; it only exists for the
-     * consistency gate. */
-    if (result == UCN_OK && cluster != NULL && cluster->config.enabled) {
-        cluster_shadow_sync(cluster, UCN_CLUSTER_REASON_UNKNOWN);
-    }
+    cluster_debug_assert_target_invariants(
+        cluster, "Target Safety invariant failed after Cluster Step");
     return result;
+}
+
+ucn_cluster_phase_t ucn_cluster_get_phase(const ucn_cluster_t *cluster)
+{
+    return cluster == NULL ? UCN_CLUSTER_PHASE_DISABLED : cluster->phase;
 }
 
 ucn_cluster_role_t ucn_cluster_get_role(const ucn_cluster_t *cluster)
 {
-    return cluster == NULL ? UCN_CLUSTER_ROLE_DISABLED : cluster->role;
+    return ucn_cluster_phase_to_role(ucn_cluster_get_phase(cluster));
 }
 
 /* CLV2-M03 (03-02): the active epoch is the logical unification of the
@@ -2479,7 +2492,7 @@ ucn_result_t ucn_cluster_get_view(const ucn_cluster_t *cluster,
     view->persistence_faulted = cluster->persistence_faulted;
     view->persistence_retry_pending = cluster->persistence_retry_pending;
     view->persistence_failure = cluster->persistence_failure;
-    view->role = cluster->role;
+    view->role = ucn_cluster_get_role(cluster);
     view->local_node_id = cluster->config.local_node_id;
     view->cluster_id = cluster->cluster_id;
     view->term = cluster->term;
@@ -2637,13 +2650,13 @@ ucn_result_t ucn_cluster_test_start_takeover(ucn_cluster_t *cluster,
     if (cluster == NULL) {
         return UCN_ERR_ARGUMENT;
     }
-    before = cluster->shadow_transition_count;
+    before = cluster->transition_count;
     start_takeover(cluster, now_ms);
     /* start_takeover() is void: report the transition outcome by whether
-     * the entry point committed (shadow_transition_count++ on success; a
+     * the entry point committed (transition_count++ on success; a
      * rejected transition performs ZERO writes and leaves the count
      * untouched). */
-    return cluster->shadow_transition_count == before ? UCN_ERR_STATE
+    return cluster->transition_count == before ? UCN_ERR_STATE
                                                       : UCN_OK;
 }
 
@@ -2697,7 +2710,7 @@ ucn_result_t ucn_cluster_test_make_next_recovery_id(
  * (and the fail-closed rejection with zero writes) without an end-of-RX
  * shadow sync re-aligning the mirror.  Both sites are void: report the
  * transition outcome by whether the entry point committed
- * (shadow_transition_count++ on success; a rejected transition performs
+ * (transition_count++ on success; a rejected transition performs
  * ZERO writes and leaves the count untouched). */
 ucn_result_t ucn_cluster_test_consider_head_offer(
     ucn_cluster_t *cluster, ucn_cluster_candidate_t *candidate, uint32_t now_ms)
@@ -2707,9 +2720,9 @@ ucn_result_t ucn_cluster_test_consider_head_offer(
     if (cluster == NULL) {
         return UCN_ERR_ARGUMENT;
     }
-    before = cluster->shadow_transition_count;
+    before = cluster->transition_count;
     consider_head_offer(cluster, candidate, now_ms);
-    return cluster->shadow_transition_count == before ? UCN_ERR_STATE : UCN_OK;
+    return cluster->transition_count == before ? UCN_ERR_STATE : UCN_OK;
 }
 
 ucn_result_t ucn_cluster_test_begin_ordered_stepdown(
@@ -2721,8 +2734,8 @@ ucn_result_t ucn_cluster_test_begin_ordered_stepdown(
     if (cluster == NULL) {
         return UCN_ERR_ARGUMENT;
     }
-    before = cluster->shadow_transition_count;
+    before = cluster->transition_count;
     begin_ordered_stepdown(cluster, candidate, now_ms);
-    return cluster->shadow_transition_count == before ? UCN_ERR_STATE : UCN_OK;
+    return cluster->transition_count == before ? UCN_ERR_STATE : UCN_OK;
 }
 #endif

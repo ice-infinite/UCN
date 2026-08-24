@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "ucn/ucn_cluster.h"
+#include "ucn/ucn_cluster_storage.h"
 
 /* Default group size; smaller topologies select 2/4 via --group. */
 #define CLUSTER_SIM_DEFAULT_GROUP_SIZE ((size_t)8U)
@@ -419,7 +419,7 @@ static bool sim_is_converged(
         size_t index;
 
         if (!network->nodes[expected_head].alive ||
-            network->nodes[expected_head].cluster.role !=
+            ucn_cluster_get_role(&network->nodes[expected_head].cluster) !=
                 UCN_CLUSTER_ROLE_HEAD) {
             return false;
         }
@@ -430,8 +430,8 @@ static bool sim_is_converged(
             if (!node->alive || index == expected_head) {
                 continue;
             }
-            if ((node->cluster.role != UCN_CLUSTER_ROLE_MEMBER &&
-                 node->cluster.role != UCN_CLUSTER_ROLE_BACKUP) ||
+            if ((ucn_cluster_get_role(&node->cluster) != UCN_CLUSTER_ROLE_MEMBER &&
+                 ucn_cluster_get_role(&node->cluster) != UCN_CLUSTER_ROLE_BACKUP) ||
                 node->cluster.head_node_id !=
                     (ucn_node_id_t)(expected_head + 1U)) {
                 return false;
@@ -462,14 +462,14 @@ static bool sim_m03_isolation_holds(const cluster_sim_network_t *network)
             if (!node->alive) {
                 continue;
             }
-            if (node->cluster.role == UCN_CLUSTER_ROLE_HEAD) {
+            if (ucn_cluster_get_role(&node->cluster) == UCN_CLUSTER_ROLE_HEAD) {
                 if (node->cluster.cluster_id == 0U || node->cluster.term == 0U ||
                     node->cluster.head_node_id != (ucn_node_id_t)(index + 1U)) {
                     return false;
                 }
                 has_local_head = true;
-            } else if (node->cluster.role == UCN_CLUSTER_ROLE_MEMBER ||
-                       node->cluster.role == UCN_CLUSTER_ROLE_BACKUP) {
+            } else if (ucn_cluster_get_role(&node->cluster) == UCN_CLUSTER_ROLE_MEMBER ||
+                       ucn_cluster_get_role(&node->cluster) == UCN_CLUSTER_ROLE_BACKUP) {
                 size_t head_index;
 
                 if (node->cluster.cluster_id == 0U || node->cluster.term == 0U ||
@@ -481,7 +481,7 @@ static bool sim_m03_isolation_holds(const cluster_sim_network_t *network)
                 if (head_index < group_start ||
                     head_index >= group_start + network->group_size ||
                     !network->nodes[head_index].alive ||
-                    network->nodes[head_index].cluster.role !=
+                    ucn_cluster_get_role(&network->nodes[head_index].cluster) !=
                         UCN_CLUSTER_ROLE_HEAD) {
                     return false;
                 }
@@ -627,10 +627,10 @@ static void count_final_state(
         }
         if (node->alive) {
             (*alive_nodes)++;
-            if (node->cluster.role == UCN_CLUSTER_ROLE_HEAD) {
+            if (ucn_cluster_get_role(&node->cluster) == UCN_CLUSTER_ROLE_HEAD) {
                 (*heads)++;
-            } else if (node->cluster.role == UCN_CLUSTER_ROLE_MEMBER ||
-                       node->cluster.role == UCN_CLUSTER_ROLE_BACKUP) {
+            } else if (ucn_cluster_get_role(&node->cluster) == UCN_CLUSTER_ROLE_MEMBER ||
+                       ucn_cluster_get_role(&node->cluster) == UCN_CLUSTER_ROLE_BACKUP) {
                 (*members)++;
             }
         }
@@ -645,7 +645,8 @@ static int run_simulation(
     cluster_sim_scenario_t scenario,
     ucn_cluster_timing_profile_t timing_profile,
     uint32_t seed,
-    bool expect_m03_isolation)
+    bool expect_m03_isolation,
+    bool expect_v3_authority_fence)
 {
     cluster_sim_network_t network;
     uint32_t now_ms;
@@ -663,6 +664,7 @@ static int run_simulation(
     uint64_t head_switches;
     uint32_t max_control_window;
     bool m03_isolation_passed;
+    bool v3_authority_fence_passed;
     size_t index;
 
     if (sim_init(&network, node_count, group_size, scenario, timing_profile,
@@ -704,6 +706,10 @@ static int run_simulation(
     m03_isolation_passed = expect_m03_isolation &&
                            sim_m03_isolation_holds(&network);
     expected_members = alive_nodes - groups;
+    v3_authority_fence_passed =
+        expect_v3_authority_fence && initial_converged_ms != 0U &&
+        final_converged_ms == 0U && heads == 0U &&
+        members == expected_members;
     recovery_ms = final_converged_ms >= final_phase_ms ?
                       final_converged_ms - final_phase_ms : 0U;
     printf("CLUSTER_SIM nodes=%zu scenario=%s profile=%s groups=%zu heads=%zu "
@@ -711,7 +717,7 @@ static int run_simulation(
            "sent=%llu tx=%llu delivered=%llu rejected=%llu dropped=%llu "
            "unreachable=%llu delayed=%llu duplicated=%llu asymmetric=%llu "
            "head_switches=%llu max_tx_1s=%lu object_bytes=%zu"
-           " m03_isolation=%s\n",
+           " m03_isolation=%s v3_authority_fence=%s\n",
             node_count, scenario_name(scenario), timing_profile_name(timing_profile),
             groups, heads, members,
            (unsigned long)final_converged_ms,
@@ -730,13 +736,17 @@ static int run_simulation(
            (unsigned long)max_control_window, sizeof(ucn_cluster_t),
            expect_m03_isolation ?
                (m03_isolation_passed ? "passed" : "failed") :
+               "not_requested",
+           expect_v3_authority_fence ?
+               (v3_authority_fence_passed ? "passed" : "failed") :
                "not_requested");
-    if ((!expect_m03_isolation &&
+    if ((!expect_m03_isolation && !expect_v3_authority_fence &&
          (final_converged_ms == 0U || heads != groups ||
           members != expected_members)) ||
         (expect_m03_isolation &&
          (!m03_isolation_passed || heads < groups ||
           heads + members != alive_nodes)) ||
+        (expect_v3_authority_fence && !v3_authority_fence_passed) ||
          max_control_window > control_window_limit(timing_profile) ||
          ((scenario == CLUSTER_SIM_SCENARIO_HEAD_FAILOVER ||
            scenario == CLUSTER_SIM_SCENARIO_MOBILITY) &&
@@ -762,7 +772,8 @@ static void print_usage(void)
              "usage: ucn_cluster_sim [--nodes N] "
              "[--scenario clean|impaired|head-failover|mobility|score-shift] "
              "[--profile default|fast-fixed] [--group 2|4|8] "
-             "[--seed N] [--expect-m03-isolation]\n");
+             "[--seed N] [--expect-m03-isolation] "
+             "[--expect-v3-authority-fence]\n");
 }
 
 int main(int argc, char **argv)
@@ -774,6 +785,7 @@ int main(int argc, char **argv)
         UCN_CLUSTER_TIMING_PROFILE_DEFAULT;
     uint32_t seed = UINT32_C(0x5EED1234);
     bool expect_m03_isolation = false;
+    bool expect_v3_authority_fence = false;
     int argument_index;
 
     for (argument_index = 1; argument_index < argc; ++argument_index) {
@@ -817,6 +829,9 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[argument_index],
                           "--expect-m03-isolation") == 0) {
             expect_m03_isolation = true;
+        } else if (strcmp(argv[argument_index],
+                          "--expect-v3-authority-fence") == 0) {
+            expect_v3_authority_fence = true;
         } else if (strcmp(argv[argument_index], "--profile") == 0 &&
                    argument_index + 1 < argc) {
             if (!parse_timing_profile(argv[++argument_index],
@@ -840,6 +855,13 @@ int main(int argc, char **argv)
                 "--expect-m03-isolation requires --scenario impaired\n");
         return 2;
     }
+    if (expect_v3_authority_fence &&
+        scenario != CLUSTER_SIM_SCENARIO_HEAD_FAILOVER) {
+        fprintf(stderr,
+                "--expect-v3-authority-fence requires --scenario head-failover\n");
+        return 2;
+    }
     return run_simulation(node_count, group_size, scenario, timing_profile,
-                          seed, expect_m03_isolation);
+                          seed, expect_m03_isolation,
+                          expect_v3_authority_fence);
 }

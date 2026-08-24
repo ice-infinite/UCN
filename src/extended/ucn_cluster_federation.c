@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "ucn/ucn_cluster_authority.h"
+#include "ucn/ucn_cluster_storage.h"
 #include "ucn/ucn_time.h"
 
 #define FED_VERSION_OFFSET ((size_t)0U)

@@ -1,0 +1,7 @@
+module,text,rodata,data,bss
+wire_v3,1398,208,0,0
+wire_v4,9691,513,0,0
+wire_dual_dispatch,380,0,0,0
+takeover_experimental,29698,22,0,1
+handover_experimental,16392,104,0,0
+rekey_experimental,23956,44,0,8

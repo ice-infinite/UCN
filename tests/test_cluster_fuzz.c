@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "ucn/ucn_cluster.h"
+#include "ucn/ucn_cluster_storage.h"
 
 #define FUZZ_CASES UINT32_C(20000)
 #define FUZZ_SEED UINT32_C(0x1C0DEC0D)

@@ -2,6 +2,7 @@
  * site; production integration remains blocked by M05 AUDIT HOLD. */
 
 #include "ucn/ucn_cluster_rekey.h"
+#include "ucn/ucn_cluster_storage.h"
 #include "ucn/ucn_time.h"
 
 #include <string.h>
@@ -345,7 +346,7 @@ ucn_result_t ucn_cluster_rekey_transaction_resume_prepared(
         durable_history, staging->successor_epoch.cluster_id);
     if (!authority->initialized || cluster == NULL ||
         cluster->authority_runtime != authority || cluster->persistence_faulted ||
-        cluster->role != UCN_CLUSTER_ROLE_HEAD ||
+        ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_HEAD ||
         !cluster->authority_active ||
         cluster->authority_phase != UCN_CLUSTER_PHASE_HEAD_STABLE ||
         !ucn_cluster_authority_runtime_quorum_met(authority, now_ms) ||
@@ -753,7 +754,7 @@ ucn_result_t ucn_cluster_rekey_transaction_begin(
     if (!authority->initialized || cluster == NULL ||
         cluster->authority_runtime != authority ||
         cluster->persistence_faulted ||
-        cluster->role != UCN_CLUSTER_ROLE_HEAD ||
+        ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_HEAD ||
         cluster->head_node_id != cluster->config.local_node_id ||
         !cluster->authority_active ||
         cluster->authority_phase != UCN_CLUSTER_PHASE_HEAD_STABLE ||
@@ -863,7 +864,7 @@ ucn_result_t ucn_cluster_rekey_transaction_begin(
     candidate.started_ms = now_ms;
     candidate.deadline_ms =
         ucn_deadline_from_now(now_ms, UCN_CLUSTER_REKEY_ACK_TIMEOUT_MS);
-    if (cluster->backup_ready &&
+    if (cluster->phase == UCN_CLUSTER_PHASE_HEAD_STABLE &&
         ucn_cluster_voter_set_contains(&candidate.successor_config.old_set,
                                        cluster->backup_node_id)) {
         candidate.successor_backup_node_id = cluster->backup_node_id;

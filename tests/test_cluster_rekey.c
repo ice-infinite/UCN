@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "ucn/ucn_cluster_rekey.h"
+#include "ucn/ucn_cluster_storage.h"
 
 #define ASSERT_TRUE(condition) \
     do { \
@@ -241,12 +242,11 @@ static int fixture_init(fixture_t *fixture)
     cluster_config.cluster_id_context = fixture;
     ASSERT_TRUE(ucn_cluster_init(&fixture->cluster, &cluster_config) == UCN_OK);
     fixture->cluster.config.enabled = true;
-    fixture->cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    fixture->cluster.phase = UCN_CLUSTER_PHASE_HEAD_STABLE;
     fixture->cluster.cluster_id = 77U;
     fixture->cluster.term = 5U;
     fixture->cluster.head_node_id = 1U;
     fixture->cluster.backup_node_id = 2U;
-    fixture->cluster.backup_ready = true;
     fixture->provider_value = 88U;
     ASSERT_TRUE(ucn_cluster_config_state_init_stable(
         &fixture->config, 10U, voters, sizeof(voters) / sizeof(voters[0U])));

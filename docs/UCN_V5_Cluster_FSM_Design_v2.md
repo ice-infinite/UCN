@@ -9,6 +9,8 @@
 >
 > `UCN_V5_Cluster_CURRENT_FSM.md`
 
+> **2026-08-25 实现对齐说明：** M14 已将 `ucn_cluster_phase_t` 收敛为唯一生命周期状态源，当前枚举为 `DISABLED` 至 `HEAD_REKEYING` 共 22 项。M04、M06..M13 的受限软件模型提供了 Persistence、Config、Authority、Backup、Takeover、Handover、Recovery 和 Rekey 证据；但 M05 production Wire v4 接线仍处于 `AUDIT HOLD`，M14-08 实机门禁也未完成。因此本文仍是 Target 规范，不能整体标记为当前默认产品行为。Phase/Message 的机器核对表见 `UCN_Cluster_Code_Doc_Contract.md`。
+
 ---
 
 # 0. 规范性关键词

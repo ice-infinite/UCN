@@ -432,7 +432,7 @@ ucn_result_t cluster_admit_verified_v4_provisional_member(
         }
         return UCN_ERR_ARGUMENT;
     }
-    if (cluster->role != UCN_CLUSTER_ROLE_HEAD) {
+    if (ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_HEAD) {
         if (reason != NULL) {
             *reason = UCN_CLUSTER_MEMBER_ADMISSION_NOT_HEAD;
         }
@@ -536,7 +536,7 @@ size_t primary_member_expire_provisionals(ucn_cluster_t *cluster,
     size_t index;
     size_t expired = 0U;
 
-    if (cluster == NULL || cluster->role != UCN_CLUSTER_ROLE_HEAD) {
+    if (cluster == NULL || ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_HEAD) {
         return 0U;
     }
     for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
@@ -574,7 +574,7 @@ void remove_member(ucn_cluster_t *cluster, ucn_node_id_t node_id,
          * node_id=0 + ready=false, so the site's own clears below are
          * idempotent (d.0 framework note) and run in the original order. */
         ucn_cluster_phase_t old_phase =
-            cluster_phase_from_legacy_state(cluster, now_ms);
+            cluster->phase;
 
         if (cluster_transition_preflight(cluster, old_phase,
                                          UCN_CLUSTER_PHASE_HEAD_NO_BACKUP,
@@ -598,12 +598,11 @@ void remove_member(ucn_cluster_t *cluster, ucn_node_id_t node_id,
             (void)memset(member, 0, sizeof(*member));
         }
         cluster->backup_node_id = 0U;
-        cluster->backup_ready = false;
         backup_resync(cluster);
 #if !defined(NDEBUG)
         /* CLV2-01-04d.4 post-commit derive assert: after the transition
          * AND the site clears the legacy state must derive HEAD_NO_BACKUP. */
-        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+        assert(cluster->phase ==
                UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
 #endif
         return;
@@ -631,7 +630,7 @@ ucn_result_t handle_join_request(
     ucn_cluster_member_t *member;
     bool member_was_present;
 
-    if (cluster->role != UCN_CLUSTER_ROLE_HEAD ||
+    if (ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_HEAD ||
         message->head_node_id != cluster->config.local_node_id ||
         message->cluster_id != cluster->cluster_id ||
         message->term != cluster->term) {
@@ -692,11 +691,11 @@ ucn_result_t handle_join_accept(
     uint32_t now_ms)
 {
     {
-        bool pre_assigned_backup = (cluster->role == UCN_CLUSTER_ROLE_BACKUP &&
-                                     cluster->backup_syncing);
+        bool pre_assigned_backup = (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_BACKUP &&
+                                     cluster_phase_backup_syncing(cluster->phase));
 
         if (!pre_assigned_backup &&
-            cluster->role != UCN_CLUSTER_ROLE_JOIN_PENDING) {
+            ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_JOIN_PENDING) {
             return UCN_ERR_ACCESS;
         }
         if (source != cluster->pending_head_node_id ||
@@ -708,7 +707,7 @@ ucn_result_t handle_join_accept(
             return UCN_ERR_ACCESS;
         }
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_BACKUP) {
         /* CLV2-01-04b.4: a pre-assigned Backup node (BACKUP_ASSIGN(self)
          * won the race against this late JOIN_ACCEPT) must NOT transition
          * - it only refreshes the epoch fields below (keep current
@@ -769,8 +768,8 @@ ucn_result_t handle_join_accept(
      * MEMBER_ACTIVE (derive depends only on role == MEMBER with no armed
      * grace deadline).  The pre-assigned Backup path performs no
      * transition, so its (unchanged) BACKUP_SYNCING shadow is untouched. */
-    if (cluster->role != UCN_CLUSTER_ROLE_BACKUP) {
-        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+    if (ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_BACKUP) {
+        assert(cluster->phase ==
                UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
     }
 #endif
@@ -785,7 +784,7 @@ ucn_result_t handle_keepalive(
 {
     ucn_cluster_member_t *member;
 
-    if (cluster->role != UCN_CLUSTER_ROLE_HEAD ||
+    if (ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_HEAD ||
         message->head_node_id != cluster->config.local_node_id ||
         message->cluster_id != cluster->cluster_id ||
         message->term != cluster->term) {
@@ -835,7 +834,7 @@ void expire_members(ucn_cluster_t *cluster, uint32_t now_ms)
 
     if (backup_expired) {
         ucn_cluster_phase_t old_phase =
-            cluster_phase_from_legacy_state(cluster, now_ms);
+            cluster->phase;
 
         if (cluster_transition_preflight(cluster, old_phase,
                                          UCN_CLUSTER_PHASE_HEAD_NO_BACKUP,
@@ -860,7 +859,7 @@ void expire_members(ucn_cluster_t *cluster, uint32_t now_ms)
         if (cluster->primary_members.slots[index].occupied &&
             (cluster->primary_members.slots[index].status !=
                  (uint8_t)UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL ||
-             cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) &&
+             ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_RECOVERY_HEAD) &&
             ucn_deadline_expired(now_ms,
                                  cluster->primary_members.slots[index].lease_expires_at_ms)) {
             ucn_node_id_t expired_id = cluster->primary_members.slots[index].node_id;
@@ -871,7 +870,6 @@ void expire_members(ucn_cluster_t *cluster, uint32_t now_ms)
             changed = true;
             if (cluster->backup_node_id == expired_id) {
                 cluster->backup_node_id = 0U;
-                cluster->backup_ready = false;
             }
         }
     }
@@ -883,7 +881,7 @@ void expire_members(ucn_cluster_t *cluster, uint32_t now_ms)
         /* CLV2-01-04d.4 post-commit derive assert: after the transition
          * AND the eviction loop the legacy state must derive
          * HEAD_NO_BACKUP. */
-        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+        assert(cluster->phase ==
                UCN_CLUSTER_PHASE_HEAD_NO_BACKUP);
     }
 #endif

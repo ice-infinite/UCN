@@ -1370,11 +1370,11 @@ static int cluster_persist_test_runtime_epoch_gate(void)
     probe.store.pending_polls_before_terminal = 1U;
     TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_OK);
     TEST_ASSERT(cluster.persistence_pending && !cluster.persistence_faulted &&
-                probe.sent_count == 0U && cluster.role == UCN_CLUSTER_ROLE_DETACHED);
+                probe.sent_count == 0U && ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_DETACHED);
     TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_OK && probe.sent_count == 0U &&
                 cluster.persistence_pending);
     TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_OK && !cluster.persistence_pending &&
-                cluster.role == UCN_CLUSTER_ROLE_CANDIDATE && probe.sent_count == 1U);
+                ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_CANDIDATE && probe.sent_count == 1U);
     TEST_ASSERT(ucn_cluster_message_decode(probe.payloads[0],
                                            UCN_CLUSTER_MESSAGE_BYTES,
                                            &message) == UCN_OK &&
@@ -1397,7 +1397,7 @@ static int cluster_persist_test_runtime_epoch_gate(void)
     probe.store.commit_not_visible = true;
     TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_ERR_STATE);
     TEST_ASSERT(cluster.persistence_faulted && !cluster.persistence_pending &&
-                probe.sent_count == 0U && cluster.role == UCN_CLUSTER_ROLE_DETACHED);
+                probe.sent_count == 0U && ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_DETACHED);
     return 0;
 }
 
@@ -1446,7 +1446,7 @@ static int cluster_persist_test_runtime_vote_gate(void)
     cluster_persist_runtime_provider(&provider, &probe);
     cluster_persist_runtime_config(&config, &probe, &provider, false);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
-    cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     cluster.cluster_id = 1U;
     cluster.term = 5U;
     cluster.head_node_id = 7U;
@@ -1454,7 +1454,7 @@ static int cluster_persist_test_runtime_vote_gate(void)
     cluster.known_backup_generation = 3U;
     cluster.head_lease_expires_at_ms = UINT32_C(200000);
     cluster.next_keepalive_ms = UINT32_C(200000);
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     cluster_persist_runtime_admit_peer(&cluster, 2U, 0U);
     (void)memset(&prepare, 0, sizeof(prepare));
     prepare.type = UCN_CLUSTER_MSG_TAKEOVER_PREPARE;
@@ -1512,13 +1512,13 @@ static int cluster_persist_test_runtime_vote_gate(void)
     cluster_persist_runtime_provider(&provider, &probe);
     cluster_persist_runtime_config(&config, &probe, &provider, false);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
-    cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     cluster.cluster_id = 1U;
     cluster.term = 5U;
     cluster.head_node_id = 7U;
     cluster.known_backup_node_id = 2U;
     cluster.known_backup_generation = 3U;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     cluster_persist_runtime_admit_peer(&cluster, 2U, 0U);
     (void)memset(&prepare, 0, sizeof(prepare));
     prepare.type = UCN_CLUSTER_MSG_TAKEOVER_PREPARE;
@@ -1535,7 +1535,7 @@ static int cluster_persist_test_runtime_vote_gate(void)
     probe.store.poll_fails = true;
     TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_ERR_STATE &&
                 cluster.persistence_faulted && !cluster.persistence_pending &&
-                cluster.role == UCN_CLUSTER_ROLE_MEMBER &&
+                ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_MEMBER &&
                 probe.sent_count == 0U);
 
     /* Vote persistence is complete before a local adapter/token back-pressure
@@ -1548,13 +1548,13 @@ static int cluster_persist_test_runtime_vote_gate(void)
     cluster_persist_runtime_provider(&provider, &probe);
     cluster_persist_runtime_config(&config, &probe, &provider, false);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
-    cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     cluster.cluster_id = 1U;
     cluster.term = 5U;
     cluster.head_node_id = 7U;
     cluster.known_backup_node_id = 2U;
     cluster.known_backup_generation = 3U;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     cluster_persist_runtime_admit_peer(&cluster, 2U, 0U);
     (void)memset(&prepare, 0, sizeof(prepare));
     prepare.type = UCN_CLUSTER_MSG_TAKEOVER_PREPARE;
@@ -1594,13 +1594,13 @@ static int cluster_persist_test_runtime_vote_gate(void)
     cluster_persist_runtime_provider(&provider, &probe);
     cluster_persist_runtime_config(&config, &probe, &provider, false);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
-    cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     cluster.cluster_id = 1U;
     cluster.term = 5U;
     cluster.head_node_id = 7U;
     cluster.known_backup_node_id = 2U;
     cluster.known_backup_generation = 3U;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     cluster_persist_runtime_admit_peer(&cluster, 2U, 0U);
     (void)memset(&prepare, 0, sizeof(prepare));
     prepare.type = UCN_CLUSTER_MSG_TAKEOVER_PREPARE;
@@ -1629,13 +1629,13 @@ static int cluster_persist_test_runtime_vote_gate(void)
     cluster_persist_runtime_provider(&provider, &probe);
     cluster_persist_runtime_config(&config, &probe, &provider, false);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
-    cluster.role = UCN_CLUSTER_ROLE_MEMBER;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     cluster.cluster_id = 1U;
     cluster.term = 5U;
     cluster.head_node_id = 7U;
     cluster.known_backup_node_id = 2U;
     cluster.known_backup_generation = 3U;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
+    cluster.phase = UCN_CLUSTER_PHASE_MEMBER_ACTIVE;
     cluster_persist_runtime_admit_peer(&cluster, 2U, 0U);
     (void)memset(&prepare, 0, sizeof(prepare));
     prepare.type = UCN_CLUSTER_MSG_TAKEOVER_PREPARE;
@@ -1952,11 +1952,11 @@ static int cluster_persist_test_runtime_reentrancy_gate(void)
                 probe.store.reentry_calls == 1U &&
                 probe.store.reentry_result == UCN_ERR_STATE &&
                 probe.sent_count == 0U);
-    cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster.cluster_id = 1U;
     cluster.term = 1U;
     cluster.head_node_id = 1U;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster.next_advertise_ms = UINT32_C(200000);
     cluster_persist_runtime_admit_peer(&cluster, 2U, 0U);
     /* Provider load() is external code too.  Its synchronous step reentry
@@ -1978,11 +1978,11 @@ static int cluster_persist_test_runtime_reentrancy_gate(void)
     cluster_persist_runtime_provider(&provider, &probe);
     cluster_persist_runtime_config(&config, &probe, &provider, true);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
-    cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster.cluster_id = 1U;
     cluster.term = 1U;
     cluster.head_node_id = 1U;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster.next_advertise_ms = UINT32_C(200000);
     cluster_persist_runtime_admit_peer(&cluster, 2U, 0U);
     probe.store.submit_pending = true;
@@ -2026,11 +2026,11 @@ static int cluster_persist_test_runtime_failure_containment(void)
     /* Represent a live Head whose next durable bridge operation fails.  The
      * generic test Vote is used because M07/M13 hooks are intentionally
      * disabled until their recovery continuations exist. */
-    cluster.role = UCN_CLUSTER_ROLE_HEAD;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster.cluster_id = 1U;
     cluster.term = 1U;
     cluster.head_node_id = 1U;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
+    cluster.phase = UCN_CLUSTER_PHASE_HEAD_NO_BACKUP;
     cluster_persist_runtime_admit_peer(&cluster, 2U, 0U);
     probe.store.submit_pending = true;
     TEST_ASSERT(cluster_persist_runtime_begin_test_vote(&cluster, &committed) ==
@@ -2040,7 +2040,7 @@ static int cluster_persist_test_runtime_failure_containment(void)
     probe.store.poll_fails = true;
     TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_ERR_STATE);
     TEST_ASSERT(cluster.persistence_faulted && !cluster.persistence_pending &&
-                cluster.role == UCN_CLUSTER_ROLE_TERM_CONFLICT &&
+                ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_TERM_CONFLICT &&
                 probe.sent_count == 0U &&
                 cluster.stats.persistence_failures == 1U);
     /* Fault remains sticky: neither a periodic step nor a direct inbound
@@ -2125,12 +2125,11 @@ static int cluster_persist_test_runtime_head_paths(void)
     cluster_persist_runtime_provider(&provider, &probe);
     cluster_persist_runtime_config(&config, &probe, &provider, true);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
-    cluster.role = UCN_CLUSTER_ROLE_BACKUP;
+    cluster.phase = UCN_CLUSTER_PHASE_BACKUP_SYNCING;
     cluster.cluster_id = 1U;
     cluster.term = 5U;
     cluster.head_node_id = 7U;
-    cluster.backup_ready = true;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_BACKUP_READY;
+    cluster.phase = UCN_CLUSTER_PHASE_BACKUP_READY;
     {
         ucn_cluster_t before = cluster;
 
@@ -2147,18 +2146,17 @@ static int cluster_persist_test_runtime_head_paths(void)
     cluster_persist_runtime_provider(&provider, &probe);
     cluster_persist_runtime_config(&config, &probe, &provider, true);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
-    cluster.role = UCN_CLUSTER_ROLE_BACKUP;
+    cluster.phase = UCN_CLUSTER_PHASE_BACKUP_SYNCING;
     cluster.cluster_id = 1U;
     cluster.term = 5U;
     cluster.head_node_id = 7U;
-    cluster.backup_takeover_active = true;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
+    cluster.phase = UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
     probe.store.submit_pending = true;
     TEST_ASSERT(complete_takeover(&cluster, probe.now_ms) == UCN_OK &&
                 cluster.persistence_pending &&
-                cluster.role == UCN_CLUSTER_ROLE_BACKUP && probe.sent_count == 0U);
+                ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_BACKUP && probe.sent_count == 0U);
     TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_OK &&
-                !cluster.persistence_pending && cluster.role == UCN_CLUSTER_ROLE_HEAD &&
+                !cluster.persistence_pending && ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_HEAD &&
                 cluster.term == 6U && cluster.head_node_id == 1U &&
                 probe.sent_count == 0U);
 
@@ -2169,12 +2167,11 @@ static int cluster_persist_test_runtime_head_paths(void)
     cluster_persist_runtime_provider(&provider, &probe);
     cluster_persist_runtime_config(&config, &probe, &provider, true);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
-    cluster.role = UCN_CLUSTER_ROLE_DETACHED;
-    cluster.recovery_eligible = true;
+    cluster.phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
     cluster.recovery_backoff_deadline_ms = 1U;
     cluster.recovery_nonce = 1U;
     cluster.cluster_id_round = 1U;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
+    cluster.phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
     (void)memset(&recovery_epoch, 0, sizeof(recovery_epoch));
     recovery_epoch.cluster_id = 2U;
     recovery_epoch.term = 1U;
@@ -2185,10 +2182,10 @@ static int cluster_persist_test_runtime_head_paths(void)
                     CLUSTER_PERSIST_ACTION_RECOVERY_DECLARE, 0U, &committed,
                     &durable_state) == UCN_OK && !committed &&
                 cluster.persistence_pending &&
-                cluster.role == UCN_CLUSTER_ROLE_DETACHED && probe.sent_count == 0U);
+                ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_DETACHED && probe.sent_count == 0U);
     TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_OK &&
                 !cluster.persistence_pending &&
-                cluster.role == UCN_CLUSTER_ROLE_RECOVERY_HEAD &&
+                ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_RECOVERY_HEAD &&
                 cluster.cluster_id == 2U && cluster.term == 1U &&
                 probe.sent_count == 0U);
 
@@ -2201,14 +2198,13 @@ static int cluster_persist_test_runtime_head_paths(void)
     cluster_persist_runtime_provider(&provider, &probe);
     cluster_persist_runtime_config(&config, &probe, &provider, true);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
-    cluster.role = UCN_CLUSTER_ROLE_DETACHED;
-    cluster.recovery_eligible = true;
+    cluster.phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
     cluster.recovery_backoff_deadline_ms = 1U;
     cluster.recovery_nonce = 1U;
     cluster.cluster_id_round = 1U;
     cluster.parent_cluster_id = 5U;
     cluster.parent_term = 9U;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
+    cluster.phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
     (void)memset(&recovery_epoch, 0, sizeof(recovery_epoch));
     recovery_epoch.cluster_id = 2U;
     recovery_epoch.term = 9U; /* mirrors the parent term */
@@ -2221,7 +2217,7 @@ static int cluster_persist_test_runtime_head_paths(void)
                 cluster.persistence_pending);
     TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_OK &&
                 !cluster.persistence_pending &&
-                cluster.role == UCN_CLUSTER_ROLE_RECOVERY_HEAD &&
+                ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_RECOVERY_HEAD &&
                 cluster.cluster_id == 2U && cluster.term == 9U &&
                 cluster.head_node_id == 1U);
 
@@ -2233,14 +2229,13 @@ static int cluster_persist_test_runtime_head_paths(void)
     cluster_persist_runtime_provider(&provider, &probe);
     cluster_persist_runtime_config(&config, &probe, &provider, true);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
-    cluster.role = UCN_CLUSTER_ROLE_DETACHED;
-    cluster.recovery_eligible = true;
+    cluster.phase = UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
     cluster.recovery_backoff_deadline_ms = 1U;
     cluster.recovery_nonce = 1U;
     cluster.cluster_id_round = 1U;
     cluster.parent_cluster_id = 5U;
     cluster.parent_term = 9U;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
+    cluster.phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
     (void)memset(&recovery_epoch, 0, sizeof(recovery_epoch));
     recovery_epoch.cluster_id = 2U;
     recovery_epoch.term = 1U; /* mismatched legacy record */
@@ -2253,7 +2248,7 @@ static int cluster_persist_test_runtime_head_paths(void)
                 cluster.persistence_pending);
     TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_ERR_STATE &&
                 cluster.persistence_faulted &&
-                cluster.role == UCN_CLUSTER_ROLE_DETACHED &&
+                ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_DETACHED &&
                 probe.sent_count == 0U);
 
     /* A failed pending takeover cannot promote a Backup after its local
@@ -2263,20 +2258,19 @@ static int cluster_persist_test_runtime_head_paths(void)
     cluster_persist_runtime_provider(&provider, &probe);
     cluster_persist_runtime_config(&config, &probe, &provider, true);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK);
-    cluster.role = UCN_CLUSTER_ROLE_BACKUP;
+    cluster.phase = UCN_CLUSTER_PHASE_BACKUP_SYNCING;
     cluster.cluster_id = 1U;
     cluster.term = 5U;
     cluster.head_node_id = 7U;
-    cluster.backup_takeover_active = true;
-    cluster.shadow_phase = UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
+    cluster.phase = UCN_CLUSTER_PHASE_BACKUP_TAKEOVER;
     probe.store.submit_pending = true;
     TEST_ASSERT(complete_takeover(&cluster, probe.now_ms) == UCN_OK &&
                 cluster.persistence_pending &&
-                cluster.role == UCN_CLUSTER_ROLE_BACKUP && probe.sent_count == 0U);
+                ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_BACKUP && probe.sent_count == 0U);
     probe.store.poll_fails = true;
     TEST_ASSERT(ucn_cluster_step(&cluster) == UCN_ERR_STATE &&
                 cluster.persistence_faulted &&
-                cluster.role == UCN_CLUSTER_ROLE_BACKUP &&
+                ucn_cluster_get_role(&cluster) == UCN_CLUSTER_ROLE_BACKUP &&
                 probe.sent_count == 0U);
     return 0;
 }

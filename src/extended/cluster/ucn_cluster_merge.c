@@ -65,10 +65,10 @@ static void begin_ordered_stepdown_with_reason(
      * original order.  The legacy reclaim event decides THAT the stepdown
      * runs; cluster_transition() validates whether the shadow agrees (a
      * caller NEVER uses the shadow to decide whether to SKIP the call). */
-    if (cluster->role == UCN_CLUSTER_ROLE_HEAD ||
-        cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_HEAD ||
+        ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
         ucn_cluster_phase_t old_phase =
-            cluster_phase_from_legacy_state(cluster, now_ms);
+            cluster->phase;
 
         if (old_phase == UCN_CLUSTER_PHASE_HEAD_NO_BACKUP ||
             old_phase == UCN_CLUSTER_PHASE_HEAD_BACKUP_ASSIGNING ||
@@ -87,10 +87,8 @@ static void begin_ordered_stepdown_with_reason(
         }
     }
     /* Yielding to a stable Head abandons any Recovery candidacy. */
-    cluster->recovery_eligible = false;
     cluster->recovery_backoff_deadline_ms = 0U;
     (void)send_head_stepdown(cluster);
-    cluster->role = UCN_CLUSTER_ROLE_STEPPING_DOWN;
     cluster->role_since_ms = now_ms;
     cluster->stepdown_deadline_ms =
         ucn_deadline_from_now(now_ms, cluster->config.keepalive_interval_ms);
@@ -105,7 +103,7 @@ static void begin_ordered_stepdown_with_reason(
      * (the role write at the site is idempotent with
      * apply_legacy(STEPPING_DOWN), so the assert holds for both the
      * HEAD_* and RECOVERY_HEAD sources). */
-    assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+    assert(cluster->phase ==
            UCN_CLUSTER_PHASE_STEPPING_DOWN);
 #endif
 }
@@ -213,7 +211,7 @@ static bool begin_higher_authority_join(
 {
     ucn_cluster_phase_t old_phase;
 
-    if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
         /* TERM_CONFLICT_WAIT is deliberately sticky for same-Term traffic.
          * A strictly higher same-Cluster Term is the first permitted exit in
          * this Current-FSM stage; M08 adds complementary Authority fencing
@@ -227,13 +225,13 @@ static bool begin_higher_authority_join(
         }
         return true;
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_JOIN_PENDING) {
         /* The phase is already JOIN_PENDING.  Retarget its pending epoch
          * without manufacturing a self-transition. */
         begin_join(cluster, candidate, now_ms);
         return true;
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_STEPPING_DOWN) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_STEPPING_DOWN) {
         /* Duplicate offers for the Head already selected by the ordered
          * yield must not collapse its grace window.  A strictly newer pending
          * Term, however, supersedes the old target immediately. */
@@ -253,7 +251,7 @@ static bool begin_higher_authority_join(
         }
         return true;
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_CANDIDATE) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_CANDIDATE) {
         /* A Candidate already owns a local same-Cluster Election Epoch.
          * A protected remote higher Term must use the same global authority
          * transition as Member/Backup, rather than falling through to the
@@ -266,8 +264,8 @@ static bool begin_higher_authority_join(
         }
         return true;
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_MEMBER) {
-        old_phase = cluster_phase_from_legacy_state(cluster, now_ms);
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_MEMBER) {
+        old_phase = cluster->phase;
         if (cluster_transition(cluster, old_phase,
                                UCN_CLUSTER_PHASE_JOIN_PENDING,
                                UCN_CLUSTER_REASON_HIGHER_AUTHORITY,
@@ -278,8 +276,8 @@ static bool begin_higher_authority_join(
          * higher-authority event; normal score routing must not run after it. */
         return true;
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
-        old_phase = cluster_phase_from_legacy_state(cluster, now_ms);
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_BACKUP) {
+        old_phase = cluster->phase;
         if (cluster_transition(cluster, old_phase,
                                UCN_CLUSTER_PHASE_JOIN_PENDING,
                                UCN_CLUSTER_REASON_HIGHER_AUTHORITY,
@@ -289,7 +287,6 @@ static bool begin_higher_authority_join(
         /* Preserve the existing Backup abandonment ordering: clear the
          * mirror only after its phase has committed, then seed the pending
          * target.  M09 later replaces this Current mirror with staging. */
-        cluster->backup_takeover_active = false;
         backup_clear_sync(cluster, now_ms);
         begin_join(cluster, candidate, now_ms);
         return true;
@@ -326,12 +323,12 @@ bool process_term_conflict(
             cluster->authority_runtime, candidate->cluster_id, candidate->term,
             candidate->head_node_id, now_ms);
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
         /* Idempotent: additional advertisements from either same-Term Head
          * cannot re-enable control actions or manufacture transitions. */
         return true;
     }
-    old_phase = cluster_phase_from_legacy_state(cluster, now_ms);
+    old_phase = cluster->phase;
     if (old_phase == UCN_CLUSTER_PHASE_DISABLED ||
         old_phase == UCN_CLUSTER_PHASE_DETACHED_OBSERVE ||
         old_phase == UCN_CLUSTER_PHASE_RECOVERY_OBSERVE ||
@@ -384,11 +381,11 @@ bool process_higher_authority(
     cluster_history_note_stable_epoch(cluster, candidate->cluster_id,
                                       candidate->term,
                                       candidate->head_node_id);
-    if (cluster->role == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_TERM_CONFLICT) {
         return begin_higher_authority_join(cluster, candidate, now_ms);
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_HEAD ||
-        cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_HEAD ||
+        ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
         begin_ordered_stepdown_with_reason(
             cluster, candidate, now_ms,
             UCN_CLUSTER_REASON_HIGHER_AUTHORITY);
@@ -441,13 +438,13 @@ void consider_head_offer(
      * already rejected lower-Term parent offers, so term >= parent_term
      * is a legal stable successor.  Foreign stable Heads remain excluded
      * (they are not the parent lineage). */
-    if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_MEMBER &&
         ucn_cluster_recovery_scoped(cluster) &&
         cluster->parent_cluster_id != 0U &&
         candidate->cluster_id == cluster->parent_cluster_id &&
         candidate->term >= cluster->parent_term) {
         ucn_cluster_phase_t reclaim_phase =
-            cluster_phase_from_legacy_state(cluster, now_ms);
+            cluster->phase;
 
         if (cluster_transition(cluster, reclaim_phase,
                                UCN_CLUSTER_PHASE_JOIN_PENDING,
@@ -460,7 +457,7 @@ void consider_head_offer(
     /* A full Head must keep refreshing existing members.  Capacity zero only
      * rejects new joins; treating it as an unavailable current Head causes
      * valid members to expire their lease and create a split brain. */
-    if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_MEMBER &&
         candidate->head_node_id == cluster->head_node_id &&
         candidate->cluster_id == cluster->cluster_id &&
         candidate->term == cluster->term) {
@@ -492,12 +489,12 @@ void consider_head_offer(
         /* CLV2-01-04c.2 post-commit derive assert: after the transition
          * (when applicable) and every site write the legacy state must
          * still derive MEMBER_ACTIVE (role == MEMBER, no armed grace). */
-        assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+        assert(cluster->phase ==
                UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
 #endif
         return;
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_BACKUP) {
         if (candidate->head_node_id == cluster->backup_primary_node_id &&
             candidate->cluster_id == cluster->cluster_id &&
             candidate->term == cluster->term) {
@@ -522,7 +519,7 @@ void consider_head_offer(
      * a single RSSI sample flap an established Head.  Member notification is
      * deliberately lease-based in this first stage; C07 owns coordinated
      * backup/merge/stepdown signalling. */
-    if (cluster->role == UCN_CLUSTER_ROLE_HEAD) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_HEAD) {
         /* CLV2-M03 (03-03): classify the offer by Epoch relation, never
          * by raw Term.  FOREIGN truncates the comparison domain FIRST -
          * a foreign Cluster's Term is not authority (Cluster A term 2
@@ -545,14 +542,14 @@ void consider_head_offer(
         classify_same_cluster_authority(cluster, candidate, now_ms, relation);
         return;
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
         /* A stable Head reclaims the domain from a temporary Recovery
          * Head; ordered stepdown switches back to the original Cluster. */
         begin_ordered_stepdown(cluster, candidate, now_ms);
         return;
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_DETACHED ||
-        cluster->role == UCN_CLUSTER_ROLE_CANDIDATE) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_DETACHED ||
+        ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_CANDIDATE) {
         /* C07.7 P1: available_capacity == 0 gates new JOINs only; it must
          * never block epoch convergence between existing Heads (handled
          * above), so the capacity check lives here at the join point. */
@@ -569,9 +566,9 @@ void consider_head_offer(
          * cluster_transition() validates whether the shadow agrees (a
          * caller NEVER uses the shadow to decide whether to SKIP the
          * call). */
-        if (!cluster->recovery_eligible) {
+        if (!cluster_phase_recovery_eligible(cluster->phase)) {
             ucn_cluster_phase_t old_phase =
-                (cluster->role == UCN_CLUSTER_ROLE_CANDIDATE)
+                (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_CANDIDATE)
                     ? UCN_CLUSTER_PHASE_ELECTION
                     : UCN_CLUSTER_PHASE_DETACHED_OBSERVE;
 
@@ -586,7 +583,7 @@ void consider_head_offer(
             }
             begin_join_prepare_fields(cluster, candidate, now_ms);
 #if !defined(NDEBUG)
-            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+            assert(cluster->phase ==
                    UCN_CLUSTER_PHASE_JOIN_PENDING);
 #endif
             return;
@@ -600,7 +597,7 @@ void consider_head_offer(
          * follows at the site. */
         {
             ucn_cluster_phase_t old_phase =
-                cluster_phase_from_legacy_state(cluster, now_ms);
+                cluster->phase;
 
             if (cluster_transition(cluster, old_phase,
                                    UCN_CLUSTER_PHASE_JOIN_PENDING,
@@ -613,13 +610,13 @@ void consider_head_offer(
             }
             begin_join_prepare_fields(cluster, candidate, now_ms);
 #if !defined(NDEBUG)
-            assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
+            assert(cluster->phase ==
                    UCN_CLUSTER_PHASE_JOIN_PENDING);
 #endif
             return;
         }
     }
-    if (cluster->role == UCN_CLUSTER_ROLE_JOIN_PENDING) {
+    if (ucn_cluster_get_role(cluster) == UCN_CLUSTER_ROLE_JOIN_PENDING) {
         ucn_cluster_epoch_t pending_epoch;
         ucn_cluster_epoch_t remote_epoch;
         ucn_cluster_epoch_relation_t relation;
@@ -646,7 +643,7 @@ void consider_head_offer(
         }
         return;
     }
-    if (cluster->role != UCN_CLUSTER_ROLE_MEMBER) {
+    if (ucn_cluster_get_role(cluster) != UCN_CLUSTER_ROLE_MEMBER) {
         return;
     }
     /* CLV2-M11 (11-08): a Member never chooses a foreign Head from score

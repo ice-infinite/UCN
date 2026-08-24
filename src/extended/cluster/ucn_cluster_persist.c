@@ -2,6 +2,14 @@
 
 #include "ucn/ucn_cluster_persist.h"
 
+#if defined(_MSC_VER)
+#define UCN_CLUSTER_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define UCN_CLUSTER_NOINLINE __attribute__((noinline))
+#else
+#define UCN_CLUSTER_NOINLINE
+#endif
+
 /* Record v1/v2/v3/v4 are deliberately explicit byte layouts. Do not replace
  * these offsets with a packed C struct: persistence must remain
  * ABI-independent. v3 appends M10 VoteId fields after the v1/v2 280 B body;
@@ -848,8 +856,9 @@ bool ucn_cluster_persist_request_is_valid(
                request->next_state.last_completed_operation_fingerprint;
 }
 
-static bool state_canonical_equal(const ucn_cluster_persist_state_t *a,
-                                  const ucn_cluster_persist_state_t *b)
+static UCN_CLUSTER_NOINLINE bool state_canonical_equal(
+    const ucn_cluster_persist_state_t *a,
+    const ucn_cluster_persist_state_t *b)
 {
     uint8_t record_a[UCN_CLUSTER_PERSIST_RECORD_BYTES];
     uint8_t record_b[UCN_CLUSTER_PERSIST_RECORD_BYTES];
@@ -884,7 +893,7 @@ static void state_clear_completed_operation(
     state->last_completed_operation_fingerprint = 0U;
 }
 
-static bool state_equal_ignoring_completed_operation(
+static UCN_CLUSTER_NOINLINE bool state_equal_ignoring_completed_operation(
     const ucn_cluster_persist_state_t *a,
     const ucn_cluster_persist_state_t *b)
 {

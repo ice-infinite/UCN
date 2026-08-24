@@ -110,6 +110,13 @@
 #ifndef UCN_CLUSTER_MAX_MEMBERS
 #define UCN_CLUSTER_MAX_MEMBERS ((size_t)16U)
 #endif
+/* Host/MCU compile-time guard for the fixed Cluster Owner object. Products
+ * with a tighter verified budget may override this before including UCN.
+ * The default intentionally leaves bounded headroom over the current Host
+ * x64 ABI; it is not a claim about a particular MCU ABI. */
+#ifndef UCN_CLUSTER_STORAGE_BUDGET_BYTES
+#define UCN_CLUSTER_STORAGE_BUDGET_BYTES ((size_t)2048U)
+#endif
 #ifndef UCN_CLUSTER_OBSERVATION_MS
 #define UCN_CLUSTER_OBSERVATION_MS UINT32_C(5000)
 #endif
