@@ -24,7 +24,7 @@
 > | M10 Final Takeover | AUDIT HOLD / R31–R34 SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW（受控实验范围） | 外审确认的通用 EPOCH bypass、durable terminal、连续接管与覆盖声明四项缺陷均已整改并完成矩阵自审；尚未获得本轮外部复审签字 | 默认产品仍不接入 v4 RX/TX/FSM、Authority、encoder 或实机结论；M10 实验 archive 也不得视为可放行，待 R31–R34 独立复审。 |
 > | M11 Merge/Handover | DONE / EXTERNAL RE-REVIEW PASS / LIMITED EXPERIMENTAL GO | R01–R08-B 全部获外审签字；R08-A 关闭同槽 ABA，R08-B 关闭 expiry 删除 replay-history / hold-down 的生命周期旁路。 | 仅限 caller-owned、default-OFF 实验 archive。M05 顶层 `AUDIT HOLD`、M08 `WAIT EXTERNAL`、M10 外审等待仍不解除；M12 不因此获授权，且不得把 M11 接入 production v4 RX/TX/FSM、Authority、Adapter 或实机结论。 |
 > | M12 RecoveryLineage | AUDIT HOLD / M12.3 SELF-AUDIT PASS / WAIT EXTERNAL | 12-01..12-08、12-10 的运行期软件范围已实现；12-09 仍 PARTIAL。M12.2 lineage-adoption 保留，M12.3 关闭运行期缺口，并把 Record scope、allocation history 与 Recovery no-wrap 三项结构阻断转交 `13-11..13`；这些转交项现已在 M13 实验范围实现并自审。 | M13 的后续实现不构成 M12 外审追认；M12 原签字范围与 `AUDIT HOLD` 不变，仍不得接入 v4/Authority/Adapter 生产路径。 |
-> | M13 Rekey/No-wrap | CODE COMPLETE / SELF-AUDIT PASS / WAIT EXTERNAL REVIEW（受限实验软件范围） | `CLV2-13-01..13` 已连续完成，每项均有独立自审报告，并完成一次跨事务、持久化、no-wrap、Profile 与默认产品隔离的全体自审。 | 仅允许 default-OFF 实验 archive 与受控测试；M05 顶层 `AUDIT HOLD`、production v4 RX/TX/FSM/Authority/Adapter/default encoder 继续冻结。 |
+> | M13 Rekey/No-wrap | CODE COMPLETE / SELF-AUDIT PASS / WAIT EXTERNAL REVIEW（受限实验软件范围） | 候选提交 `5c23078`；`CLV2-13-01..13` 已连续完成，每项均有独立自审报告，并完成一次跨事务、持久化、no-wrap、Profile 与默认产品隔离的全体自审。 | 仅允许 default-OFF 实验 archive 与受控测试；M05 顶层 `AUDIT HOLD`、production v4 RX/TX/FSM/Authority/Adapter/default encoder 继续冻结。 |
 > | M14 收敛/发布 | TODO | — | — |
 >
 > 状态取值：TODO / IN_PROGRESS / BLOCKED / AUDIT HOLD / DONE（DONE 须审计后由人更新）。每个任务完成时在 `docs/01-项目操作记录.md` 记录提交、测试证据与操作编号。
