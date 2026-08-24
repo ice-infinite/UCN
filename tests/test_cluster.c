@@ -3376,7 +3376,7 @@ static int cluster_test_phase_mapping_static(void)
     ucn_cluster_config_t config;
     const uint32_t now = 1000U;
 
-    TEST_ASSERT(UCN_CLUSTER_PHASE_COUNT == 21);
+    TEST_ASSERT(UCN_CLUSTER_PHASE_COUNT == 22);
     /* CLV2-M12 (12-07): +1 for UCN_CLUSTER_REASON_STABLE_RECLAIM. */
     TEST_ASSERT(UCN_CLUSTER_REASON_COUNT == 33);
     TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
@@ -3923,6 +3923,38 @@ static int cluster_test_persistence_init_restore(void)
                 view.persistence_restore_state ==
                     UCN_CLUSTER_PERSISTENCE_RESTORE_READY);
 
+    /* CLV2-13-11: a READY Recovery-scoped Record restores the captured
+     * parent Stable history, never the Recovery Epoch as last_stable_*. */
+    ucn_cluster_persist_state_init_empty(&probe.loaded.snapshot);
+    probe.loaded.state = UCN_CLUSTER_PERSIST_LOAD_READY;
+    probe.loaded.snapshot.has_active_epoch = true;
+    probe.loaded.snapshot.active_epoch.cluster_id = 21U;
+    probe.loaded.snapshot.active_epoch.term = 9U;
+    probe.loaded.snapshot.active_epoch.head_node_id = 1U;
+    probe.loaded.snapshot.has_max_epoch = true;
+    probe.loaded.snapshot.max_epoch = probe.loaded.snapshot.active_epoch;
+    probe.loaded.snapshot.epoch_scope =
+        UCN_CLUSTER_PERSIST_EPOCH_SCOPE_RECOVERY;
+    probe.loaded.snapshot.recovery_identity.valid = true;
+    probe.loaded.snapshot.recovery_identity.epoch =
+        probe.loaded.snapshot.active_epoch;
+    probe.loaded.snapshot.recovery_identity.parent_cluster_id = 7U;
+    probe.loaded.snapshot.recovery_identity.parent_term = 9U;
+    probe.loaded.snapshot.recovery_identity.parent_config_id = 1U;
+    probe.loaded.snapshot.recovery_identity.recovery_round = 3U;
+    probe.loaded.snapshot.recovery_identity.recovery_nonce = 4U;
+    probe.loaded.snapshot.recovery_identity.cluster_id_round = 2U;
+    probe.loaded.snapshot.boot_incarnation = 12U;
+    config.cluster_id_incarnation = 0U;
+    TEST_ASSERT(ucn_cluster_init(&node.cluster, &config) == UCN_OK);
+    TEST_ASSERT(node.cluster.last_cluster_id == 7U &&
+                node.cluster.max_seen_term == 9U &&
+                node.cluster.last_stable_head == 0U &&
+                node.cluster.recovery_round == 3U &&
+                node.cluster.recovery_nonce == 4U &&
+                node.cluster.cluster_id_round == 2U &&
+                node.cluster.config.cluster_id_incarnation == 13U);
+
     /* A transport/CRC failure and an impossible success result both leave no
      * partially initialized Cluster object behind. */
     probe.load_result = UCN_ERR_CRC;
@@ -3940,7 +3972,7 @@ static int cluster_test_persistence_init_restore(void)
     config.persistence_mode = UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
     config.persistence_provider = NULL;
     TEST_ASSERT(ucn_cluster_init(&node.cluster, &config) == UCN_OK);
-    TEST_ASSERT(probe.load_calls == 8U);
+    TEST_ASSERT(probe.load_calls == 11U);
     TEST_ASSERT(ucn_cluster_get_view(&node.cluster, &view) == UCN_OK);
     TEST_ASSERT(view.persistence_mode ==
                 UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST &&
@@ -13699,6 +13731,45 @@ static int cluster_test_m06_legacy_auto_commit_bridge(void)
     return 0;
 }
 
+static int cluster_test_recovery_serial_exhaustion_m13(void)
+{
+    cluster_test_network_t network;
+    cluster_test_node_t *node;
+    uint32_t before_deadline;
+
+    TEST_ASSERT(cluster_test_network_init(&network, 1U) == 0);
+    node = &network.nodes[0];
+    node->cluster.recovery_eligible = true;
+    node->cluster.recovery_nonce =
+        UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD - 1U;
+    TEST_ASSERT(start_recovery_backoff(&node->cluster, 1U) == UCN_OK &&
+                node->cluster.recovery_nonce ==
+                    UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD);
+    before_deadline = node->cluster.recovery_backoff_deadline_ms;
+    TEST_ASSERT(start_recovery_backoff(&node->cluster, 2U) ==
+                    UCN_ERR_EXHAUSTED &&
+                node->cluster.recovery_nonce ==
+                    UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD &&
+                !node->cluster.recovery_eligible &&
+                node->cluster.recovery_backoff_deadline_ms == 0U &&
+                before_deadline != 0U);
+
+    TEST_ASSERT(cluster_test_network_init(&network, 1U) == 0);
+    node = &network.nodes[0];
+    node->cluster.recovery_eligible = true;
+    node->cluster.recovery_round =
+        UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD - 1U;
+    stepdown_recovery_head(&node->cluster, 1U);
+    TEST_ASSERT(node->cluster.recovery_round ==
+                    UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD &&
+                node->cluster.recovery_eligible);
+    stepdown_recovery_head(&node->cluster, 2U);
+    TEST_ASSERT(node->cluster.recovery_round ==
+                    UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD &&
+                !node->cluster.recovery_eligible);
+    return 0;
+}
+
 int test_cluster(void)
 {
     /* CLV2-M03 (03-01): Epoch comparator boundary tests (pure infra). */
@@ -13822,6 +13893,7 @@ int test_cluster(void)
     TEST_ASSERT(cluster_test_recovery_isolation_policy() == 0);
     /* CLV2-M12 (12-10): the composed recovery suite (Safety-4/Liveness). */
     TEST_ASSERT(cluster_test_recovery_suite_m12() == 0);
+    TEST_ASSERT(cluster_test_recovery_serial_exhaustion_m13() == 0);
     /* CLV2-01-04f (f3 SITE A): consider_head_offer() RECOVERY_* sources
      * (RECOVERY_OBSERVE / RECOVERY_ELECTION) now commit RECOVERY_* ->
      * JOIN_PENDING through the single entry point before the join payload

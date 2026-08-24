@@ -64,20 +64,21 @@ static ucn_result_t test_encode_legacy_v2_fixture(
     uint8_t *output)
 {
     ucn_cluster_persist_state_t writer;
-    uint8_t v3_record[UCN_CLUSTER_PERSIST_RECORD_BYTES];
+    uint8_t current_record[UCN_CLUSTER_PERSIST_RECORD_BYTES];
 
     if (state == NULL || output == NULL) {
         return UCN_ERR_ARGUMENT;
     }
     writer = *state;
     writer.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
-    if (ucn_cluster_persist_record_encode(&writer, generation, v3_record,
-                                          sizeof(v3_record)) != UCN_OK) {
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION;
+    if (ucn_cluster_persist_record_encode(&writer, generation, current_record,
+                                          sizeof(current_record)) != UCN_OK) {
         return UCN_ERR_STATE;
     }
     (void)memset(output, 0, UCN_CLUSTER_PERSIST_RECORD_BYTES);
-    (void)memcpy(output, v3_record, UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES);
+    (void)memcpy(output, current_record,
+                 UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES);
     test_write_u16_be(output + TEST_PERSIST_SCHEMA_OFFSET,
                       UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V2);
     test_write_u16_be(output + TEST_PERSIST_SIZE_OFFSET,
@@ -663,7 +664,7 @@ static int test_legacy_v2_partial_vote_never_becomes_m10_proof(void)
     ASSERT_TRUE(ucn_cluster_takeover_persist_vote_request_build(
                     &decoded, &transaction, 62U, &request) == UCN_OK &&
                 request.next_state.record_schema_version ==
-                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 &&
+                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION &&
                 ucn_cluster_persist_request_admit(&decoded, &request) ==
                     UCN_CLUSTER_PERSIST_REQUEST_ADMISSION_NEW);
     return 0;

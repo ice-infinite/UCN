@@ -251,10 +251,10 @@ ucn_result_t cluster_persistence_begin_state(
     }
     request.operation = operation;
     request.next_state = *next_state;
-    /* Record v1 is read-only migration input. A normal runtime write always
-     * emits schema v3, including the controlled legacy-abort transition. */
+    /* Legacy schemas are read-only migration inputs. A normal runtime write
+     * always emits the current schema v4, including controlled migration. */
     request.next_state.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION;
     result = ucn_cluster_persist_request_finalize(&request);
     if (result != UCN_OK) {
         cluster_persistence_fail_closed(cluster, result);
@@ -328,6 +328,20 @@ ucn_result_t cluster_persistence_begin_epoch(
         next.active_epoch = *epoch;
         next.has_max_epoch = true;
         next.max_epoch = *epoch;
+        if (action == CLUSTER_PERSIST_ACTION_RECOVERY_DECLARE) {
+            next.epoch_scope = UCN_CLUSTER_PERSIST_EPOCH_SCOPE_RECOVERY;
+            next.recovery_identity.valid = true;
+            next.recovery_identity.epoch = *epoch;
+            next.recovery_identity.parent_cluster_id =
+                cluster->parent_cluster_id;
+            next.recovery_identity.parent_term = cluster->parent_term;
+            next.recovery_identity.parent_config_id =
+                cluster->parent_config_id;
+            next.recovery_identity.recovery_round = cluster->recovery_round;
+            next.recovery_identity.recovery_nonce = cluster->recovery_nonce;
+            next.recovery_identity.cluster_id_round =
+                cluster->cluster_id_round;
+        }
         *committed = true;
         *durable_state = next;
         return UCN_OK;
@@ -349,6 +363,24 @@ ucn_result_t cluster_persistence_begin_epoch(
         /* CLV2-M12.1 (MAJOR-1): a Recovery identity carries the parent
          * Term mirror; only this owner may request the relaxed create. */
         operation = UCN_CLUSTER_PERSIST_OPERATION_RECOVERY_CREATE_COMMIT;
+        next.epoch_scope = UCN_CLUSTER_PERSIST_EPOCH_SCOPE_RECOVERY;
+        next.recovery_identity.valid = true;
+        next.recovery_identity.epoch = *epoch;
+        next.recovery_identity.parent_cluster_id = cluster->parent_cluster_id;
+        next.recovery_identity.parent_term = cluster->parent_term;
+        next.recovery_identity.parent_config_id = cluster->parent_config_id;
+        next.recovery_identity.recovery_round = cluster->recovery_round;
+        next.recovery_identity.recovery_nonce = cluster->recovery_nonce;
+        next.recovery_identity.cluster_id_round = cluster->cluster_id_round;
+        if (current.epoch_scope ==
+                UCN_CLUSTER_PERSIST_EPOCH_SCOPE_RECOVERY &&
+            current.has_active_epoch) {
+            next.recovery_tombstone.valid = true;
+            next.recovery_tombstone.retired_epoch = current.active_epoch;
+            next.recovery_tombstone.replacement_cluster_id =
+                epoch->cluster_id;
+            next.recovery_tombstone.recovery_round = cluster->recovery_round;
+        }
     } else {
         /* Match CLUSTER_CREATE_COMMIT's exact clear policy without touching
          * Rekey/Tombstone lineage evidence; the transition validator rejects
@@ -361,6 +393,19 @@ ucn_result_t cluster_persistence_begin_epoch(
                      sizeof(next.config_transaction));
         next.config_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE;
         operation = UCN_CLUSTER_PERSIST_OPERATION_CLUSTER_CREATE_COMMIT;
+        next.epoch_scope = UCN_CLUSTER_PERSIST_EPOCH_SCOPE_STABLE;
+        (void)memset(&next.recovery_identity, 0,
+                     sizeof(next.recovery_identity));
+        if (current.epoch_scope ==
+                UCN_CLUSTER_PERSIST_EPOCH_SCOPE_RECOVERY &&
+            current.has_active_epoch) {
+            next.recovery_tombstone.valid = true;
+            next.recovery_tombstone.retired_epoch = current.active_epoch;
+            next.recovery_tombstone.replacement_cluster_id =
+                epoch->cluster_id;
+            next.recovery_tombstone.recovery_round =
+                current.recovery_identity.recovery_round;
+        }
     }
     return cluster_persistence_begin_state(cluster, &current, operation, &next,
                                            action, destination, committed,

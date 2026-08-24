@@ -101,7 +101,7 @@ ucn_result_t ucn_cluster_takeover_persist_vote_request_build(
     candidate.operation = UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_VOTE_COMMIT;
     candidate.next_state = *committed_state;
     candidate.next_state.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION;
     vote_from_transaction(&candidate.next_state.last_vote, transaction);
     if (ucn_cluster_persist_request_finalize(&candidate) != UCN_OK ||
         !ucn_cluster_persist_request_is_valid(&candidate)) {
@@ -116,7 +116,7 @@ bool ucn_cluster_takeover_persist_vote_matches(
     const ucn_cluster_takeover_transaction_t *transaction)
 {
     return durable_state != NULL && durable_state->record_schema_version ==
-                                      UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 &&
+                                      UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION &&
            transaction_persistence_context_is_valid(durable_state, transaction) &&
            vote_matches_transaction(&durable_state->last_vote, transaction);
 }
@@ -139,7 +139,7 @@ ucn_result_t ucn_cluster_takeover_persist_epoch_request_build(
     candidate.operation = UCN_CLUSTER_PERSIST_OPERATION_TAKEOVER_EPOCH_COMMIT;
     candidate.next_state = *committed_state;
     candidate.next_state.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION;
     candidate.next_state.has_active_epoch = true;
     candidate.next_state.active_epoch = transaction->proposed_epoch;
     candidate.next_state.has_max_epoch = true;
@@ -159,7 +159,7 @@ bool ucn_cluster_takeover_persist_epoch_matches(
     return durable_state != NULL && transaction != NULL &&
            ucn_cluster_persist_state_is_valid(durable_state) &&
            durable_state->record_schema_version ==
-               UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 &&
+               UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION &&
            durable_state->committed_config.valid &&
            durable_state->committed_config.config_id == transaction->vote_id.config_id &&
            vote_matches_transaction(&durable_state->last_vote, transaction) &&

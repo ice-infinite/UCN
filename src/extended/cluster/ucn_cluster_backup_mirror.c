@@ -27,6 +27,18 @@ static bool serial_is_valid(uint32_t value)
     return value != 0U && value <= UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD;
 }
 
+static ucn_result_t serial_next_checked(uint32_t current, uint32_t *next)
+{
+    if (next == NULL || !serial_is_valid(current)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (current >= UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD) {
+        return UCN_ERR_EXHAUSTED;
+    }
+    *next = current + 1U;
+    return UCN_OK;
+}
+
 bool ucn_cluster_backup_epoch_is_valid(
     const ucn_cluster_backup_epoch_t *epoch)
 {
@@ -136,6 +148,7 @@ ucn_result_t ucn_cluster_backup_epoch_next_generation(
     const ucn_cluster_backup_epoch_t *current)
 {
     ucn_cluster_backup_epoch_t candidate;
+    uint32_t next_generation;
 
     if (output == NULL || current == NULL) {
         return UCN_ERR_ARGUMENT;
@@ -147,8 +160,12 @@ ucn_result_t ucn_cluster_backup_epoch_next_generation(
         UCN_CLUSTER_SERIAL_ROTATION_THRESHOLD - 1U) {
         return UCN_ERR_EXHAUSTED;
     }
+    if (serial_next_checked(current->backup_generation, &next_generation) !=
+        UCN_OK) {
+        return UCN_ERR_EXHAUSTED;
+    }
     candidate = *current;
-    candidate.backup_generation++;
+    candidate.backup_generation = next_generation;
     if (!ucn_cluster_backup_epoch_is_valid(&candidate) ||
         ucn_cluster_backup_epoch_rekey_required(&candidate)) {
         return UCN_ERR_EXHAUSTED;

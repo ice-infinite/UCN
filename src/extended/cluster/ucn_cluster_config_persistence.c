@@ -71,7 +71,7 @@ static bool owner_is_valid(const ucn_cluster_config_persist_owner_t *owner)
            owner->config_store != NULL &&
            ucn_cluster_persist_state_is_valid(&owner->durable_state) &&
            owner->durable_state.record_schema_version ==
-               UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 &&
+               UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION &&
            owner->durable_state.committed_config.valid;
 }
 
@@ -465,7 +465,7 @@ ucn_result_t ucn_cluster_config_persist_owner_init(
         loaded.state != UCN_CLUSTER_PERSIST_LOAD_READY ||
         !loaded.snapshot.committed_config.valid ||
         loaded.snapshot.record_schema_version !=
-            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3) {
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION) {
         (void)memcpy(owner, previous_owner, sizeof(previous_owner));
         return UCN_ERR_STATE;
     }

@@ -372,10 +372,25 @@ static void restore_current_fsm_safety_inputs(
     ucn_cluster_t *cluster,
     const ucn_cluster_persist_state_t *state)
 {
-    if (state->has_max_epoch) {
+    if (state->has_max_epoch &&
+        state->epoch_scope == UCN_CLUSTER_PERSIST_EPOCH_SCOPE_STABLE) {
         cluster->last_cluster_id = state->max_epoch.cluster_id;
         cluster->max_seen_term = state->max_epoch.term;
         cluster->last_stable_head = state->max_epoch.head_node_id;
+    } else if (state->epoch_scope ==
+                   UCN_CLUSTER_PERSIST_EPOCH_SCOPE_RECOVERY &&
+               state->recovery_identity.valid) {
+        /* CLV2-13-11: a Recovery Epoch is never restored as Stable history.
+         * Restore its captured parent lineage and no-wrap counters only. */
+        cluster->last_cluster_id =
+            state->recovery_identity.parent_cluster_id;
+        cluster->max_seen_term = state->recovery_identity.parent_term;
+        cluster->recovery_round =
+            state->recovery_identity.recovery_round;
+        cluster->recovery_nonce =
+            state->recovery_identity.recovery_nonce;
+        cluster->cluster_id_round =
+            state->recovery_identity.cluster_id_round;
     }
     if (state->last_vote.valid) {
         /* Current M03 only has this replay-suppression key.  The persisted
@@ -451,15 +466,22 @@ static ucn_result_t establish_boot_incarnation_before_init(
     next = current;
     next.boot_incarnation = next_incarnation;
     operation = UCN_CLUSTER_PERSIST_OPERATION_REPLAY_INCARNATION;
-    /* Only physical Record-v1 PREPARED is R23 migration input. Schema v2
-     * belongs to its owning M07/M13 transaction and may never be mistaken for
-     * a legacy abort; until that owner restores it, boot remains fail-closed. */
-    if ((current.config_transaction.phase ==
-             UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED ||
-         current.rekey_transaction.phase ==
-             UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED) &&
+    /* Only physical Record-v1 PREPARED is R23 migration input. Current v4
+     * Rekey PREPARED has its own M13 identity and is closed by the exact
+     * REKEY_ABORT transition below. Config PREPARED and v2/v3 Rekey remain
+     * owned by their original transaction and fail closed here. */
+    if (current.config_transaction.phase ==
+            UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED &&
         current.record_schema_version !=
             UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V1) {
+        return UCN_ERR_STATE;
+    }
+    if (current.rekey_transaction.phase ==
+            UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED &&
+        current.record_schema_version !=
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V1 &&
+        current.record_schema_version !=
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V4) {
         return UCN_ERR_STATE;
     }
     if (current.config_transaction.phase ==
@@ -479,6 +501,14 @@ static ucn_result_t establish_boot_incarnation_before_init(
                      sizeof(next.rekey_transaction));
         next.rekey_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE;
         operation = UCN_CLUSTER_PERSIST_OPERATION_LEGACY_PREPARED_ABORT;
+    }
+    if (current.rekey_transaction.phase ==
+            UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED &&
+        current.record_schema_version ==
+            UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V4) {
+        next.rekey_transaction.phase =
+            UCN_CLUSTER_PERSIST_TRANSACTION_ABORTED;
+        operation = UCN_CLUSTER_PERSIST_OPERATION_REKEY_ABORT;
     }
     result = cluster_persistence_begin_state(
         cluster, &current, operation,
@@ -1616,6 +1646,8 @@ static ucn_result_t declare_recovery_after_persistence(
     const ucn_cluster_persist_state_t *durable_state,
     uint32_t now_ms)
 {
+    uint32_t first_nonce;
+
     if (cluster == NULL || expected_epoch == NULL || durable_state == NULL ||
         !durable_state->has_active_epoch ||
         durable_state->active_epoch.cluster_id == 0U ||
@@ -1632,6 +1664,10 @@ static ucn_result_t declare_recovery_after_persistence(
         durable_state->active_epoch.head_node_id !=
             expected_epoch->head_node_id) {
         return UCN_ERR_STATE;
+    }
+    if (cluster->recovery_nonce == 0U &&
+        cluster_serial_next_checked(0U, &first_nonce) != UCN_OK) {
+        return UCN_ERR_EXHAUSTED;
     }
     if (cluster_transition(cluster, UCN_CLUSTER_PHASE_RECOVERY_ELECTION,
                            UCN_CLUSTER_PHASE_RECOVERY_HEAD,
@@ -2162,6 +2198,14 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                         compute_recovery_backoff(cluster) != 0U;
 
                     if (backoff_is_nonzero) {
+                        uint32_t next_recovery_nonce;
+
+                        result = cluster_serial_next_checked(
+                            cluster->recovery_nonce, &next_recovery_nonce);
+                        if (result != UCN_OK) {
+                            cluster->recovery_eligible = false;
+                            return result;
+                        }
                         if (cluster_transition(
                                 cluster, UCN_CLUSTER_PHASE_RECOVERY_OBSERVE,
                                 UCN_CLUSTER_PHASE_RECOVERY_ELECTION,
@@ -2180,7 +2224,10 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
                      * zero-backoff config it re-arms a zero deadline
                      * exactly as before (nonce bump preserved) and the
                      * phase stays RECOVERY_OBSERVE. */
-                    start_recovery_backoff(cluster, now_ms);
+                    result = start_recovery_backoff(cluster, now_ms);
+                    if (result != UCN_OK) {
+                        return result;
+                    }
 #if !defined(NDEBUG)
                     /* CLV2-01-04f post-commit derive assert: after the
                      * transition AND the site-owned nonce/deadline writes

@@ -230,7 +230,7 @@ static ucn_cluster_persist_request_t persist_replay_incarnation_request(
     next.boot_incarnation = boot_incarnation;
     /* Any accepted next write upgrades a decoded v1/v2 record. */
     next.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION;
     return persist_request_from_state(
         operation_id, UCN_CLUSTER_PERSIST_OPERATION_REPLAY_INCARNATION, &next);
 }
@@ -353,7 +353,7 @@ static ucn_result_t persist_encode_legacy_v1_fixture(
     }
     writer_state = *legacy_state;
     writer_state.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION;
     result = ucn_cluster_persist_record_encode(&writer_state, generation,
                                                 writer_record,
                                                 sizeof(writer_record));
@@ -393,14 +393,17 @@ static void persist_rekey_ref_set(ucn_cluster_persist_rekey_ref_t *rekey,
     rekey->valid = true;
     rekey->generation = generation;
     rekey->next_incarnation = incarnation;
+    rekey->prepare_nonce = 1U;
+    rekey->allocation_history_fingerprint = UINT32_C(0x13579BDF);
     rekey->predecessor_epoch = *predecessor;
     rekey->predecessor_config = *predecessor_config;
     rekey->successor_epoch = *successor;
+    persist_config_ref_set(&rekey->successor_config, 1U, 1U, 0xB1U);
 }
 
 /* These builders represent an already-decoded pre-R20 Record-v1 snapshot.
  * They are intentionally logical fixtures, not writer paths: production
- * record_encode() only emits schema v3. Legacy v1 bytes are created below by
+ * record_encode() only emits schema v4. Legacy v1 bytes are created below by
  * a test-only header rewrite plus CRC refresh. */
 static ucn_result_t persist_legacy_config_prepared_state(
     ucn_cluster_persist_state_t *state)
@@ -503,12 +506,12 @@ static int cluster_persist_test_record_codec(void)
                            0xA6U);
     TEST_ASSERT(ucn_cluster_persist_record_encode(
                     &state, 7U, record, sizeof(record)) == UCN_OK);
-    TEST_ASSERT(record[4U] == 0U && record[5U] == 3U);
+    TEST_ASSERT(record[4U] == 0U && record[5U] == 4U);
     TEST_ASSERT(ucn_cluster_persist_record_decode(
                     record, sizeof(record), &generation, &decoded) == UCN_OK);
     TEST_ASSERT(generation == 7U &&
                 decoded.record_schema_version ==
-                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 &&
+                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION &&
                 decoded.has_active_epoch &&
                 decoded.active_epoch.term == 2U && decoded.last_vote.valid &&
                 decoded.last_vote.voted_for_node_id == 8U &&
@@ -542,7 +545,7 @@ static int cluster_persist_test_record_codec(void)
                 decoded.config_transaction.phase ==
                     UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED);
     state.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION;
 
     /* A terminal transaction retains its exact C_new reference as well as its
      * txid.  This binds CONFIG_ABORT replay after reset to the proposal that
@@ -568,7 +571,7 @@ static int cluster_persist_test_record_codec(void)
     successor.head_node_id = 9U;
     state.rekey_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED;
     state.rekey_transaction.transaction_id = 32U;
-    persist_rekey_ref_set(&state.rekey_transaction.staging_rekey, 5U, 11U,
+    persist_rekey_ref_set(&state.rekey_transaction.staging_rekey, 5U, 10U,
                           &state.active_epoch, &state.committed_config,
                           &successor);
     TEST_ASSERT(ucn_cluster_persist_record_encode(
@@ -583,13 +586,20 @@ static int cluster_persist_test_record_codec(void)
                 decoded.rekey_transaction.staging_rekey.successor_epoch
                         .cluster_id == 2U &&
                 decoded.rekey_transaction.staging_rekey.successor_epoch.term ==
-                    1U);
+                    1U &&
+                decoded.rekey_transaction.staging_rekey.successor_config
+                        .config_id == 1U &&
+                decoded.rekey_transaction.staging_rekey.
+                        allocation_history_fingerprint ==
+                    UINT32_C(0x13579BDF));
 
     /* A Rekey COMMIT atomically records the successor Epoch, committed Rekey
      * identity and the tombstone that retires the predecessor. */
     state.active_epoch = successor;
     state.max_epoch = successor;
     state.committed_rekey = state.rekey_transaction.staging_rekey;
+    state.committed_config = state.committed_rekey.successor_config;
+    state.boot_incarnation = state.committed_rekey.next_incarnation;
     state.rekey_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_COMMITTED;
     (void)memset(&state.rekey_transaction.staging_rekey, 0,
                  sizeof(state.rekey_transaction.staging_rekey));
@@ -605,6 +615,8 @@ static int cluster_persist_test_record_codec(void)
                     UCN_CLUSTER_PERSIST_TRANSACTION_COMMITTED &&
                 decoded.rekey_transaction.transaction_id == 32U &&
                 decoded.committed_rekey.successor_epoch.cluster_id == 2U &&
+                decoded.committed_rekey.allocation_history_fingerprint ==
+                    UINT32_C(0x13579BDF) &&
                 decoded.tombstone.rekey_transaction_id == 32U &&
                 decoded.tombstone.retired_epoch.cluster_id == 1U);
 
@@ -1051,7 +1063,7 @@ static int cluster_persist_test_operation_admission(void)
     next = committed;
     next.rekey_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED;
     next.rekey_transaction.transaction_id = 61U;
-    persist_rekey_ref_set(&next.rekey_transaction.staging_rekey, 7U, 12U,
+    persist_rekey_ref_set(&next.rekey_transaction.staging_rekey, 7U, 10U,
                           &committed.active_epoch, &committed.committed_config,
                           &successor);
     request = persist_request_from_state(
@@ -1067,6 +1079,11 @@ static int cluster_persist_test_operation_admission(void)
     next.committed_rekey.successor_epoch.cluster_id = 3U;
     next.active_epoch = next.committed_rekey.successor_epoch;
     next.max_epoch = next.committed_rekey.successor_epoch;
+    next.committed_config = next.committed_rekey.successor_config;
+    next.boot_incarnation = next.committed_rekey.next_incarnation;
+    (void)memset(&next.config_transaction, 0,
+                 sizeof(next.config_transaction));
+    next.config_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE;
     next.rekey_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_COMMITTED;
     (void)memset(&next.rekey_transaction.staging_rekey, 0,
                  sizeof(next.rekey_transaction.staging_rekey));
@@ -1085,6 +1102,11 @@ static int cluster_persist_test_operation_admission(void)
     next.active_epoch = successor;
     next.max_epoch = successor;
     next.committed_rekey = prepared.rekey_transaction.staging_rekey;
+    next.committed_config = next.committed_rekey.successor_config;
+    next.boot_incarnation = next.committed_rekey.next_incarnation;
+    (void)memset(&next.config_transaction, 0,
+                 sizeof(next.config_transaction));
+    next.config_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE;
     next.rekey_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_COMMITTED;
     (void)memset(&next.rekey_transaction.staging_rekey, 0,
                  sizeof(next.rekey_transaction.staging_rekey));
@@ -1201,7 +1223,7 @@ static int cluster_persist_test_operation_admission(void)
     next.config_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE;
     next.boot_incarnation = 10U;
     next.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION;
     request = persist_request_from_state(
         8U, UCN_CLUSTER_PERSIST_OPERATION_LEGACY_PREPARED_ABORT, &next);
     TEST_ASSERT(ucn_cluster_persist_request_is_valid(&request));
@@ -1220,7 +1242,7 @@ static int cluster_persist_test_operation_admission(void)
     next.rekey_transaction.phase = UCN_CLUSTER_PERSIST_TRANSACTION_NONE;
     next.boot_incarnation = 10U;
     next.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION;
     request = persist_request_from_state(
         8U, UCN_CLUSTER_PERSIST_OPERATION_LEGACY_PREPARED_ABORT, &next);
     TEST_ASSERT(ucn_cluster_persist_request_admit(&committed, &request) ==
@@ -1815,15 +1837,13 @@ static int cluster_persist_test_legacy_prepared_boot_migration(void)
                     UCN_CLUSTER_PERSIST_OPERATION_LEGACY_PREPARED_ABORT &&
                 probe.sent_count == 0U);
 
-    /* A v3 PREPARED is deliberately not eligible for R23.  It must survive
-     * boot unchanged until M07's Config owner (or M13's Rekey owner) supplies
-     * its Resume/Abort/Commit continuation; the pre-owner behavior is a safe
-     * fail-closed init, never a silent abort. */
+    /* A current-schema Config PREPARED is deliberately not eligible for R23
+     * or M13. It survives boot unchanged until the M07 owner resumes it. */
     (void)memset(&probe, 0, sizeof(probe));
     persist_fake_set_factory_empty(&probe.store);
     TEST_ASSERT(persist_legacy_config_prepared_state(&state) == UCN_OK);
     state.record_schema_version =
-        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3;
+        UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION;
     state.last_completed_operation_id = 0U;
     state.last_completed_operation = 0U;
     state.last_completed_operation_fingerprint = 0U;
@@ -1833,11 +1853,11 @@ static int cluster_persist_test_legacy_prepared_boot_migration(void)
     state = request.next_state;
     TEST_ASSERT(ucn_cluster_persist_record_encode(
                     &state, 17U, record, sizeof(record)) == UCN_OK &&
-                 record[4U] == 0U && record[5U] == 3U);
+                 record[4U] == 0U && record[5U] == 4U);
     TEST_ASSERT(ucn_cluster_persist_record_decode(
                     record, sizeof(record), &generation, &decoded) == UCN_OK &&
                 decoded.record_schema_version ==
-                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 &&
+                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION &&
                 decoded.config_transaction.phase ==
                     UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED);
     probe.store.stored.state = UCN_CLUSTER_PERSIST_LOAD_READY;
@@ -1846,11 +1866,37 @@ static int cluster_persist_test_legacy_prepared_boot_migration(void)
     cluster_persist_runtime_config(&config, &probe, &provider, false);
     TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_ERR_STATE &&
                 probe.store.stored.snapshot.record_schema_version ==
-                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 &&
+                    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION &&
                 probe.store.stored.snapshot.boot_incarnation == 9U &&
                 probe.store.stored.snapshot.config_transaction.phase ==
                     UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED &&
                 probe.sent_count == 0U);
+
+    /* Current-schema M13 Rekey PREPARED has an explicit exact Abort
+     * transition. Controlled boot closes it and advances incarnation in one
+     * atomic request before any role/timer/wire activity. */
+    (void)memset(&probe, 0, sizeof(probe));
+    persist_fake_set_factory_empty(&probe.store);
+    TEST_ASSERT(persist_legacy_rekey_prepared_state(&state) == UCN_OK);
+    state.record_schema_version = UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION;
+    state.last_completed_operation_id = 0U;
+    state.last_completed_operation = 0U;
+    state.last_completed_operation_fingerprint = 0U;
+    request = persist_request_from_state(
+        7U, UCN_CLUSTER_PERSIST_OPERATION_REKEY_PREPARE, &state);
+    TEST_ASSERT(ucn_cluster_persist_request_is_valid(&request));
+    probe.store.stored.state = UCN_CLUSTER_PERSIST_LOAD_READY;
+    probe.store.stored.snapshot = request.next_state;
+    cluster_persist_runtime_provider(&provider, &probe);
+    cluster_persist_runtime_config(&config, &probe, &provider, false);
+    TEST_ASSERT(ucn_cluster_init(&cluster, &config) == UCN_OK &&
+                !cluster.persistence_pending && probe.sent_count == 0U &&
+                cluster.config.cluster_id_incarnation == 10U &&
+                probe.store.stored.snapshot.boot_incarnation == 10U &&
+                probe.store.stored.snapshot.rekey_transaction.phase ==
+                    UCN_CLUSTER_PERSIST_TRANSACTION_ABORTED &&
+                probe.store.stored.snapshot.last_completed_operation ==
+                    UCN_CLUSTER_PERSIST_OPERATION_REKEY_ABORT);
     return 0;
 }
 
@@ -2126,6 +2172,8 @@ static int cluster_persist_test_runtime_head_paths(void)
     cluster.role = UCN_CLUSTER_ROLE_DETACHED;
     cluster.recovery_eligible = true;
     cluster.recovery_backoff_deadline_ms = 1U;
+    cluster.recovery_nonce = 1U;
+    cluster.cluster_id_round = 1U;
     cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
     (void)memset(&recovery_epoch, 0, sizeof(recovery_epoch));
     recovery_epoch.cluster_id = 2U;
@@ -2156,6 +2204,8 @@ static int cluster_persist_test_runtime_head_paths(void)
     cluster.role = UCN_CLUSTER_ROLE_DETACHED;
     cluster.recovery_eligible = true;
     cluster.recovery_backoff_deadline_ms = 1U;
+    cluster.recovery_nonce = 1U;
+    cluster.cluster_id_round = 1U;
     cluster.parent_cluster_id = 5U;
     cluster.parent_term = 9U;
     cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
@@ -2186,6 +2236,8 @@ static int cluster_persist_test_runtime_head_paths(void)
     cluster.role = UCN_CLUSTER_ROLE_DETACHED;
     cluster.recovery_eligible = true;
     cluster.recovery_backoff_deadline_ms = 1U;
+    cluster.recovery_nonce = 1U;
+    cluster.cluster_id_round = 1U;
     cluster.parent_cluster_id = 5U;
     cluster.parent_term = 9U;
     cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_ELECTION;
@@ -2449,6 +2501,73 @@ static int cluster_persist_test_dual_slot_crash_matrix(void)
  * PREPARED Record selectable; the next controlled boot retries the same
  * atomic abort+incarnation transition.  Cover both historical transaction
  * kinds rather than assuming Config and Rekey have identical record bodies. */
+static int cluster_persist_test_recovery_scope_record(void)
+{
+    ucn_cluster_persist_state_t stable;
+    ucn_cluster_persist_state_t recovery;
+    ucn_cluster_persist_state_t decoded;
+    uint8_t stable_record[UCN_CLUSTER_PERSIST_RECORD_BYTES];
+    uint8_t recovery_record[UCN_CLUSTER_PERSIST_RECORD_BYTES];
+    uint32_t generation = 0U;
+
+    ucn_cluster_persist_state_init_empty(&stable);
+    stable.has_active_epoch = true;
+    stable.active_epoch.cluster_id = 5U;
+    stable.active_epoch.term = 5U;
+    stable.active_epoch.head_node_id = 1U;
+    stable.has_max_epoch = true;
+    stable.max_epoch = stable.active_epoch;
+    stable.boot_incarnation = 1U;
+    TEST_ASSERT(ucn_cluster_persist_record_encode(
+                    &stable, 1U, stable_record, sizeof(stable_record)) == UCN_OK);
+
+    recovery = stable;
+    recovery.epoch_scope = UCN_CLUSTER_PERSIST_EPOCH_SCOPE_RECOVERY;
+    recovery.active_epoch.cluster_id = 21U;
+    recovery.max_epoch = recovery.active_epoch;
+    recovery.recovery_identity.valid = true;
+    recovery.recovery_identity.epoch = recovery.active_epoch;
+    recovery.recovery_identity.parent_cluster_id = 5U;
+    recovery.recovery_identity.parent_term = 5U;
+    recovery.recovery_identity.parent_config_id = 1U;
+    recovery.recovery_identity.recovery_round = 3U;
+    recovery.recovery_identity.recovery_nonce = 4U;
+    recovery.recovery_identity.cluster_id_round = 2U;
+    recovery.recovery_tombstone.valid = true;
+    recovery.recovery_tombstone.retired_epoch.cluster_id = 20U;
+    recovery.recovery_tombstone.retired_epoch.term = 5U;
+    recovery.recovery_tombstone.retired_epoch.head_node_id = 1U;
+    recovery.recovery_tombstone.replacement_cluster_id = 21U;
+    recovery.recovery_tombstone.recovery_round = 2U;
+    TEST_ASSERT(ucn_cluster_persist_state_is_valid(&recovery));
+    TEST_ASSERT(ucn_cluster_persist_record_encode(
+                    &recovery, 2U, recovery_record, sizeof(recovery_record)) ==
+                UCN_OK);
+    TEST_ASSERT(ucn_cluster_persist_record_decode(
+                    recovery_record, sizeof(recovery_record), &generation,
+                    &decoded) == UCN_OK && generation == 2U &&
+                decoded.epoch_scope ==
+                    UCN_CLUSTER_PERSIST_EPOCH_SCOPE_RECOVERY &&
+                decoded.recovery_identity.parent_cluster_id == 5U &&
+                decoded.recovery_identity.recovery_round == 3U &&
+                ucn_cluster_persist_recovery_identity_admit(
+                    &decoded, 20U, 2U, 3U) == UCN_ERR_REPLAY &&
+                ucn_cluster_persist_recovery_identity_admit(
+                    &decoded, 21U, 3U, 4U) == UCN_OK);
+    /* Torn newest slot cannot reinterpret Recovery as Stable; the older
+     * complete slot remains independently decodable. */
+    recovery_record[350U] ^= 1U;
+    TEST_ASSERT(ucn_cluster_persist_record_decode(
+                    recovery_record, sizeof(recovery_record), &generation,
+                    &decoded) == UCN_ERR_CRC);
+    TEST_ASSERT(ucn_cluster_persist_record_decode(
+                    stable_record, sizeof(stable_record), &generation,
+                    &decoded) == UCN_OK && generation == 1U &&
+                decoded.epoch_scope == UCN_CLUSTER_PERSIST_EPOCH_SCOPE_STABLE &&
+                decoded.active_epoch.cluster_id == 5U);
+    return 0;
+}
+
 static int cluster_persist_test_dual_slot_legacy_prepared_recovery(void)
 {
     cluster_persist_dual_fake_t fake;
@@ -2552,6 +2671,7 @@ int test_cluster_persist(void)
     TEST_ASSERT(cluster_persist_test_runtime_reentrancy_gate() == 0);
     TEST_ASSERT(cluster_persist_test_runtime_failure_containment() == 0);
     TEST_ASSERT(cluster_persist_test_runtime_head_paths() == 0);
+    TEST_ASSERT(cluster_persist_test_recovery_scope_record() == 0);
     /* CLV2-M12 (12-09): recovery identity non-reuse across restart. */
     TEST_ASSERT(cluster_persist_test_recovery_identity_restart() == 0);
     TEST_ASSERT(cluster_persist_test_dual_slot_crash_matrix() == 0);
@@ -2650,7 +2770,8 @@ int test_cluster_persist(void)
     successor.term = 1U;
     successor.head_node_id = 9U;
     persist_rekey_ref_set(&request.next_state.rekey_transaction.staging_rekey,
-                          6U, 12U, &request.next_state.active_epoch,
+                          6U, request.next_state.boot_incarnation + 1U,
+                          &request.next_state.active_epoch,
                           &request.next_state.committed_config, &successor);
     TEST_ASSERT(ucn_cluster_persist_request_finalize(&request) == UCN_OK);
     completion = provider.submit(provider.context, &request);

@@ -250,11 +250,25 @@ void send_recovery_declare(ucn_cluster_t *cluster)
     }
 }
 
-void start_recovery_backoff(ucn_cluster_t *cluster, uint32_t now_ms)
+ucn_result_t start_recovery_backoff(ucn_cluster_t *cluster, uint32_t now_ms)
 {
-    cluster->recovery_nonce = next_nonce(cluster);
+    uint32_t next_recovery_nonce;
+    ucn_result_t result;
+
+    result = cluster_serial_next_checked(cluster->recovery_nonce,
+                                         &next_recovery_nonce);
+    if (result != UCN_OK) {
+        /* CLV2-13-13: an exhausted Recovery replay domain is not allowed to
+         * wrap through the generic message nonce generator.  The caller may
+         * only continue after a persisted identity rotation/rekey. */
+        cluster->recovery_eligible = false;
+        cluster->recovery_backoff_deadline_ms = 0U;
+        return result;
+    }
+    cluster->recovery_nonce = next_recovery_nonce;
     cluster->recovery_backoff_deadline_ms = ucn_deadline_from_now(
         now_ms, compute_recovery_backoff(cluster));
+    return UCN_OK;
 }
 
 void declare_recovery_head(ucn_cluster_t *cluster,
@@ -262,7 +276,16 @@ void declare_recovery_head(ucn_cluster_t *cluster,
                            uint32_t now_ms)
 {
     if (cluster->recovery_nonce == 0U) {
-        cluster->recovery_nonce = next_nonce(cluster);
+        uint32_t first_nonce;
+
+        /* declare_recovery_after_persistence preflights this path before
+         * changing phase. Keep the assignment checked here as a second,
+         * no-wrap safety boundary. */
+        if (cluster_serial_next_checked(0U, &first_nonce) != UCN_OK) {
+            cluster->recovery_eligible = false;
+            return;
+        }
+        cluster->recovery_nonce = first_nonce;
     }
     /* CLV2-M12.1 (MAJOR-1): the RAM/wire epoch IS the durable promise.
      * The Term is adopted from the persisted recovery Epoch - it is never
@@ -292,11 +315,21 @@ void declare_recovery_head(ucn_cluster_t *cluster,
 
 void stepdown_recovery_head(ucn_cluster_t *cluster, uint32_t now_ms)
 {
+    uint32_t next_round;
+
     /* CLV2-M12 (12-03): every TTL expiry or arbitration loss escalates the
      * attempt counter, which both escalates the exponential backoff and
      * derives a fresh Recovery ID (12-02).  A sustained stable join resets
      * the round via cluster_lineage_reset(). */
-    cluster->recovery_round++;
+    if (cluster_serial_next_checked(cluster->recovery_round, &next_round) ==
+        UCN_OK) {
+        cluster->recovery_round = next_round;
+    } else {
+        /* Fail closed at the reserved serial boundary. A later M13 runtime
+         * owner may persist a fresh identity domain, but this Recovery FSM
+         * must never roll the round back to zero/one on its own. */
+        cluster->recovery_eligible = false;
+    }
     cluster->recovery_cooldown_until_ms = ucn_deadline_from_now(
         now_ms, cluster->config.recovery_observation_ms);
     cluster->recovery_cluster_id = 0U;

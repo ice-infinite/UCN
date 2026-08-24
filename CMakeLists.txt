@@ -17,6 +17,8 @@ option(UCN_BUILD_CLUSTER_TAKEOVER_EXPERIMENTAL
     "Build the isolated M10 frozen-majority takeover model (default OFF)" OFF)
 option(UCN_BUILD_CLUSTER_HANDOVER_EXPERIMENTAL
     "Build the isolated M11 Merge/Handover model (default OFF)" OFF)
+option(UCN_BUILD_CLUSTER_REKEY_EXPERIMENTAL
+    "Build the isolated M13 Rekey/No-wrap model (default OFF)" OFF)
 set(UCN_PROFILE "FULL" CACHE STRING "UCN feature profile: NANO, LITE, or FULL")
 set_property(CACHE UCN_PROFILE PROPERTY STRINGS NANO LITE FULL)
 option(UCN_FEATURE_SERVICE "Build the orthogonal Service Router/Bridge" ON)
@@ -230,6 +232,25 @@ if(UCN_BUILD_CLUSTER_HANDOVER_EXPERIMENTAL)
     )
 endif()
 
+# CLV2-M13: quorum Rekey and no-wrap continuation are isolated from the
+# default Cluster archive.  The experimental owner consumes explicit M04/M08
+# evidence but cannot parse production RX, send v4 frames or mutate the
+# Current FSM merely because an application links ucn_cluster.
+if(UCN_BUILD_CLUSTER_REKEY_EXPERIMENTAL)
+    add_library(ucn_cluster_rekey_experimental STATIC EXCLUDE_FROM_ALL
+        src/extended/cluster/ucn_cluster_rekey.c
+        src/extended/cluster/ucn_cluster_rekey_persistence.c
+        src/extended/cluster/ucn_cluster_id_history.c
+    )
+    target_link_libraries(ucn_cluster_rekey_experimental PUBLIC ucn_cluster)
+    target_compile_definitions(ucn_cluster_rekey_experimental PUBLIC
+        UCN_CLUSTER_REKEY_EXPERIMENTAL_ENABLED=1
+    )
+    target_compile_options(ucn_cluster_rekey_experimental PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+endif()
+
 # C06 federation format/state remains an opt-in Extended archive.  C06.1 only
 # freezes the Endpoint codec and read-only Cluster boundary; no Core object
 # or Wire v5 field changes are introduced here.
@@ -287,6 +308,15 @@ if(UCN_BUILD_SCALE_SIM AND NOT UCN_PROFILE_UPPER STREQUAL "NANO")
 endif()
 
 if(UCN_BUILD_TESTS)
+    # CLV2-13-09: a source-level no-wrap contract is part of every test
+    # profile. Products do not link Python or this script; it is a Host CI
+    # gate that rejects direct mutation of Cluster safety serials.
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME ucn_cluster_no_wrap_source_gate
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_cluster_no_wrap.py
+            ${CMAKE_CURRENT_SOURCE_DIR})
+
     enable_testing()
 
     set(UCN_TEST_SOURCES
@@ -603,6 +633,19 @@ if(UCN_BUILD_TESTS)
         )
         add_test(NAME ucn_cluster_handover_tests
             COMMAND ucn_cluster_handover_tests)
+    endif()
+
+    if(UCN_BUILD_CLUSTER_REKEY_EXPERIMENTAL)
+        add_executable(ucn_cluster_rekey_tests
+            tests/test_cluster_rekey.c
+        )
+        target_link_libraries(ucn_cluster_rekey_tests PRIVATE
+            ucn_cluster_rekey_experimental
+        )
+        target_compile_options(ucn_cluster_rekey_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+        )
+        add_test(NAME ucn_cluster_rekey_tests COMMAND ucn_cluster_rekey_tests)
     endif()
 
     # CLV2-07-01: independent production-archive value-model gate. It has no

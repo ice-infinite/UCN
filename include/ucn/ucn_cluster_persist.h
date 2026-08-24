@@ -29,26 +29,32 @@ extern "C" {
 #define UCN_CLUSTER_PERSIST_CONFIG_DIGEST_BYTES ((size_t)16U)
 /* Physical record schemas: all fields are explicit big-endian bytes;
  * never persist a C struct image because alignment and bool layout vary by
- * toolchain. Schema v1/v2 are read-only 280 B legacy inputs. Schema v3 is
- * the only writer format: it keeps the first 280 B byte-for-byte compatible
- * with v2 and appends the three missing M10 VoteId fields. A product that
- * persists raw slots must therefore support a 292 B v3 slot (or explicitly
- * migrate its older 280 B slots before making a v3 write). */
+ * toolchain. Schema v1/v2 are read-only 280 B legacy inputs. Schema v3 is a
+ * read-only 292 B input that appends the three M10 VoteId fields. Schema v4
+ * is the only writer format: it keeps the first 292 B byte-for-byte
+ * compatible with v3 and appends the exact successor Config reference needed
+ * by M13 Rekey. A product that persists raw slots must therefore support a
+ * 388 B v4 slot (or explicitly migrate its older slots before a v4 write).
+ * The final v4 extension also makes Stable/Recovery scope explicit and
+ * persists Recovery lineage plus its retired-ID tombstone. */
 #define UCN_CLUSTER_PERSIST_RECORD_MAGIC UINT32_C(0x55435052)
 #define UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V1 ((uint16_t)1U)
 #define UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V2 ((uint16_t)2U)
 #define UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3 ((uint16_t)3U)
+#define UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V4 ((uint16_t)4U)
 /* Kept as a source-level name for code that explicitly handles an on-media
  * v2 input. It is not a writer schema. */
 #define UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V2 \
     UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_LEGACY_V2
 #define UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION \
-    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V3
+    UCN_CLUSTER_PERSIST_RECORD_SCHEMA_VERSION_CURRENT_V4
 #define UCN_CLUSTER_PERSIST_RECORD_HEADER_BYTES ((size_t)16U)
 #define UCN_CLUSTER_PERSIST_RECORD_LEGACY_PAYLOAD_BYTES ((size_t)264U)
 #define UCN_CLUSTER_PERSIST_RECORD_LEGACY_BYTES ((size_t)280U)
-#define UCN_CLUSTER_PERSIST_RECORD_PAYLOAD_BYTES ((size_t)276U)
-#define UCN_CLUSTER_PERSIST_RECORD_BYTES ((size_t)292U)
+#define UCN_CLUSTER_PERSIST_RECORD_V3_PAYLOAD_BYTES ((size_t)276U)
+#define UCN_CLUSTER_PERSIST_RECORD_V3_BYTES ((size_t)292U)
+#define UCN_CLUSTER_PERSIST_RECORD_PAYLOAD_BYTES ((size_t)372U)
+#define UCN_CLUSTER_PERSIST_RECORD_BYTES ((size_t)388U)
 
 typedef uint32_t ucn_cluster_persist_token_t;
 
@@ -87,9 +93,25 @@ typedef struct ucn_cluster_persist_rekey_ref {
     bool valid;
     uint32_t generation;
     uint32_t next_incarnation;
+    /* M13 PREPARE restart identity. The wire nonce and frozen successor
+     * Backup are persisted with the successor Epoch/Config so a rebooted
+     * owner cannot resume the same txid with a different replay domain or
+     * silently materialize a different Backup. Legacy v1-v3 decode both as
+     * zero and can never satisfy the M13 current-schema resume contract. */
+    uint32_t prepare_nonce;
+    ucn_node_id_t successor_backup_node_id;
+    /* Exact fingerprint of the separately persisted allocation-history
+     * generation named by `generation`. It closes the reboot window where a
+     * PREPARED Rekey could otherwise resume against a different history body. */
+    uint32_t allocation_history_fingerprint;
     ucn_cluster_epoch_t predecessor_epoch;
     ucn_cluster_persist_config_ref_t predecessor_config;
     ucn_cluster_epoch_t successor_epoch;
+    /* Schema v4 binds the exact successor Stable Config as part of PREPARE.
+     * Without this field a rebooted owner could not distinguish
+     * Prepare(A)/Commit(B). Legacy v1-v3 Rekey records decode with this field
+     * absent and are never accepted as an M13 resume proof. */
+    ucn_cluster_persist_config_ref_t successor_config;
 } ucn_cluster_persist_rekey_ref_t;
 
 /* Transaction phase is invalid-zero-safe. NONE means no in-flight or
@@ -101,7 +123,12 @@ typedef enum ucn_cluster_persist_transaction_phase {
     UCN_CLUSTER_PERSIST_TRANSACTION_INVALID = 0,
     UCN_CLUSTER_PERSIST_TRANSACTION_NONE = 1,
     UCN_CLUSTER_PERSIST_TRANSACTION_PREPARED = 2,
-    UCN_CLUSTER_PERSIST_TRANSACTION_COMMITTED = 3
+    UCN_CLUSTER_PERSIST_TRANSACTION_COMMITTED = 3,
+    /* M13 timeout/restart closes a current-schema Rekey PREPARED journal
+     * without retiring the predecessor Epoch. The exact txid/staging ref is
+     * retained so old PREPARE/ACK traffic cannot be confused with a future
+     * transaction. Config transactions do not use this phase. */
+    UCN_CLUSTER_PERSIST_TRANSACTION_ABORTED = 4
 } ucn_cluster_persist_transaction_phase_t;
 
 typedef struct ucn_cluster_persist_config_transaction {
@@ -129,6 +156,32 @@ typedef struct ucn_cluster_persist_tombstone {
     uint32_t rekey_transaction_id;
 } ucn_cluster_persist_tombstone_t;
 
+typedef enum ucn_cluster_persist_epoch_scope {
+    /* Zero is a valid, explicit Stable scope so pre-release hand-built v4
+     * snapshots remain canonical without an implicit migration sentinel. */
+    UCN_CLUSTER_PERSIST_EPOCH_SCOPE_STABLE = 0,
+    UCN_CLUSTER_PERSIST_EPOCH_SCOPE_RECOVERY = 1,
+    UCN_CLUSTER_PERSIST_EPOCH_SCOPE_INVALID = 255
+} ucn_cluster_persist_epoch_scope_t;
+
+typedef struct ucn_cluster_persist_recovery_identity {
+    bool valid;
+    ucn_cluster_epoch_t epoch;
+    uint32_t parent_cluster_id;
+    uint32_t parent_term;
+    uint32_t parent_config_id;
+    uint32_t recovery_round;
+    uint32_t recovery_nonce;
+    uint32_t cluster_id_round;
+} ucn_cluster_persist_recovery_identity_t;
+
+typedef struct ucn_cluster_persist_recovery_tombstone {
+    bool valid;
+    ucn_cluster_epoch_t retired_epoch;
+    uint32_t replacement_cluster_id;
+    uint32_t recovery_round;
+} ucn_cluster_persist_recovery_tombstone_t;
+
 /* Full logical snapshot atomically supplied to the provider.  04-02 maps it
  * to a versioned CRC-protected physical record.  Fields with has_* false are
  * semantically absent, not a zero-valued valid Epoch.  When active_epoch is
@@ -137,7 +190,7 @@ typedef struct ucn_cluster_persist_tombstone {
 typedef struct ucn_cluster_persist_state {
     /* On-media schema provenance, populated by decode. It is not authority
      * state: v1/v2 exist only for controlled migration/readback. The public
-     * writer and normal runtime writes emit v3. Its pre-release terminal
+     * writer and normal runtime writes emit v4. Its pre-release terminal
      * Config records retain C_new; older unpublished terminal records without
      * that identity are fail-closed. */
     uint16_t record_schema_version;
@@ -145,6 +198,9 @@ typedef struct ucn_cluster_persist_state {
     ucn_cluster_epoch_t active_epoch;
     bool has_max_epoch;
     ucn_cluster_epoch_t max_epoch;
+    ucn_cluster_persist_epoch_scope_t epoch_scope;
+    ucn_cluster_persist_recovery_identity_t recovery_identity;
+    ucn_cluster_persist_recovery_tombstone_t recovery_tombstone;
     ucn_cluster_persist_vote_t last_vote;
     ucn_cluster_persist_config_ref_t committed_config;
     ucn_cluster_persist_config_transaction_t config_transaction;
@@ -236,7 +292,12 @@ typedef enum ucn_cluster_persist_operation {
      * its Term-1 rule.  Only the RECOVERY_DECLARE owner may request this
      * operation; its transition validator applies the same ordinary-state
      * clear policy as CLUSTER_CREATE_COMMIT. */
-    UCN_CLUSTER_PERSIST_OPERATION_RECOVERY_CREATE_COMMIT = 15
+    UCN_CLUSTER_PERSIST_OPERATION_RECOVERY_CREATE_COMMIT = 15,
+    /* Atomically closes an exact M13 REKEY_PREPARED transaction. It may also
+     * advance boot_incarnation by exactly one when used by the controlled
+     * load-before-init recovery path; it never changes Active/Max Epoch,
+     * committed Config, committed Rekey or Tombstone. */
+    UCN_CLUSTER_PERSIST_OPERATION_REKEY_ABORT = 16
 } ucn_cluster_persist_operation_t;
 
 typedef struct ucn_cluster_persist_request {
@@ -350,6 +411,15 @@ static inline bool ucn_cluster_persist_provider_accepts_completion(
 void ucn_cluster_persist_state_init_empty(ucn_cluster_persist_state_t *state);
 bool ucn_cluster_persist_state_is_valid(
     const ucn_cluster_persist_state_t *state);
+
+/* Recovery scope/replay classifier used by the future v4 RX owner. It is
+ * pure and does not enable production RX: retired Recovery identities always
+ * return REPLAY after a reboot; the current exact identity returns OK. */
+ucn_result_t ucn_cluster_persist_recovery_identity_admit(
+    const ucn_cluster_persist_state_t *state,
+    uint32_t cluster_id,
+    uint32_t recovery_round,
+    uint32_t recovery_nonce);
 /* True only for the schema-v3 representation of M10's complete VoteId.
  * A valid partial legacy vote deliberately returns false. */
 bool ucn_cluster_persist_vote_is_complete_takeover(

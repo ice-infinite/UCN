@@ -246,7 +246,11 @@ typedef enum ucn_cluster_phase {
     UCN_CLUSTER_PHASE_HEAD_RECONFIGURING = 18,
     UCN_CLUSTER_PHASE_HEAD_QUORUM_GRACE = 19,
     UCN_CLUSTER_PHASE_HEAD_FENCED = 20,
-    UCN_CLUSTER_PHASE_COUNT = 21
+    /* CLV2-13-01: M13 transaction-owned phase.  The Current production FSM
+     * has no edge to or from it; only the default-OFF Rekey owner may expose
+     * this phase until M05 production integration is independently released. */
+    UCN_CLUSTER_PHASE_HEAD_REKEYING = 21,
+    UCN_CLUSTER_PHASE_COUNT = 22
 } ucn_cluster_phase_t;
 
 /* A Head may retain identity context after it lost write authority.  This is
@@ -259,7 +263,10 @@ typedef enum ucn_cluster_authority_fence_reason {
     UCN_CLUSTER_AUTHORITY_FENCE_HIGHER_AUTHORITY = 3,
     UCN_CLUSTER_AUTHORITY_FENCE_TERM_CONFLICT = 4,
     UCN_CLUSTER_AUTHORITY_FENCE_PERSISTENCE_FAULT = 5,
-    UCN_CLUSTER_AUTHORITY_FENCE_OWNER_STEP_BUDGET = 6
+    UCN_CLUSTER_AUTHORITY_FENCE_OWNER_STEP_BUDGET = 6,
+    /* Default-OFF M13 owner: old Authority is irreversibly revoked once a
+     * successor Commit enters the durable boundary. */
+    UCN_CLUSTER_AUTHORITY_FENCE_REKEY_COMMIT = 7
 } ucn_cluster_authority_fence_reason_t;
 
 /* CLV2-01-03 (M01 shadow phase): why the last shadow phase transition
@@ -317,8 +324,8 @@ typedef enum ucn_cluster_transition_reason {
 
 /* CLV2-01-01: compile-time fences so an accidental enum extension is
  * caught at build time, not in a test run (C99-compatible assertion). */
-typedef char ucn_cluster_phase_count_must_be_21[
-    UCN_CLUSTER_PHASE_COUNT == 21 ? 1 : -1];
+typedef char ucn_cluster_phase_count_must_be_22[
+    UCN_CLUSTER_PHASE_COUNT == 22 ? 1 : -1];
 /* CLV2-M12 (12-07): extended by exactly one reason (STABLE_RECLAIM). */
 typedef char ucn_cluster_reason_count_must_be_33[
     UCN_CLUSTER_REASON_COUNT == 33 ? 1 : -1];
