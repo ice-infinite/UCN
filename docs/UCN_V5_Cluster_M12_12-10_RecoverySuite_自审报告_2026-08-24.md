@@ -1,5 +1,7 @@
 # UCN V5 Cluster M12 12-10 Recovery Suite 分项自审报告（2026-08-24）
 
+> **M12.3 补正：** 本报告的 suite PASS 只覆盖当时的软件场景。节点重启项仅证明固定短向量中的 boot incarnation 会改变默认 ID，不证明 32-bit ID 硬唯一，也不关闭重启入站 replay、Recovery scope 或 serial no-wrap；这些边界分别归 `CLV2-13-11..13`。
+
 ## 1. 范围与结论
 
 本报告只处理 CLV2-12-10（P0）: Recovery 套件（Safety-4 与 Liveness-4/5）。结论: SELF-AUDIT PASS。
@@ -14,4 +16,4 @@
 | 两个异 lineage island | 场景 4: parent 1 vs 2 双头并存不合并 | PASS |
 | TTL 循环 | 场景 2: round 递增、lineage 留存、新轮新 ID | PASS |
 | Stable reclaim | 场景 3: parent A/2 归来全员收敛 | PASS |
-| 节点重启 | 12-09 cluster_persist_test_recovery_identity_restart（incarnation 驱动 ID 不复用） | PASS |
+| 节点重启 | 12-09 `cluster_persist_test_recovery_identity_restart`（固定向量中 incarnation 驱动 ID 变化；非硬唯一证明） | PARTIAL，结构性边界归 M13 |

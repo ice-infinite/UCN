@@ -1,15 +1,9 @@
-/* UCN CLV2-M02 (02-06): Cluster Recovery module.
+/* UCN Cluster Recovery module.
  *
- * STRUCTURAL REFACTOR ONLY (M02 mandate): the RECOVERY_HEAD quorum /
- * declaration / arbitration / TTL lifecycle moved verbatim from the
- * former single ucn_cluster.c.  Every function body is UNCHANGED; M01
- * (human sign-off ab53b31/a7f4841) froze the semantics including the
- * zero-backoff degenerate spin (a documented Current deficiency, M12
- * will fix it - do NOT change it here).  Do NOT "optimize" anything.
- *
- * Cross-module (via ucn_cluster_internal.h, all de-static only):
- *   - calls into fsm / membership / ucn_cluster.c core as declared.
- */
+ * M02 originally extracted the legacy Recovery lifecycle from
+ * ucn_cluster.c.  M12 now owns the lineage, bounded-backoff, exact-round
+ * membership and Stable-precedence rules in this module.  Cross-module
+ * helpers remain private through ucn_cluster_internal.h. */
 
 #include "ucn/ucn_cluster.h"
 
@@ -35,6 +29,68 @@ static bool recovery_candidate_outranks_current_head(
         return candidate_term > cluster->term;
     }
     return candidate_node < cluster->known_recovery_source;
+}
+
+/* CLV2-M12.3: legacy/unknown-lineage contenders still need a CURRENT
+ * winner fence.  recovery_nonce is only comparable inside this legacy
+ * fallback; lineage-aware candidates continue to use parent Term + Head
+ * Node ordering above. */
+static bool recovery_legacy_candidate_outranks_current_head(
+    const ucn_cluster_t *cluster,
+    uint32_t candidate_nonce,
+    ucn_node_id_t candidate_node)
+{
+    if (candidate_nonce != cluster->accepted_recovery_nonce) {
+        return candidate_nonce < cluster->accepted_recovery_nonce;
+    }
+    return candidate_node < cluster->known_recovery_source;
+}
+
+static ucn_result_t send_recovery_ack(
+    ucn_cluster_t *cluster,
+    ucn_node_id_t destination,
+    const ucn_cluster_message_t *declare)
+{
+    ucn_cluster_message_t ack;
+
+    (void)memset(&ack, 0, sizeof(ack));
+    ack.type = UCN_CLUSTER_MSG_RECOVERY_ACK;
+    ack.role = UCN_CLUSTER_ROLE_MEMBER;
+    ack.cluster_id = declare->cluster_id;
+    ack.term = declare->term;
+    ack.head_node_id = destination;
+    ack.recovery_nonce = declare->recovery_nonce;
+    ack.recovery_parent_cluster_id = declare->recovery_parent_cluster_id;
+    return send_cluster_message(cluster, destination, &ack);
+}
+
+/* CLV2-M12.2 (MAJOR): a Recovery DECLARE is the only v3 wire evidence a
+ * parentless/lagging survivor has after it follows a Recovery Head.  Adopt
+ * its lineage only after every format, parent-domain, rank and phase gate has
+ * accepted the declaration.  v3 does not carry parent_config_id, so never
+ * manufacture one here. */
+static void recovery_adopt_lineage_from_declare(
+    ucn_cluster_t *cluster,
+    const ucn_cluster_message_t *message)
+{
+    if (cluster == NULL || message == NULL ||
+        message->recovery_parent_cluster_id == 0U) {
+        return;
+    }
+    if (cluster->parent_cluster_id == 0U) {
+        /* This is newly learned lineage evidence.  Do not alter round or
+         * Config here: the v3 DECLARE proves only parent identity and Term;
+         * round escalation remains owned by the recovery timeout path. */
+        cluster->parent_cluster_id = message->recovery_parent_cluster_id;
+        cluster->parent_term = message->term;
+        return;
+    }
+    if (cluster->parent_cluster_id == message->recovery_parent_cluster_id &&
+        message->term > cluster->parent_term) {
+        /* Same-parent evidence is forward-only.  A stale DECLARE can never
+         * lower lineage even if it reached this helper in a future path. */
+        cluster->parent_term = message->term;
+    }
 }
 
 /* CLV2-M12 (12-04): pure deterministic Recovery rank comparator.  Terms
@@ -221,6 +277,10 @@ void declare_recovery_head(ucn_cluster_t *cluster,
     cluster->role_since_ms = now_ms;
     cluster->election_deadline_ms = 0U;
     cluster->recovery_backoff_deadline_ms = 0U;
+    /* A Recovery identity owns a distinct membership round.  No slot from a
+     * prior Recovery ID (or an abandoned stable mirror) is evidence for this
+     * new authority domain; every member must ACK the current nonce again. */
+    primary_member_table_clear(cluster);
     cluster->recovery_ack_count = 0U;
     cluster->recovery_acked = 0U;
     cluster->recovery_deadline_ms =
@@ -244,6 +304,7 @@ void stepdown_recovery_head(ucn_cluster_t *cluster, uint32_t now_ms)
     cluster->recovery_backoff_deadline_ms = 0U;
     cluster->recovery_ack_count = 0U;
     cluster->recovery_acked = 0U;
+    primary_member_table_clear(cluster);
     cluster->accepted_recovery_nonce = 0U;
     cluster->known_recovery_source = 0U;
     /* Keep recovery_eligible so a still-headless domain re-backs off with
@@ -256,8 +317,8 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
                                               const ucn_cluster_message_t *message,
                                               uint32_t now_ms)
 {
-    ucn_cluster_message_t ack;
     bool phase_committed = false;
+    bool follows_recovery_head;
 
     if (message->role != UCN_CLUSTER_ROLE_RECOVERY_HEAD ||
         message->head_node_id != source ||
@@ -274,25 +335,69 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
         cluster->role != UCN_CLUSTER_ROLE_RECOVERY_HEAD) {
         return UCN_ERR_ACCESS;
     }
+    follows_recovery_head =
+        cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+        ucn_cluster_recovery_scoped(cluster) &&
+        cluster->known_recovery_source != 0U &&
+        cluster->accepted_recovery_nonce != 0U;
     if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
-        cluster->recovery_cluster_id == 0U &&
+        !ucn_cluster_recovery_scoped(cluster) &&
         !ucn_deadline_expired(now_ms, cluster->head_lease_expires_at_ms)) {
         return UCN_ERR_ACCESS;
     }
-    /* CLV2-M12 (12-06): a recovery-domain member rejects an old-round
-     * DECLARE from its CURRENT Head.  recovery_nonce is a monotonic
-     * per-node counter (next_nonce), so the same source with a smaller
-     * nonce is a delayed old round -> REPLAY with zero writes; the same
-     * nonce with a different cluster_id is inconsistent -> REPLAY.  A
-     * strictly larger nonce is the Head's next round and follows the
-     * normal rank/join path below. */
-    if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
-        cluster->recovery_cluster_id != 0U &&
+    /* A Backup whose Primary lease is still live belongs to a Stable
+     * authority domain.  A temporary Recovery declaration cannot peel it
+     * away before the existing Backup FSM has fenced that Primary.  Once
+     * the lease has expired (and takeover is not already active), the
+     * headless Backup may use the legacy Recovery join path. */
+    if (cluster->role == UCN_CLUSTER_ROLE_BACKUP &&
+        (cluster->backup_takeover_active ||
+         cluster->backup_primary_lease_deadline_ms == 0U ||
+         !ucn_deadline_expired(now_ms,
+                               cluster->backup_primary_lease_deadline_ms))) {
+        return UCN_ERR_ACCESS;
+    }
+    /* CLV2-M12 (12-06): a recovery-domain member rejects an old or
+     * inconsistent exact-round DECLARE from its CURRENT Head.
+     * recovery_nonce is a monotonic per-node counter (next_nonce), so a
+     * smaller nonce is delayed old round -> REPLAY.  An equal nonce must
+     * also preserve recovery ID, Term and parent lineage.  Rejection may
+     * increment stale statistics, but cannot refresh the lease or alter
+     * Recovery membership/identity.  A strictly larger nonce is the Head's
+     * next round and follows the normal rank/join path below. */
+    if (follows_recovery_head &&
+        message->cluster_id == cluster->recovery_cluster_id &&
+        (source != cluster->known_recovery_source ||
+         message->recovery_nonce != cluster->accepted_recovery_nonce ||
+         message->term != cluster->term ||
+         message->recovery_parent_cluster_id != cluster->parent_cluster_id)) {
+        /* One Recovery ID denotes one exact round/Head/Epoch.  Reusing it
+         * with another source, nonce, Term or lineage is an identity
+         * collision, not a new round. */
+        cluster->stats.stale_messages++;
+        return UCN_ERR_REPLAY;
+    }
+    if (follows_recovery_head &&
         cluster->known_recovery_source == source &&
-        message->recovery_nonce != 0U &&
-        (message->recovery_nonce < cluster->accepted_recovery_nonce ||
-         (message->recovery_nonce == cluster->accepted_recovery_nonce &&
-          message->cluster_id != cluster->recovery_cluster_id))) {
+        message->cluster_id != cluster->recovery_cluster_id &&
+        message->recovery_nonce <= cluster->accepted_recovery_nonce) {
+        cluster->stats.stale_messages++;
+        return UCN_ERR_REPLAY;
+    }
+    /* Once a node has authoritative lineage evidence, an unscoped legacy
+     * candidate cannot erase that domain and a same-parent older Term cannot
+     * recruit an idle survivor merely because it has not started its own
+     * recovery backoff yet.  The former implementation applied this rank
+     * fence only to active contenders/current followers, leaving the
+     * headless-but-lineaged window open. */
+    if (cluster->parent_cluster_id != 0U &&
+        message->recovery_parent_cluster_id == 0U) {
+        cluster->stats.stale_messages++;
+        return UCN_ERR_REPLAY;
+    }
+    if (cluster->parent_cluster_id != 0U &&
+        message->recovery_parent_cluster_id == cluster->parent_cluster_id &&
+        message->term < cluster->parent_term) {
         cluster->stats.stale_messages++;
         return UCN_ERR_REPLAY;
     }
@@ -312,18 +417,31 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
         message->recovery_parent_cluster_id != cluster->parent_cluster_id) {
         return UCN_OK; /* different parent: keep contending, never cross-yield */
     }
-    if (message->recovery_parent_cluster_id != 0U &&
-        cluster->parent_cluster_id != 0U &&
-        cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
-        cluster->recovery_cluster_id != 0U &&
-        cluster->known_recovery_source != 0U &&
-        source != cluster->known_recovery_source) {
+    if (follows_recovery_head && source != cluster->known_recovery_source) {
+        bool yield_to_candidate;
+
         /* CLV2-M12.1 (MAJOR-2): a Member that already follows a winner
          * only switches when the incoming candidate outranks the CURRENT
-         * accepted Head (parent_term DESC, node ASC).  A delayed loser
-         * can never pull an already-converged island apart again. */
-        if (!recovery_candidate_outranks_current_head(cluster, message->term,
-                                                      source)) {
+         * accepted Head.  Equal known lineage ranks by parent_term DESC,
+         * node ASC.  If local lineage is still unknown, the documented
+         * legacy (nonce,node) ordering is used against the accepted Head,
+         * never against this member's own candidacy.  Once lineage is
+         * known, an unknown-parent frame cannot downgrade that evidence. */
+        if (cluster->parent_cluster_id != 0U &&
+            message->recovery_parent_cluster_id == 0U) {
+            cluster->stats.stale_messages++;
+            return UCN_ERR_REPLAY;
+        }
+        if (cluster->parent_cluster_id != 0U &&
+            message->recovery_parent_cluster_id != 0U) {
+            yield_to_candidate = recovery_candidate_outranks_current_head(
+                cluster, message->term, source);
+        } else {
+            yield_to_candidate =
+                recovery_legacy_candidate_outranks_current_head(
+                    cluster, message->recovery_nonce, source);
+        }
+        if (!yield_to_candidate) {
             cluster->stats.stale_messages++;
             return UCN_ERR_REPLAY;
         }
@@ -373,12 +491,19 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
     }
     /* Re-declaration of the same recovery Head refreshes the member
      * lease (the Recovery Head re-advertises periodically). */
-    if (cluster->accepted_recovery_nonce == message->recovery_nonce &&
-        cluster->known_recovery_source == source) {
+    if (follows_recovery_head &&
+        cluster->accepted_recovery_nonce == message->recovery_nonce &&
+        cluster->known_recovery_source == source &&
+        cluster->recovery_cluster_id == message->cluster_id &&
+        cluster->term == message->term &&
+        cluster->parent_cluster_id == message->recovery_parent_cluster_id) {
         cluster->head_lease_expires_at_ms =
             ucn_deadline_from_now(now_ms, message->recovery_ttl_ms);
         cluster->head_grace_deadline_ms = 0U;
-        return UCN_OK;
+        /* A lost/backpressured first ACK must be recoverable from the
+         * periodic re-declaration.  The Head side is idempotent, so every
+         * exact refresh re-sends the ACK. */
+        return send_recovery_ack(cluster, source, message);
     }
     /* CLV2-01-04f.4: the plain join.  Every headless source derives a
      * pre-phase (RECOVERY_OBSERVE / RECOVERY_ELECTION / DETACHED_OBSERVE
@@ -411,6 +536,10 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
             }
         }
     }
+    /* All rejecting rank/phase transitions are above.  The accepted
+     * declaration is now trustworthy lineage evidence for a parentless or
+     * lagging survivor; adopt it before committing the Recovery join. */
+    recovery_adopt_lineage_from_declare(cluster, message);
     cluster->accepted_recovery_nonce = message->recovery_nonce;
     cluster->known_recovery_source = source;
     /* C07.7 P0-1: actually join the recovery Cluster.  Its fresh ID was
@@ -418,6 +547,7 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
      * impersonates the lost Cluster.  The member keeps its role_since/lease
      * so the recovery domain has a live membership. */
     if (cluster->role != UCN_CLUSTER_ROLE_MEMBER ||
+        cluster->cluster_id != message->cluster_id ||
         cluster->recovery_cluster_id != message->cluster_id) {
         cluster->recovery_cluster_id = message->cluster_id;
         cluster->cluster_id = message->cluster_id;
@@ -431,6 +561,10 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
     cluster->head_lease_expires_at_ms =
         ucn_deadline_from_now(now_ms, message->recovery_ttl_ms);
     cluster->head_grace_deadline_ms = 0U;
+    /* A stable JOIN_ACCEPT timer must never survive a direct lease-expired
+     * switch into a Recovery domain and later erase the newly adopted
+     * lineage. */
+    cluster->lineage_reset_deadline_ms = 0U;
     /* Joining a recovery Head abandons our own recovery candidacy. */
     cluster->recovery_eligible = false;
     cluster->recovery_backoff_deadline_ms = 0U;
@@ -441,17 +575,7 @@ ucn_result_t handle_recovery_declare(ucn_cluster_t *cluster,
     assert(cluster_phase_from_legacy_state(cluster, now_ms) ==
            UCN_CLUSTER_PHASE_MEMBER_ACTIVE);
 #endif
-    (void)memset(&ack, 0, sizeof(ack));
-    ack.type = UCN_CLUSTER_MSG_RECOVERY_ACK;
-    ack.role = UCN_CLUSTER_ROLE_MEMBER;
-    ack.cluster_id = message->cluster_id;
-    ack.term = message->term;
-    ack.head_node_id = source;
-    /* CLV2-M12 (12-06): the ACK echoes the exact declare round (nonce) and
-     * lineage binding (parent), so the Head can reject old-round ACKs. */
-    ack.recovery_nonce = message->recovery_nonce;
-    ack.recovery_parent_cluster_id = message->recovery_parent_cluster_id;
-    return send_cluster_message(cluster, source, &ack);
+    return send_recovery_ack(cluster, source, message);
 }
 
 ucn_result_t handle_recovery_ack(ucn_cluster_t *cluster,
@@ -462,22 +586,23 @@ ucn_result_t handle_recovery_ack(ucn_cluster_t *cluster,
     ucn_cluster_member_t *member;
 
     if (cluster->role != UCN_CLUSTER_ROLE_RECOVERY_HEAD ||
+        message->role != UCN_CLUSTER_ROLE_MEMBER ||
         message->cluster_id != cluster->recovery_cluster_id ||
         message->head_node_id != cluster->config.local_node_id) {
         return UCN_ERR_ACCESS;
     }
-    /* CLV2-M12 (12-06): the ACK is bound to the exact declare round and
-     * lineage.  A non-zero nonce that differs from the current round is an
-     * old-round ACK -> REPLAY with zero writes.  A non-zero parent binding
-     * that differs from ours is a different-parent island -> ACCESS.
-     * Zero fields keep the legacy/staged frame tolerance. */
-    if (message->recovery_nonce != 0U &&
-        message->recovery_nonce != cluster->recovery_nonce) {
+    if (message->term != cluster->term) {
         cluster->stats.stale_messages++;
         return UCN_ERR_REPLAY;
     }
-    if (message->recovery_parent_cluster_id != 0U &&
-        message->recovery_parent_cluster_id != cluster->parent_cluster_id) {
+    /* CLV2-M12.3: an ACK is an exact-round membership proof.  Legacy zero
+     * nonce cannot be accepted by a live Recovery Head; parent 0 remains a
+     * valid exact value only for a genuinely parentless Recovery domain. */
+    if (message->recovery_nonce != cluster->recovery_nonce) {
+        cluster->stats.stale_messages++;
+        return UCN_ERR_REPLAY;
+    }
+    if (message->recovery_parent_cluster_id != cluster->parent_cluster_id) {
         return UCN_ERR_ACCESS;
     }
     /* C07.7 P0-1: track the acknowledged member so the recovery Cluster

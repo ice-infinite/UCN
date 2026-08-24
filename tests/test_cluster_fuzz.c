@@ -110,7 +110,11 @@ static int cluster_fuzz_build_seed(uint8_t type, uint8_t seed[UCN_CLUSTER_MESSAG
         message.role = UCN_CLUSTER_ROLE_BACKUP;
         break;
     case UCN_CLUSTER_MSG_TAKEOVER_ACK:
+    case UCN_CLUSTER_MSG_RECOVERY_ACK:
         message.role = UCN_CLUSTER_ROLE_MEMBER;
+        break;
+    case UCN_CLUSTER_MSG_RECOVERY_DECLARE:
+        message.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
         break;
     default:
         message.role = UCN_CLUSTER_ROLE_HEAD;

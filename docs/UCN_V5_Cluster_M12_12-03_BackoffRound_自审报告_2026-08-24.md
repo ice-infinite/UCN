@@ -17,7 +17,7 @@
 
 - base 大于 max 的配置：钳制而非拒绝（自审中发现原校验会拒绝既有小 max 测试配置）。
 - 抖动确定性：只依赖 (parent, round, node)——同节点同轮重复计算一致，异节点/异轮去同步。
-- round 上界：退避指数封顶 min(round, 4)；round 本身单调增长无回绕风险（ID 唯一性另由对象轮保证）。
+- round 上界：退避指数封顶 `min(round,4)`；当前 `recovery_round++` 与 Recovery nonce 仍是 32-bit RAM serial，尚无阈值/持久 rotate，不能宣称无回绕。该边界已登记为 `CLV2-13-13`。
 - 稳定加入判定：JOIN_ACCEPT 只来自稳定 Head（恢复域 Join 走 DECLARE/ACK），因此单站点武装即可，无歧义。
 
 ## 4. 测试与门禁证据

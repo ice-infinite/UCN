@@ -1,5 +1,7 @@
 # UCN V5 Cluster M12 RecoveryLineage 连续实施计划（2026-08-24）
 
+> **后续复审补正：** 本文记录首轮实施计划，不代表当前完成状态。“默认生成器保证新 ID”和 12-09 的完整持久化目标尚未成立；当前结论以 `UCN_V5_Cluster_M12.3_全体复审整改与自审报告_2026-08-24.md` 和任务表 `CLV2-12.3/13-11..13` 为准。
+
 ## 1. 授权与范围
 
 - 用户指令：接替完成 M12；**每完成一个小节点即自审，自审通过才开始下一个节点**；全部节点完成后做 M12 全量自审，通过后整理外部审计材料并停在外部审计边界（不提交、不推送）。
@@ -10,7 +12,7 @@
 ## 2. 现场核对（HEAD=9386dca）
 
 - M05 顶层仍 AUDIT HOLD；M08 仍 WAIT EXTERNAL；M10 待外审复审；M09 AUDIT HOLD；M11 已外审 GO（受限实验）。M12 依赖 M11，且**默认产品不接入 v4 RX/TX/FSM/Authority/encoder**。
-- 既有可复用资产：M03-06 运行时历史 `last_cluster_id/max_seen_term/last_stable_head`（set_detached 不清）；M03-08 cluster ID provider（request 已携带 purpose/parent cluster/term/round/incarnation，默认生成器已保证恢复域新 ID）；M04 persist-before-promise + 受控启动 incarnation；M08 Authority/Fence（12-05 衔接）；M01 时代 zero-backoff 退化自旋（OP-210 明示留待 M12 修复）。
+- 既有可复用资产：M03-06 运行时历史 `last_cluster_id/max_seen_term/last_stable_head`（set_detached 不清）；M03-08 cluster ID provider（request 已携带 purpose/parent cluster/term/round/incarnation，默认生成器只提供确定性 best-effort，硬唯一性归产品 Provider/分配历史）；M04 persist-before-promise + 受控启动 incarnation；M08 Authority/Fence（12-05 衔接）；M01 时代 zero-backoff 退化自旋（OP-210 明示留待 M12 修复）。
 - 现状缺口（逐节点对应）：lineage 未显式成域（12-01）；Recovery ID 未绑 config/round 语义（12-02）；退避为 node_id%max 线性且零值退化（12-03）；仲裁仍是 (nonce,node_id) 而非 lineage rank（12-04）；Recovery Head 无权威范围限制（12-05）；Declare/ACK 未绑 round（12-06）；Recovery Member 无 Stable 优先让位路径（12-07）；min_recovery_peers 不可配（12-08）；round/lineage 未持久化（12-09）；缺端到端场景套件（12-10）。
 
 ## 3. 逐节点验收标准（完成定义与测试）

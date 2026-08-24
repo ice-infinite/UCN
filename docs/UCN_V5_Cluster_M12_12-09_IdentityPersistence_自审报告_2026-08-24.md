@@ -4,7 +4,7 @@
 
 外审裁决: 本项此前自评 PASS（或分支 boot incarnation）不成立——任务原文是 persist boot incarnation + tombstone，而本项只实现了 boot incarnation。
 正式处理（外审选项 B）: 12-09 降级为 PARTIAL / boot-ID non-reuse only；重启入站 replay 保护（恢复域 tombstone）正式归 M13（需要 schema v4）。M12 不得宣称 12-01..12-10 字面全部完成。
-生效后的准确结论: PARTIAL（boot-ID 跨重启不复用已闭环并有重启 replay 测试；重启入站 replay 保护未实现，归 M13）。
+生效后的准确结论: PARTIAL（boot incarnation 严格前进及固定短序列 ID 变化已验证；重启入站 replay、Recovery scope 恢复和硬 ID 不复用均未闭环，归 M13）。
 
 ---
 
@@ -17,14 +17,15 @@
 | 要求 | 证据 | 原始结论 | 外审后结论 |
 |---|---|---|---|
 | persist round/lineage 或至少 boot incarnation + tombstone | boot incarnation（04-09）持久化并回流 provider 请求；incarnation 编入 Recovery ID | PASS（或分支） | PARTIAL（缺 + tombstone） |
-| 避免重启后复用旧 Recovery ID/nonce | 重启 replay 测试: Boot2 incarnation N+1 派生 id2 异于 id1 | PASS | PASS（仅 ID 不复用） |
+| 避免重启后复用旧 Recovery ID/nonce | 重启测试只证明该固定向量 Boot2 的 id2 异于 id1 | PASS | PARTIAL（样本通过，不是全空间无碰撞证明） |
 | 重启 replay 测试 | cluster_persist_test_recovery_identity_restart | PASS | PASS（ID 维度） |
 
 ## 3. 关键设计说明（原始）
 
-- ID 不复用的机制链: M04 04-09 持久化 incarnation（REQUIRED init 前严格递增），12-02 链式 mix 混入 incarnation，每 boot 新 ID。
+- ID 去相关机制链：M04 04-09 持久化 incarnation（REQUIRED init 前严格递增），12-02 默认 mix 混入 incarnation；硬唯一性仍属于 Provider/分配历史合同。
 - RAM-only 边界: round/lineage 不持久化（v3 292B 记录固定，扩展归 M13 schema v4）；重启后 round 从 0 起、退避有界。
 - 恢复域退役 tombstone 复用 M13 Rekey 语义，恢复域专用 tombstone 需要 schema 扩展，明确后置。
+- Record 当前只有 Active/Max Epoch，没有 Stable/Recovery scope。`RECOVERY_CREATE_COMMIT` 后若重启，`restore_current_fsm_safety_inputs()` 会把 max Epoch 投影到 `last_cluster_id/max_seen_term/last_stable_head`；在 schema 能标记 scope 前无法可靠区分这是不是 Stable 历史。该歧义登记为 `CLV2-13-11`，M12 不做猜测式迁移。
 
 ## 4. 测试与门禁证据（原始）
 

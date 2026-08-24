@@ -730,6 +730,76 @@ static int test_production_v3_join_request_stays_provisional(void)
     return 0;
 }
 
+/* CLV2-M12.3: Recovery ACKs intentionally remain non-voting v3
+ * PROVISIONAL records in the production archive, but their Recovery lease
+ * still owns the slot lifetime.  The test-hook copy promotes legacy records
+ * to COMMITTED and therefore cannot expose this production-only boundary. */
+static int test_production_recovery_provisional_member_expires(void)
+{
+    ucn_cluster_t cluster;
+    ucn_cluster_config_t config;
+    ucn_neighbor_summary_t neighbor;
+    ucn_cluster_message_t ack;
+    ucn_cluster_member_t *member;
+    uint8_t encoded[UCN_CLUSTER_MESSAGE_BYTES];
+    uint32_t now_ms = 100U;
+
+    (void)memset(&config, 0, sizeof(config));
+    config.local_node_id = 2U;
+    config.enabled = true;
+    config.head_capable = true;
+    config.head_score = 1U;
+    config.member_capacity = 2U;
+    config.persistence_mode = UCN_CLUSTER_PERSISTENCE_VOLATILE_TEST;
+    config.now_ms = production_rx_now;
+    config.now_context = &now_ms;
+    config.send = production_rx_send;
+    ASSERT_TRUE(ucn_cluster_config_apply_timing_profile(
+                    &config, UCN_CLUSTER_TIMING_PROFILE_DEFAULT) == UCN_OK);
+    ASSERT_TRUE(ucn_cluster_init(&cluster, &config) == UCN_OK);
+
+    (void)memset(&neighbor, 0, sizeof(neighbor));
+    neighbor.state = UCN_NEIGHBOR_ADMITTED;
+    neighbor.peer_node_id = 1U;
+    ASSERT_TRUE(ucn_cluster_sync_neighbors(&cluster, &neighbor, 1U) == UCN_OK);
+
+    cluster.role = UCN_CLUSTER_ROLE_RECOVERY_HEAD;
+    cluster.cluster_id = 20U;
+    cluster.recovery_cluster_id = 20U;
+    cluster.term = 3U;
+    cluster.head_node_id = config.local_node_id;
+    cluster.recovery_nonce = 9U;
+    cluster.parent_cluster_id = 10U;
+    cluster.shadow_phase = UCN_CLUSTER_PHASE_RECOVERY_HEAD;
+
+    (void)memset(&ack, 0, sizeof(ack));
+    ack.type = UCN_CLUSTER_MSG_RECOVERY_ACK;
+    ack.role = UCN_CLUSTER_ROLE_MEMBER;
+    ack.cluster_id = cluster.cluster_id;
+    ack.term = cluster.term;
+    ack.head_node_id = config.local_node_id;
+    ack.recovery_nonce = cluster.recovery_nonce;
+    ack.recovery_parent_cluster_id = cluster.parent_cluster_id;
+    ASSERT_TRUE(ucn_cluster_message_encode(&ack, encoded) == UCN_OK);
+    ASSERT_TRUE(ucn_cluster_receive(&cluster, 1U, true, encoded,
+                                    sizeof(encoded)) == UCN_OK);
+
+    member = primary_member_find(&cluster, 1U);
+    ASSERT_TRUE(member != NULL);
+    ASSERT_TRUE(member->status == UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL);
+    ASSERT_TRUE(!member->voting);
+    ASSERT_TRUE(member->wire_version == UCN_CLUSTER_MEMBER_WIRE_VERSION_V3);
+    ASSERT_TRUE(!primary_member_is_protected_voter(member));
+    member->lease_expires_at_ms = ucn_deadline_from_now(now_ms, 1U);
+
+    now_ms += 1U;
+    expire_members(&cluster, now_ms);
+    ASSERT_TRUE(primary_member_find(&cluster, 1U) == NULL);
+    ASSERT_TRUE(cluster.stats.member_leases_expired == 1U);
+    ASSERT_TRUE(cluster.recovery_ack_count == 1U);
+    return 0;
+}
+
 int main(void)
 {
     int result = 0;
@@ -746,5 +816,6 @@ int main(void)
     result |= test_runtime_and_voter_capacities_are_independent();
     result |= test_production_v3_backup_authority_rx_is_fenced();
     result |= test_production_v3_join_request_stays_provisional();
+    result |= test_production_recovery_provisional_member_expires();
     return result;
 }

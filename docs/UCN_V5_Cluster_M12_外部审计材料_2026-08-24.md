@@ -1,5 +1,7 @@
 # UCN V5 Cluster M12 外部审计材料（2026-08-24）
 
+> **当前复审对象（M12.3）：** `codex/v5-adaptive-wire` 的 `1fb4521` 加当前未提交工作树。原 `9386dca / ucn-wt-m35` 内容仅保留为历史基线。最新运行期修复、对抗回归、完整矩阵和仍未关闭的结构性边界见 `UCN_V5_Cluster_M12.3_全体复审整改与自审报告_2026-08-24.md`。M12 仍为 `AUDIT HOLD / WAIT EXTERNAL`，不得据此进入 M13。
+
 ## 1. 审计对象
 
 - 里程碑: CLV2-M12 RecoveryLineage（任务表 L747-772）。
@@ -44,3 +46,11 @@ cmake -B build -DUCN_PROFILE=FULL -DCMAKE_BUILD_TYPE=Debug && cmake --build buil
 ## 5. M12.1 外审整改（2026-08-24）
 
 - All UCN tests passed；OBSERVED-PAIRS count=30、VIOLATION 0；Golden blob 8b80b087c554708e8538ee2db23f545167b31554、trace mismatch 0；cluster_bytes=1616；-Werror 零告警；git diff --check 干净。
+
+## 6. M12.3 全体复审补充材料
+
+- Recovery 域退出：Stable Join 清除旧 Recovery identity/nonce/source/deadline/ACK 状态；直接 Recovery Join 取消旧 Stable lineage-reset timer。
+- 身份与 Wire：Type 16/17 严格校验角色、ID、parent 与非零 nonce；同一 Recovery ID 只能绑定 exact `{Head,Term,parent,nonce}`；exact redeclare 重发 ACK。
+- 生命周期：新 Recovery identity、Recovery stepdown 均清旧成员表；生产 archive 中 Recovery Head 的 v3 provisional member 会按 lease 过期；活跃 Stable Backup 与 takeover-active Backup 不会被 Recovery Declare 剥离。
+- 当前验证矩阵：Windows Full Debug/Release、Lite、Nano、Service-Off，WSL ASan/UBSan 与 `-fanalyzer -Werror` 全部通过；具体计数与命令见 M12.3 报告。
+- 仍阻断整体放行：Record v1 未区分 Stable/Recovery Epoch scope；默认 32-bit mix 已观察到固定碰撞；Recovery round/nonce 尚未进入 no-wrap/rotation 纪律。对应任务为 `CLV2-13-11..13`。

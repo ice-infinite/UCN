@@ -94,10 +94,11 @@ static uint32_t cluster_default_next_id(const ucn_cluster_id_request_t *request)
     }
     /* CLV2-M12 (12-02): the Recovery identity keys on the full lineage
      * (parent cluster/term/config/round) plus the boot incarnation and the
-     * monotonic object round.  Each input is mixed INTO the chain (not
-     * XOR-ed alongside): a bit delta in one input can never cancel a bit
-     * delta in another, so consecutive recovery rounds with consecutive
-     * object rounds can never derive the same ID. */
+     * monotonic object round.  Chained avalanche mixing avoids the known
+     * cross-field XOR cancellation failure and gives a deterministic,
+     * low-cost default.  It is not a mathematical collision-free allocator;
+     * products requiring a hard uniqueness proof must provide
+     * make_cluster_id and retain their own allocation history. */
     candidate = UINT32_C(0xA511E9B3);
     candidate = cluster_id_mix(candidate ^ request->local_node_id);
     candidate = cluster_id_mix(candidate ^ request->parent_cluster_id);
@@ -179,10 +180,12 @@ ucn_result_t cluster_make_next_id(ucn_cluster_t *cluster,
                                    parent_term, 0U, 0U, cluster_id);
 }
 
-/* CLV2-M12 (12-02): the Recovery identity keys on the full captured
- * lineage - parent cluster/term/config and the recovery round - so the
- * same node derives a distinct ID for every round and boot incarnation,
- * and the ID is never the parent cluster_id or 0/broadcast. */
+/* CLV2-M12 (12-02): the Recovery identity request keys on the full captured
+ * lineage - parent cluster/term/config and the recovery round.  The core
+ * strictly rejects parent/zero/broadcast results.  Cross-round/boot/global
+ * collision freedom is a Provider allocation contract; the compact default
+ * is deterministic best-effort and observed collisions fail closed on the
+ * exact Recovery identity gates. */
 ucn_result_t cluster_make_next_recovery_id(ucn_cluster_t *cluster,
                                            uint32_t parent_cluster_id,
                                            uint32_t parent_term,
@@ -1907,6 +1910,7 @@ static ucn_result_t ucn_cluster_step_inner(ucn_cluster_t *cluster)
      * lineage.  This is a pure site effect on phase-preserving state - no
      * transition - and it runs before any Member control activity. */
     if (cluster->role == UCN_CLUSTER_ROLE_MEMBER &&
+        !ucn_cluster_recovery_scoped(cluster) &&
         cluster->lineage_reset_deadline_ms != 0U &&
         ucn_deadline_expired(now_ms, cluster->lineage_reset_deadline_ms)) {
         cluster_lineage_reset(cluster);

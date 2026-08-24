@@ -23,7 +23,7 @@
 > | M09 Backup 双缓冲 | AUDIT HOLD / BLOCKED BY M08 WAIT EXTERNAL（R01 外审 GO，受限实验软件范围） | 09-01..11 已完成分项和全量自审；R01 已获外审 GO，但 M08 仍为 SELF-AUDIT PASS / WAIT EXTERNAL，M05 顶层 AUDIT HOLD 不解除 | 仅建立独立 Backup mirror/同步合同与 production-archive 单元测试；不接入 v4 production RX/TX/FSM、Authority 或 Takeover 提交。 |
 > | M10 Final Takeover | AUDIT HOLD / R31–R34 SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW（受控实验范围） | 外审确认的通用 EPOCH bypass、durable terminal、连续接管与覆盖声明四项缺陷均已整改并完成矩阵自审；尚未获得本轮外部复审签字 | 默认产品仍不接入 v4 RX/TX/FSM、Authority、encoder 或实机结论；M10 实验 archive 也不得视为可放行，待 R31–R34 独立复审。 |
 > | M11 Merge/Handover | DONE / EXTERNAL RE-REVIEW PASS / LIMITED EXPERIMENTAL GO | R01–R08-B 全部获外审签字；R08-A 关闭同槽 ABA，R08-B 关闭 expiry 删除 replay-history / hold-down 的生命周期旁路。 | 仅限 caller-owned、default-OFF 实验 archive。M05 顶层 `AUDIT HOLD`、M08 `WAIT EXTERNAL`、M10 外审等待仍不解除；M12 不因此获授权，且不得把 M11 接入 production v4 RX/TX/FSM、Authority、Adapter 或实机结论。 |
-> | M12 RecoveryLineage | AUDIT HOLD / M12.1 整改完成 / SELF-AUDIT PASS / WAIT EXTERNAL RE-REVIEW | 12-01..12-08、12-10 完成；12-09 PARTIAL（boot-ID non-reuse only，重启入站 replay 保护归 M13）；M12.1 已修外审 4 MAJOR + 1 MINOR（OP-371） | 外审 MAJOR-1 durable Recovery Term 一致（新 operation 类 RECOVERY_CREATE_COMMIT）、MAJOR-2 成员当前赢家 fencing、MAJOR-3 同 parent config 前向刷新、MAJOR-4 12-09 降级 PARTIAL 均整改并有对抗测试；FULL/ASan/LITE/NANO 全绿；OBSERVED 30 零违例；Golden 8b80b08；cluster_bytes 1616。待外审复审；M05/M08/M10 边界不解除。 |
+> | M12 RecoveryLineage | AUDIT HOLD / M12.3 SELF-AUDIT PASS / WAIT EXTERNAL | 12-01..12-08、12-10 的运行期软件范围已实现；12-09 仍 PARTIAL。M12.2 lineage-adoption 保留，M12.3 又关闭域退出、严格身份、成员轮次/租约和 Stable Backup 优先级缺口，并登记 `13-11..13` 三项结构阻断。 | 默认 ID 仅 best-effort；Record scope、硬唯一 allocation history 与 Recovery no-wrap 未完成。不得接入 v4/Authority/Adapter 生产路径，外审前不得进入 M13。 |
 > | M13 Rekey/No-wrap | TODO | — | — |
 > | M14 收敛/发布 | TODO | — | — |
 >
@@ -750,6 +750,8 @@ duplicate/replay/reorder
 
 **依赖：** M11
 
+**当前状态（2026-08-24 全体复审后）：** `AUDIT HOLD / M12.3 SELF-AUDIT PASS / WAIT EXTERNAL`。M12.2 的 lineage adoption 已保留；M12.3 另关闭运行期 Recovery 域退出、严格身份、成员生命周期与 Stable Backup 优先级缺口。`12-09` 仍为 PARTIAL；默认 32-bit ID 生成器只提供确定性 best-effort，硬唯一性须由 Provider/分配历史保证，均不得写成生产已闭环。
+
 **里程碑门禁：** Recovery 使用新 cluster_id；同 lineage 先比较 parent term/config；连续失败退避升级。
 
 | 任务 ID | 优先级 | 依赖 | 主要文件/位置 | 具体修改任务 | 完成定义 / 测试 |
@@ -764,6 +766,13 @@ duplicate/replay/reorder
 | `CLV2-12-08` | P1 | 12-01 | Isolation policy | 产品可配置 `min_recovery_peers`；默认禁止完全孤立自封。普通 Member 和带 mirror Backup 的门槛分别明确，不混称 old quorum。 | 1/2/多节点 island 测试。 |
 | `CLV2-12-09` | P0 | 12-01 | Persistence | persist recovery round/lineage 或至少 persist boot incarnation + tombstone，避免重启后复用旧 Recovery ID/nonce。 | 重启 replay 测试。 |
 | `CLV2-12-10` | P0 | 12-01..09 | Recovery suite | Primary+Backup 同死、多候选、两个同/不同 lineage island、TTL 循环、Stable reclaim、节点重启。 | Safety-4 与 Liveness-4/5 满足。 |
+| `CLV2-12.2-01` | P0 / MAJOR | M12.1 | Recovery Head lineage adoption | 接受 lineage-aware `RECOVERY_DECLARE` 时，在所有 rank/phase/transition 校验通过后、join 状态写入前，采用可信 `parent_cluster_id` 与 forward-only `parent_term`；未知 parent 采用 ID/Term（不伪造 Config），同 parent 仅提高 Term，不同 parent 保持原有 fail-closed。 | **SELF-AUDIT PASS：** parentless late survivor 先加入 H1/A/T9 后记录 A/T9；迟到同 parent loser H2 不得再把它拉走；已知 A/T8 切换 A/T9 后 lineage 必为 T9。 |
+| `CLV2-12.2-02` | P1 | 12-06 | Declare/ACK exact Term binding | 同源同 nonce lease refresh 必须同时精确匹配 recovery cluster、Term、parent；Recovery Head 接受 ACK 必须精确匹配 cluster、Term、Head、nonce、parent。 | **SELF-AUDIT PASS：** wrong-Term DECLARE/ACK 均拒绝且不写 lease/member/ACK/Recovery 身份（replay 统计允许增加）；正确 current round 仍可 refresh/idempotent。 |
+| `CLV2-12.2-03` | P0 | 12.2-01,12.2-02 | Focused self-audit | 仅复测 lineage-adoption、winner fencing、Term exact binding 及全既有 M12/M04/M05 边界；核对 M12.1 原 4 MAJOR + 1 MINOR 保持关闭。 | **SELF-AUDIT PASS：** Full Debug/Release、Lite/Nano/Service-Off、ASan/UBSan、analyzer、Golden/OBSERVED、`diff --check` 与 production-v4 isolation 全部记录；仍须外审。 |
+| `CLV2-12.3-01` | P0 | 12.2 | Recovery domain exit / timer ownership | Stable `JOIN_ACCEPT` 必须清除 Recovery ID、nonce、source、deadline、ACK 状态；Stable lineage-reset timer 不得在直接 Recovery join 后继续运行。 | **SELF-AUDIT PASS / WAIT EXTERNAL：** delayed old DECLARE 不刷新 Stable lease；Recovery join 后旧 reset timer 不清新 lineage。 |
+| `CLV2-12.3-02` | P0 | 12-06 | Exact Recovery identity / wire validity | 一个 Recovery ID 只能绑定一个 `{Head,Term,parent,nonce}`；Type16/17 严格角色、非零 nonce、非 broadcast ID，Recovery ID 不得等于 parent；exact redeclare 重发 ACK。 | **SELF-AUDIT PASS / WAIT EXTERNAL：** identity collision、wrong role/zero/broadcast/parent reuse 全拒绝；首个 ACK 丢失可由重声明恢复。 |
+| `CLV2-12.3-03` | P0 | 12-06,12-07 | Membership round / Stable Backup fence | 新 Recovery identity 与 stepdown 都清旧成员表；Recovery Head 的 v3 provisional member 按 Recovery lease 过期；活跃 Stable Backup 与 takeover-active Backup 拒绝 Recovery DECLARE。 | **SELF-AUDIT PASS / WAIT EXTERNAL：** 旧轮成员不跨 ID；生产 archive provisional member 可过期；Stable Backup 完整对象无写回。 |
+| `CLV2-12.3-04` | P1 | 12-02,12-03,12-09 | Honest limits / M13 handoff | 删除“32-bit hash 绝不碰撞”“round 无回绕风险”“zero ACK 兼容”等过度承诺；登记 Recovery scope 持久化歧义、ID allocation history、nonce/round no-wrap 为 M13 阻断。 | **SELF-AUDIT PASS / WAIT EXTERNAL：** 文档与代码一致；M12 保持 HOLD，不以测试矩阵代替未实现 schema/allocator。 |
 
 ## 本里程碑禁止事项
 - 禁止 Recovery 使用 parent cluster_id。
@@ -792,6 +801,9 @@ duplicate/replay/reorder
 | `CLV2-13-08` | P1 | 13-01 | State reset | 新 cluster 下 term/config/generation/snapshot 从合法初值开始；成员、Backup、Config 通过 Commit 原子迁移。 | 没有一部分节点停留旧 ID 却被计入新 quorum。 |
 | `CLV2-13-09` | P0 | 13-01 | No-wrap CI | 静态脚本扫描 Cluster 代码：禁止 `MAX -> 1`、未经 helper 的 `++term/generation/config/snapshot`。 | CI gate。 |
 | `CLV2-13-10` | P0 | 13-01..09 | Rekey suite | 阈值、ACK 丢失、旧 quorum 不足、persist failure、Commit 后旧 frame、节点重启、Backup 替换。 | Safety-7/9/10 满足。 |
+| `CLV2-13-11` | P0 | 12-09,13-03 | Persisted Epoch scope / Recovery tombstone | Record schema 必须显式区分 Stable 与 Recovery Active/Max Epoch，持久化 Recovery lineage/round/retired-ID tombstone；禁止把 Recovery Epoch 在重启后恢复成 `last_stable_*`。 | Recovery create→restart 不污染 Stable history；旧 Recovery frame 在 reboot 后 replay；双槽撕裂仍 fail-closed。 |
+| `CLV2-13-12` | P0 | 12-02,13-11 | Cluster ID allocation history | 产品级 Provider 必须提供可验证的全局/域内唯一分配或持久化 collision history；默认 32-bit mix 只作 best-effort。观察到同 ID 不同 identity 时必须 fail-closed 并换号，不能继续赋权。 | 固定碰撞向量、重启、满历史、双节点同时分配与换号收敛回归。 |
+| `CLV2-13-13` | P0 | 12-03,12-06,13-02 | Recovery serial exhaustion | `recovery_round`、`cluster_id_round`、Recovery nonce 纳入 no-wrap/rotation 纪律；达到阈值只能持久化 rotate/rekey 或 fail-closed，禁止 `UINT32_MAX→1/0`。 | 阈值前进、阈值拒绝、重启后不回退、旧 nonce/round 不复活。 |
 
 ## 本里程碑禁止事项
 - 禁止 MAX->1。

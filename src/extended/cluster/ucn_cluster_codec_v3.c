@@ -149,10 +149,22 @@ static bool message_is_valid(const ucn_cluster_message_t *message)
         return message->backup_generation != 0U &&
                message->role == UCN_CLUSTER_ROLE_BACKUP;
     case UCN_CLUSTER_MSG_RECOVERY_DECLARE:
-        return message->recovery_nonce != 0U &&
+        return message->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD &&
+               message->cluster_id != UCN_NODE_BROADCAST &&
+               message->recovery_parent_cluster_id != UCN_NODE_BROADCAST &&
+               (message->recovery_parent_cluster_id == 0U ||
+                message->cluster_id != message->recovery_parent_cluster_id) &&
+               message->recovery_nonce != 0U &&
                ucn_duration_is_valid(message->recovery_ttl_ms);
     case UCN_CLUSTER_MSG_RECOVERY_ACK:
-        return true;
+        /* CLV2-M12.3: ACK is an exact-round membership proof.  Zero nonce
+         * was the pre-M12 legacy body and cannot prove a live round. */
+        return message->role == UCN_CLUSTER_ROLE_MEMBER &&
+               message->cluster_id != UCN_NODE_BROADCAST &&
+               message->recovery_parent_cluster_id != UCN_NODE_BROADCAST &&
+               (message->recovery_parent_cluster_id == 0U ||
+                message->cluster_id != message->recovery_parent_cluster_id) &&
+               message->recovery_nonce != 0U;
     default:
         return false;
     }
@@ -314,8 +326,8 @@ static void decode_trailing_12b(ucn_cluster_message_t *message,
         message->recovery_parent_cluster_id = read_u32_be(input + 8U);
         break;
     case UCN_CLUSTER_MSG_RECOVERY_ACK:
-        /* CLV2-M12 (12-06): round echo + lineage binding; old ACK frames
-         * decode as 0 and keep the legacy-tolerant path. */
+        /* CLV2-M12 (12-06): round echo + lineage binding.  The structural
+         * validator rejects the pre-M12 all-zero ACK body. */
         message->recovery_nonce = read_u32_be(input + 0U);
         message->recovery_parent_cluster_id = read_u32_be(input + 4U);
         break;

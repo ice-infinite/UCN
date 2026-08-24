@@ -16,7 +16,7 @@
 ## 3. 关键设计说明
 
 - 旧轮判定的单调性依据：recovery_nonce 来自 next_nonce（每节点单调递增），同源（known_recovery_source）下 nonce 更小即可判定为延迟旧轮。
-- 兼容边界：nonce/parent 为零的旧帧保持 legacy 容忍（既有 M01 测试与 staged 场景不变）。
+- M12.3 收紧边界：Type16 必须为 `RECOVERY_HEAD`、Type17 必须为 `MEMBER`，两者 nonce 必须非零；Cluster/parent 禁止 broadcast，非零 parent 不得等于 Recovery ID。旧全零 ACK 不再被当作当前轮成员证明。
 - 12-02 的每轮新恢复 ID 与 12-06 的 nonce 门双保险：即使 ID 不可判序，nonce 仍可判旧轮。
 
 ## 4. 测试与门禁证据
@@ -26,4 +26,4 @@
 
 ## 5. 边界
 
-- nonce 回绕：next_nonce 无回绕护栏（既有行为）；12-09/13 的 serial 纪律覆盖 Term/generation/config，nonce 属抗重放令牌、按既有边界。
+- nonce 回绕：`next_nonce` 当前仍会在极限值回到 1；这不是已关闭边界。Recovery nonce/round/cluster-id round 已统一列入 `CLV2-13-13` no-wrap/rotation 门禁。

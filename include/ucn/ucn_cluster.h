@@ -776,6 +776,9 @@ typedef struct ucn_cluster {
      * can never clobber our own candidacy nonce. */
     uint32_t accepted_recovery_nonce;
     ucn_node_id_t known_recovery_source;
+    /* Saturating diagnostic evidence for the current Recovery identity.
+     * It is not a live-quorum counter: current member liveness and expiry
+     * are owned by the membership table. */
     uint8_t recovery_ack_count;
     uint32_t recovery_acked;
     /* CLV2-M12 (12-01): recovery lineage captured at the fence exit from

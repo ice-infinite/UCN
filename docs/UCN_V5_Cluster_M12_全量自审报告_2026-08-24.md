@@ -1,8 +1,10 @@
 # UCN V5 Cluster M12 RecoveryLineage 全量自审报告（2026-08-24）
 
+> **M12.3 复审补正（2026-08-24）：** 本文保留为 M12 首轮全量自审历史证据；其“全部 10 个节点 PASS”结论已被后续 M12.1/M12.2/M12.3 复审覆盖，不能继续作为当前放行结论。当前有效结论见 `UCN_V5_Cluster_M12.3_全体复审整改与自审报告_2026-08-24.md`：运行期整改自审通过，但 M12 整体仍为 `AUDIT HOLD / WAIT EXTERNAL`，`12-09` 仍为 PARTIAL。
+
 ## 1. 结论
 
-M12 全部 10 个节点（CLV2-12-01..12-10）逐节点自审全部 PASS；本报告为全量自审。结论: SELF-AUDIT PASS / WAIT EXTERNAL。
+首轮 M12 全部 10 个节点（CLV2-12-01..12-10）曾逐节点自评 PASS；该历史结论已被 M12.1/M12.2/M12.3 复审补正，不代表当前整体 PASS。
 工作区 ucn-wt-m35（分支 wt/m35），不提交、不推送；M05 顶层 AUDIT HOLD、M08 WAIT EXTERNAL、M10 待复审均不解除；不接入 v4/Authority/Adapter 生产路径。
 
 ## 2. 里程碑门禁逐条

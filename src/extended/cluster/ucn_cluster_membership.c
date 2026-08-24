@@ -731,6 +731,19 @@ ucn_result_t handle_join_accept(
         }
     }
     cluster->role_since_ms = now_ms;
+    /* CLV2-M12.3: JOIN_ACCEPT is a stable-domain commit.  Scrub every
+     * Recovery-domain identity before installing the stable Epoch; leaving
+     * the old id/nonce/source live lets a delayed RECOVERY_DECLARE refresh
+     * the stable Head lease or masquerade as the current Recovery round. */
+    cluster->recovery_cluster_id = 0U;
+    cluster->recovery_deadline_ms = 0U;
+    cluster->recovery_cooldown_until_ms = 0U;
+    cluster->recovery_backoff_deadline_ms = 0U;
+    cluster->recovery_nonce = 0U;
+    cluster->accepted_recovery_nonce = 0U;
+    cluster->known_recovery_source = 0U;
+    cluster->recovery_ack_count = 0U;
+    cluster->recovery_acked = 0U;
     cluster->cluster_id = message->cluster_id;
     cluster->term = message->term;
     cluster->head_node_id = source;
@@ -845,8 +858,9 @@ void expire_members(ucn_cluster_t *cluster, uint32_t now_ms)
      * backup identity, then resync. */
     for (index = 0U; index < UCN_CLUSTER_MAX_MEMBERS; ++index) {
         if (cluster->primary_members.slots[index].occupied &&
-            cluster->primary_members.slots[index].status !=
-                (uint8_t)UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL &&
+            (cluster->primary_members.slots[index].status !=
+                 (uint8_t)UCN_CLUSTER_MEMBER_STATUS_PROVISIONAL ||
+             cluster->role == UCN_CLUSTER_ROLE_RECOVERY_HEAD) &&
             ucn_deadline_expired(now_ms,
                                  cluster->primary_members.slots[index].lease_expires_at_ms)) {
             ucn_node_id_t expired_id = cluster->primary_members.slots[index].node_id;
