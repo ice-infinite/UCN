@@ -18,4 +18,4 @@ src/ 只放 UCN 的内部实现；产品代码不应直接包含这里的私有�
 
 V5-62 起所有 transport/adapter/port 初始化统一要求 Port API V2 的 `struct_size/api_version`，Transfer 统一从配置回调取权威时间。该项允许预发布源码/ABI 破坏但不改变 Wire；任何产品必须清理旧对象并全量重编译。经典 CAN Source 在完成 Carrier 提交前不再消费下一条物理帧。
 
-详细规则见 [../docs/架构/02-代码模块与依赖规则.md](../docs/架构/02-代码模块与依赖规则.md)。
+详细规则见 [../docs/02-总体架构/项目结构/02-代码模块与依赖规则.md](../docs/02-总体架构/项目结构/02-代码模块与依赖规则.md)。

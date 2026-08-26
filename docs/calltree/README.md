@@ -140,7 +140,7 @@ docs/calltree/
 - YAML 主图描述 `FULL + Service ON` 超集；Nano/Lite 的实际可达子集必须结合 `ucn_profile.h` 与 CMake 源文件选择判断，不能把 Full 的 Path/Diagnostic 分支当成低档 Profile 的运行时代码。
 - `ucn_node_receive()` 的控制帧分支很大，按“接收总入口 → 邻居/路由/Path/诊断/业务转发”拆到不同模块，以避免重复写同一函数。
 - `ucn_security_ops_t` 是产品实现的函数指针边界。树记录 Core 何时调用它，但不会虚构 AEAD、密钥库或 Flash Provider 的内部调用关系。
-- 本树描述调用关系，不等价于成功送达、可靠 RPC 或真实无线时延；验证结论仍以 `tests/`、`docs/00-任务表.md` 与 `docs/01-项目操作记录.md` 为准。
+- 本树描述调用关系，不等价于成功送达、可靠 RPC 或真实无线时延；验证结论仍以 `tests/`、`docs/00-项目管理/00-任务表.md` 与 `docs/00-项目管理/01-项目操作记录.md` 为准。
 
 ## 5. 更新规则
 
