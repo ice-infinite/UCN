@@ -15,6 +15,7 @@
 
 ## 独立机器资料
 
+- [UCN 用户手册](用户手册/README.md)：面向产品集成，从五分钟收发、Profile 选择、驱动接入到自动路由、多链路、Service、Transfer、安全、诊断和性能调优；只讲如何配置、调用与验收，不要求先阅读内核。
 - [调用树](calltree/README.md)：面向代码导航的 YAML 调用树。
 - [Core 源码阅读指南](源码阅读指南/README.md)：按公共基础层、Nano、Lite、Full、真实调用链和人工审计顺序阅读当前 Core；包含按条件编译生成的完整函数签名索引。
 - [`results/`](results/)：规模、资源和测试生成结果；由 `evidence/` 建立 commit 级索引，机器路径保持不变。
