@@ -16,6 +16,7 @@
 ## 独立机器资料
 
 - [调用树](calltree/README.md)：面向代码导航的 YAML 调用树。
+- [Core 源码阅读指南](源码阅读指南/README.md)：按公共基础层、Nano、Lite、Full、真实调用链和人工审计顺序阅读当前 Core；包含按条件编译生成的完整函数签名索引。
 - [`results/`](results/)：规模、资源和测试生成结果；由 `evidence/` 建立 commit 级索引，机器路径保持不变。
 
 ## 文档状态规则
