@@ -220,6 +220,10 @@ typedef struct ucn_transfer_tx_slot {
     uint8_t window_size;
     bool awaiting_ack;
     bool resend_active;
+    /* A Go-Back-N replay has been fully submitted and is waiting for fresh
+     * cumulative progress.  Duplicate ACKs at the same offset must not start
+     * additional recovery rounds before either progress or ACK timeout. */
+    bool recovery_waiting_ack;
     ucn_transfer_completion_fn completion;
     void *completion_context;
 } ucn_transfer_tx_slot_t;

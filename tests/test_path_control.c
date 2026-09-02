@@ -35,6 +35,7 @@ typedef struct path_receive_state {
     uint32_t count;
     uint8_t last_payload;
     uint8_t last_message_type;
+    ucn_traffic_class_t last_traffic_class;
     bool last_has_path_id;
     ucn_path_id_t last_path_id;
 } path_receive_state_t;
@@ -343,6 +344,7 @@ static void path_receive(void *context, const ucn_frame_t *frame)
     state->count++;
     state->last_payload = frame->payload[0];
     state->last_message_type = frame->message_type;
+    state->last_traffic_class = frame->traffic_class;
     state->last_has_path_id = frame->has_path_id;
     state->last_path_id = frame->path_id;
 }
@@ -933,6 +935,18 @@ static int test_path_relay_capability_contract(void)
     TEST_ASSERT(received.count == 1U &&
                 cbc.last_wire_profile == UCN_WIRE_PROFILE_W3_BACKBONE &&
                 sb.open_calls == 0U);
+    TEST_ASSERT(ucn_node_send_path(&a, UINT32_C(3),
+                                   (uint8_t)0x52U,
+                                   UCN_TRAFFIC_Q2_NORMAL,
+                                   transparent_path, &payload, 1U) == UCN_OK);
+    TEST_ASSERT(received.count == 2U &&
+                received.last_traffic_class == UCN_TRAFFIC_Q2_NORMAL);
+    TEST_ASSERT(ucn_node_send_path(&a, UINT32_C(3),
+                                   (uint8_t)0x52U,
+                                   UCN_TRAFFIC_Q3_BULK,
+                                   transparent_path, &payload, 1U) == UCN_OK);
+    TEST_ASSERT(received.count == 3U &&
+                received.last_traffic_class == UCN_TRAFFIC_Q3_BULK);
 
     /* If the source has no propagated bottleneck and a relay discovers a
      * narrower next hop, reject deterministically, revoke the Path and return
@@ -946,7 +960,7 @@ static int test_path_relay_capability_contract(void)
                                 UCN_TRAFFIC_Q1_REALTIME,
                                 profile_failure_path, &payload, 1U);
     TEST_ASSERT(result == UCN_ERR_UNSUPPORTED);
-    TEST_ASSERT(received.count == 1U &&
+    TEST_ASSERT(received.count == 3U &&
                 ucn_node_find_path_forward(&a, UINT32_C(1), sa.session_id,
                                             profile_failure_path,
                                             UINT32_C(3)) == NULL &&
@@ -966,7 +980,7 @@ static int test_path_relay_capability_contract(void)
                                 UCN_TRAFFIC_Q1_REALTIME,
                                 mtu_failure_path, &payload, 1U);
     TEST_ASSERT(result == UCN_ERR_TOO_LARGE);
-    TEST_ASSERT(received.count == 1U &&
+    TEST_ASSERT(received.count == 3U &&
                 ucn_node_find_path_forward(&a, UINT32_C(1), sa.session_id,
                                             mtu_failure_path,
                                             UINT32_C(3)) == NULL &&

@@ -12,7 +12,7 @@
 - Node、Endpoint、Session、Sequence 分别区分什么；
 - W0～W3 为什么存在，一帧实际占多少字节；
 - 消息提交后为什么不等待 Heartbeat；
-- 邻居发现、业务分发、Q0/Q1 和背压如何衔接；
+- 邻居发现、业务分发、Q0～Q3 和背压如何衔接；
 - 多路径重复、TTL、时间回绕和错误如何处理；
 - Build Profile、Wire Profile 与 Link preset 为什么不能混为一谈。
 

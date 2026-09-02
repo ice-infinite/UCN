@@ -54,7 +54,7 @@ Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个�
 | Trusted Neighbor | 已实现固定 Candidate/Admitted/Suspect/Removed/Rejected/Expired 表、Heartbeat 和已接纳节点撤销/Link 槽复用。 | 随机退避、入网令牌桶与实机在线时间标定。 |
 | AODV-Lite Route | 已实现 RREQ/RREP/RERR、Active/Candidate 固定表、刷新、Probe/Activate、Route Epoch/grace、老化、保守未知 Cost、源端控制 Token，以及 Full 本地 LC-1 出口贡献比较。 | 真实介质质量标定。 |
 | Explicit Path | 已实现默认 8 项的逐跳 Path 表；v5 Path Header 为 W0～W3 的 19/25/31/36 B，固定/自动模式均可使用。受认证安装/撤销、透明 E2E 中继、Path RERR、`PINNED_*` 与基于 LC-1 有效分的 Q1 Flow 亲和 `AUTO_BALANCE` 保持。 | 真实多板验收。 |
-| Forwarding / QoS | 已实现 TTL、下一跳、Q0/Q1、deadline、latest-value、静态 Endpoint 分发；Endpoint Q1 未知路由固定等待/自动 RREQ。 | Q2/Q3、可靠确认。 |
+| Forwarding / QoS | 已实现 TTL、下一跳、Q0～Q3 独立固定队列、`6:3:2:1` 调度、deadline、Q1 latest-value、静态 Endpoint 分发；Endpoint Q1 未知路由固定等待/自动 RREQ。 | 普通消息无端到端可靠确认；硬件优先队列映射待产品 BSP。 |
 | Node 内 Service / Task | Endpoint 目前分发到协议任务中的固定回调，不增加帧字节。 | T25：Port 层的静态 Endpoint→任务队列映射、统一任务发送 API、本机直投和任务收发统计；不把 FreeRTOS 写入 Core。 |
 | Health | 已实现候选/路由老化、Heartbeat、Link down 路径清理和动态 Link 回收。 | 统一 Link 状态消息、应用失联事件。 |
 
@@ -153,14 +153,14 @@ Adapter 不把 MAC、CAN ID 或蓝牙地址当作 UCN 身份。其统一接口�
 | --- | --- | --- |
 | Service Discovery | 发布 `motor.control`、`imu.data` 等服务及版本。 | 应用以预配置 Node ID + Message Type 通信。 |
 | Group / Multicast | 面向编队或同类传感器的受权限组消息。 | 使用受限广播或多次单播。 |
-| Q2 Reliable | 参数写入、配置和需确认的普通服务。 | Core 仅提供 Q0/Q1，参数通过本地工具或专用节点维护。 |
+| Reliable Transfer | 参数写入、配置和需确认的普通服务。 | Core Q2 只提供 Normal FIFO；逐条可靠交付必须使用 Transfer/业务 Result。 |
 | Fragmentation | 在小 MTU Link 上传输较大消息。 | 超过 Core 最大载荷直接拒绝，不隐式切片。 |
 | Single-level Cluster | 一跳邻居范围内选 Head、受容量加入、租约保活和失效重选。 | 节点继续使用 Core 的扁平按需 Route/Path，不产生簇级语义。 |
-| Q3 Bulk | 日志、OTA、文件与低优先级限速。 | 不在 MCU Mesh 中传大文件。 |
+| Q3 Bulk + Transfer | 日志、OTA、文件与低优先级限速。 | Core Q3 只有小型固定 FIFO；不链接 Transfer 时不能发送超单帧大消息。 |
 | Time Sync | 日志关联、编队与传感融合时间基准。 | 使用本地单调时间，不提供跨节点精密时间。 |
 | Diagnostics | 详细统计、抓包镜像、长期质量历史。 | Core 只保留必要的错误计数和健康状态。 |
 
-`Extended` 节点仍必须服从 Core 的固定内存原则。当前 `ucn_transfer` 使用独立、可裁剪的 TX/RX/Endpoint/Peer 固定表；`ucn_cluster` 使用独立 Peer/Candidate/Member 固定表；两者均为 `EXCLUDE_FROM_ALL` Target，没有链接/创建对象的节点不支付对应 RAM。Cluster 首阶段不含簇间 Locator/Directory/Tunnel，不能把单层收敛测试当作万级数据面。未来 Q3 仍必须另设配额，绝不能吞掉 Q0/Q1 的队列、会话或路由内存。
+`Extended` 节点仍必须服从 Core 的固定内存原则。当前 `ucn_transfer` 使用独立、可裁剪的 TX/RX/Endpoint/Peer 固定表；`ucn_cluster` 使用独立 Peer/Candidate/Member 固定表；两者均为 `EXCLUDE_FROM_ALL` Target，没有链接/创建对象的节点不支付对应 RAM。Cluster 首阶段不含簇间 Locator/Directory/Tunnel，不能把单层收敛测试当作万级数据面。Q3 已有独立固定小队列和 `6:3:2:1` 调度配额，绝不能借用或吞掉 Q0/Q1 的队列、会话或路由内存。
 
 ## 5. UCN-Host：兼容层，不是协议中心
 
@@ -192,11 +192,11 @@ Adapter 不把 MAC、CAN ID 或蓝牙地址当作 UCN 身份。其统一接口�
 
 ### Phase A：只实现 Core
 
-当前已通过内存虚拟 Link 验证三个逻辑 MCU 的两跳 `DATA_Q1`、`ROUTE_ERROR`、重新寻路和 Q0/Q1 队列隔离；真实三板安全入网、生产密码与本地失联事件仍待 T14/T15。
+当前已通过内存虚拟 Link 验证多跳业务、`ROUTE_ERROR`、重新寻路和 Q0～Q3 队列隔离；真实目标板四级延迟、吞吐、硬件优先级映射和生产安全仍待实机门禁。
 
 ### Phase B：只给必要 MCU 增加 Extended
 
-有界 Transfer 已实现默认单消息、可选静态 Peer 有界多消息并发；后续按实际需要增加动态能力协商、服务发现、通用 Q2、时间同步和 Q3。每增加一项都要记录新增 Flash、静态 RAM、峰值 RAM、CPU 和空口占用。
+有界 Transfer 已实现默认单消息、可选静态 Peer 有界多消息并发；Node/Service 的通用 Q2/Q3 软件队列也已完成。后续按实际需要增加动态能力协商、服务发现和时间同步，并把四级策略接入具体 Bearer 的硬件能力。每增加一项都要记录新增 Flash、静态 RAM、峰值 RAM、CPU 和空口占用。
 
 ### Phase C：最后接入 Host
 

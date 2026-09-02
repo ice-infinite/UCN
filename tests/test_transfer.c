@@ -18,6 +18,7 @@ typedef struct transfer_test_link_context {
     uint16_t drop_ack_offset;
     uint32_t dropped_acks;
     uint32_t dropped_fragments;
+    uint32_t frames_by_class[UCN_TRAFFIC_CLASS_COUNT];
 } transfer_test_link_context_t;
 
 typedef struct transfer_test_receive_state {
@@ -93,6 +94,11 @@ static ucn_result_t transfer_test_link_send(ucn_link_t *link,
         (transfer_test_link_context_t *)link->context;
     ucn_frame_t frame;
     ucn_result_t decode_result = ucn_frame_decode(bytes, length, &frame);
+
+    if (decode_result == UCN_OK &&
+        (uint8_t)frame.traffic_class < (uint8_t)UCN_TRAFFIC_CLASS_COUNT) {
+        context->frames_by_class[(uint8_t)frame.traffic_class]++;
+    }
 
     if (decode_result == UCN_OK &&
         frame.message_type == UCN_MSG_TRANSFER_FRAGMENT &&
@@ -495,6 +501,12 @@ static int transfer_test_all_classes(void)
                 expected_fragmented);
     TEST_ASSERT(ucn_transfer_get_stats(&pair->transfer_a)->fragments_sent >=
                 expected_fragmented);
+    TEST_ASSERT(pair->context_ab.frames_by_class[UCN_TRAFFIC_Q2_NORMAL] ==
+                expected_direct);
+    TEST_ASSERT(pair->context_ab.frames_by_class[UCN_TRAFFIC_Q3_BULK] >=
+                expected_fragmented);
+    TEST_ASSERT(pair->context_ba.frames_by_class[UCN_TRAFFIC_Q1_REALTIME] >=
+                expected_fragmented);
     return 0;
 }
 
@@ -778,6 +790,151 @@ static int transfer_test_window_pipeline_and_gap_recovery(void)
     return 0;
 }
 
+static ucn_result_t transfer_test_inject_ack(
+    transfer_test_pair_t *pair,
+    uint16_t transfer_id,
+    uint16_t next_expected_offset)
+{
+    ucn_transfer_ack_t ack;
+    uint8_t payload[UCN_TRANSFER_ACK_BYTES];
+    bool drop_all_acks = pair->context_ba.drop_all_acks;
+    ucn_result_t result;
+
+    (void)memset(&ack, 0, sizeof(ack));
+    ack.target_endpoint = TRANSFER_TEST_ENDPOINT;
+    ack.transfer_id = transfer_id;
+    ack.next_expected_offset = next_expected_offset;
+    ack.status = UCN_TRANSFER_ACK_OK;
+    result = ucn_transfer_encode_ack(&ack, payload);
+    if (result != UCN_OK) {
+        return result;
+    }
+    pair->context_ba.drop_all_acks = false;
+    result = ucn_node_send(&pair->b, UINT32_C(1), UCN_MSG_TRANSFER_ACK,
+                           UCN_TRAFFIC_Q1_REALTIME, payload,
+                           (uint16_t)sizeof(payload));
+    pair->context_ba.drop_all_acks = drop_all_acks;
+    return result;
+}
+
+static int transfer_test_duplicate_ack_recovery_is_bounded(void)
+{
+    transfer_test_pair_t *pair = &WINDOW_PAIR;
+    transfer_test_completion_state_t completion;
+    ucn_transfer_tx_slot_t *slot = NULL;
+    uint32_t step;
+    size_t index;
+
+    if (UCN_TRANSFER_MAX_WINDOW < 4U ||
+        UCN_TRANSFER_MAX_MESSAGE_BYTES < 256U) {
+        return 0;
+    }
+    TEST_ASSERT(transfer_test_init_pair_window(pair, 250U, 4U) == 0);
+    pair->transfer_a.config.ack_timeout_ms = 1000U;
+    transfer_test_prepare_receive(&pair->received, TRANSFER_TEST_DATA, 256U,
+                                  UCN_TRANSFER_CLASS_T256, true);
+    (void)memset(&completion, 0, sizeof(completion));
+    pair->context_ba.drop_all_acks = true;
+    TEST_ASSERT(ucn_transfer_send(
+                    &pair->transfer_a, UINT32_C(2), TRANSFER_TEST_ENDPOINT,
+                    UCN_TRANSFER_CLASS_T256, TRANSFER_TEST_DATA, 256U,
+                    transfer_test_complete, &completion) == UCN_OK);
+    for (step = 0U; step < 100U && pair->received.count == 0U; ++step) {
+        ucn_result_t result;
+
+        pair->now_ms++;
+        result = transfer_test_step_at(&pair->transfer_a, pair->now_ms);
+        TEST_ASSERT(result == UCN_OK || result == UCN_ERR_NOT_FOUND ||
+                    result == UCN_ERR_NO_SPACE ||
+                    result == UCN_ERR_LINK_DOWN ||
+                    result == UCN_ERR_TOO_LARGE);
+    }
+    TEST_ASSERT(pair->received.count == 1U);
+    for (index = 0U; index < UCN_TRANSFER_TX_SLOTS; ++index) {
+        if (pair->transfer_a.tx_slots[index].occupied) {
+            slot = &pair->transfer_a.tx_slots[index];
+            break;
+        }
+    }
+    TEST_ASSERT(slot != NULL);
+    TEST_ASSERT(slot->acknowledged_offset == 0U);
+    TEST_ASSERT(transfer_test_inject_ack(pair, slot->transfer_id, 0U) ==
+                UCN_OK);
+    TEST_ASSERT(slot->retry_count == 1U && slot->resend_active);
+
+    for (step = 0U; step < 16U && slot->resend_active; ++step) {
+        ucn_result_t result;
+
+        pair->now_ms++;
+        result = transfer_test_step_at(&pair->transfer_a, pair->now_ms);
+        TEST_ASSERT(result == UCN_OK || result == UCN_ERR_NOT_FOUND ||
+                    result == UCN_ERR_NO_SPACE ||
+                    result == UCN_ERR_LINK_DOWN ||
+                    result == UCN_ERR_TOO_LARGE);
+    }
+    TEST_ASSERT(!slot->resend_active);
+    TEST_ASSERT(slot->recovery_waiting_ack);
+
+    /* A delayed duplicate from the original gap is not a new recovery
+     * signal.  It must neither consume another retry nor reopen replay. */
+    TEST_ASSERT(transfer_test_inject_ack(pair, slot->transfer_id, 0U) ==
+                UCN_OK);
+    TEST_ASSERT(slot->occupied);
+    TEST_ASSERT(slot->retry_count == 1U);
+    TEST_ASSERT(!slot->resend_active);
+    TEST_ASSERT(slot->recovery_waiting_ack);
+
+    pair->now_ms = slot->ack_deadline_ms;
+    TEST_ASSERT(transfer_test_step_at(&pair->transfer_a, pair->now_ms) ==
+                UCN_OK);
+    TEST_ASSERT(slot->retry_count == 2U);
+    TEST_ASSERT(slot->resend_active || slot->recovery_waiting_ack);
+    return 0;
+}
+
+static int transfer_test_recent_completion_evicts_oldest(void)
+{
+    transfer_test_pair_t *pair = &MTU_PAIR;
+    transfer_test_completion_state_t completion;
+    size_t index;
+
+    if (UCN_TRANSFER_MAX_MESSAGE_BYTES < 128U ||
+        UCN_TRANSFER_RECENT_COMPLETIONS != 4U) {
+        return 0;
+    }
+    TEST_ASSERT(transfer_test_init_pair(pair, 250U) == 0);
+    pair->now_ms = 1000U;
+    for (index = 0U; index < UCN_TRANSFER_RECENT_COMPLETIONS; ++index) {
+        ucn_transfer_recent_completion_t *recent =
+            &pair->transfer_b.recent[index];
+
+        (void)memset(recent, 0, sizeof(*recent));
+        recent->occupied = true;
+        recent->source = (ucn_node_id_t)(UINT32_C(100) + index);
+        recent->expires_at_ms = pair->now_ms +
+            (index == 0U ? 400U : index == 1U ? 300U :
+             index == 2U ? 100U : 200U);
+    }
+    transfer_test_prepare_receive(&pair->received, TRANSFER_TEST_DATA, 128U,
+                                  UCN_TRANSFER_CLASS_T128, true);
+    (void)memset(&completion, 0, sizeof(completion));
+    TEST_ASSERT(ucn_transfer_send(
+                    &pair->transfer_a, UINT32_C(2), TRANSFER_TEST_ENDPOINT,
+                    UCN_TRANSFER_CLASS_T128, TRANSFER_TEST_DATA, 128U,
+                    transfer_test_complete, &completion) == UCN_OK);
+    TEST_ASSERT(transfer_test_run_until_complete(
+                    &pair->transfer_a, &pair->transfer_b, &completion,
+                    &pair->now_ms, 100U) == 0);
+    TEST_ASSERT(completion.status == UCN_TRANSFER_COMPLETION_DELIVERED);
+    TEST_ASSERT(pair->transfer_b.recent[0].source == UINT32_C(100));
+    TEST_ASSERT(pair->transfer_b.recent[1].source == UINT32_C(101));
+    TEST_ASSERT(pair->transfer_b.recent[2].source == UINT32_C(1));
+    TEST_ASSERT(pair->transfer_b.recent[2].transfer_id ==
+                completion.transfer_id);
+    TEST_ASSERT(pair->transfer_b.recent[3].source == UINT32_C(103));
+    return 0;
+}
+
 static int transfer_test_integrity_failure(void)
 {
     transfer_test_pair_t *pair = &DIRECT_PAIR;
@@ -786,6 +943,8 @@ static int transfer_test_integrity_failure(void)
     size_t payload_length;
     uint32_t failed_before =
         ucn_transfer_get_stats(&pair->transfer_b)->integrity_failed;
+    uint32_t rejected_before =
+        ucn_transfer_get_stats(&pair->transfer_b)->rx_rejected;
     uint32_t expired_before;
 
     if (UCN_TRANSFER_MAX_MESSAGE_BYTES < 128U) {
@@ -808,6 +967,12 @@ static int transfer_test_integrity_failure(void)
                               UCN_MSG_TRANSFER_FRAGMENT,
                               UCN_TRAFFIC_Q1_REALTIME, payload,
                               (uint16_t)payload_length) == UCN_OK);
+    TEST_ASSERT(ucn_transfer_get_stats(&pair->transfer_b)->rx_rejected ==
+                rejected_before + 1U);
+    TEST_ASSERT(ucn_node_send(&pair->a, UINT32_C(2),
+                              UCN_MSG_TRANSFER_FRAGMENT,
+                              UCN_TRAFFIC_Q3_BULK, payload,
+                              (uint16_t)payload_length) == UCN_OK);
     TEST_ASSERT(ucn_transfer_get_stats(&pair->transfer_b)->integrity_failed ==
                 failed_before + 1U);
 
@@ -823,7 +988,7 @@ static int transfer_test_integrity_failure(void)
                 UCN_OK);
     TEST_ASSERT(ucn_node_send(&pair->a, UINT32_C(2),
                               UCN_MSG_TRANSFER_FRAGMENT,
-                              UCN_TRAFFIC_Q1_REALTIME, payload,
+                              UCN_TRAFFIC_Q3_BULK, payload,
                               (uint16_t)payload_length) == UCN_OK);
     TEST_ASSERT(transfer_test_step_at(&pair->transfer_b, UINT32_C(100000)) ==
                 UCN_ERR_NOT_FOUND);
@@ -1242,6 +1407,8 @@ int test_transfer(void)
     TEST_ASSERT(transfer_test_authoritative_clock() == 0);
     TEST_ASSERT(transfer_test_retry_and_slot_lifetime() == 0);
     TEST_ASSERT(transfer_test_window_pipeline_and_gap_recovery() == 0);
+    TEST_ASSERT(transfer_test_duplicate_ack_recovery_is_bounded() == 0);
+    TEST_ASSERT(transfer_test_recent_completion_evicts_oldest() == 0);
     TEST_ASSERT(transfer_test_integrity_failure() == 0);
     TEST_ASSERT(transfer_test_plain_rejection() == 0);
     TEST_ASSERT(transfer_test_peer_concurrency_contract() == 0);

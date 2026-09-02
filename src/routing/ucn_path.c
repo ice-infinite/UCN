@@ -4,6 +4,10 @@
 #include "ucn/ucn_path.h"
 #include "ucn/ucn_time.h"
 
+/*
+ * EN: Checks the `identity_matches` condition against current Path forwarding state.
+ * 中文：根据当前 Path 转发 状态检查 `identity_matches` 条件。
+ */
 static bool path_identity_matches(const ucn_path_forward_entry_t *entry,
                                   ucn_node_id_t owner,
                                   ucn_session_id_t owner_session_id,
@@ -14,6 +18,10 @@ static bool path_identity_matches(const ucn_path_forward_entry_t *entry,
            entry->path_id == path_id;
 }
 
+/*
+ * EN: Checks the `is_expired` predicate against current Path forwarding state.
+ * 中文：根据当前 Path 转发 状态检查 `is_expired` 条件。
+ */
 bool ucn_path_is_expired(const ucn_path_forward_entry_t *entry,
                          uint32_t now_ms)
 {
@@ -21,6 +29,10 @@ bool ucn_path_is_expired(const ucn_path_forward_entry_t *entry,
            ucn_deadline_expired(now_ms, entry->expires_at_ms);
 }
 
+/*
+ * EN: Looks up `find` in bounded Path forwarding state without allocation.
+ * 中文：在固定容量的 Path 转发 状态中查找 `find`，且不进行动态分配。
+ */
 const ucn_path_forward_entry_t *ucn_path_find(
     const ucn_path_state_t *state,
     ucn_node_id_t owner,
@@ -46,6 +58,10 @@ const ucn_path_forward_entry_t *ucn_path_find(
     return NULL;
 }
 
+/*
+ * EN: Validates and installs `install_capable` into bounded Path forwarding state.
+ * 中文：验证 `install_capable` 并将其安装到固定容量的 Path 转发 状态中。
+ */
 ucn_result_t ucn_path_install_capable(
     ucn_path_state_t *state,
     const ucn_path_forward_config_t *config,
@@ -118,12 +134,20 @@ ucn_result_t ucn_path_install_capable(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and installs `install` in bounded Path forwarding state.
+ * 中文：验证 `install` 并将其安装到固定容量的 Path 转发 状态中。
+ */
 ucn_result_t ucn_path_install(ucn_path_state_t *state,
                               const ucn_path_forward_config_t *config)
 {
     return ucn_path_install_capable(state, config, NULL);
 }
 
+/*
+ * EN: Clears or releases `revoke` from bounded Path forwarding state.
+ * 中文：从固定容量的 Path 转发 状态中清除或释放 `revoke`。
+ */
 ucn_result_t ucn_path_revoke(ucn_path_state_t *state,
                              ucn_node_id_t owner,
                              ucn_session_id_t owner_session_id,
@@ -150,6 +174,10 @@ ucn_result_t ucn_path_revoke(ucn_path_state_t *state,
     return UCN_ERR_NOT_FOUND;
 }
 
+/*
+ * EN: Checks or removes expired `expire` state in Path forwarding.
+ * 中文：检查或移除 Path 转发 中已过期的 `expire` 状态。
+ */
 void ucn_path_expire(ucn_path_state_t *state, uint32_t now_ms)
 {
     size_t index;

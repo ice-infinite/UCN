@@ -27,6 +27,14 @@ extern "C" {
 #define UCN_SERVICE_REMOTE_TX_Q1_DEPTH ((uint8_t)4U)
 #endif
 
+#ifndef UCN_SERVICE_REMOTE_TX_Q2_DEPTH
+#define UCN_SERVICE_REMOTE_TX_Q2_DEPTH ((uint8_t)2U)
+#endif
+
+#ifndef UCN_SERVICE_REMOTE_TX_Q3_DEPTH
+#define UCN_SERVICE_REMOTE_TX_Q3_DEPTH ((uint8_t)1U)
+#endif
+
 #ifndef UCN_SERVICE_MAX_Q0_BINDINGS
 #define UCN_SERVICE_MAX_Q0_BINDINGS ((uint8_t)2U)
 #endif
@@ -35,8 +43,24 @@ extern "C" {
 #define UCN_SERVICE_MAX_Q1_BINDINGS ((uint8_t)4U)
 #endif
 
+#ifndef UCN_SERVICE_MAX_Q2_BINDINGS
+#define UCN_SERVICE_MAX_Q2_BINDINGS ((uint8_t)1U)
+#endif
+
+#ifndef UCN_SERVICE_MAX_Q3_BINDINGS
+#define UCN_SERVICE_MAX_Q3_BINDINGS ((uint8_t)1U)
+#endif
+
 #ifndef UCN_SERVICE_Q0_INBOX_DEPTH
 #define UCN_SERVICE_Q0_INBOX_DEPTH ((uint8_t)4U)
+#endif
+
+#ifndef UCN_SERVICE_Q2_INBOX_DEPTH
+#define UCN_SERVICE_Q2_INBOX_DEPTH ((uint8_t)2U)
+#endif
+
+#ifndef UCN_SERVICE_Q3_INBOX_DEPTH
+#define UCN_SERVICE_Q3_INBOX_DEPTH ((uint8_t)1U)
 #endif
 
 #define UCN_SERVICE_ID_NONE ((uint8_t)0U)
@@ -59,15 +83,33 @@ extern "C" {
 typedef char ucn_service_payload_must_fit_core_frame[
     UCN_SERVICE_MAX_PAYLOAD_BYTES <= UCN_MAX_PAYLOAD_BYTES ? 1 : -1];
 typedef char ucn_service_q0_binding_limit_must_fit[
+    UCN_SERVICE_MAX_Q0_BINDINGS > 0U &&
     UCN_SERVICE_MAX_Q0_BINDINGS <= UCN_SERVICE_MAX_BINDINGS ? 1 : -1];
 typedef char ucn_service_q1_binding_limit_must_fit[
+    UCN_SERVICE_MAX_Q1_BINDINGS > 0U &&
     UCN_SERVICE_MAX_Q1_BINDINGS <= UCN_SERVICE_MAX_BINDINGS ? 1 : -1];
+typedef char ucn_service_q2_binding_limit_must_fit[
+    UCN_SERVICE_MAX_Q2_BINDINGS > 0U &&
+    UCN_SERVICE_MAX_Q2_BINDINGS <= UCN_SERVICE_MAX_BINDINGS ? 1 : -1];
+typedef char ucn_service_q3_binding_limit_must_fit[
+    UCN_SERVICE_MAX_Q3_BINDINGS > 0U &&
+    UCN_SERVICE_MAX_Q3_BINDINGS <= UCN_SERVICE_MAX_BINDINGS ? 1 : -1];
+typedef char ucn_service_queue_depths_must_be_nonzero[
+    UCN_SERVICE_REMOTE_TX_Q0_DEPTH > 0U &&
+    UCN_SERVICE_REMOTE_TX_Q1_DEPTH > 0U &&
+    UCN_SERVICE_REMOTE_TX_Q2_DEPTH > 0U &&
+    UCN_SERVICE_REMOTE_TX_Q3_DEPTH > 0U &&
+    UCN_SERVICE_Q0_INBOX_DEPTH > 0U &&
+    UCN_SERVICE_Q2_INBOX_DEPTH > 0U &&
+    UCN_SERVICE_Q3_INBOX_DEPTH > 0U ? 1 : -1];
 
 typedef uint8_t ucn_service_id_t;
 
 typedef enum ucn_service_delivery_mode {
     UCN_SERVICE_DELIVERY_Q0_FIFO = 0,
-    UCN_SERVICE_DELIVERY_Q1_LATEST = 1
+    UCN_SERVICE_DELIVERY_Q1_LATEST = 1,
+    UCN_SERVICE_DELIVERY_Q2_FIFO = 2,
+    UCN_SERVICE_DELIVERY_Q3_FIFO = 3
 } ucn_service_delivery_mode_t;
 
 /* This is an ownership/acceptance result, never an end-to-end delivery ACK.
@@ -170,6 +212,41 @@ typedef struct ucn_service_q1_inbox {
     ucn_service_message_t latest;
 } ucn_service_q1_inbox_t;
 
+typedef struct ucn_service_q2_inbox {
+    ucn_service_message_t messages[UCN_SERVICE_Q2_INBOX_DEPTH];
+    uint8_t head;
+    uint8_t tail;
+    uint8_t count;
+} ucn_service_q2_inbox_t;
+
+typedef struct ucn_service_q3_inbox {
+    ucn_service_message_t messages[UCN_SERVICE_Q3_INBOX_DEPTH];
+    uint8_t head;
+    uint8_t tail;
+    uint8_t count;
+} ucn_service_q3_inbox_t;
+
+typedef struct ucn_service_remote_q0_queue {
+    ucn_service_message_t messages[UCN_SERVICE_REMOTE_TX_Q0_DEPTH];
+    uint8_t head;
+    uint8_t tail;
+    uint8_t count;
+} ucn_service_remote_q0_queue_t;
+
+typedef struct ucn_service_remote_q2_queue {
+    ucn_service_message_t messages[UCN_SERVICE_REMOTE_TX_Q2_DEPTH];
+    uint8_t head;
+    uint8_t tail;
+    uint8_t count;
+} ucn_service_remote_q2_queue_t;
+
+typedef struct ucn_service_remote_q3_queue {
+    ucn_service_message_t messages[UCN_SERVICE_REMOTE_TX_Q3_DEPTH];
+    uint8_t head;
+    uint8_t tail;
+    uint8_t count;
+} ucn_service_remote_q3_queue_t;
+
 typedef struct ucn_service_remote_q1_slot {
     bool occupied;
     ucn_service_message_t message;
@@ -179,6 +256,8 @@ typedef struct ucn_service_binding_state {
     bool ready;
     uint8_t q0_inbox_index;
     uint8_t q1_inbox_index;
+    uint8_t q2_inbox_index;
+    uint8_t q3_inbox_index;
 } ucn_service_binding_state_t;
 
 typedef struct ucn_service_stats {
@@ -193,12 +272,17 @@ typedef struct ucn_service_stats {
     uint32_t traffic_rejected;
     uint32_t q0_inbox_full;
     uint32_t q1_overwrites;
+    uint32_t q2_inbox_full;
+    uint32_t q3_inbox_full;
     uint32_t binding_purges;
     uint32_t remote_q0_full;
     uint32_t remote_q1_full;
     uint32_t remote_q1_overwrites;
+    uint32_t remote_q2_full;
+    uint32_t remote_q3_full;
     uint32_t inbox_reads;
     uint32_t remote_tx_reads;
+    uint32_t remote_tx_reads_by_class[UCN_TRAFFIC_CLASS_COUNT];
 } ucn_service_stats_t;
 
 typedef struct ucn_service_router {
@@ -206,14 +290,19 @@ typedef struct ucn_service_router {
     ucn_service_binding_state_t binding_states[UCN_SERVICE_MAX_BINDINGS];
     ucn_service_q0_inbox_t q0_inboxes[UCN_SERVICE_MAX_Q0_BINDINGS];
     ucn_service_q1_inbox_t q1_inboxes[UCN_SERVICE_MAX_Q1_BINDINGS];
-    ucn_service_q0_inbox_t remote_q0;
+    ucn_service_q2_inbox_t q2_inboxes[UCN_SERVICE_MAX_Q2_BINDINGS];
+    ucn_service_q3_inbox_t q3_inboxes[UCN_SERVICE_MAX_Q3_BINDINGS];
+    ucn_service_remote_q0_queue_t remote_q0;
     ucn_service_remote_q1_slot_t remote_q1[UCN_SERVICE_REMOTE_TX_Q1_DEPTH];
+    ucn_service_remote_q2_queue_t remote_q2;
+    ucn_service_remote_q3_queue_t remote_q3;
+    uint8_t remote_schedule_cursor;
     ucn_service_stats_t stats;
 } ucn_service_router_t;
 
 ucn_result_t ucn_service_router_init(ucn_service_router_t *router,
                                      const ucn_service_router_config_t *config);
-/* Setting ready=false also purges this Binding's Q0 FIFO or Q1 Latest value.
+/* Setting ready=false also purges this Binding's Q0/Q2/Q3 FIFO or Q1 Latest value.
  * A restarted Task can therefore never consume a command/sample queued before
  * it became not-ready.  The caller/RTOS Port must serialize Router access. */
 ucn_result_t ucn_service_set_ready(ucn_service_router_t *router,
@@ -247,15 +336,15 @@ ucn_result_t ucn_service_send_ex(ucn_service_router_t *router,
 ucn_result_t ucn_service_deliver_remote(ucn_service_router_t *router,
                                         const ucn_frame_t *frame);
 
-/* Consumer/Port reads a message from its only bound Endpoint.  Q0 is FIFO;
- * Q1 consumes the current Latest Value. */
+/* Consumer/Port reads a message from its only bound Endpoint.  Q0/Q2/Q3 are
+ * FIFO; Q1 consumes the current Latest Value. */
 ucn_result_t ucn_service_inbox_take(ucn_service_router_t *router,
                                     ucn_service_id_t owner_service_id,
                                     ucn_endpoint_t endpoint,
                                     ucn_service_message_t *message);
 
-/* Only the future Protocol Task bridge may call this.  Q0 is always selected
- * before Q1; obtaining a message transfers its fixed copy to the caller. */
+/* Only the Protocol Task bridge may call this.  Q0-Q3 use the same bounded
+ * 6:3:2:1 weighted schedule as Node TX; taking transfers the fixed copy. */
 ucn_result_t ucn_service_remote_tx_take(ucn_service_router_t *router,
                                         ucn_service_message_t *message);
 

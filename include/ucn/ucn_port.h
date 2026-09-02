@@ -40,6 +40,10 @@ typedef struct ucn_port_ops {
                                    ucn_port_critical_token_t token);
 } ucn_port_ops_t;
 
+/*
+ * EN: Checks the `ops_is_compatible` condition against current Port contract state.
+ * 中文：根据当前 Port 合同 状态检查 `ops_is_compatible` 条件。
+ */
 static inline bool ucn_port_ops_is_compatible(const ucn_port_ops_t *ops)
 {
     return ops != NULL &&

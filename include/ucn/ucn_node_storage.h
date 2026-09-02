@@ -13,7 +13,7 @@
  * mutate them outside the Core/Port owner and always compile every translation
  * unit with the same UCN_PROFILE and UCN_FEATURE_SERVICE definitions.
  */
-#define UCN_NODE_STORAGE_LAYOUT_VERSION UINT32_C(5)
+#define UCN_NODE_STORAGE_LAYOUT_VERSION UINT32_C(7)
 
 typedef struct ucn_endpoint_handler_entry {
     bool occupied;
@@ -56,6 +56,7 @@ typedef struct ucn_tx_item {
     uint32_t next_attempt_ms;
     uint32_t order;
     uint8_t backpressure_retries;
+    bool waiting_for_route;
     uint16_t payload_length;
     uint8_t payload[UCN_MAX_PAYLOAD_BYTES];
 } ucn_tx_item_t;
@@ -239,6 +240,8 @@ struct ucn_node {
     uint32_t next_queue_order;
     ucn_tx_item_t q0[UCN_TX_Q0_DEPTH];
     ucn_tx_item_t q1[UCN_TX_Q1_DEPTH];
+    ucn_tx_item_t q2[UCN_TX_Q2_DEPTH];
+    ucn_tx_item_t q3[UCN_TX_Q3_DEPTH];
 #if UCN_FEATURE_DYNAMIC_MESH
     ucn_pending_q1_item_t pending_q1[UCN_PENDING_Q1_DEPTH];
     ucn_route_constraints_t default_route_constraints;
@@ -290,6 +293,7 @@ struct ucn_node {
 #if UCN_FEATURE_DYNAMIC_MESH
     uint8_t business_tx_since_maintenance;
 #endif
+    uint8_t business_schedule_cursor;
     bool step_observation_started;
 #if UCN_FEATURE_DYNAMIC_MESH
     uint8_t control_tokens;

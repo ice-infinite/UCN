@@ -170,6 +170,10 @@ static const ucn_standard_preset_entry_t STANDARD_PRESETS[
                        UCN_BEARER_IP_TUNNEL, 0U, 25U, 4U)
 };
 
+/*
+ * EN: Checks whether `preset` satisfies the standard Adapter module's validity rules.
+ * 中文：检查 `preset` 是否满足 标准 Adapter 模块的合法性规则。
+ */
 static bool standard_preset_is_valid(ucn_standard_preset_t preset)
 {
     return preset > UCN_STANDARD_PRESET_UNSPECIFIED &&
@@ -177,6 +181,10 @@ static bool standard_preset_is_valid(ucn_standard_preset_t preset)
            STANDARD_PRESETS[preset].profile.preset == preset;
 }
 
+/*
+ * EN: Resolves a standard Bearer preset into deterministic Link defaults.
+ * 中文：把标准 Bearer Preset 解析为确定性的 Link 默认参数。
+ */
 ucn_result_t ucn_standard_preset_resolve(
     ucn_standard_preset_t preset,
     ucn_standard_preset_profile_t *profile)
@@ -192,6 +200,10 @@ ucn_result_t ucn_standard_preset_resolve(
     return UCN_OK;
 }
 
+/*
+ * EN: Merges product overrides with a standard Link preset and validates the result.
+ * 中文：合并产品覆盖项与标准 Link Preset，并验证最终配置。
+ */
 ucn_result_t ucn_standard_link_config_resolve(
     const ucn_standard_link_config_t *config,
     ucn_standard_resolved_link_config_t *resolved)

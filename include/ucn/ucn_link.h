@@ -124,6 +124,10 @@ struct ucn_link {
     ucn_wire_profile_t peer_wire_profile;
 };
 
+/*
+ * EN: Checks whether `liveness_profile` satisfies the Link contract module's validity rules.
+ * 中文：检查 `liveness_profile` 是否满足 Link 合同 模块的合法性规则。
+ */
 static inline bool ucn_link_liveness_profile_is_valid(uint8_t profile)
 {
     return profile < (uint8_t)UCN_LINK_LIVENESS_PROFILE_COUNT;
@@ -132,6 +136,10 @@ static inline bool ucn_link_liveness_profile_is_valid(uint8_t profile)
 /* Resolve the single MTU contract shared by Full/Nano and Adapter-facing
  * code.  A zero result means that no usable MTU is currently known, so the
  * Link must not be selected for transmission until get_status() recovers. */
+/*
+ * EN: Returns the smaller usable MTU reported by the Link and its current status.
+ * 中文：返回 Link 静态上限与当前状态上限中较小的可用 MTU。
+ */
 static inline size_t ucn_link_effective_mtu(
     const ucn_link_t *link,
     const ucn_link_status_t *status)

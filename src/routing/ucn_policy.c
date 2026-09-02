@@ -3,16 +3,28 @@
 #include "ucn/ucn_node_storage.h"
 #include "ucn/ucn_time.h"
 
+/*
+ * EN: Checks whether `node_id` satisfies the routing Policy module's validity rules.
+ * 中文：检查 `node_id` 是否满足 路由 Policy 模块的合法性规则。
+ */
 static bool policy_node_id_is_valid(ucn_node_id_t node_id)
 {
     return node_id != 0U && node_id != UCN_NODE_BROADCAST;
 }
 
+/*
+ * EN: Checks whether `traffic_class` satisfies the routing Policy module's validity rules.
+ * 中文：检查 `traffic_class` 是否满足 路由 Policy 模块的合法性规则。
+ */
 static bool policy_traffic_class_is_valid(uint8_t traffic_class)
 {
     return traffic_class <= (uint8_t)UCN_TRAFFIC_Q3_BULK;
 }
 
+/*
+ * EN: Checks whether `key` satisfies the routing Policy module's validity rules.
+ * 中文：检查 `key` 是否满足 路由 Policy 模块的合法性规则。
+ */
 static bool policy_key_is_valid(const ucn_route_policy_key_t *key)
 {
     return key != NULL && policy_node_id_is_valid(key->destination) &&
@@ -21,6 +33,10 @@ static bool policy_key_is_valid(const ucn_route_policy_key_t *key)
             policy_traffic_class_is_valid(key->traffic_class));
 }
 
+/*
+ * EN: Compares `key_equal` using the canonical routing Policy identity rules.
+ * 中文：按照规范的 路由 Policy 身份规则比较 `key_equal`。
+ */
 static bool policy_key_equal(const ucn_route_policy_key_t *left,
                              const ucn_route_policy_key_t *right)
 {
@@ -29,6 +45,10 @@ static bool policy_key_equal(const ucn_route_policy_key_t *left,
            left->traffic_class == right->traffic_class;
 }
 
+/*
+ * EN: Compares `flow_key_equal` using the canonical routing Policy identity rules.
+ * 中文：按照规范的 路由 Policy 身份规则比较 `flow_key_equal`。
+ */
 static bool policy_flow_key_equal(const ucn_policy_flow_key_t *left,
                                   const ucn_policy_flow_key_t *right)
 {
@@ -37,6 +57,10 @@ static bool policy_flow_key_equal(const ucn_policy_flow_key_t *left,
            left->traffic_class == right->traffic_class;
 }
 
+/*
+ * EN: Checks the current `link_is_registered` condition in routing Policy state.
+ * 中文：检查当前 路由 Policy 状态中的 `link_is_registered` 条件。
+ */
 static bool policy_link_is_registered(const ucn_node_t *node,
                                       const ucn_link_t *link)
 {
@@ -53,6 +77,10 @@ static bool policy_link_is_registered(const ucn_node_t *node,
     return false;
 }
 
+/*
+ * EN: Checks the `link_is_present` condition against current routing Policy state.
+ * 中文：根据当前 路由 Policy 状态检查 `link_is_present` 条件。
+ */
 static bool policy_link_is_present(ucn_link_t *const *links,
                                    size_t link_count,
                                    const ucn_link_t *link)
@@ -67,6 +95,10 @@ static bool policy_link_is_present(ucn_link_t *const *links,
     return false;
 }
 
+/*
+ * EN: Searches bounded routing Policy state for `route_policy_entry`.
+ * 中文：在固定容量的 路由 Policy 状态中查找 `route_policy_entry`。
+ */
 static ucn_route_policy_entry_t *find_route_policy_entry(
     ucn_policy_state_t *state,
     const ucn_route_policy_key_t *key)
@@ -82,6 +114,10 @@ static ucn_route_policy_entry_t *find_route_policy_entry(
     return NULL;
 }
 
+/*
+ * EN: Searches bounded routing Policy state for `route_policy_match`.
+ * 中文：在固定容量的 路由 Policy 状态中查找 `route_policy_match`。
+ */
 static const ucn_route_policy_entry_t *find_route_policy_match(
     const ucn_policy_state_t *state,
     ucn_node_id_t destination,
@@ -113,6 +149,10 @@ static const ucn_route_policy_entry_t *find_route_policy_match(
     return wildcard;
 }
 
+/*
+ * EN: Searches bounded routing Policy state for `policy_path_entry`.
+ * 中文：在固定容量的 路由 Policy 状态中查找 `policy_path_entry`。
+ */
 static ucn_policy_path_entry_t *find_policy_path_entry(ucn_policy_state_t *state,
                                                         uint16_t local_path_id)
 {
@@ -127,6 +167,10 @@ static ucn_policy_path_entry_t *find_policy_path_entry(ucn_policy_state_t *state
     return NULL;
 }
 
+/*
+ * EN: Searches bounded routing Policy state for `policy_path_entry_const`.
+ * 中文：在固定容量的 路由 Policy 状态中查找 `policy_path_entry_const`。
+ */
 static const ucn_policy_path_entry_t *find_policy_path_entry_const(
     const ucn_policy_state_t *state,
     uint16_t local_path_id)
@@ -134,6 +178,10 @@ static const ucn_policy_path_entry_t *find_policy_path_entry_const(
     return find_policy_path_entry((ucn_policy_state_t *)state, local_path_id);
 }
 
+/*
+ * EN: Searches bounded routing Policy state for `flow_binding`.
+ * 中文：在固定容量的 路由 Policy 状态中查找 `flow_binding`。
+ */
 static ucn_policy_flow_binding_t *find_flow_binding(ucn_policy_state_t *state,
                                                      const ucn_policy_flow_key_t *key)
 {
@@ -148,6 +196,10 @@ static ucn_policy_flow_binding_t *find_flow_binding(ucn_policy_state_t *state,
     return NULL;
 }
 
+/*
+ * EN: Searches bounded routing Policy state for `quality_snapshot`.
+ * 中文：在固定容量的 路由 Policy 状态中查找 `quality_snapshot`。
+ */
 static ucn_policy_link_quality_snapshot_t *find_quality_snapshot(
     ucn_policy_state_t *state,
     const ucn_link_t *link)
@@ -162,6 +214,10 @@ static ucn_policy_link_quality_snapshot_t *find_quality_snapshot(
     return NULL;
 }
 
+/*
+ * EN: Searches bounded routing Policy state for `or_allocate_quality_snapshot`.
+ * 中文：在固定容量的 路由 Policy 状态中查找 `or_allocate_quality_snapshot`。
+ */
 static ucn_policy_link_quality_snapshot_t *find_or_allocate_quality_snapshot(
     ucn_policy_state_t *state,
     ucn_link_t *link)
@@ -184,11 +240,19 @@ static ucn_policy_link_quality_snapshot_t *find_or_allocate_quality_snapshot(
     return NULL;
 }
 
+/*
+ * EN: Applies the fixed-point EWMA used by routing Policy quality samples.
+ * 中文：应用路由 Policy 质量样本使用的定点 EWMA。
+ */
 static uint16_t policy_ewma(uint16_t previous, uint16_t sample)
 {
     return ucn_link_cost_ewma_update(previous, sample);
 }
 
+/*
+ * EN: Updates `update_optional_ewma` in bounded routing Policy state.
+ * 中文：更新固定容量 路由 Policy 状态中的 `update_optional_ewma`。
+ */
 static void update_optional_ewma(bool *valid,
                                  uint16_t *value,
                                  bool sample_valid,
@@ -207,6 +271,10 @@ static void update_optional_ewma(bool *valid,
     *value = policy_ewma(*value, sample);
 }
 
+/*
+ * EN: Clears `quality_metrics` from routing Policy without allocating memory.
+ * 中文：从 路由 Policy 中清除 `quality_metrics`，且不进行动态分配。
+ */
 static void clear_quality_metrics(ucn_policy_link_quality_snapshot_t *snapshot)
 {
     snapshot->route_cost_valid = false;
@@ -231,6 +299,10 @@ static void clear_quality_metrics(ucn_policy_link_quality_snapshot_t *snapshot)
     snapshot->adapter_bad_metric_count = 0U;
 }
 
+/*
+ * EN: Selects or resolves `resolve_quality_cost` using deterministic routing Policy rules.
+ * 中文：按照确定性的 路由 Policy 规则选择或解析 `resolve_quality_cost`。
+ */
 static void resolve_quality_cost(ucn_policy_state_t *state,
                                  ucn_policy_link_quality_snapshot_t *snapshot,
                                  const ucn_link_status_t *status,
@@ -277,6 +349,10 @@ static void resolve_quality_cost(ucn_policy_state_t *state,
     }
 }
 
+/*
+ * EN: Updates `refresh_link_quality` in bounded routing Policy state.
+ * 中文：更新固定容量 路由 Policy 状态中的 `refresh_link_quality`。
+ */
 bool ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
                                      ucn_link_t *const *links,
                                      size_t link_count,
@@ -432,6 +508,10 @@ bool ucn_policy_refresh_link_quality(ucn_policy_state_t *state,
 /* Policy Paths are logical forwarding objects.  Their configured Link is a
  * stable binding key, while liveness and congestion must follow the physical
  * Bearer selected for that logical next hop at this sample. */
+/*
+ * EN: Updates `refresh_path_egress` in bounded routing Policy state.
+ * 中文：更新固定容量 路由 Policy 状态中的 `refresh_path_egress`。
+ */
 void ucn_policy_refresh_path_egress(ucn_policy_state_t *state,
                                     uint16_t local_path_id,
                                     ucn_link_t *active_egress_link,
@@ -467,6 +547,10 @@ void ucn_policy_refresh_path_egress(ucn_policy_state_t *state,
     }
 }
 
+/*
+ * EN: Checks or removes expired `expire_flows` state in routing Policy.
+ * 中文：检查或移除 路由 Policy 中已过期的 `expire_flows` 状态。
+ */
 void ucn_policy_expire_flows(ucn_policy_state_t *state, uint32_t now_ms)
 {
     size_t index;
@@ -483,6 +567,10 @@ void ucn_policy_expire_flows(ucn_policy_state_t *state, uint32_t now_ms)
     }
 }
 
+/*
+ * EN: Validates and sets `route_policy` in routing Policy state.
+ * 中文：验证并设置 路由 Policy 状态中的 `route_policy`。
+ */
 ucn_result_t ucn_node_set_route_policy(ucn_node_t *node,
                                        const ucn_route_policy_config_t *config)
 {
@@ -543,6 +631,10 @@ ucn_result_t ucn_node_set_route_policy(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Clears `route_policy` from routing Policy without allocating memory.
+ * 中文：从 路由 Policy 中清除 `route_policy`，且不进行动态分配。
+ */
 ucn_result_t ucn_node_clear_route_policy(ucn_node_t *node,
                                          const ucn_route_policy_key_t *key)
 {
@@ -559,6 +651,10 @@ ucn_result_t ucn_node_clear_route_policy(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Searches bounded routing Policy state for `route_policy`.
+ * 中文：在固定容量的 路由 Policy 状态中查找 `route_policy`。
+ */
 const ucn_route_policy_entry_t *ucn_node_find_route_policy(
     const ucn_node_t *node,
     ucn_node_id_t destination,
@@ -572,6 +668,10 @@ const ucn_route_policy_entry_t *ucn_node_find_route_policy(
                                    traffic_class);
 }
 
+/*
+ * EN: Validates and sets `policy_path` in routing Policy state.
+ * 中文：验证并设置 路由 Policy 状态中的 `policy_path`。
+ */
 ucn_result_t ucn_node_set_policy_path(ucn_node_t *node,
                                       const ucn_policy_path_config_t *config)
 {
@@ -629,6 +729,10 @@ ucn_result_t ucn_node_set_policy_path(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Clears `policy_path` from routing Policy without allocating memory.
+ * 中文：从 路由 Policy 中清除 `policy_path`，且不进行动态分配。
+ */
 ucn_result_t ucn_node_clear_policy_path(ucn_node_t *node,
                                         uint16_t local_path_id)
 {
@@ -653,6 +757,10 @@ ucn_result_t ucn_node_clear_policy_path(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Searches bounded routing Policy state for `policy_path`.
+ * 中文：在固定容量的 路由 Policy 状态中查找 `policy_path`。
+ */
 const ucn_policy_path_entry_t *ucn_node_find_policy_path(
     const ucn_node_t *node,
     uint16_t local_path_id)
@@ -663,6 +771,10 @@ const ucn_policy_path_entry_t *ucn_node_find_policy_path(
     return find_policy_path_entry_const(&node->policy_state, local_path_id);
 }
 
+/*
+ * EN: Validates and installs `bind_q1_flow` into bounded routing Policy state.
+ * 中文：验证 `bind_q1_flow` 并将其安装到固定容量的 路由 Policy 状态中。
+ */
 ucn_result_t ucn_node_bind_q1_flow(ucn_node_t *node,
                                    ucn_node_id_t destination,
                                    ucn_endpoint_t endpoint,
@@ -711,6 +823,10 @@ ucn_result_t ucn_node_bind_q1_flow(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Searches bounded routing Policy state for `q1_flow`.
+ * 中文：在固定容量的 路由 Policy 状态中查找 `q1_flow`。
+ */
 const ucn_policy_flow_binding_t *ucn_node_find_q1_flow(
     const ucn_node_t *node,
     ucn_node_id_t destination,
@@ -734,6 +850,10 @@ const ucn_policy_flow_binding_t *ucn_node_find_q1_flow(
     return binding;
 }
 
+/*
+ * EN: Returns the current `link_quality` view from routing Policy state.
+ * 中文：从 路由 Policy 状态返回当前 `link_quality` 视图。
+ */
 const ucn_policy_link_quality_snapshot_t *ucn_node_get_link_quality(
     const ucn_node_t *node,
     const ucn_link_t *link)
@@ -744,6 +864,10 @@ const ucn_policy_link_quality_snapshot_t *ucn_node_get_link_quality(
     return find_quality_snapshot((ucn_policy_state_t *)&node->policy_state, link);
 }
 
+/*
+ * EN: Updates `mark_path_down` in bounded routing Policy state.
+ * 中文：更新固定容量 路由 Policy 状态中的 `mark_path_down`。
+ */
 void ucn_policy_mark_path_down(ucn_policy_state_t *state,
                                uint16_t local_path_id)
 {
@@ -758,6 +882,10 @@ void ucn_policy_mark_path_down(ucn_policy_state_t *state,
     }
 }
 
+/*
+ * EN: Records `touch_q1_flow` in bounded routing Policy state or statistics.
+ * 中文：在固定容量的 路由 Policy 状态或统计中记录 `touch_q1_flow`。
+ */
 void ucn_policy_touch_q1_flow(ucn_policy_state_t *state,
                               ucn_node_id_t destination,
                               ucn_endpoint_t endpoint,
@@ -779,6 +907,10 @@ void ucn_policy_touch_q1_flow(ucn_policy_state_t *state,
     }
 }
 
+/*
+ * EN: Returns the current `policy_stats` view from routing Policy state.
+ * 中文：从 路由 Policy 状态返回当前 `policy_stats` 视图。
+ */
 const ucn_policy_stats_t *ucn_node_get_policy_stats(const ucn_node_t *node)
 {
     return node == NULL ? NULL : &node->policy_state.stats;

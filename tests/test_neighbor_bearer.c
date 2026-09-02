@@ -319,6 +319,7 @@ int test_neighbor_quality(void)
     ucn_node_t a, b;
     ucn_link_t ab_primary, ab_backup, ba_primary, ba_backup;
     bearer_link_context_t cab_primary, cab_backup, cba_primary, cba_backup;
+    uint32_t switch_at_ms = 0U;
 
     if (UCN_MAX_BEARERS_PER_NEIGHBOR < 2U) {
         return 0;
@@ -398,9 +399,27 @@ int test_neighbor_quality(void)
     TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 4500U) == UCN_OK);
     TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 5000U) == UCN_OK);
     TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 5500U) == UCN_OK);
-    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 5600U) == UCN_OK);
-    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 5700U) == UCN_OK);
-    TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 6000U) == UCN_OK);
+    {
+        uint32_t now_ms;
+
+        /* Drive the bounded scheduler at its declared service cadence. A
+         * deterministic Heartbeat phase may occupy either historical probe
+         * timestamp, but cannot starve the candidate proof sequence. */
+        for (now_ms = 5510U; now_ms <= 7000U; now_ms += 10U) {
+            const ucn_result_t phase_result =
+                bearer_step_with_peer_clock(&a, &b, now_ms);
+
+            TEST_ASSERT(phase_result == UCN_OK ||
+                        phase_result == UCN_ERR_NOT_FOUND);
+            if (a.neighbors[0]
+                    .bearers[a.neighbors[0].primary_bearer_index]
+                    .link == &ab_backup) {
+                switch_at_ms = now_ms;
+                break;
+            }
+        }
+    }
+    TEST_ASSERT(switch_at_ms != 0U);
     TEST_ASSERT(a.neighbors[0].bearers[a.neighbors[0].primary_bearer_index].link ==
                 &ab_backup);
     TEST_ASSERT(a.stats.bearer_quality_probes_sent ==
@@ -421,11 +440,17 @@ int test_neighbor_quality(void)
          * keeps the new Primary stable and schedules no new soft Probe. */
         cab_primary.metrics.tx_failure_per_mille = 0U;
         cab_backup.metrics.tx_failure_per_mille = 200U;
-        TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 6500U) == UCN_OK);
-        TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 7000U) == UCN_OK);
-        TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 7500U) == UCN_OK);
-        TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 8000U) == UCN_OK);
-        TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 8500U) == UCN_OK);
+        {
+            uint32_t offset_ms;
+
+            for (offset_ms = 500U; offset_ms <= 2500U; offset_ms += 500U) {
+                const ucn_result_t hold_result = bearer_step_with_peer_clock(
+                    &a, &b, switch_at_ms + offset_ms);
+
+                TEST_ASSERT(hold_result == UCN_OK ||
+                            hold_result == UCN_ERR_NOT_FOUND);
+            }
+        }
         TEST_ASSERT(a.neighbors[0]
                         .bearers[a.neighbors[0].primary_bearer_index]
                         .link == &ab_backup);
@@ -435,10 +460,11 @@ int test_neighbor_quality(void)
         /* A stale active snapshot is a hard exclusion.  It fails over at the
          * next sample without waiting for another three-sample/Probe cycle. */
         cab_primary.metrics.metrics_timestamp_valid = true;
-        cab_primary.metrics.metrics_timestamp_ms = 9000U;
+        cab_primary.metrics.metrics_timestamp_ms = switch_at_ms + 3000U;
         cab_backup.metrics.metrics_timestamp_valid = true;
         cab_backup.metrics.metrics_timestamp_ms = 0U;
-        TEST_ASSERT(bearer_step_with_peer_clock(&a, &b, 9000U) == UCN_OK);
+        TEST_ASSERT(bearer_step_with_peer_clock(
+                        &a, &b, switch_at_ms + 3000U) == UCN_OK);
         TEST_ASSERT(a.neighbors[0]
                         .bearers[a.neighbors[0].primary_bearer_index]
                         .link == &ab_primary);

@@ -2,22 +2,38 @@
 
 #include "ucn/ucn_service.h"
 
+/*
+ * EN: Checks whether `id` satisfies the Service Router module's validity rules.
+ * 中文：检查 `id` 是否满足 Service Router 模块的合法性规则。
+ */
 static bool ucn_service_id_is_valid(ucn_service_id_t service_id)
 {
     return service_id != UCN_SERVICE_ID_NONE && service_id <= UCN_SERVICE_ID_MAX;
 }
 
+/*
+ * EN: Checks the `traffic_is_supported` condition against current Service Router state.
+ * 中文：根据当前 Service Router 状态检查 `traffic_is_supported` 条件。
+ */
 static bool ucn_service_traffic_is_supported(ucn_traffic_class_t traffic_class)
 {
-    return traffic_class == UCN_TRAFFIC_Q0_CRITICAL ||
-           traffic_class == UCN_TRAFFIC_Q1_REALTIME;
+    return traffic_class >= UCN_TRAFFIC_Q0_CRITICAL &&
+           traffic_class <= UCN_TRAFFIC_Q3_BULK;
 }
 
+/*
+ * EN: Calculates `traffic_mask` with bounded, deterministic Service Router arithmetic.
+ * 中文：使用有界且确定性的 Service Router 算术计算 `traffic_mask`。
+ */
 static uint8_t ucn_service_traffic_mask(ucn_traffic_class_t traffic_class)
 {
     return UCN_SERVICE_TRAFFIC_MASK(traffic_class);
 }
 
+/*
+ * EN: Searches bounded Service Router state for `binding`.
+ * 中文：在固定容量的 Service Router 状态中查找 `binding`。
+ */
 static int ucn_service_find_binding(const ucn_service_router_t *router,
                                     ucn_endpoint_t endpoint)
 {
@@ -31,10 +47,16 @@ static int ucn_service_find_binding(const ucn_service_router_t *router,
     return -1;
 }
 
+/*
+ * EN: Checks whether `binding` satisfies the Service Router module's validity rules.
+ * 中文：检查 `binding` 是否满足 Service Router 模块的合法性规则。
+ */
 static bool ucn_service_binding_is_valid(const ucn_service_binding_t *binding)
 {
     const uint8_t q0_mask = ucn_service_traffic_mask(UCN_TRAFFIC_Q0_CRITICAL);
     const uint8_t q1_mask = ucn_service_traffic_mask(UCN_TRAFFIC_Q1_REALTIME);
+    const uint8_t q2_mask = ucn_service_traffic_mask(UCN_TRAFFIC_Q2_NORMAL);
+    const uint8_t q3_mask = ucn_service_traffic_mask(UCN_TRAFFIC_Q3_BULK);
 
     if (!ucn_endpoint_is_static(binding->endpoint) ||
         !ucn_service_id_is_valid(binding->owner_service_id) ||
@@ -51,9 +73,21 @@ static bool ucn_service_binding_is_valid(const ucn_service_binding_t *binding)
         return binding->allowed_traffic_mask == q1_mask &&
                !binding->require_remote_q0_validator;
     }
+    if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q2_FIFO) {
+        return binding->allowed_traffic_mask == q2_mask &&
+               !binding->require_remote_q0_validator;
+    }
+    if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q3_FIFO) {
+        return binding->allowed_traffic_mask == q3_mask &&
+               !binding->require_remote_q0_validator;
+    }
     return false;
 }
 
+/*
+ * EN: Validates `target` before Service Router state is used or changed.
+ * 中文：在使用或修改 Service Router 状态前验证 `target`。
+ */
 static ucn_result_t ucn_service_validate_target(ucn_service_router_t *router,
                                                 uint8_t binding_index,
                                                 ucn_traffic_class_t traffic_class,
@@ -77,6 +111,10 @@ static ucn_result_t ucn_service_validate_target(ucn_service_router_t *router,
     return UCN_OK;
 }
 
+/*
+ * EN: Builds `build_message` in caller-provided storage for Service Router.
+ * 中文：在调用方存储中为 Service Router 构造 `build_message`。
+ */
 static void ucn_service_build_message(ucn_service_message_t *message,
                                       ucn_node_id_t source_node_id,
                                       ucn_node_id_t destination_node_id,
@@ -98,30 +136,48 @@ static void ucn_service_build_message(ucn_service_message_t *message,
     }
 }
 
-static ucn_result_t ucn_service_q0_push(ucn_service_q0_inbox_t *inbox,
-                                        const ucn_service_message_t *message)
+/*
+ * EN: Copies one message into caller-provided bounded FIFO storage.
+ * 中文：把一条消息复制到调用方提供的有界 FIFO 存储。
+ */
+static ucn_result_t ucn_service_fifo_push(ucn_service_message_t *messages,
+                                          uint8_t capacity,
+                                          uint8_t *tail,
+                                          uint8_t *count,
+                                          const ucn_service_message_t *message)
 {
-    if (inbox->count >= UCN_SERVICE_Q0_INBOX_DEPTH) {
+    if (*count >= capacity) {
         return UCN_ERR_NO_SPACE;
     }
-    inbox->messages[inbox->tail] = *message;
-    inbox->tail = (uint8_t)((inbox->tail + 1U) % UCN_SERVICE_Q0_INBOX_DEPTH);
-    inbox->count++;
+    messages[*tail] = *message;
+    *tail = (uint8_t)((*tail + 1U) % capacity);
+    (*count)++;
     return UCN_OK;
 }
 
-static ucn_result_t ucn_service_q0_take(ucn_service_q0_inbox_t *inbox,
-                                        ucn_service_message_t *message)
+/*
+ * EN: Removes one message from caller-provided bounded FIFO storage.
+ * 中文：从调用方提供的有界 FIFO 存储中移除一条消息。
+ */
+static ucn_result_t ucn_service_fifo_take(ucn_service_message_t *messages,
+                                          uint8_t capacity,
+                                          uint8_t *head,
+                                          uint8_t *count,
+                                          ucn_service_message_t *message)
 {
-    if (inbox->count == 0U) {
+    if (*count == 0U) {
         return UCN_ERR_NOT_FOUND;
     }
-    *message = inbox->messages[inbox->head];
-    inbox->head = (uint8_t)((inbox->head + 1U) % UCN_SERVICE_Q0_INBOX_DEPTH);
-    inbox->count--;
+    *message = messages[*head];
+    *head = (uint8_t)((*head + 1U) % capacity);
+    (*count)--;
     return UCN_OK;
 }
 
+/*
+ * EN: Forwards or delivers `deliver_to_binding` through the bounded Service Router path.
+ * 中文：通过有界的 Service Router 路径转发或投递 `deliver_to_binding`。
+ */
 static ucn_result_t ucn_service_deliver_to_binding(ucn_service_router_t *router,
                                                     uint8_t binding_index,
                                                     const ucn_service_message_t *message)
@@ -130,23 +186,55 @@ static ucn_result_t ucn_service_deliver_to_binding(ucn_service_router_t *router,
     const ucn_service_binding_state_t *state = &router->binding_states[binding_index];
 
     if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q0_FIFO) {
-        const ucn_result_t result = ucn_service_q0_push(
-            &router->q0_inboxes[state->q0_inbox_index], message);
+        ucn_service_q0_inbox_t *inbox =
+            &router->q0_inboxes[state->q0_inbox_index];
+        const ucn_result_t result = ucn_service_fifo_push(
+            inbox->messages, UCN_SERVICE_Q0_INBOX_DEPTH, &inbox->tail,
+            &inbox->count, message);
 
         if (result != UCN_OK) {
             router->stats.q0_inbox_full++;
         }
         return result;
     }
-
-    if (router->q1_inboxes[state->q1_inbox_index].occupied) {
-        router->stats.q1_overwrites++;
+    if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q1_LATEST) {
+        if (router->q1_inboxes[state->q1_inbox_index].occupied) {
+            router->stats.q1_overwrites++;
+        }
+        router->q1_inboxes[state->q1_inbox_index].latest = *message;
+        router->q1_inboxes[state->q1_inbox_index].occupied = true;
+        return UCN_OK;
     }
-    router->q1_inboxes[state->q1_inbox_index].latest = *message;
-    router->q1_inboxes[state->q1_inbox_index].occupied = true;
-    return UCN_OK;
+    if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q2_FIFO) {
+        ucn_service_q2_inbox_t *inbox =
+            &router->q2_inboxes[state->q2_inbox_index];
+        const ucn_result_t result = ucn_service_fifo_push(
+            inbox->messages, UCN_SERVICE_Q2_INBOX_DEPTH, &inbox->tail,
+            &inbox->count, message);
+
+        if (result != UCN_OK) {
+            router->stats.q2_inbox_full++;
+        }
+        return result;
+    }
+    {
+        ucn_service_q3_inbox_t *inbox =
+            &router->q3_inboxes[state->q3_inbox_index];
+        const ucn_result_t result = ucn_service_fifo_push(
+            inbox->messages, UCN_SERVICE_Q3_INBOX_DEPTH, &inbox->tail,
+            &inbox->count, message);
+
+        if (result != UCN_OK) {
+            router->stats.q3_inbox_full++;
+        }
+        return result;
+    }
 }
 
+/*
+ * EN: Searches bounded Service Router state for `remote_q1`.
+ * 中文：在固定容量的 Service Router 状态中查找 `remote_q1`。
+ */
 static int ucn_service_find_remote_q1(const ucn_service_router_t *router,
                                       ucn_node_id_t destination,
                                       ucn_endpoint_t endpoint)
@@ -164,6 +252,10 @@ static int ucn_service_find_remote_q1(const ucn_service_router_t *router,
     return -1;
 }
 
+/*
+ * EN: Searches bounded Service Router state for `free_remote_q1`.
+ * 中文：在固定容量的 Service Router 状态中查找 `free_remote_q1`。
+ */
 static int ucn_service_find_free_remote_q1(const ucn_service_router_t *router)
 {
     uint8_t index;
@@ -176,12 +268,18 @@ static int ucn_service_find_free_remote_q1(const ucn_service_router_t *router)
     return -1;
 }
 
+/*
+ * EN: Initializes `router_init` for Service Router using caller-owned fixed storage.
+ * 中文：使用调用方提供的固定存储初始化 Service Router 的 `router_init`。
+ */
 ucn_result_t ucn_service_router_init(ucn_service_router_t *router,
                                      const ucn_service_router_config_t *config)
 {
     uint8_t index;
     uint8_t q0_count = 0U;
     uint8_t q1_count = 0U;
+    uint8_t q2_count = 0U;
+    uint8_t q3_count = 0U;
 
     if (router == NULL || config == NULL || config->bindings == NULL ||
         config->binding_count == 0U || config->binding_count > UCN_SERVICE_MAX_BINDINGS ||
@@ -209,23 +307,41 @@ ucn_result_t ucn_service_router_init(ucn_service_router_t *router,
         router->binding_states[index].ready = binding->enabled_at_boot;
         router->binding_states[index].q0_inbox_index = UCN_SERVICE_BINDING_INDEX_NONE;
         router->binding_states[index].q1_inbox_index = UCN_SERVICE_BINDING_INDEX_NONE;
+        router->binding_states[index].q2_inbox_index = UCN_SERVICE_BINDING_INDEX_NONE;
+        router->binding_states[index].q3_inbox_index = UCN_SERVICE_BINDING_INDEX_NONE;
         if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q0_FIFO) {
             if (q0_count >= UCN_SERVICE_MAX_Q0_BINDINGS) {
                 (void)memset(router, 0, sizeof(*router));
                 return UCN_ERR_NO_SPACE;
             }
             router->binding_states[index].q0_inbox_index = q0_count++;
-        } else {
+        } else if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q1_LATEST) {
             if (q1_count >= UCN_SERVICE_MAX_Q1_BINDINGS) {
                 (void)memset(router, 0, sizeof(*router));
                 return UCN_ERR_NO_SPACE;
             }
             router->binding_states[index].q1_inbox_index = q1_count++;
+        } else if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q2_FIFO) {
+            if (q2_count >= UCN_SERVICE_MAX_Q2_BINDINGS) {
+                (void)memset(router, 0, sizeof(*router));
+                return UCN_ERR_NO_SPACE;
+            }
+            router->binding_states[index].q2_inbox_index = q2_count++;
+        } else {
+            if (q3_count >= UCN_SERVICE_MAX_Q3_BINDINGS) {
+                (void)memset(router, 0, sizeof(*router));
+                return UCN_ERR_NO_SPACE;
+            }
+            router->binding_states[index].q3_inbox_index = q3_count++;
         }
     }
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `ready` in Service Router state.
+ * 中文：验证并设置 Service Router 状态中的 `ready`。
+ */
 ucn_result_t ucn_service_set_ready(ucn_service_router_t *router,
                                    ucn_endpoint_t endpoint,
                                    bool ready)
@@ -247,9 +363,15 @@ ucn_result_t ucn_service_set_ready(ucn_service_router_t *router,
         if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q0_FIFO) {
             (void)memset(&router->q0_inboxes[state->q0_inbox_index], 0,
                          sizeof(router->q0_inboxes[state->q0_inbox_index]));
-        } else {
+        } else if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q1_LATEST) {
             (void)memset(&router->q1_inboxes[state->q1_inbox_index], 0,
                          sizeof(router->q1_inboxes[state->q1_inbox_index]));
+        } else if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q2_FIFO) {
+            (void)memset(&router->q2_inboxes[state->q2_inbox_index], 0,
+                         sizeof(router->q2_inboxes[state->q2_inbox_index]));
+        } else {
+            (void)memset(&router->q3_inboxes[state->q3_inbox_index], 0,
+                         sizeof(router->q3_inboxes[state->q3_inbox_index]));
         }
         router->stats.binding_purges++;
     }
@@ -257,6 +379,10 @@ ucn_result_t ucn_service_set_ready(ucn_service_router_t *router,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and submits `send_ex` through the bounded Service Router transmit path.
+ * 中文：验证 `send_ex` 并将其提交到有界的 Service Router 发送路径。
+ */
 ucn_result_t ucn_service_send_ex(ucn_service_router_t *router,
                                  ucn_node_id_t destination,
                                  ucn_service_id_t source_service_id,
@@ -309,12 +435,14 @@ ucn_result_t ucn_service_send_ex(ucn_service_router_t *router,
     }
 
     if (traffic_class == UCN_TRAFFIC_Q0_CRITICAL) {
-        result = ucn_service_q0_push(&router->remote_q0, &message);
+        result = ucn_service_fifo_push(
+            router->remote_q0.messages, UCN_SERVICE_REMOTE_TX_Q0_DEPTH,
+            &router->remote_q0.tail, &router->remote_q0.count, &message);
         if (result != UCN_OK) {
             router->stats.remote_q0_full++;
             return result;
         }
-    } else {
+    } else if (traffic_class == UCN_TRAFFIC_Q1_REALTIME) {
         int slot_index = ucn_service_find_remote_q1(router, destination, endpoint);
 
         if (slot_index >= 0) {
@@ -329,6 +457,22 @@ ucn_result_t ucn_service_send_ex(ucn_service_router_t *router,
             router->remote_q1[slot_index].occupied = true;
             router->remote_q1[slot_index].message = message;
         }
+    } else if (traffic_class == UCN_TRAFFIC_Q2_NORMAL) {
+        result = ucn_service_fifo_push(
+            router->remote_q2.messages, UCN_SERVICE_REMOTE_TX_Q2_DEPTH,
+            &router->remote_q2.tail, &router->remote_q2.count, &message);
+        if (result != UCN_OK) {
+            router->stats.remote_q2_full++;
+            return result;
+        }
+    } else {
+        result = ucn_service_fifo_push(
+            router->remote_q3.messages, UCN_SERVICE_REMOTE_TX_Q3_DEPTH,
+            &router->remote_q3.tail, &router->remote_q3.count, &message);
+        if (result != UCN_OK) {
+            router->stats.remote_q3_full++;
+            return result;
+        }
     }
     router->stats.remote_enqueued++;
     if (acceptance != NULL) {
@@ -337,6 +481,10 @@ ucn_result_t ucn_service_send_ex(ucn_service_router_t *router,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and submits `send` through the bounded Service Router transmit path.
+ * 中文：验证 `send` 并将其提交到有界的 Service Router 发送路径。
+ */
 ucn_result_t ucn_service_send(ucn_service_router_t *router,
                               ucn_node_id_t destination,
                               ucn_service_id_t source_service_id,
@@ -349,6 +497,10 @@ ucn_result_t ucn_service_send(ucn_service_router_t *router,
                                traffic_class, payload, payload_length, NULL);
 }
 
+/*
+ * EN: Forwards or delivers `deliver_remote` through the bounded Service Router path.
+ * 中文：通过有界的 Service Router 路径转发或投递 `deliver_remote`。
+ */
 ucn_result_t ucn_service_deliver_remote(ucn_service_router_t *router,
                                         const ucn_frame_t *frame)
 {
@@ -391,6 +543,10 @@ ucn_result_t ucn_service_deliver_remote(ucn_service_router_t *router,
     return result;
 }
 
+/*
+ * EN: Removes and returns `inbox_take` from bounded Service Router storage.
+ * 中文：从固定容量的 Service Router 存储中移除并返回 `inbox_take`。
+ */
 ucn_result_t ucn_service_inbox_take(ucn_service_router_t *router,
                                     ucn_service_id_t owner_service_id,
                                     ucn_endpoint_t endpoint,
@@ -418,13 +574,31 @@ ucn_result_t ucn_service_inbox_take(ucn_service_router_t *router,
         return UCN_ERR_NOT_FOUND;
     }
     if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q0_FIFO) {
-        result = ucn_service_q0_take(&router->q0_inboxes[state->q0_inbox_index], message);
-    } else if (!router->q1_inboxes[state->q1_inbox_index].occupied) {
-        result = UCN_ERR_NOT_FOUND;
+        ucn_service_q0_inbox_t *inbox =
+            &router->q0_inboxes[state->q0_inbox_index];
+        result = ucn_service_fifo_take(
+            inbox->messages, UCN_SERVICE_Q0_INBOX_DEPTH, &inbox->head,
+            &inbox->count, message);
+    } else if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q1_LATEST) {
+        if (!router->q1_inboxes[state->q1_inbox_index].occupied) {
+            result = UCN_ERR_NOT_FOUND;
+        } else {
+            *message = router->q1_inboxes[state->q1_inbox_index].latest;
+            router->q1_inboxes[state->q1_inbox_index].occupied = false;
+            result = UCN_OK;
+        }
+    } else if (binding->delivery_mode == UCN_SERVICE_DELIVERY_Q2_FIFO) {
+        ucn_service_q2_inbox_t *inbox =
+            &router->q2_inboxes[state->q2_inbox_index];
+        result = ucn_service_fifo_take(
+            inbox->messages, UCN_SERVICE_Q2_INBOX_DEPTH, &inbox->head,
+            &inbox->count, message);
     } else {
-        *message = router->q1_inboxes[state->q1_inbox_index].latest;
-        router->q1_inboxes[state->q1_inbox_index].occupied = false;
-        result = UCN_OK;
+        ucn_service_q3_inbox_t *inbox =
+            &router->q3_inboxes[state->q3_inbox_index];
+        result = ucn_service_fifo_take(
+            inbox->messages, UCN_SERVICE_Q3_INBOX_DEPTH, &inbox->head,
+            &inbox->count, message);
     }
     if (result == UCN_OK) {
         router->stats.inbox_reads++;
@@ -432,36 +606,105 @@ ucn_result_t ucn_service_inbox_take(ucn_service_router_t *router,
     return result;
 }
 
+/* Keep Service-to-Node handoff ordering identical to the Node queue weights. */
+#define UCN_SERVICE_REMOTE_SCHEDULE_LENGTH ((uint8_t)12U)
+static const ucn_traffic_class_t
+    ucn_service_remote_schedule[UCN_SERVICE_REMOTE_SCHEDULE_LENGTH] = {
+        UCN_TRAFFIC_Q0_CRITICAL,
+        UCN_TRAFFIC_Q1_REALTIME,
+        UCN_TRAFFIC_Q0_CRITICAL,
+        UCN_TRAFFIC_Q2_NORMAL,
+        UCN_TRAFFIC_Q0_CRITICAL,
+        UCN_TRAFFIC_Q1_REALTIME,
+        UCN_TRAFFIC_Q0_CRITICAL,
+        UCN_TRAFFIC_Q3_BULK,
+        UCN_TRAFFIC_Q0_CRITICAL,
+        UCN_TRAFFIC_Q1_REALTIME,
+        UCN_TRAFFIC_Q0_CRITICAL,
+        UCN_TRAFFIC_Q2_NORMAL
+    };
+
+/*
+ * EN: Takes one remote message from a specific Service traffic class.
+ * 中文：从指定 Service 业务等级取出一条远端消息。
+ */
+static ucn_result_t ucn_service_remote_take_class(
+    ucn_service_router_t *router,
+    ucn_traffic_class_t traffic_class,
+    ucn_service_message_t *message)
+{
+    uint8_t index;
+
+    if (traffic_class == UCN_TRAFFIC_Q0_CRITICAL) {
+        return ucn_service_fifo_take(
+            router->remote_q0.messages, UCN_SERVICE_REMOTE_TX_Q0_DEPTH,
+            &router->remote_q0.head, &router->remote_q0.count, message);
+    }
+    if (traffic_class == UCN_TRAFFIC_Q1_REALTIME) {
+        for (index = 0U; index < UCN_SERVICE_REMOTE_TX_Q1_DEPTH; ++index) {
+            if (router->remote_q1[index].occupied) {
+                *message = router->remote_q1[index].message;
+                router->remote_q1[index].occupied = false;
+                return UCN_OK;
+            }
+        }
+        return UCN_ERR_NOT_FOUND;
+    }
+    if (traffic_class == UCN_TRAFFIC_Q2_NORMAL) {
+        return ucn_service_fifo_take(
+            router->remote_q2.messages, UCN_SERVICE_REMOTE_TX_Q2_DEPTH,
+            &router->remote_q2.head, &router->remote_q2.count, message);
+    }
+    return ucn_service_fifo_take(
+        router->remote_q3.messages, UCN_SERVICE_REMOTE_TX_Q3_DEPTH,
+        &router->remote_q3.head, &router->remote_q3.count, message);
+}
+
+/*
+ * EN: Removes and returns `remote_tx_take` from bounded Service Router storage.
+ * 中文：从固定容量的 Service Router 存储中移除并返回 `remote_tx_take`。
+ */
 ucn_result_t ucn_service_remote_tx_take(ucn_service_router_t *router,
                                         ucn_service_message_t *message)
 {
-    uint8_t index;
-    ucn_result_t result;
+    uint8_t offset;
 
     if (router == NULL || message == NULL) {
         return UCN_ERR_ARGUMENT;
     }
-    result = ucn_service_q0_take(&router->remote_q0, message);
-    if (result == UCN_OK) {
-        router->stats.remote_tx_reads++;
-        return UCN_OK;
-    }
-    for (index = 0U; index < UCN_SERVICE_REMOTE_TX_Q1_DEPTH; ++index) {
-        if (router->remote_q1[index].occupied) {
-            *message = router->remote_q1[index].message;
-            router->remote_q1[index].occupied = false;
+    for (offset = 0U; offset < UCN_SERVICE_REMOTE_SCHEDULE_LENGTH; ++offset) {
+        const uint8_t schedule_index = (uint8_t)(
+            (router->remote_schedule_cursor + offset) %
+            UCN_SERVICE_REMOTE_SCHEDULE_LENGTH);
+        const ucn_traffic_class_t traffic_class =
+            ucn_service_remote_schedule[schedule_index];
+        const ucn_result_t result = ucn_service_remote_take_class(
+            router, traffic_class, message);
+
+        if (result == UCN_OK) {
+            router->remote_schedule_cursor = (uint8_t)(
+                (schedule_index + 1U) % UCN_SERVICE_REMOTE_SCHEDULE_LENGTH);
             router->stats.remote_tx_reads++;
+            router->stats.remote_tx_reads_by_class[(uint8_t)traffic_class]++;
             return UCN_OK;
         }
     }
     return UCN_ERR_NOT_FOUND;
 }
 
+/*
+ * EN: Returns the current `stats` view from Service Router state.
+ * 中文：从 Service Router 状态返回当前 `stats` 视图。
+ */
 const ucn_service_stats_t *ucn_service_get_stats(const ucn_service_router_t *router)
 {
     return router == NULL ? NULL : &router->stats;
 }
 
+/*
+ * EN: Maps a synchronous Service acceptance result to its asynchronous stage.
+ * 中文：把同步 Service 接受结果映射为对应的异步阶段。
+ */
 ucn_service_async_stage_t ucn_service_acceptance_stage(
     ucn_service_acceptance_t acceptance)
 {
@@ -474,6 +717,10 @@ ucn_service_async_stage_t ucn_service_acceptance_stage(
     return UCN_SERVICE_STAGE_NONE;
 }
 
+/*
+ * EN: Encodes `command_guard_encode` into its bounded Service Router wire representation.
+ * 中文：把 `command_guard_encode` 编码为有界的 Service Router 线格式。
+ */
 ucn_result_t ucn_service_command_guard_encode(
     const ucn_service_command_guard_t *guard,
     uint8_t output[UCN_SERVICE_COMMAND_GUARD_BYTES])
@@ -498,6 +745,10 @@ ucn_result_t ucn_service_command_guard_encode(
     return UCN_OK;
 }
 
+/*
+ * EN: Decodes and validates `command_guard_decode` from its Service Router wire representation.
+ * 中文：从 Service Router 线格式解码并验证 `command_guard_decode`。
+ */
 ucn_result_t ucn_service_command_guard_decode(
     const uint8_t *payload,
     size_t payload_length,
@@ -524,6 +775,10 @@ ucn_result_t ucn_service_command_guard_decode(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates a command against the bounded Service idempotency guard.
+ * 中文：使用固定容量的 Service 幂等 Guard 验证命令。
+ */
 ucn_result_t ucn_service_command_guard_validate(
     const ucn_service_command_guard_t *guard,
     uint32_t now_ms,
@@ -544,6 +799,10 @@ ucn_result_t ucn_service_command_guard_validate(
     return UCN_OK;
 }
 
+/*
+ * EN: Checks whether `result_header` satisfies the Service Router module's validity rules.
+ * 中文：检查 `result_header` 是否满足 Service Router 模块的合法性规则。
+ */
 static bool ucn_service_result_header_is_valid(
     const ucn_service_result_header_t *header)
 {
@@ -560,6 +819,10 @@ static bool ucn_service_result_header_is_valid(
            header->status <= UCN_SERVICE_RESULT_EXPIRED;
 }
 
+/*
+ * EN: Encodes `result_header_encode` into its bounded Service Router wire representation.
+ * 中文：把 `result_header_encode` 编码为有界的 Service Router 线格式。
+ */
 ucn_result_t ucn_service_result_header_encode(
     const ucn_service_result_header_t *header,
     uint8_t output[UCN_SERVICE_RESULT_HEADER_BYTES])
@@ -578,6 +841,10 @@ ucn_result_t ucn_service_result_header_encode(
     return UCN_OK;
 }
 
+/*
+ * EN: Decodes and validates `result_header_decode` from its Service Router wire representation.
+ * 中文：从 Service Router 线格式解码并验证 `result_header_decode`。
+ */
 ucn_result_t ucn_service_result_header_decode(
     const uint8_t *payload,
     size_t payload_length,
@@ -597,6 +864,10 @@ ucn_result_t ucn_service_result_header_decode(
     return ucn_service_result_header_is_valid(header) ? UCN_OK : UCN_ERR_MALFORMED;
 }
 
+/*
+ * EN: Checks the `result_matches_command` condition against current Service Router state.
+ * 中文：根据当前 Service Router 状态检查 `result_matches_command` 条件。
+ */
 bool ucn_service_result_matches_command(
     const ucn_service_command_guard_t *command,
     ucn_endpoint_t received_endpoint,

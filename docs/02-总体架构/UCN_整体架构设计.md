@@ -109,7 +109,7 @@ Core 只需支持：单播、受限广播、有限跳转发和小尺寸应用负
 
 高风险远端 Q0 Binding 可强制要求产品 Validator：Core 完成安全/解密后，Bridge 在 Router 上锁与复制前传入完整 Frame、Source、Session、Endpoint、Payload 和当前 Node 时间；拒绝项不会进入 Inbox。可选 Replay 表使用固定容量，Session 切换必须由认证产品逻辑显式轮换。普通 Q1 和本机 Fast Path不承担这项开销，执行 Task 始终保留第二次产品安全检查。
 
-`ucn_node_t` 仍由单一协议任务拥有。Endpoint 回调只应完成无阻塞固定副本投递和任务通知，不能在协议任务中执行耗时控制、PWM、FOC 或传感器业务。当前 Port 已编译，但真实 Task 高水位、Q0/Q1 和时延仍未测量；详细队列、QoS、Payload 所有权和测试门禁见[节点内任务通信建议](../05-传输与服务/UCN_节点内任务通信建议.md)。
+`ucn_node_t` 仍由单一协议任务拥有。Endpoint 回调只应完成无阻塞固定副本投递和任务通知，不能在协议任务中执行耗时控制、PWM、FOC 或传感器业务。当前 Port 已编译且 Q0～Q3 软件队列已完成，但真实 Task 高水位、四级端到端时延和各 Bearer 硬件优先级映射仍未测量；详细队列、QoS、Payload 所有权和测试门禁见[节点内任务通信建议](../05-传输与服务/UCN_节点内任务通信建议.md)。
 
 ### 4.3 MCU 独立自组网流程
 

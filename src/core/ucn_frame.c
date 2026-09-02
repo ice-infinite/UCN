@@ -34,6 +34,10 @@ static ucn_result_t validate_frame_fields(
     bool require_auth_tag,
     const ucn_wire_profile_descriptor_t **descriptor_out);
 
+/*
+ * EN: Selects or resolves `resolve_profile` using deterministic Wire frame codec rules.
+ * 中文：按照确定性的 Wire 帧编解码 规则选择或解析 `resolve_profile`。
+ */
 static const ucn_wire_profile_descriptor_t *resolve_profile(
     ucn_wire_profile_t profile)
 {
@@ -43,6 +47,10 @@ static const ucn_wire_profile_descriptor_t *resolve_profile(
     return ucn_wire_profile_get_descriptor(profile);
 }
 
+/*
+ * EN: Returns the current `wire_profile_get_descriptor` view from Wire frame codec state.
+ * 中文：从 Wire 帧编解码 状态返回当前 `wire_profile_get_descriptor` 视图。
+ */
 const ucn_wire_profile_descriptor_t *ucn_wire_profile_get_descriptor(
     ucn_wire_profile_t profile)
 {
@@ -58,12 +66,20 @@ const ucn_wire_profile_descriptor_t *ucn_wire_profile_get_descriptor(
     return NULL;
 }
 
+/*
+ * EN: Derives `profile_from_wire_code` with the canonical Wire frame codec conversion rules.
+ * 中文：按照规范的 Wire 帧编解码 转换规则推导 `profile_from_wire_code`。
+ */
 static ucn_wire_profile_t profile_from_wire_code(uint8_t wire_code)
 {
     return (ucn_wire_profile_t)(wire_code +
                                 (uint8_t)UCN_WIRE_PROFILE_W0_LOCAL);
 }
 
+/*
+ * EN: Builds the packed protocol-version and Wire-Profile header byte.
+ * 中文：构造协议版本与 Wire Profile 组合后的头部字节。
+ */
 static uint8_t version_profile_byte(
     const ucn_wire_profile_descriptor_t *descriptor)
 {
@@ -71,6 +87,10 @@ static uint8_t version_profile_byte(
                      (UCN_PROTOCOL_VERSION & UCN_VERSION_MASK));
 }
 
+/*
+ * EN: Writes `uint_be` in the canonical Wire frame codec byte order.
+ * 中文：按规范的 Wire 帧编解码 字节序写入 `uint_be`。
+ */
 static void write_uint_be(uint8_t *output, uint8_t width, uint32_t value)
 {
     uint8_t index;
@@ -81,6 +101,10 @@ static void write_uint_be(uint8_t *output, uint8_t width, uint32_t value)
     }
 }
 
+/*
+ * EN: Reads `uint_be` from the canonical Wire frame codec byte order.
+ * 中文：按规范的 Wire 帧编解码 字节序读取 `uint_be`。
+ */
 static uint32_t read_uint_be(const uint8_t *input, uint8_t width)
 {
     uint8_t index;
@@ -92,6 +116,10 @@ static uint32_t read_uint_be(const uint8_t *input, uint8_t width)
     return value;
 }
 
+/*
+ * EN: Calculates `max_for_width` with bounded, deterministic Wire frame codec arithmetic.
+ * 中文：使用有界且确定性的 Wire 帧编解码 算术计算 `max_for_width`。
+ */
 static uint32_t max_for_width(uint8_t width)
 {
     if (width >= 4U) {
@@ -100,6 +128,10 @@ static uint32_t max_for_width(uint8_t width)
     return (UINT32_C(1) << ((uint32_t)width * 8U)) - UINT32_C(1);
 }
 
+/*
+ * EN: Checks whether `flags` satisfies the Wire frame codec module's validity rules.
+ * 中文：检查 `flags` 是否满足 Wire 帧编解码 模块的合法性规则。
+ */
 static bool flags_are_valid(uint8_t flags)
 {
     return (flags & (uint8_t)~UCN_FRAME_KNOWN_FLAGS) == 0U &&
@@ -107,6 +139,10 @@ static bool flags_are_valid(uint8_t flags)
              ((flags & UCN_FRAME_FLAG_ROUTE_EXTENSION) == 0U));
 }
 
+/*
+ * EN: Calculates `header_size_for_profile` with bounded, deterministic Wire frame codec arithmetic.
+ * 中文：使用有界且确定性的 Wire 帧编解码 算术计算 `header_size_for_profile`。
+ */
 size_t ucn_frame_header_size_for_profile(ucn_wire_profile_t profile,
                                          uint8_t flags)
 {
@@ -129,6 +165,10 @@ size_t ucn_frame_header_size_for_profile(ucn_wire_profile_t profile,
     return header_size;
 }
 
+/*
+ * EN: Calculates `max_payload_for_profile` with bounded, deterministic Wire frame codec arithmetic.
+ * 中文：使用有界且确定性的 Wire 帧编解码 算术计算 `max_payload_for_profile`。
+ */
 size_t ucn_frame_max_payload_for_profile(ucn_wire_profile_t profile,
                                          uint8_t flags)
 {
@@ -155,12 +195,20 @@ size_t ucn_frame_max_payload_for_profile(ucn_wire_profile_t profile,
     return available;
 }
 
+/*
+ * EN: Calculates `max_payload` with bounded, deterministic Wire frame codec arithmetic.
+ * 中文：使用有界且确定性的 Wire 帧编解码 算术计算 `max_payload`。
+ */
 size_t ucn_frame_max_payload(uint8_t flags)
 {
     return ucn_frame_max_payload_for_profile(UCN_WIRE_PROFILE_W3_BACKBONE,
                                              flags);
 }
 
+/*
+ * EN: Selects or resolves `select_min_wire_profile` using deterministic Wire frame codec rules.
+ * 中文：按照确定性的 Wire 帧编解码 规则选择或解析 `select_min_wire_profile`。
+ */
 ucn_result_t ucn_frame_select_min_wire_profile(
     const ucn_frame_t *frame,
     ucn_wire_profile_t maximum_profile,
@@ -205,16 +253,28 @@ ucn_result_t ucn_frame_select_min_wire_profile(
     return saw_size_failure ? UCN_ERR_TOO_LARGE : UCN_ERR_UNSUPPORTED;
 }
 
+/*
+ * EN: Calculates the bounded `e2e_aad_size` value used by Wire frame codec.
+ * 中文：计算 Wire 帧编解码 使用的有界 `e2e_aad_size` 值。
+ */
 size_t ucn_frame_e2e_aad_size(void)
 {
     return UCN_E2E_AAD_BYTES;
 }
 
+/*
+ * EN: Checks the `is_protected` predicate against current Wire frame codec state.
+ * 中文：根据当前 Wire 帧编解码 状态检查 `is_protected` 条件。
+ */
 static bool frame_is_protected(const ucn_frame_t *frame)
 {
     return (frame->flags & UCN_FRAME_FLAG_E2E_PROTECTED) != 0U;
 }
 
+/*
+ * EN: Validates `frame_fields` before Wire frame codec state is used or changed.
+ * 中文：在使用或修改 Wire 帧编解码 状态前验证 `frame_fields`。
+ */
 static ucn_result_t validate_frame_fields(
     const ucn_frame_t *frame,
     bool require_auth_tag,
@@ -260,12 +320,20 @@ static ucn_result_t validate_frame_fields(
     return UCN_OK;
 }
 
+/*
+ * EN: Writes `u16_be` in the canonical Wire frame codec byte order.
+ * 中文：按规范的 Wire 帧编解码 字节序写入 `u16_be`。
+ */
 static void write_u16_be(uint8_t *output, uint16_t value)
 {
     output[0] = (uint8_t)(value >> 8U);
     output[1] = (uint8_t)value;
 }
 
+/*
+ * EN: Writes `u32_be` in the canonical Wire frame codec byte order.
+ * 中文：按规范的 Wire 帧编解码 字节序写入 `u32_be`。
+ */
 static void write_u32_be(uint8_t *output, uint32_t value)
 {
     output[0] = (uint8_t)(value >> 24U);
@@ -274,11 +342,19 @@ static void write_u32_be(uint8_t *output, uint32_t value)
     output[3] = (uint8_t)value;
 }
 
+/*
+ * EN: Reads `u16_be` from the canonical Wire frame codec byte order.
+ * 中文：按规范的 Wire 帧编解码 字节序读取 `u16_be`。
+ */
 static uint16_t read_u16_be(const uint8_t *input)
 {
     return (uint16_t)(((uint16_t)input[0] << 8U) | input[1]);
 }
 
+/*
+ * EN: Writes `e2e_aad` in the canonical Wire frame codec byte order.
+ * 中文：按规范的 Wire 帧编解码 字节序写入 `e2e_aad`。
+ */
 ucn_result_t ucn_frame_write_e2e_aad(const ucn_frame_t *frame,
                                      uint8_t *output,
                                      size_t output_capacity,
@@ -314,6 +390,10 @@ ucn_result_t ucn_frame_write_e2e_aad(const ucn_frame_t *frame,
     return UCN_OK;
 }
 
+/*
+ * EN: Calculates the incremental CRC-16/CCITT value used by Core frames.
+ * 中文：计算 Core 帧使用的可增量 CRC-16/CCITT 值。
+ */
 uint16_t ucn_crc16_ccitt(const uint8_t *data, size_t length, uint16_t seed)
 {
     size_t index;
@@ -338,11 +418,19 @@ uint16_t ucn_crc16_ccitt(const uint8_t *data, size_t length, uint16_t seed)
     return crc;
 }
 
+/*
+ * EN: Calculates the bounded `crc_offset` value used by Wire frame codec.
+ * 中文：计算 Wire 帧编解码 使用的有界 `crc_offset` 值。
+ */
 static size_t frame_crc_offset(size_t header_size)
 {
     return header_size - sizeof(uint16_t);
 }
 
+/*
+ * EN: Calculates `crc` with bounded, deterministic Wire frame codec arithmetic.
+ * 中文：使用有界且确定性的 Wire 帧编解码 算术计算 `crc`。
+ */
 static uint16_t frame_crc(const uint8_t *header, size_t header_size,
                           const uint8_t *payload, uint16_t payload_length,
                           const uint8_t *auth_tag)
@@ -357,6 +445,10 @@ static uint16_t frame_crc(const uint8_t *header, size_t header_size,
     return crc;
 }
 
+/*
+ * EN: Encodes `encoded_size` into its bounded Wire frame codec wire representation.
+ * 中文：把 `encoded_size` 编码为有界的 Wire 帧编解码 线格式。
+ */
 size_t ucn_frame_encoded_size(const ucn_frame_t *frame)
 {
     const ucn_wire_profile_descriptor_t *descriptor;
@@ -372,6 +464,10 @@ size_t ucn_frame_encoded_size(const ucn_frame_t *frame)
     return total_size <= UCN_MAX_FRAME_BYTES ? total_size : 0U;
 }
 
+/*
+ * EN: Encodes `encode` into its bounded Wire frame codec wire representation.
+ * 中文：把 `encode` 编码为有界的 Wire 帧编解码 线格式。
+ */
 ucn_result_t ucn_frame_encode(const ucn_frame_t *frame,
                               uint8_t *output,
                               size_t output_capacity,
@@ -459,6 +555,10 @@ ucn_result_t ucn_frame_encode(const ucn_frame_t *frame,
     return UCN_OK;
 }
 
+/*
+ * EN: Inspects `wire_profile` without completing a full Wire frame codec decode.
+ * 中文：在不完成完整 Wire 帧编解码 解码的情况下检查 `wire_profile`。
+ */
 ucn_result_t ucn_frame_peek_wire_profile(const uint8_t *input,
                                          size_t input_length,
                                          ucn_wire_profile_t *profile)
@@ -488,6 +588,10 @@ ucn_result_t ucn_frame_peek_wire_profile(const uint8_t *input,
     return UCN_OK;
 }
 
+/*
+ * EN: Inspects `encoded_size` without completing a full Wire frame codec decode.
+ * 中文：在不完成完整 Wire 帧编解码 解码的情况下检查 `encoded_size`。
+ */
 ucn_result_t ucn_frame_peek_encoded_size(const uint8_t *input,
                                          size_t available_length,
                                          size_t *encoded_length)
@@ -545,6 +649,10 @@ ucn_result_t ucn_frame_peek_encoded_size(const uint8_t *input,
     return UCN_OK;
 }
 
+/*
+ * EN: Decodes and validates `decode` from its Wire frame codec wire representation.
+ * 中文：从 Wire 帧编解码 线格式解码并验证 `decode`。
+ */
 ucn_result_t ucn_frame_decode(const uint8_t *input,
                               size_t input_length,
                               ucn_frame_t *frame)

@@ -4,6 +4,10 @@
 #include "ucn/ucn_frame.h"
 #include "ucn/ucn_time.h"
 
+/*
+ * EN: Enters or leaves the bounded `enter_task` critical section for CAN Source.
+ * 中文：进入或退出 CAN Source 的有界 `enter_task` 临界区。
+ */
 static void can_enter_task(ucn_can_source_t *source)
 {
     if (source->port_ops->enter_critical != NULL) {
@@ -11,6 +15,10 @@ static void can_enter_task(ucn_can_source_t *source)
     }
 }
 
+/*
+ * EN: Enters or leaves the bounded `exit_task` critical section for CAN Source.
+ * 中文：进入或退出 CAN Source 的有界 `exit_task` 临界区。
+ */
 static void can_exit_task(ucn_can_source_t *source)
 {
     if (source->port_ops->exit_critical != NULL) {
@@ -18,23 +26,39 @@ static void can_exit_task(ucn_can_source_t *source)
     }
 }
 
+/*
+ * EN: Checks the `isr_lock_is_configured` condition against current CAN Source state.
+ * 中文：根据当前 CAN Source 状态检查 `isr_lock_is_configured` 条件。
+ */
 static bool can_isr_lock_is_configured(const ucn_can_source_t *source)
 {
     return source->port_ops->enter_critical_from_isr != NULL &&
            source->port_ops->exit_critical_from_isr != NULL;
 }
 
+/*
+ * EN: Enters or leaves the bounded `enter_isr` critical section for CAN Source.
+ * 中文：进入或退出 CAN Source 的有界 `enter_isr` 临界区。
+ */
 static ucn_port_critical_token_t can_enter_isr(ucn_can_source_t *source)
 {
     return source->port_ops->enter_critical_from_isr(source->port_context);
 }
 
+/*
+ * EN: Enters or leaves the bounded `exit_isr` critical section for CAN Source.
+ * 中文：进入或退出 CAN Source 的有界 `exit_isr` 临界区。
+ */
 static void can_exit_isr(ucn_can_source_t *source,
                          ucn_port_critical_token_t token)
 {
     source->port_ops->exit_critical_from_isr(source->port_context, token);
 }
 
+/*
+ * EN: Checks whether `fd_length` satisfies the CAN Source module's validity rules.
+ * 中文：检查 `fd_length` 是否满足 CAN Source 模块的合法性规则。
+ */
 static bool can_fd_length_is_valid(size_t length)
 {
     return length <= 8U || length == 12U || length == 16U ||
@@ -42,6 +66,10 @@ static bool can_fd_length_is_valid(size_t length)
            length == 48U || length == 64U;
 }
 
+/*
+ * EN: Rounds `fd_rounded_length` to the next representation accepted by CAN Source.
+ * 中文：把 `fd_rounded_length` 向上取整为 CAN Source 可接受的下一种表示。
+ */
 static size_t can_fd_rounded_length(size_t length)
 {
     static const uint8_t lengths[] = {
@@ -58,6 +86,10 @@ static size_t can_fd_rounded_length(size_t length)
     return 0U;
 }
 
+/*
+ * EN: Checks whether `frame_shape` satisfies the CAN Source module's validity rules.
+ * 中文：检查 `frame_shape` 是否满足 CAN Source 模块的合法性规则。
+ */
 static bool can_frame_shape_is_valid(const ucn_can_frame_t *frame)
 {
     const bool extended =
@@ -77,6 +109,10 @@ static bool can_frame_shape_is_valid(const ucn_can_frame_t *frame)
                 frame->length <= UCN_CAN_CLASSIC_MAX_DATA_BYTES;
 }
 
+/*
+ * EN: Checks the `mode_accepts` condition against current CAN Source state.
+ * 中文：根据当前 CAN Source 状态检查 `mode_accepts` 条件。
+ */
 static bool can_mode_accepts(const ucn_can_source_t *source, bool fd)
 {
     return source->mode == UCN_CAN_SOURCE_MIXED ||
@@ -84,6 +120,10 @@ static bool can_mode_accepts(const ucn_can_source_t *source, bool fd)
            (!fd && source->mode == UCN_CAN_SOURCE_CLASSIC_CARRIER);
 }
 
+/*
+ * EN: Clears `slot` from CAN Source without allocating memory.
+ * 中文：从 CAN Source 中清除 `slot`，且不进行动态分配。
+ */
 static void can_clear_slot(ucn_can_reassembly_slot_t *slot)
 {
     uint8_t *storage = slot->frame_storage;
@@ -92,6 +132,10 @@ static void can_clear_slot(ucn_can_reassembly_slot_t *slot)
     slot->frame_storage = storage;
 }
 
+/*
+ * EN: Clears `slots` from CAN Source without allocating memory.
+ * 中文：从 CAN Source 中清除 `slots`，且不进行动态分配。
+ */
 static size_t can_clear_slots(ucn_can_source_t *source)
 {
     size_t index;
@@ -106,6 +150,10 @@ static size_t can_clear_slots(ucn_can_source_t *source)
     return cleared;
 }
 
+/*
+ * EN: Removes and returns `take_reassembly_clear` from a bounded CAN Source queue or slot.
+ * 中文：从固定容量的 CAN Source 队列或槽位中移除并返回 `take_reassembly_clear`。
+ */
 static bool can_take_reassembly_clear(ucn_can_source_t *source)
 {
     bool clear;
@@ -117,6 +165,10 @@ static bool can_take_reassembly_clear(ucn_can_source_t *source)
     return clear;
 }
 
+/*
+ * EN: Returns the current `bus_state` view from CAN Source state.
+ * 中文：从 CAN Source 状态返回当前 `bus_state` 视图。
+ */
 static ucn_can_bus_state_t can_get_bus_state(ucn_can_source_t *source)
 {
     ucn_can_bus_state_t state;
@@ -127,6 +179,10 @@ static ucn_can_bus_state_t can_get_bus_state(ucn_can_source_t *source)
     return state;
 }
 
+/*
+ * EN: Looks up `ring_peek` in bounded CAN Source state without allocation.
+ * 中文：在固定容量的 CAN Source 状态中查找 `ring_peek`，且不进行动态分配。
+ */
 static bool can_ring_peek(ucn_can_source_t *source, ucn_can_frame_t *frame)
 {
     bool present;
@@ -140,6 +196,10 @@ static bool can_ring_peek(ucn_can_source_t *source, ucn_can_frame_t *frame)
     return present;
 }
 
+/*
+ * EN: Removes and returns `ring_pop` from bounded CAN Source storage.
+ * 中文：从固定容量的 CAN Source 存储中移除并返回 `ring_pop`。
+ */
 static void can_ring_pop(ucn_can_source_t *source)
 {
     can_enter_task(source);
@@ -150,6 +210,10 @@ static void can_ring_pop(ucn_can_source_t *source)
     can_exit_task(source);
 }
 
+/*
+ * EN: Calculates the bounded `ring_count` value used by CAN Source.
+ * 中文：计算 CAN Source 使用的有界 `ring_count` 值。
+ */
 static size_t can_ring_count(ucn_can_source_t *source)
 {
     size_t count;
@@ -160,6 +224,10 @@ static size_t can_ring_count(ucn_can_source_t *source)
     return count;
 }
 
+/*
+ * EN: Checks the `has_complete_slot` condition in current CAN Source state.
+ * 中文：检查当前 CAN Source 状态中的 `has_complete_slot` 条件。
+ */
 static bool can_has_complete_slot(const ucn_can_source_t *source)
 {
     size_t index;
@@ -173,6 +241,10 @@ static bool can_has_complete_slot(const ucn_can_source_t *source)
     return false;
 }
 
+/*
+ * EN: Selects or resolves `resolve_link` using deterministic CAN Source rules.
+ * 中文：按照确定性的 CAN Source 规则选择或解析 `resolve_link`。
+ */
 static ucn_result_t can_resolve_link(ucn_can_source_t *source,
                                      const ucn_can_frame_t *frame,
                                      ucn_link_t **link)
@@ -192,6 +264,10 @@ static ucn_result_t can_resolve_link(ucn_can_source_t *source,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and processes `process_fd` in the CAN Source receive path.
+ * 中文：在 CAN Source 接收路径中验证并处理 `process_fd`。
+ */
 static ucn_result_t can_process_fd(ucn_can_source_t *source,
                                    const ucn_can_frame_t *physical,
                                    bool *queue_backpressure)
@@ -232,6 +308,10 @@ static ucn_result_t can_process_fd(ucn_can_source_t *source,
     return result;
 }
 
+/*
+ * EN: Searches bounded CAN Source state for `slot`.
+ * 中文：在固定容量的 CAN Source 状态中查找 `slot`。
+ */
 static ucn_can_reassembly_slot_t *can_find_slot(
     ucn_can_source_t *source,
     uint32_t identifier,
@@ -250,6 +330,10 @@ static ucn_can_reassembly_slot_t *can_find_slot(
     return NULL;
 }
 
+/*
+ * EN: Searches bounded CAN Source state for `free_slot`.
+ * 中文：在固定容量的 CAN Source 状态中查找 `free_slot`。
+ */
 static ucn_can_reassembly_slot_t *can_find_free_slot(ucn_can_source_t *source)
 {
     size_t index;
@@ -262,6 +346,10 @@ static ucn_can_reassembly_slot_t *can_find_free_slot(ucn_can_source_t *source)
     return NULL;
 }
 
+/*
+ * EN: Validates and processes `process_classic` in the CAN Source receive path.
+ * 中文：在 CAN Source 接收路径中验证并处理 `process_classic`。
+ */
 static ucn_result_t can_process_classic(ucn_can_source_t *source,
                                         const ucn_can_frame_t *physical,
                                         uint32_t now_ms,
@@ -380,6 +468,10 @@ static ucn_result_t can_process_classic(ucn_can_source_t *source,
     return UCN_ERR_MALFORMED;
 }
 
+/*
+ * EN: Checks or removes expired `expire_slots` state in CAN Source.
+ * 中文：检查或移除 CAN Source 中已过期的 `expire_slots` 状态。
+ */
 static size_t can_expire_slots(ucn_can_source_t *source,
                                uint32_t now_ms,
                                size_t max_work)
@@ -401,6 +493,10 @@ static size_t can_expire_slots(ucn_can_source_t *source,
     return expired;
 }
 
+/*
+ * EN: Completes `submit_complete_slots` and records its terminal CAN Source result.
+ * 中文：完成 `submit_complete_slots` 并记录其 CAN Source 终态结果。
+ */
 static ucn_result_t can_submit_complete_slots(
     ucn_can_source_t *source,
     size_t max_work,
@@ -434,6 +530,10 @@ static ucn_result_t can_submit_complete_slots(
     return UCN_OK;
 }
 
+/*
+ * EN: Processes one bounded `source_service` work unit for CAN Source.
+ * 中文：为 CAN Source 处理一个有界的 `source_service` 工作单元。
+ */
 static ucn_result_t can_source_service(
     void *context,
     ucn_event_source_events_t events,
@@ -516,6 +616,10 @@ static const ucn_event_source_ops_t CAN_EVENT_SOURCE_OPS = {
     can_source_service
 };
 
+/*
+ * EN: Initializes the CAN Source object from validated caller-owned configuration without heap allocation.
+ * 中文：使用经验证的调用方配置初始化 CAN Source 对象，且不使用堆内存。
+ */
 ucn_result_t ucn_can_source_init(
     ucn_can_source_t *source,
     const ucn_can_source_config_t *config)
@@ -605,6 +709,10 @@ ucn_result_t ucn_can_source_init(
     return UCN_OK;
 }
 
+/*
+ * EN: Writes `source_write` using the canonical bounded CAN Source representation.
+ * 中文：使用规范且有界的 CAN Source 表示写入 `source_write`。
+ */
 static ucn_result_t can_source_write(ucn_can_source_t *source,
                                      const ucn_can_frame_t *frame,
                                      bool from_isr)
@@ -679,18 +787,30 @@ static ucn_result_t can_source_write(ucn_can_source_t *source,
     return signal_result;
 }
 
+/*
+ * EN: Writes `write` using the canonical bounded CAN Source representation.
+ * 中文：使用规范且有界的 CAN Source 表示写入 `write`。
+ */
 ucn_result_t ucn_can_source_write(ucn_can_source_t *source,
                                   const ucn_can_frame_t *frame)
 {
     return can_source_write(source, frame, false);
 }
 
+/*
+ * EN: Writes `from_isr` in the canonical CAN Source byte order.
+ * 中文：按规范的 CAN Source 字节序写入 `from_isr`。
+ */
 ucn_result_t ucn_can_source_write_from_isr(ucn_can_source_t *source,
                                            const ucn_can_frame_t *frame)
 {
     return can_source_write(source, frame, true);
 }
 
+/*
+ * EN: Validates and installs `source_set_bus_state` in bounded CAN Source state.
+ * 中文：验证 `source_set_bus_state` 并将其安装到固定容量的 CAN Source 状态中。
+ */
 static ucn_result_t can_source_set_bus_state(ucn_can_source_t *source,
                                              ucn_can_bus_state_t state,
                                              bool from_isr)
@@ -764,12 +884,20 @@ static ucn_result_t can_source_set_bus_state(ucn_can_source_t *source,
     return signal_result;
 }
 
+/*
+ * EN: Validates and sets `bus_state` in CAN Source state.
+ * 中文：验证并设置 CAN Source 状态中的 `bus_state`。
+ */
 ucn_result_t ucn_can_source_set_bus_state(ucn_can_source_t *source,
                                           ucn_can_bus_state_t state)
 {
     return can_source_set_bus_state(source, state, false);
 }
 
+/*
+ * EN: Validates and sets `bus_state_from_isr` in CAN Source state.
+ * 中文：验证并设置 CAN Source 状态中的 `bus_state_from_isr`。
+ */
 ucn_result_t ucn_can_source_set_bus_state_from_isr(
     ucn_can_source_t *source,
     ucn_can_bus_state_t state)
@@ -777,6 +905,10 @@ ucn_result_t ucn_can_source_set_bus_state_from_isr(
     return can_source_set_bus_state(source, state, true);
 }
 
+/*
+ * EN: Clears or releases `reset` from bounded CAN Source state.
+ * 中文：从固定容量的 CAN Source 状态中清除或释放 `reset`。
+ */
 ucn_result_t ucn_can_source_reset(ucn_can_source_t *source)
 {
     if (source == NULL || !source->initialized) {
@@ -792,6 +924,10 @@ ucn_result_t ucn_can_source_reset(ucn_can_source_t *source)
     return UCN_OK;
 }
 
+/*
+ * EN: Returns the current `health` view from CAN Source state.
+ * 中文：从 CAN Source 状态返回当前 `health` 视图。
+ */
 ucn_result_t ucn_can_source_get_health(
     ucn_can_source_t *source,
     ucn_can_source_health_t *health)
@@ -826,12 +962,20 @@ ucn_result_t ucn_can_source_get_health(
     return UCN_OK;
 }
 
+/*
+ * EN: Returns the current `stats` view from CAN Source state.
+ * 中文：从 CAN Source 状态返回当前 `stats` 视图。
+ */
 const ucn_can_source_stats_t *ucn_can_source_get_stats(
     const ucn_can_source_t *source)
 {
     return source == NULL || !source->initialized ? NULL : &source->stats;
 }
 
+/*
+ * EN: Encodes `fd_carrier_encode` into its bounded CAN Source wire representation.
+ * 中文：把 `fd_carrier_encode` 编码为有界的 CAN Source 线格式。
+ */
 ucn_result_t ucn_can_fd_carrier_encode(
     const uint8_t *frame,
     size_t frame_length,
@@ -868,6 +1012,10 @@ ucn_result_t ucn_can_fd_carrier_encode(
     return UCN_OK;
 }
 
+/*
+ * EN: Calculates the bounded `classic_carrier_segment_count` value used by CAN Source.
+ * 中文：计算 CAN Source 使用的有界 `classic_carrier_segment_count` 值。
+ */
 size_t ucn_can_classic_carrier_segment_count(size_t frame_length)
 {
     size_t continuation_bytes;
@@ -882,6 +1030,10 @@ size_t ucn_can_classic_carrier_segment_count(size_t frame_length)
     return segments <= 256U ? segments : 0U;
 }
 
+/*
+ * EN: Writes `classic_carrier_encode_segment` using the canonical bounded CAN Source representation.
+ * 中文：使用规范且有界的 CAN Source 表示写入 `classic_carrier_encode_segment`。
+ */
 ucn_result_t ucn_can_classic_carrier_encode_segment(
     const uint8_t *frame,
     size_t frame_length,

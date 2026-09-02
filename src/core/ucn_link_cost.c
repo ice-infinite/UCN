@@ -2,6 +2,10 @@
 
 #include "ucn/ucn_link_cost.h"
 
+/*
+ * EN: Calculates `queue_penalty` with bounded, deterministic Link Cost arithmetic.
+ * 中文：使用有界且确定性的 Link Cost 算术计算 `queue_penalty`。
+ */
 static uint16_t queue_penalty(uint16_t value)
 {
     if (value < 250U) {
@@ -19,6 +23,10 @@ static uint16_t queue_penalty(uint16_t value)
     return 80U;
 }
 
+/*
+ * EN: Calculates `tx_failure_penalty` with bounded, deterministic Link Cost arithmetic.
+ * 中文：使用有界且确定性的 Link Cost 算术计算 `tx_failure_penalty`。
+ */
 static uint16_t tx_failure_penalty(uint16_t value)
 {
     if (value < 5U) {
@@ -39,6 +47,10 @@ static uint16_t tx_failure_penalty(uint16_t value)
     return 160U;
 }
 
+/*
+ * EN: Calculates `rx_failure_penalty` with bounded, deterministic Link Cost arithmetic.
+ * 中文：使用有界且确定性的 Link Cost 算术计算 `rx_failure_penalty`。
+ */
 static uint16_t rx_failure_penalty(uint16_t value)
 {
     if (value < 5U) {
@@ -59,6 +71,10 @@ static uint16_t rx_failure_penalty(uint16_t value)
     return 80U;
 }
 
+/*
+ * EN: Calculates `medium_busy_penalty` with bounded, deterministic Link Cost arithmetic.
+ * 中文：使用有界且确定性的 Link Cost 算术计算 `medium_busy_penalty`。
+ */
 static uint16_t medium_busy_penalty(uint16_t value)
 {
     if (value < 250U) {
@@ -76,6 +92,10 @@ static uint16_t medium_busy_penalty(uint16_t value)
     return 70U;
 }
 
+/*
+ * EN: Calculates `medium_quality_penalty` with bounded, deterministic Link Cost arithmetic.
+ * 中文：使用有界且确定性的 Link Cost 算术计算 `medium_quality_penalty`。
+ */
 static uint16_t medium_quality_penalty(uint16_t value)
 {
     if (value >= 850U) {
@@ -93,16 +113,28 @@ static uint16_t medium_quality_penalty(uint16_t value)
     return 70U;
 }
 
+/*
+ * EN: Checks whether `per_mille` satisfies the Link Cost module's validity rules.
+ * 中文：检查 `per_mille` 是否满足 Link Cost 模块的合法性规则。
+ */
 static bool per_mille_is_valid(bool valid, uint16_t value)
 {
     return valid && value <= UCN_LINK_METRIC_PER_MILLE_MAX;
 }
 
+/*
+ * EN: Updates a Link Cost sample with the fixed-point EWMA rule.
+ * 中文：使用定点 EWMA 规则更新 Link Cost 样本。
+ */
 uint16_t ucn_link_cost_ewma_update(uint16_t previous, uint16_t sample)
 {
     return (uint16_t)(((uint32_t)previous * 3U + (uint32_t)sample) / 4U);
 }
 
+/*
+ * EN: Selects or resolves `resolve` using deterministic Link Cost rules.
+ * 中文：按照确定性的 Link Cost 规则选择或解析 `resolve`。
+ */
 ucn_result_t ucn_link_cost_resolve(const ucn_link_cost_input_t *input,
                                    ucn_link_cost_result_t *result)
 {
@@ -218,6 +250,10 @@ ucn_result_t ucn_link_cost_resolve(const ucn_link_cost_input_t *input,
     return UCN_OK;
 }
 
+/*
+ * EN: Checks the `is_sufficiently_better` predicate against current Link Cost state.
+ * 中文：根据当前 Link Cost 状态检查 `is_sufficiently_better` 条件。
+ */
 bool ucn_link_cost_is_sufficiently_better(uint16_t active_cost,
                                           uint16_t candidate_cost)
 {

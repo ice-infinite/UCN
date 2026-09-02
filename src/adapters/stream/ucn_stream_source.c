@@ -2,6 +2,10 @@
 
 #include "ucn/adapters/ucn_stream_source.h"
 
+/*
+ * EN: Enters or leaves the bounded `enter_task` critical section for Stream Source.
+ * 中文：进入或退出 Stream Source 的有界 `enter_task` 临界区。
+ */
 static void stream_enter_task(ucn_stream_source_t *source)
 {
     if (source->port_ops->enter_critical != NULL) {
@@ -9,6 +13,10 @@ static void stream_enter_task(ucn_stream_source_t *source)
     }
 }
 
+/*
+ * EN: Enters or leaves the bounded `exit_task` critical section for Stream Source.
+ * 中文：进入或退出 Stream Source 的有界 `exit_task` 临界区。
+ */
 static void stream_exit_task(ucn_stream_source_t *source)
 {
     if (source->port_ops->exit_critical != NULL) {
@@ -16,24 +24,40 @@ static void stream_exit_task(ucn_stream_source_t *source)
     }
 }
 
+/*
+ * EN: Checks the `isr_lock_is_configured` condition against current Stream Source state.
+ * 中文：根据当前 Stream Source 状态检查 `isr_lock_is_configured` 条件。
+ */
 static bool stream_isr_lock_is_configured(const ucn_stream_source_t *source)
 {
     return source->port_ops->enter_critical_from_isr != NULL &&
            source->port_ops->exit_critical_from_isr != NULL;
 }
 
+/*
+ * EN: Enters or leaves the bounded `enter_isr` critical section for Stream Source.
+ * 中文：进入或退出 Stream Source 的有界 `enter_isr` 临界区。
+ */
 static ucn_port_critical_token_t stream_enter_isr(
     ucn_stream_source_t *source)
 {
     return source->port_ops->enter_critical_from_isr(source->port_context);
 }
 
+/*
+ * EN: Enters or leaves the bounded `exit_isr` critical section for Stream Source.
+ * 中文：进入或退出 Stream Source 的有界 `exit_isr` 临界区。
+ */
 static void stream_exit_isr(ucn_stream_source_t *source,
                             ucn_port_critical_token_t token)
 {
     source->port_ops->exit_critical_from_isr(source->port_context, token);
 }
 
+/*
+ * EN: Reads and validates `cobs_decode_in_place` from the canonical Stream Source representation.
+ * 中文：从规范的 Stream Source 表示中读取并验证 `cobs_decode_in_place`。
+ */
 static ucn_result_t cobs_decode_in_place(uint8_t *buffer,
                                          size_t encoded_length,
                                          size_t decoded_capacity,
@@ -70,6 +94,10 @@ static ucn_result_t cobs_decode_in_place(uint8_t *buffer,
     return UCN_OK;
 }
 
+/*
+ * EN: Encodes `carrier_encode` into its bounded Stream Source wire representation.
+ * 中文：把 `carrier_encode` 编码为有界的 Stream Source 线格式。
+ */
 ucn_result_t ucn_stream_carrier_encode(const uint8_t *frame,
                                        size_t frame_length,
                                        uint8_t *wire_output,
@@ -131,6 +159,10 @@ ucn_result_t ucn_stream_carrier_encode(const uint8_t *frame,
     return UCN_OK;
 }
 
+/*
+ * EN: Calculates the bounded `ring_count` value used by Stream Source.
+ * 中文：计算 Stream Source 使用的有界 `ring_count` 值。
+ */
 static size_t stream_ring_count(ucn_stream_source_t *source)
 {
     size_t count;
@@ -141,6 +173,10 @@ static size_t stream_ring_count(ucn_stream_source_t *source)
     return count;
 }
 
+/*
+ * EN: Checks the `has_pending_input` condition in current Stream Source state.
+ * 中文：检查当前 Stream Source 状态中的 `has_pending_input` 条件。
+ */
 static bool stream_has_pending_input(ucn_stream_source_t *source)
 {
     bool pending;
@@ -154,6 +190,10 @@ static bool stream_has_pending_input(ucn_stream_source_t *source)
 /* Take at most one delimiter-terminated segment.  Stopping at the first zero
  * means Source may retain a decoded frame on Adapter Queue backpressure
  * without having already consumed bytes from the following carrier. */
+/*
+ * EN: Removes and returns `ring_take_segment` from bounded Stream Source storage.
+ * 中文：从固定容量的 Stream Source 存储中移除并返回 `ring_take_segment`。
+ */
 static size_t stream_ring_take_segment(ucn_stream_source_t *source,
                                        uint8_t *output,
                                        size_t capacity,
@@ -188,6 +228,10 @@ static size_t stream_ring_take_segment(ucn_stream_source_t *source,
     return index;
 }
 
+/*
+ * EN: Checks the current `submit_pending` condition in Stream Source state.
+ * 中文：检查当前 Stream Source 状态中的 `submit_pending` 条件。
+ */
 static ucn_result_t stream_submit_pending(ucn_stream_source_t *source)
 {
     ucn_result_t result;
@@ -209,6 +253,10 @@ static ucn_result_t stream_submit_pending(ucn_stream_source_t *source)
     return result;
 }
 
+/*
+ * EN: Processes one bounded `source_service` work unit for Stream Source.
+ * 中文：为 Stream Source 处理一个有界的 `source_service` 工作单元。
+ */
 static ucn_result_t stream_source_service(
     void *context,
     ucn_event_source_events_t events,
@@ -342,6 +390,10 @@ static const ucn_event_source_ops_t STREAM_EVENT_SOURCE_OPS = {
     stream_source_service
 };
 
+/*
+ * EN: Initializes the Stream Source object from validated caller-owned configuration without heap allocation.
+ * 中文：使用经验证的调用方配置初始化 Stream Source 对象，且不使用堆内存。
+ */
 ucn_result_t ucn_stream_source_init(
     ucn_stream_source_t *source,
     const ucn_stream_source_config_t *config)
@@ -409,6 +461,10 @@ ucn_result_t ucn_stream_source_init(
     return UCN_OK;
 }
 
+/*
+ * EN: Writes `source_write` using the canonical bounded Stream Source representation.
+ * 中文：使用规范且有界的 Stream Source 表示写入 `source_write`。
+ */
 static ucn_result_t stream_source_write(ucn_stream_source_t *source,
                                         const uint8_t *data,
                                         size_t length,
@@ -489,6 +545,10 @@ static ucn_result_t stream_source_write(ucn_stream_source_t *source,
     return write_result != UCN_OK ? write_result : signal_result;
 }
 
+/*
+ * EN: Writes `write` using the canonical bounded Stream Source representation.
+ * 中文：使用规范且有界的 Stream Source 表示写入 `write`。
+ */
 ucn_result_t ucn_stream_source_write(ucn_stream_source_t *source,
                                      const uint8_t *data,
                                      size_t length)
@@ -496,6 +556,10 @@ ucn_result_t ucn_stream_source_write(ucn_stream_source_t *source,
     return stream_source_write(source, data, length, false);
 }
 
+/*
+ * EN: Writes `from_isr` in the canonical Stream Source byte order.
+ * 中文：按规范的 Stream Source 字节序写入 `from_isr`。
+ */
 ucn_result_t ucn_stream_source_write_from_isr(ucn_stream_source_t *source,
                                               const uint8_t *data,
                                               size_t length)
@@ -503,6 +567,10 @@ ucn_result_t ucn_stream_source_write_from_isr(ucn_stream_source_t *source,
     return stream_source_write(source, data, length, true);
 }
 
+/*
+ * EN: Clears or releases `reset` from bounded Stream Source state.
+ * 中文：从固定容量的 Stream Source 状态中清除或释放 `reset`。
+ */
 ucn_result_t ucn_stream_source_reset(ucn_stream_source_t *source)
 {
     if (source == NULL || !source->initialized) {
@@ -522,12 +590,20 @@ ucn_result_t ucn_stream_source_reset(ucn_stream_source_t *source)
     return UCN_OK;
 }
 
+/*
+ * EN: Checks the `pending_bytes` condition against current Stream Source state.
+ * 中文：根据当前 Stream Source 状态检查 `pending_bytes` 条件。
+ */
 size_t ucn_stream_source_pending_bytes(ucn_stream_source_t *source)
 {
     return source == NULL || !source->initialized ? 0U :
                                                     stream_ring_count(source);
 }
 
+/*
+ * EN: Returns the current free-byte capacity of the Stream Source ring.
+ * 中文：返回 Stream Source 环形缓冲当前可用的字节容量。
+ */
 size_t ucn_stream_source_free_bytes(ucn_stream_source_t *source)
 {
     size_t pending;
@@ -539,6 +615,10 @@ size_t ucn_stream_source_free_bytes(ucn_stream_source_t *source)
     return source->ring_capacity - pending;
 }
 
+/*
+ * EN: Returns the current `stats` view from Stream Source state.
+ * 中文：从 Stream Source 状态返回当前 `stats` 视图。
+ */
 const ucn_stream_source_stats_t *ucn_stream_source_get_stats(
     const ucn_stream_source_t *source)
 {

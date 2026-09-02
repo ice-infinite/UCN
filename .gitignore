@@ -12,6 +12,10 @@ Testing/
 # Local Codex review artifacts.
 /.codex_docx_review/
 
+# Python tooling caches.
+__pycache__/
+*.py[cod]
+
 # Compiler, linker and firmware outputs.
 *.o
 *.obj

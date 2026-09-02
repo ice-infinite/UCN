@@ -11,6 +11,8 @@ enum {
 
 #define BRIDGE_Q0_MASK UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q0_CRITICAL)
 #define BRIDGE_Q1_MASK UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q1_REALTIME)
+#define BRIDGE_Q2_MASK UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q2_NORMAL)
+#define BRIDGE_Q3_MASK UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q3_BULK)
 
 static const ucn_service_binding_t BRIDGE_BINDINGS[] = {
     { 0x40U, BRIDGE_SERVICE_CONTROL, 24U, BRIDGE_Q1_MASK,
@@ -18,7 +20,13 @@ static const ucn_service_binding_t BRIDGE_BINDINGS[] = {
       UCN_SERVICE_SOURCE_MASK(BRIDGE_SERVICE_SENSOR), true, true, false },
     { 0x60U, BRIDGE_SERVICE_ACTUATOR, 16U, BRIDGE_Q0_MASK,
       UCN_SERVICE_DELIVERY_Q0_FIFO,
-      UCN_SERVICE_SOURCE_MASK(BRIDGE_SERVICE_CONTROL), true, true, false }
+      UCN_SERVICE_SOURCE_MASK(BRIDGE_SERVICE_CONTROL), true, true, false },
+    { 0x41U, BRIDGE_SERVICE_CONTROL, 24U, BRIDGE_Q2_MASK,
+      UCN_SERVICE_DELIVERY_Q2_FIFO,
+      UCN_SERVICE_SOURCE_MASK(BRIDGE_SERVICE_SENSOR), true, true, false },
+    { 0x42U, BRIDGE_SERVICE_CONTROL, 24U, BRIDGE_Q3_MASK,
+      UCN_SERVICE_DELIVERY_Q3_FIFO,
+      UCN_SERVICE_SOURCE_MASK(BRIDGE_SERVICE_SENSOR), true, true, false }
 };
 
 static const ucn_service_binding_t VALIDATED_BINDINGS[] = {
@@ -560,6 +568,8 @@ static int test_service_bridge_three_node_delivery(void)
     uint8_t q1_value = 0x41U;
     uint8_t q1_rejected_value = 0x42U;
     uint8_t q0_value = 0x60U;
+    uint8_t q2_value = 0x52U;
+    uint8_t q3_value = 0x53U;
     uint8_t processed;
     ucn_node_t node_a, node_b, node_c;
     ucn_link_t ab, ba, bc, cb;
@@ -653,17 +663,35 @@ static int test_service_bridge_three_node_delivery(void)
     TEST_ASSERT(ucn_service_inbox_take(&router_c, BRIDGE_SERVICE_CONTROL, 0x40U,
                                        &message) == UCN_ERR_NOT_FOUND);
     TEST_ASSERT(ucn_service_set_ready(&router_c, 0x40U, true) == UCN_OK);
+    TEST_ASSERT(ucn_service_send(&router_a, UINT32_C(3), BRIDGE_SERVICE_SENSOR,
+                                 0x41U, UCN_TRAFFIC_Q2_NORMAL,
+                                 &q2_value, 1U) == UCN_OK);
+    TEST_ASSERT(ucn_service_protocol_bridge_step(&bridge_a, 1U, &processed) == UCN_OK);
+    TEST_ASSERT(processed == 1U);
+    TEST_ASSERT(ucn_service_inbox_take(&router_c, BRIDGE_SERVICE_CONTROL, 0x41U,
+                                       &message) == UCN_OK);
+    TEST_ASSERT(message.traffic_class == UCN_TRAFFIC_Q2_NORMAL &&
+                message.payload[0] == q2_value);
+    TEST_ASSERT(ucn_service_send(&router_a, UINT32_C(3), BRIDGE_SERVICE_SENSOR,
+                                 0x42U, UCN_TRAFFIC_Q3_BULK,
+                                 &q3_value, 1U) == UCN_OK);
+    TEST_ASSERT(ucn_service_protocol_bridge_step(&bridge_a, 1U, &processed) == UCN_OK);
+    TEST_ASSERT(processed == 1U);
+    TEST_ASSERT(ucn_service_inbox_take(&router_c, BRIDGE_SERVICE_CONTROL, 0x42U,
+                                       &message) == UCN_OK);
+    TEST_ASSERT(message.traffic_class == UCN_TRAFFIC_Q3_BULK &&
+                message.payload[0] == q3_value);
     TEST_ASSERT(relay_rx.count == 0U);
     a_stats = ucn_service_protocol_bridge_get_stats(&bridge_a);
     c_stats = ucn_service_protocol_bridge_get_stats(&bridge_c);
-    TEST_ASSERT(a_stats != NULL && a_stats->remote_tx_accepted == 3U &&
+    TEST_ASSERT(a_stats != NULL && a_stats->remote_tx_accepted == 5U &&
                 a_stats->remote_tx_failed == 0U && a_stats->last_tx_result == UCN_OK);
-    TEST_ASSERT(c_stats != NULL && c_stats->inbound_delivered == 2U &&
+    TEST_ASSERT(c_stats != NULL && c_stats->inbound_delivered == 4U &&
                 c_stats->inbound_rejected == 1U &&
-                c_stats->last_inbound_result == UCN_ERR_NOT_FOUND);
-    TEST_ASSERT(hook_state.lock_count == 6U && hook_state.unlock_count == 6U &&
-                hook_state.observer_count == 3U && hook_state.last_endpoint == 0x40U &&
-                hook_state.last_result == UCN_ERR_NOT_FOUND);
+                c_stats->last_inbound_result == UCN_OK);
+    TEST_ASSERT(hook_state.lock_count == 10U && hook_state.unlock_count == 10U &&
+                hook_state.observer_count == 5U && hook_state.last_endpoint == 0x42U &&
+                hook_state.last_result == UCN_OK);
     return 0;
 }
 

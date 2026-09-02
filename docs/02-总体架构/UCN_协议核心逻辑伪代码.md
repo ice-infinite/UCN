@@ -1066,7 +1066,7 @@ ucn_cluster_step(cluster):
 2. **fail-closed**：安全要求开启而 Provider 不完整 → 拒绝一切收发。
 3. **HELLO 一跳**：不转发、不进应用、只绑定 Node ID 与准入。
 4. **控制帧不端到端加密**：控制面逐跳语义，业务面才 E2E。
-5. **Q0 不等待寻路**：无路由立即失败；只有 Q1 能入 Pending 并触发发现。
+5. **Q0 route-wait 必须显式且有界**：默认 Q0 无路由明确失败；只有显式 `RETRY_ON_BACKPRESSURE` 的 Q0 才能在 Full/Lite 中保留原 FIFO/Deadline 并合并 Route Discovery。该等待不是端到端 ACK；Nano 静态路由缺失仍立即失败。Q1 继续使用独立 Latest Pending。
 6. **Latest-value 是 Q1 的灵魂**：Pending 合并同 (dst, endpoint)；旧值绝不重传。
 7. **所有容量编译期固定**：表满/令牌尽 = 显式错误码，无驱逐、无动态扩容。
 8. **中继只读头**：转发改 Hop 与 RREP Cost，密文 Payload 原样透传（透明密文中继）。

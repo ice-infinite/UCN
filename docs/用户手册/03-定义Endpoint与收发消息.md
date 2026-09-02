@@ -111,18 +111,20 @@ ucn_result_t result = ucn_node_enqueue(node, &request);
 
 Node 成功入队后拥有 Payload 的固定副本，调用者可以复用原 Buffer。队列内容由后续 `ucn_node_step()` 发送。
 
-## 5. 选择 Q0/Q1 和 Delivery
+## 5. 选择 Q0～Q3 和 Delivery
 
-当前 Node 的业务发送重点是 Q0/Q1：
+当前 Node、Service 与 Transfer 使用统一的四级语义：
 
 | 场景 | Traffic | Delivery | 行为 |
 | --- | --- | --- | --- |
 | 舵机/急停命令 | Q0 Critical | Retry on backpressure | 有界保留，不能无限重试 |
 | IMU/温度实时样本 | Q1 Realtime | Latest value | 同一目标/Endpoint保留最新值 |
-| 普通状态 | Q1 Realtime | Best effort或Latest | 按是否允许旧值堆积选择 |
-| 文件/日志 | 不直接占Q0/Q1大包 | Transfer | 由Transfer分片和限流 |
+| 参数、查询结果、普通状态 | Q2 Normal | Best effort | 独立 FIFO，不覆盖、不自动重试 |
+| 文件/日志/大块消息 | Q3 Bulk 或 Transfer | Best effort/Transfer | 普通 Q3 是小容量 FIFO；大消息由 Transfer 分片、ACK 和限流 |
 
 `Q0` 表示本地调度优先，不等于端到端可靠、远端执行或物理安全。危险命令仍需 Command ID、Deadline、去重和业务 Result。
+
+四级队列持续满载时，Node 以 `6:3:2:1` 服务 Q0/Q1/Q2/Q3。该比例防止 Q2/Q3 永久饥饿，但不是物理链路带宽保证；Owner、路由维护、Driver 和真实介质仍会增加等待。
 
 ### Latest Value
 
@@ -131,6 +133,10 @@ Node 成功入队后拥有 Payload 的固定副本，调用者可以复用原 Bu
 ### Retry on backpressure
 
 只针对本地 `UCN_ERR_NO_SPACE` 做有界 admission retry，不会因为远端未执行而自动重发。
+
+### Q2/Q3 FIFO
+
+Q2 与 Q3 都不会像 Q1 Latest 一样覆盖旧值，也不能选择 Q0 Retry。队列满时调用方收到 `UCN_ERR_NO_SPACE`，应按产品语义限流、丢弃可丢日志或改用 Transfer；不要无限重试堵住业务任务。
 
 ## 6. Payload 大小
 
@@ -174,7 +180,7 @@ Command(command_id, deadline, args)
 | `ARGUMENT` | Endpoint不在静态范围、NULL/长度非法 | 修正ABI和调用参数 |
 | `TOO_LARGE` | Frame或Link MTU不足 | 缩小消息或用Transfer |
 | `NOT_FOUND` | 无Route/Path | 固定Route或动态discover |
-| `NO_SPACE` | Q0/Q1或Driver队列满 | 按业务语义丢弃/重试/告警 |
+| `NO_SPACE` | Q0～Q3、Service Inbox或Driver队列满 | 按业务语义丢弃/重试/告警 |
 | `TTL` | 请求已过Deadline或Hop耗尽 | 不发送过期命令，检查路由环 |
 | `SECURITY` | required但Provider/Policy未就绪 | 保持失败关闭，不降级明文 |
 | `ACCESS` | ACL、Join或管理授权拒绝 | 检查身份和产品策略 |
@@ -186,6 +192,7 @@ Command(command_id, deadline, args)
 - Handler 返回后不再引用 Frame/Payload；
 - Q1 Latest 确实覆盖旧样本；
 - Q0 满载时有明确降级/告警；
+- Q2/Q3 FIFO 满载时不覆盖其他 Class，持续混合负载下不饥饿；
 - 命令重复、过期、Result丢失均有业务策略；
 - 本机 `UCN_OK` 未被误写成远端执行成功。
 

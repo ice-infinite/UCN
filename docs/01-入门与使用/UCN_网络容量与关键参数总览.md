@@ -234,7 +234,7 @@ Windows x64、GCC 14.2、Release、Service OFF的当前静态证据：
 | Lite | 6,024 B | 73,735 B |
 | Full | 10,080 B | 139,017 B |
 
-这是 V5-33 后的 Host x64 GCC 14.2 Release/Service OFF 结果；`ucn_link_t=40 B`，Storage Layout Version=5。它只证明固定对象与代码裁剪，不等于目标 MCU ELF/栈/功耗；历史基线见[V5-07 报告](../08-实现与验证/版本演进/UCN_V5_07_发布门禁与软件验证报告.md)。
+这是 V5-33 阶段的 Host x64 GCC 14.2 Release/Service OFF 历史结果；当前 `ucn_link_t=40 B`，H6-FB-01 后 Storage Layout Version=6。表中对象/Archive 数字没有在本节冒充 H6-FB-01 后的新资源值；最新 Core 门禁另记录 Transfer 对象 8,840 B（ACK Fence 固定增加 8 B）。这些数据只证明固定对象与代码裁剪，不等于目标 MCU ELF/栈/功耗；历史基线见[V5-07 报告](../08-实现与验证/版本演进/UCN_V5_07_发布门禁与软件验证报告.md)。
 
 特性：
 
@@ -281,7 +281,8 @@ Windows x64、GCC 14.2、Release、Service OFF的当前静态证据：
 | Bearer稳定样本 | 3次 | 候选需要持续明显更优。 |
 | Bearer Probe | 2/最多3次ACK | 防止只凭瞬时Cost切换。 |
 | Bearer切换保持期 | 3000 ms | 软切换后抑制反复横跳；硬失效不等待。 |
-| Q0背压重试 | 最多3次、间隔5 ms | 仅产品显式开启且只处理`NO_SPACE`；不是端到端可靠重传。 |
+| Q0 Link背压重试 | 最多3次、间隔5 ms | 仅产品显式开启；处理本地`NO_SPACE`，不是端到端可靠重传。 |
+| Q0动态路由等待 | 间隔50 ms、受原消息Deadline限制 | 仅Full/Lite动态Mesh且显式选择重试语义；保留FIFO并合并发现，Nano无此能力，也不是远端ACK。 |
 
 Driver明确报告Link Down时可立即处理，不必等4秒。Heartbeat也不是唯一活性证据：来自该Neighbor的合法业务或控制帧同样刷新`last_seen`。
 
@@ -289,8 +290,9 @@ Driver明确报告Link Down时可立即处理，不必等4秒。Heartbeat也不�
 
 - 静态Endpoint编号范围为`0x40..0xBF`，共有128个协议编号；默认每Node同时注册8个Handler。
 - Endpoint直接复用`message_type`，正常业务帧不额外增加Endpoint字段。
-- 当前Core只真正发送Q0/Q1；Q2/Q3枚举存在但发送API返回不支持。
-- Q0是有界关键FIFO；Q1偏向实时Latest Value。
+- 当前 Core 与 Service 已完整接受 Q0～Q3；四级持续满载按 `6:3:2:1` 有界调度。
+- Q0 是有界关键 FIFO，Q1 偏向实时 Latest Value，Q2/Q3 分别是普通/批量固定 FIFO。
+- T32/T64 Direct 使用 Q2，Transfer Fragment 使用 Q3，ACK 使用 Q1；该映射不把普通 Q2/Q3 变成可靠传输。
 - `UCN_OK`只说明本机对应层接受了副本，不自动表示远端Inbox或执行成功；远端结果需要业务Result Endpoint。
 - 受保护帧增加16 B E2E Tag；加密算法、密钥、Session持久化和生产Replay Window由Security Provider负责。
 

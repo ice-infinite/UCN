@@ -6,5 +6,5 @@ int test_node_storage_header(void)
 {
     ucn_node_t node;
 
-    return sizeof(node) > 0U && UCN_NODE_STORAGE_LAYOUT_VERSION == 5U ? 0 : 1;
+    return sizeof(node) > 0U && UCN_NODE_STORAGE_LAYOUT_VERSION == 7U ? 0 : 1;
 }

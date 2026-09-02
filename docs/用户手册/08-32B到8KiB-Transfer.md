@@ -2,6 +2,8 @@
 
 Transfer是可选扩展，用于超过单帧能力或需要重组ACK的大消息。它不会改变Core的轻量普通消息路径。
 
+当前固定映射为：T32/T64 Direct 使用 Q2 Normal；T128～T8K Fragment 使用 Q3 Bulk；Transfer ACK 使用 Q1 Realtime。接收端会拒绝错 Class 的 Fragment/ACK。Traffic Class 负责调度，可靠交付仍由本节的 CRC32、ACK、窗口和重试证明。
+
 ## 1. 选择最小 Class
 
 | 长度 | Class |
@@ -161,7 +163,7 @@ Completion状态：
 
 ## 8. 推进顺序
 
-为了不抢占Core Q0/Q1和维护工作：
+为了不抢占 Core Q0/Q1 和维护工作，产品 Owner 可以在没有待处理 Core 工作时推进 Transfer：
 
 ```c
 ucn_result_t core_result = product_protocol_owner_step();

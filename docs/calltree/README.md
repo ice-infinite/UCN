@@ -77,7 +77,7 @@ C06.3 簇间 Federation（Locator Directory + 显式单帧 Tunnel）
 
 这个所有权也体现在头文件中：指针/API 使用者只包含 `ucn_node.h`；实际静态分配 Node 的 Protocol Task owner 才包含 `ucn_node_storage.h`。调用树描述公开函数关系，不把存储头中的内部表项当作应用可调用接口。
 
-S15 的 Bridge Pending 与 Core Q0 Retry 都只处理本机 Adapter TX Queue 的瞬时 `UCN_ERR_NO_SPACE`。它们有固定容量、次数和 Deadline；`UCN_OK` 只代表 Link Queue 接受，不是远端送达或执行确认。
+S15 的 Bridge Pending 仍只处理本机 Adapter TX Queue 的瞬时 `UCN_ERR_NO_SPACE`。Core Q0 Retry 除该背压外，在 Full/Lite 动态 Mesh 中还可把可恢复 `NOT_FOUND` 转为有界 route-wait：保留原 FIFO/Deadline/Order，合并发现，恢复后继续；Nano 没有该分支。两者都有固定容量与 Deadline；`UCN_OK` 只代表本地对应层接受，不是远端送达或执行确认。
 
 S16 给这条循环增加产品时间契约：`UCN_MAX_STEP_INTERVAL_MS` 默认 10 ms，Node 观测实际最大 Gap/违规；业务 Burst、Neighbor、Bearer 上限会生成保守维护服务上界，不安全的 Profile 编译失败。调用树只描述该边界，真实 Task 抢占和 Link `send()` WCET 仍须目标板日志证明。
 

@@ -4,6 +4,10 @@
 #include "ucn/ucn_time.h"
 
 #if UCN_FEATURE_DYNAMIC_MESH
+/*
+ * EN: Checks whether `interval_with_jitter` satisfies the Adapter module's validity rules.
+ * 中文：检查 `interval_with_jitter` 是否满足 Adapter 模块的合法性规则。
+ */
 static bool hello_interval_with_jitter_is_valid(uint32_t interval_ms,
                                                 uint16_t jitter_permille)
 {
@@ -19,6 +23,10 @@ static bool hello_interval_with_jitter_is_valid(uint32_t interval_ms,
            (uint64_t)UCN_MAX_SAFE_DURATION_MS * UINT64_C(1000);
 }
 
+/*
+ * EN: Checks whether `config` satisfies the Adapter module's validity rules.
+ * 中文：检查 `config` 是否满足 Adapter 模块的合法性规则。
+ */
 static bool hello_config_is_valid(const ucn_adapter_hello_config_t *config)
 {
     if (config == NULL) {
@@ -55,6 +63,10 @@ static bool hello_config_is_valid(const ucn_adapter_hello_config_t *config)
                config->retry_jitter_permille);
 }
 
+/*
+ * EN: Advances the deterministic PRNG used for HELLO scheduling jitter.
+ * 中文：推进 HELLO 调度抖动使用的确定性伪随机序列。
+ */
 static uint32_t hello_random_next(ucn_adapter_hello_scheduler_t *scheduler)
 {
     uint32_t value = scheduler->random_state;
@@ -69,6 +81,10 @@ static uint32_t hello_random_next(ucn_adapter_hello_scheduler_t *scheduler)
     return value;
 }
 
+/*
+ * EN: Initializes the deterministic HELLO scheduler random state.
+ * 中文：初始化 HELLO Scheduler 的确定性随机状态。
+ */
 static void hello_seed(ucn_adapter_hello_scheduler_t *scheduler,
                        uint32_t random_seed)
 {
@@ -82,6 +98,10 @@ static void hello_seed(ucn_adapter_hello_scheduler_t *scheduler,
     (void)hello_random_next(scheduler);
 }
 
+/*
+ * EN: Initializes `initial_delay` for Adapter using caller-owned fixed storage.
+ * 中文：使用调用方提供的固定存储初始化 Adapter 的 `initial_delay`。
+ */
 static uint32_t hello_initial_delay(ucn_adapter_hello_scheduler_t *scheduler)
 {
     const uint32_t minimum = scheduler->config.initial_jitter_min_ms;
@@ -90,6 +110,10 @@ static uint32_t hello_initial_delay(ucn_adapter_hello_scheduler_t *scheduler)
     return minimum + hello_random_next(scheduler) % range;
 }
 
+/*
+ * EN: Calculates the bounded randomized delay before the next HELLO retry.
+ * 中文：计算下一次 HELLO 重试前的有界随机延迟。
+ */
 static uint32_t hello_retry_delay(ucn_adapter_hello_scheduler_t *scheduler,
                                   uint32_t interval_ms)
 {
@@ -105,6 +129,10 @@ static uint32_t hello_retry_delay(ucn_adapter_hello_scheduler_t *scheduler,
     return interval_ms - span_ms + hello_random_next(scheduler) % offset_range;
 }
 
+/*
+ * EN: Schedules `schedule_initial` using the wrap-safe Adapter time domain.
+ * 中文：使用回绕安全的 Adapter 时间域调度 `schedule_initial`。
+ */
 static void hello_schedule_initial(ucn_adapter_hello_scheduler_t *scheduler,
                                    uint32_t now_ms)
 {
@@ -115,6 +143,10 @@ static void hello_schedule_initial(ucn_adapter_hello_scheduler_t *scheduler,
         ucn_deadline_from_now(now_ms, hello_initial_delay(scheduler));
 }
 
+/*
+ * EN: Schedules `schedule_retry` using the wrap-safe Adapter time domain.
+ * 中文：使用回绕安全的 Adapter 时间域调度 `schedule_retry`。
+ */
 static void hello_schedule_retry(ucn_adapter_hello_scheduler_t *scheduler,
                                  uint32_t now_ms,
                                  uint32_t interval_ms)
@@ -123,6 +155,10 @@ static void hello_schedule_retry(ucn_adapter_hello_scheduler_t *scheduler,
         now_ms, hello_retry_delay(scheduler, interval_ms));
 }
 
+/*
+ * EN: Enters or leaves the bounded `enter_admitted` critical section for Adapter.
+ * 中文：进入或退出 Adapter 的有界 `enter_admitted` 临界区。
+ */
 static void hello_enter_admitted(ucn_adapter_hello_scheduler_t *scheduler,
                                  uint32_t now_ms)
 {
@@ -141,6 +177,10 @@ static void hello_enter_admitted(ucn_adapter_hello_scheduler_t *scheduler,
 }
 #endif
 
+/*
+ * EN: Enters or leaves the bounded `enter_task` critical section for Adapter.
+ * 中文：进入或退出 Adapter 的有界 `enter_task` 临界区。
+ */
 static void queue_enter_task(ucn_adapter_rx_queue_t *queue)
 {
     if (queue->port_ops != NULL) {
@@ -148,6 +188,10 @@ static void queue_enter_task(ucn_adapter_rx_queue_t *queue)
     }
 }
 
+/*
+ * EN: Enters or leaves the bounded `exit_task` critical section for Adapter.
+ * 中文：进入或退出 Adapter 的有界 `exit_task` 临界区。
+ */
 static void queue_exit_task(ucn_adapter_rx_queue_t *queue)
 {
     if (queue->port_ops != NULL) {
@@ -155,18 +199,30 @@ static void queue_exit_task(ucn_adapter_rx_queue_t *queue)
     }
 }
 
+/*
+ * EN: Enters or leaves the bounded `enter_from_isr` critical section for Adapter.
+ * 中文：进入或退出 Adapter 的有界 `enter_from_isr` 临界区。
+ */
 static ucn_port_critical_token_t queue_enter_from_isr(
     ucn_adapter_rx_queue_t *queue)
 {
     return queue->port_ops->enter_critical_from_isr(queue->port_context);
 }
 
+/*
+ * EN: Enters or leaves the bounded `exit_from_isr` critical section for Adapter.
+ * 中文：进入或退出 Adapter 的有界 `exit_from_isr` 临界区。
+ */
 static void queue_exit_from_isr(ucn_adapter_rx_queue_t *queue,
                                 ucn_port_critical_token_t token)
 {
     queue->port_ops->exit_critical_from_isr(queue->port_context, token);
 }
 
+/*
+ * EN: Checks the `isr_critical_is_configured` condition against current Adapter state.
+ * 中文：根据当前 Adapter 状态检查 `isr_critical_is_configured` 条件。
+ */
 static bool queue_isr_critical_is_configured(const ucn_adapter_rx_queue_t *queue)
 {
     return queue->port_ops != NULL &&
@@ -174,12 +230,20 @@ static bool queue_isr_critical_is_configured(const ucn_adapter_rx_queue_t *queue
            queue->port_ops->exit_critical_from_isr != NULL;
 }
 
+/*
+ * EN: Checks whether `address` satisfies the Adapter module's validity rules.
+ * 中文：检查 `address` 是否满足 Adapter 模块的合法性规则。
+ */
 bool ucn_adapter_address_is_valid(const ucn_adapter_address_t *address)
 {
     return address != NULL && address->length != 0U &&
            address->length <= UCN_ADAPTER_PHYSICAL_ADDRESS_MAX;
 }
 
+/*
+ * EN: Compares `address_equal` using the canonical Adapter identity rules.
+ * 中文：按照规范的 Adapter 身份规则比较 `address_equal`。
+ */
 bool ucn_adapter_address_equal(const ucn_adapter_address_t *left,
                                const ucn_adapter_address_t *right)
 {
@@ -190,6 +254,10 @@ bool ucn_adapter_address_equal(const ucn_adapter_address_t *left,
     return memcmp(left->bytes, right->bytes, left->length) == 0;
 }
 
+/*
+ * EN: Searches bounded Adapter state for `peer`.
+ * 中文：在固定容量的 Adapter 状态中查找 `peer`。
+ */
 ucn_adapter_peer_binding_t *ucn_adapter_find_peer(
     ucn_adapter_peer_binding_t *bindings,
     size_t binding_count,
@@ -209,6 +277,10 @@ ucn_adapter_peer_binding_t *ucn_adapter_find_peer(
     return NULL;
 }
 
+/*
+ * EN: Validates and installs `bind_peer` into bounded Adapter state.
+ * 中文：验证 `bind_peer` 并将其安装到固定容量的 Adapter 状态中。
+ */
 ucn_result_t ucn_adapter_bind_peer(ucn_adapter_peer_binding_t *bindings,
                                    size_t binding_count,
                                    const ucn_adapter_address_t *address,
@@ -241,6 +313,10 @@ ucn_result_t ucn_adapter_bind_peer(ucn_adapter_peer_binding_t *bindings,
     return UCN_OK;
 }
 
+/*
+ * EN: Initializes `rx_queue_init` for Adapter using caller-owned fixed storage.
+ * 中文：使用调用方提供的固定存储初始化 Adapter 的 `rx_queue_init`。
+ */
 ucn_result_t ucn_adapter_rx_queue_init(ucn_adapter_rx_queue_t *queue,
                                        const ucn_port_ops_t *port_ops,
                                        void *port_context)
@@ -260,6 +336,10 @@ ucn_result_t ucn_adapter_rx_queue_init(ucn_adapter_rx_queue_t *queue,
     return UCN_OK;
 }
 
+/*
+ * EN: Copies `rx_enqueue` into a bounded Adapter queue.
+ * 中文：把 `rx_enqueue` 复制到固定容量的 Adapter 队列。
+ */
 ucn_result_t ucn_adapter_rx_enqueue(ucn_adapter_rx_queue_t *queue,
                                     ucn_link_t *ingress_link,
                                     const uint8_t *data,
@@ -294,6 +374,10 @@ ucn_result_t ucn_adapter_rx_enqueue(ucn_adapter_rx_queue_t *queue,
     return UCN_OK;
 }
 
+/*
+ * EN: Copies `rx_enqueue_from_isr` into a bounded Adapter queue.
+ * 中文：把 `rx_enqueue_from_isr` 复制到固定容量的 Adapter 队列。
+ */
 ucn_result_t ucn_adapter_rx_enqueue_from_isr(ucn_adapter_rx_queue_t *queue,
                                              ucn_link_t *ingress_link,
                                              const uint8_t *data,
@@ -332,6 +416,10 @@ ucn_result_t ucn_adapter_rx_enqueue_from_isr(ucn_adapter_rx_queue_t *queue,
     return UCN_OK;
 }
 
+/*
+ * EN: Processes one bounded `rx_pump` work unit for Adapter.
+ * 中文：为 Adapter 处理一个有界的 `rx_pump` 工作单元。
+ */
 ucn_result_t ucn_adapter_rx_pump(ucn_adapter_rx_queue_t *queue,
                                  ucn_node_t *node,
                                  size_t max_frames,
@@ -371,6 +459,10 @@ ucn_result_t ucn_adapter_rx_pump(ucn_adapter_rx_queue_t *queue,
     return UCN_OK;
 }
 
+/*
+ * EN: Returns the current `rx_get_stats` view from Adapter state.
+ * 中文：从 Adapter 状态返回当前 `rx_get_stats` 视图。
+ */
 const ucn_adapter_rx_stats_t *ucn_adapter_rx_get_stats(
     const ucn_adapter_rx_queue_t *queue)
 {
@@ -378,6 +470,10 @@ const ucn_adapter_rx_stats_t *ucn_adapter_rx_get_stats(
 }
 
 #if UCN_FEATURE_DYNAMIC_MESH
+/*
+ * EN: Initializes `hello_scheduler_init` for Adapter using caller-owned fixed storage.
+ * 中文：使用调用方提供的固定存储初始化 Adapter 的 `hello_scheduler_init`。
+ */
 ucn_result_t ucn_adapter_hello_scheduler_init(
     ucn_adapter_hello_scheduler_t *scheduler,
     const ucn_adapter_hello_config_t *config,
@@ -403,6 +499,10 @@ ucn_result_t ucn_adapter_hello_scheduler_init(
     return UCN_OK;
 }
 
+/*
+ * EN: Restarts HELLO scheduling with a new seed and current timestamp.
+ * 中文：使用新种子和当前时间重新启动 HELLO 调度。
+ */
 ucn_result_t ucn_adapter_hello_scheduler_restart(
     ucn_adapter_hello_scheduler_t *scheduler,
     uint32_t random_seed,
@@ -423,6 +523,10 @@ ucn_result_t ucn_adapter_hello_scheduler_restart(
     return UCN_OK;
 }
 
+/*
+ * EN: Advances one bounded `hello_scheduler_step` state-machine step in Adapter.
+ * 中文：在 Adapter 中推进一次有界的 `hello_scheduler_step` 状态机步骤。
+ */
 ucn_result_t ucn_adapter_hello_scheduler_step(
     ucn_adapter_hello_scheduler_t *scheduler,
     uint32_t now_ms,
@@ -503,6 +607,10 @@ ucn_result_t ucn_adapter_hello_scheduler_step(
     return UCN_OK;
 }
 
+/*
+ * EN: Returns the current `hello_scheduler_get_stats` view from Adapter state.
+ * 中文：从 Adapter 状态返回当前 `hello_scheduler_get_stats` 视图。
+ */
 const ucn_adapter_hello_stats_t *ucn_adapter_hello_scheduler_get_stats(
     const ucn_adapter_hello_scheduler_t *scheduler)
 {

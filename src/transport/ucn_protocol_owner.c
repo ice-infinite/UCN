@@ -2,6 +2,10 @@
 
 #include "ucn/ports/ucn_protocol_owner.h"
 
+/*
+ * EN: Initializes the Protocol Owner object from validated caller-owned configuration without heap allocation.
+ * 中文：使用经验证的调用方配置初始化 Protocol Owner 对象，且不使用堆内存。
+ */
 ucn_result_t ucn_protocol_owner_init(
     ucn_protocol_owner_t *owner,
     const ucn_protocol_owner_config_t *config)
@@ -32,6 +36,10 @@ ucn_result_t ucn_protocol_owner_init(
     return UCN_OK;
 }
 
+/*
+ * EN: Copies `rx_enqueue` into a bounded Protocol Owner queue.
+ * 中文：把 `rx_enqueue` 复制到固定容量的 Protocol Owner 队列。
+ */
 static ucn_result_t protocol_owner_rx_enqueue(
     ucn_protocol_owner_t *owner,
     ucn_link_t *ingress_link,
@@ -58,6 +66,10 @@ static ucn_result_t protocol_owner_rx_enqueue(
     return UCN_OK;
 }
 
+/*
+ * EN: Copies `rx_enqueue` into a bounded Protocol Owner queue.
+ * 中文：把 `rx_enqueue` 复制到固定容量的 Protocol Owner 队列。
+ */
 ucn_result_t ucn_protocol_owner_rx_enqueue(
     ucn_protocol_owner_t *owner,
     ucn_link_t *ingress_link,
@@ -67,6 +79,10 @@ ucn_result_t ucn_protocol_owner_rx_enqueue(
     return protocol_owner_rx_enqueue(owner, ingress_link, data, length, false);
 }
 
+/*
+ * EN: Copies `rx_enqueue_from_isr` into a bounded Protocol Owner queue.
+ * 中文：把 `rx_enqueue_from_isr` 复制到固定容量的 Protocol Owner 队列。
+ */
 ucn_result_t ucn_protocol_owner_rx_enqueue_from_isr(
     ucn_protocol_owner_t *owner,
     ucn_link_t *ingress_link,
@@ -76,6 +92,10 @@ ucn_result_t ucn_protocol_owner_rx_enqueue_from_isr(
     return protocol_owner_rx_enqueue(owner, ingress_link, data, length, true);
 }
 
+/*
+ * EN: Advances one bounded `step` state-machine step in Protocol Owner.
+ * 中文：在 Protocol Owner 中推进一次有界的 `step` 状态机步骤。
+ */
 ucn_result_t ucn_protocol_owner_step(
     ucn_protocol_owner_t *owner,
     size_t *pumped,
@@ -139,6 +159,10 @@ ucn_result_t ucn_protocol_owner_step(
 }
 
 const ucn_protocol_owner_stats_t *
+/*
+ * EN: Returns the current `stats` view from Protocol Owner state.
+ * 中文：从 Protocol Owner 状态返回当前 `stats` 视图。
+ */
 ucn_protocol_owner_get_stats(const ucn_protocol_owner_t *owner)
 {
     return owner == NULL ? NULL : &owner->stats;

@@ -308,7 +308,7 @@ nodes:
     notes:
       - 连续 `UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE`（默认 4）个业务发送后，真正到期的必要维护可取得一个槽位；Q0 仍 FIFO，Snapshot/Policy Diagnostic 不抢占业务。
       - 调度顺序为 Q0 → Q1 / Pending Q1；必要维护在业务空闲时立即检查，或在到期且达到连续业务上限时插入；诊断始终在上述工作后。
-      - 显式 `RETRY_ON_BACKPRESSURE` 的 Q0 只在 `NO_SPACE` 时保留原槽；等待下一次尝试期间不让 Q1 越序，但到期的必要维护仍可运行。
+      - 显式 `RETRY_ON_BACKPRESSURE` 的 Q0 在 `NO_SPACE` 或 Full/Lite 可恢复 route gap 中保留原槽；route-wait 合并同目的地发现并保持原 Deadline/Order。等待期间不让 Q1 越序，但到期的必要维护仍可运行；这不是端到端 ACK。
       - 第一次 Step 只建立时间基线；之后以回绕安全的无符号差值更新 `last_step_ms`、`max_step_gap_ms`、`step_interval_violations`。
       - Heartbeat 与 Bearer/Path Probe 成功发送时，同时更新相对到期时刻的最大服务延迟统计，供目标板日志观测。
       - 产品 `UCN_MAX_STEP_INTERVAL_MS` 与 Burst/Neighbor/Bearer 上限共同形成保守维护服务上界；侵入 Suspect 窗口的 Profile 在编译期拒绝。

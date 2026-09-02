@@ -4,6 +4,10 @@
 #include "ucn/ucn_time.h"
 #include "ucn/ucn_transfer.h"
 
+/*
+ * EN: Updates `observe_now` in bounded Transfer state.
+ * 中文：更新固定容量 Transfer 状态中的 `observe_now`。
+ */
 static uint32_t transfer_observe_now(ucn_transfer_t *transfer)
 {
     const uint32_t now_ms = transfer->config.now_ms(
@@ -13,23 +17,39 @@ static uint32_t transfer_observe_now(ucn_transfer_t *transfer)
     return now_ms;
 }
 
+/*
+ * EN: Reads `u16_be` from the canonical Transfer byte order.
+ * 中文：按规范的 Transfer 字节序读取 `u16_be`。
+ */
 static uint16_t read_u16_be(const uint8_t *input)
 {
     return (uint16_t)(((uint16_t)input[0] << 8U) | (uint16_t)input[1]);
 }
 
+/*
+ * EN: Reads `u32_be` from the canonical Transfer byte order.
+ * 中文：按规范的 Transfer 字节序读取 `u32_be`。
+ */
 static uint32_t read_u32_be(const uint8_t *input)
 {
     return ((uint32_t)input[0] << 24U) | ((uint32_t)input[1] << 16U) |
            ((uint32_t)input[2] << 8U) | (uint32_t)input[3];
 }
 
+/*
+ * EN: Writes `u16_be` in the canonical Transfer byte order.
+ * 中文：按规范的 Transfer 字节序写入 `u16_be`。
+ */
 static void write_u16_be(uint8_t *output, uint16_t value)
 {
     output[0] = (uint8_t)(value >> 8U);
     output[1] = (uint8_t)value;
 }
 
+/*
+ * EN: Writes `u32_be` in the canonical Transfer byte order.
+ * 中文：按规范的 Transfer 字节序写入 `u32_be`。
+ */
 static void write_u32_be(uint8_t *output, uint32_t value)
 {
     output[0] = (uint8_t)(value >> 24U);
@@ -38,12 +58,20 @@ static void write_u32_be(uint8_t *output, uint32_t value)
     output[3] = (uint8_t)value;
 }
 
+/*
+ * EN: Checks whether `class` satisfies the Transfer module's validity rules.
+ * 中文：检查 `class` 是否满足 Transfer 模块的合法性规则。
+ */
 static bool transfer_class_is_valid(ucn_transfer_class_t transfer_class)
 {
     return transfer_class >= UCN_TRANSFER_CLASS_T32 &&
            transfer_class < UCN_TRANSFER_CLASS_COUNT;
 }
 
+/*
+ * EN: Calculates `class_max_bytes` with bounded, deterministic Transfer arithmetic.
+ * 中文：使用有界且确定性的 Transfer 算术计算 `class_max_bytes`。
+ */
 size_t ucn_transfer_class_max_bytes(ucn_transfer_class_t transfer_class)
 {
     static const uint16_t limits[UCN_TRANSFER_CLASS_COUNT] = {
@@ -54,6 +82,10 @@ size_t ucn_transfer_class_max_bytes(ucn_transfer_class_t transfer_class)
                (size_t)limits[(size_t)transfer_class] : 0U;
 }
 
+/*
+ * EN: Calculates the bounded `smallest_class_for_length` value used by Transfer.
+ * 中文：计算 Transfer 使用的有界 `smallest_class_for_length` 值。
+ */
 ucn_transfer_class_t ucn_transfer_smallest_class_for_length(size_t length)
 {
     ucn_transfer_class_t transfer_class;
@@ -71,6 +103,10 @@ ucn_transfer_class_t ucn_transfer_smallest_class_for_length(size_t length)
     return UCN_TRANSFER_CLASS_COUNT;
 }
 
+/*
+ * EN: Calculates `crc32` with bounded, deterministic Transfer arithmetic.
+ * 中文：使用有界且确定性的 Transfer 算术计算 `crc32`。
+ */
 uint32_t ucn_transfer_crc32(const uint8_t *data, size_t length)
 {
     size_t index;
@@ -91,6 +127,10 @@ uint32_t ucn_transfer_crc32(const uint8_t *data, size_t length)
     return ~crc;
 }
 
+/*
+ * EN: Checks whether `fragment_shape` satisfies the Transfer module's validity rules.
+ * 中文：检查 `fragment_shape` 是否满足 Transfer 模块的合法性规则。
+ */
 static bool fragment_shape_is_valid(const ucn_transfer_fragment_t *fragment)
 {
     size_t class_limit;
@@ -118,6 +158,10 @@ static bool fragment_shape_is_valid(const ucn_transfer_fragment_t *fragment)
                         UCN_TRANSFER_MIN_FRAGMENT_DATA_BYTES);
 }
 
+/*
+ * EN: Encodes `encode_fragment` into its bounded Transfer wire representation.
+ * 中文：把 `encode_fragment` 编码为有界的 Transfer 线格式。
+ */
 ucn_result_t ucn_transfer_encode_fragment(
     const ucn_transfer_fragment_t *fragment,
     uint8_t *output,
@@ -150,6 +194,10 @@ ucn_result_t ucn_transfer_encode_fragment(
     return UCN_OK;
 }
 
+/*
+ * EN: Decodes and validates `decode_fragment` from its Transfer wire representation.
+ * 中文：从 Transfer 线格式解码并验证 `decode_fragment`。
+ */
 ucn_result_t ucn_transfer_decode_fragment(
     const uint8_t *input,
     size_t input_length,
@@ -179,6 +227,10 @@ ucn_result_t ucn_transfer_decode_fragment(
     return fragment_shape_is_valid(fragment) ? UCN_OK : UCN_ERR_MALFORMED;
 }
 
+/*
+ * EN: Checks whether `ack_shape` satisfies the Transfer module's validity rules.
+ * 中文：检查 `ack_shape` 是否满足 Transfer 模块的合法性规则。
+ */
 static bool ack_shape_is_valid(const ucn_transfer_ack_t *ack)
 {
     return ack != NULL && ucn_endpoint_is_static(ack->target_endpoint) &&
@@ -187,6 +239,10 @@ static bool ack_shape_is_valid(const ucn_transfer_ack_t *ack)
            ack->status <= UCN_TRANSFER_ACK_REJECTED;
 }
 
+/*
+ * EN: Encodes `encode_ack` into its bounded Transfer wire representation.
+ * 中文：把 `encode_ack` 编码为有界的 Transfer 线格式。
+ */
 ucn_result_t ucn_transfer_encode_ack(const ucn_transfer_ack_t *ack,
                                      uint8_t output[UCN_TRANSFER_ACK_BYTES])
 {
@@ -205,6 +261,10 @@ ucn_result_t ucn_transfer_encode_ack(const ucn_transfer_ack_t *ack,
     return UCN_OK;
 }
 
+/*
+ * EN: Decodes and validates `decode_ack` from its Transfer wire representation.
+ * 中文：从 Transfer 线格式解码并验证 `decode_ack`。
+ */
 ucn_result_t ucn_transfer_decode_ack(const uint8_t *input,
                                      size_t input_length,
                                      ucn_transfer_ack_t *ack)
@@ -228,6 +288,10 @@ ucn_result_t ucn_transfer_decode_ack(const uint8_t *input,
     return ack_shape_is_valid(ack) ? UCN_OK : UCN_ERR_MALFORMED;
 }
 
+/*
+ * EN: Calculates `class_deadline_ms` with bounded, deterministic Transfer arithmetic.
+ * 中文：使用有界且确定性的 Transfer 算术计算 `class_deadline_ms`。
+ */
 static uint32_t class_deadline_ms(ucn_transfer_class_t transfer_class)
 {
     static const uint32_t deadlines[UCN_TRANSFER_CLASS_COUNT] = {
@@ -238,6 +302,10 @@ static uint32_t class_deadline_ms(ucn_transfer_class_t transfer_class)
                deadlines[(size_t)transfer_class] : 0U;
 }
 
+/*
+ * EN: Searches bounded Transfer state for `endpoint`.
+ * 中文：在固定容量的 Transfer 状态中查找 `endpoint`。
+ */
 static ucn_transfer_endpoint_binding_t *find_endpoint(
     ucn_transfer_t *transfer,
     ucn_endpoint_t endpoint)
@@ -253,6 +321,10 @@ static ucn_transfer_endpoint_binding_t *find_endpoint(
     return NULL;
 }
 
+/*
+ * EN: Searches bounded Transfer state for `peer`.
+ * 中文：在固定容量的 Transfer 状态中查找 `peer`。
+ */
 static ucn_transfer_peer_capability_t *find_peer(
     ucn_transfer_t *transfer,
     ucn_node_id_t node_id)
@@ -268,6 +340,10 @@ static ucn_transfer_peer_capability_t *find_peer(
     return NULL;
 }
 
+/*
+ * EN: Validates and processes `direct_endpoint_handler` in the Transfer receive path.
+ * 中文：在 Transfer 接收路径中验证并处理 `direct_endpoint_handler`。
+ */
 static void direct_endpoint_handler(void *context, const ucn_frame_t *frame)
 {
     ucn_transfer_endpoint_binding_t *binding =
@@ -293,6 +369,10 @@ static void direct_endpoint_handler(void *context, const ucn_frame_t *frame)
                      frame->payload_length, UCN_TRANSFER_RX_HANDLE_DIRECT);
 }
 
+/*
+ * EN: Allocates `allocate_transfer_id` from fixed Transfer slots without heap use.
+ * 中文：从 Transfer 的固定槽位分配 `allocate_transfer_id`，不使用堆内存。
+ */
 static uint16_t allocate_transfer_id(ucn_transfer_t *transfer)
 {
     uint16_t id = transfer->next_transfer_id;
@@ -307,6 +387,10 @@ static uint16_t allocate_transfer_id(ucn_transfer_t *transfer)
     return id;
 }
 
+/*
+ * EN: Completes `complete_tx_slot` and records its terminal Transfer result.
+ * 中文：完成 `complete_tx_slot` 并记录其 Transfer 终态结果。
+ */
 static void complete_tx_slot(ucn_transfer_t *transfer,
                              ucn_transfer_tx_slot_t *slot,
                              ucn_transfer_completion_status_t status)
@@ -328,6 +412,10 @@ static void complete_tx_slot(ucn_transfer_t *transfer,
     }
 }
 
+/*
+ * EN: Clears `rx_slot` from Transfer without allocating memory.
+ * 中文：从 Transfer 中清除 `rx_slot`，且不进行动态分配。
+ */
 static void clear_rx_slot(ucn_transfer_rx_slot_t *slot)
 {
     uint16_t generation;
@@ -340,6 +428,10 @@ static void clear_rx_slot(ucn_transfer_rx_slot_t *slot)
     slot->generation = generation;
 }
 
+/*
+ * EN: Searches bounded Transfer state for `rx_slot`.
+ * 中文：在固定容量的 Transfer 状态中查找 `rx_slot`。
+ */
 static ucn_transfer_rx_slot_t *find_rx_slot(
     ucn_transfer_t *transfer,
     const ucn_frame_t *frame,
@@ -360,6 +452,10 @@ static ucn_transfer_rx_slot_t *find_rx_slot(
     return NULL;
 }
 
+/*
+ * EN: Searches bounded Transfer state for `recent`.
+ * 中文：在固定容量的 Transfer 状态中查找 `recent`。
+ */
 static ucn_transfer_recent_completion_t *find_recent(
     ucn_transfer_t *transfer,
     const ucn_frame_t *frame,
@@ -382,11 +478,16 @@ static ucn_transfer_recent_completion_t *find_recent(
     return NULL;
 }
 
+/*
+ * EN: Records `remember_completion` in bounded Transfer state or statistics.
+ * 中文：在固定容量的 Transfer 状态或统计中记录 `remember_completion`。
+ */
 static void remember_completion(ucn_transfer_t *transfer,
                                 const ucn_transfer_rx_slot_t *slot)
 {
     size_t index;
     size_t selected = UCN_TRANSFER_RECENT_COMPLETIONS;
+    uint32_t selected_remaining = UINT32_MAX;
 
     for (index = 0U; index < UCN_TRANSFER_RECENT_COMPLETIONS; ++index) {
         if (!transfer->recent[index].occupied ||
@@ -395,9 +496,15 @@ static void remember_completion(ucn_transfer_t *transfer,
             selected = index;
             break;
         }
-    }
-    if (selected == UCN_TRANSFER_RECENT_COMPLETIONS) {
-        selected = 0U;
+        {
+            const uint32_t remaining =
+                transfer->recent[index].expires_at_ms - transfer->now_ms;
+
+            if (remaining < selected_remaining) {
+                selected = index;
+                selected_remaining = remaining;
+            }
+        }
     }
     transfer->recent[selected].occupied = true;
     transfer->recent[selected].source = slot->source;
@@ -416,6 +523,10 @@ static void remember_completion(ucn_transfer_t *transfer,
  * therefore prevent a 2-hop ring from ever expanding to 4/8/16 hops.  A
  * Transfer only needs to ensure that discovery exists; Core owns its timing
  * and expansion once the request is pending. */
+/*
+ * EN: Starts or prepares `ensure_route_discovery` after validating Transfer prerequisites.
+ * 中文：验证 Transfer 前置条件后启动或准备 `ensure_route_discovery`。
+ */
 static void ensure_route_discovery(ucn_transfer_t *transfer,
                                    ucn_node_id_t destination)
 {
@@ -425,6 +536,10 @@ static void ensure_route_discovery(ucn_transfer_t *transfer,
     }
 }
 
+/*
+ * EN: Validates and submits `send_ack` through the bounded Transfer transmit path.
+ * 中文：验证 `send_ack` 并将其提交到有界的 Transfer 发送路径。
+ */
 static ucn_result_t send_ack(ucn_transfer_t *transfer,
                              ucn_node_id_t destination,
                              ucn_endpoint_t endpoint,
@@ -455,6 +570,10 @@ static ucn_result_t send_ack(ucn_transfer_t *transfer,
     return result;
 }
 
+/*
+ * EN: Allocates `allocate_rx_slot` from fixed Transfer slots without heap use.
+ * 中文：从 Transfer 的固定槽位分配 `allocate_rx_slot`，不使用堆内存。
+ */
 static ucn_transfer_rx_slot_t *allocate_rx_slot(
     ucn_transfer_t *transfer,
     const ucn_frame_t *frame,
@@ -489,6 +608,10 @@ static ucn_transfer_rx_slot_t *allocate_rx_slot(
     return NULL;
 }
 
+/*
+ * EN: Builds `make_rx_handle` in caller-provided storage for Transfer.
+ * 中文：在调用方存储中为 Transfer 构造 `make_rx_handle`。
+ */
 static ucn_transfer_rx_handle_t make_rx_handle(
     const ucn_transfer_t *transfer,
     const ucn_transfer_rx_slot_t *slot)
@@ -498,6 +621,10 @@ static ucn_transfer_rx_handle_t make_rx_handle(
     return ((uint32_t)slot->generation << 8U) | (uint32_t)(index + 1U);
 }
 
+/*
+ * EN: Validates and processes `handle_fragment` in the Transfer receive path.
+ * 中文：在 Transfer 接收路径中验证并处理 `handle_fragment`。
+ */
 static void handle_fragment(ucn_transfer_t *transfer,
                             const ucn_frame_t *frame)
 {
@@ -507,6 +634,10 @@ static void handle_fragment(ucn_transfer_t *transfer,
     ucn_transfer_recent_completion_t *recent;
     ucn_result_t result;
 
+    if (frame->traffic_class != UCN_TRAFFIC_Q3_BULK) {
+        transfer->stats.rx_rejected++;
+        return;
+    }
     result = ucn_transfer_decode_fragment(frame->payload, frame->payload_length,
                                           &fragment);
     if (result != UCN_OK) {
@@ -621,6 +752,10 @@ static void handle_fragment(ucn_transfer_t *transfer,
                      slot->total_length, make_rx_handle(transfer, slot));
 }
 
+/*
+ * EN: Starts or prepares `begin_window_recovery` after validating Transfer prerequisites.
+ * 中文：验证 Transfer 前置条件后启动或准备 `begin_window_recovery`。
+ */
 static bool begin_window_recovery(ucn_transfer_t *transfer,
                                   ucn_transfer_tx_slot_t *slot)
 {
@@ -643,11 +778,19 @@ static bool begin_window_recovery(ucn_transfer_t *transfer,
     return true;
 }
 
+/*
+ * EN: Validates and processes `handle_ack` in the Transfer receive path.
+ * 中文：在 Transfer 接收路径中验证并处理 `handle_ack`。
+ */
 static void handle_ack(ucn_transfer_t *transfer, const ucn_frame_t *frame)
 {
     ucn_transfer_ack_t ack;
     size_t index;
 
+    if (frame->traffic_class != UCN_TRAFFIC_Q1_REALTIME) {
+        transfer->stats.rx_rejected++;
+        return;
+    }
     if (ucn_transfer_decode_ack(frame->payload, frame->payload_length, &ack) !=
         UCN_OK) {
         transfer->stats.rx_rejected++;
@@ -674,6 +817,7 @@ static void handle_ack(ucn_transfer_t *transfer, const ucn_frame_t *frame)
         if (ack.next_expected_offset > slot->acknowledged_offset) {
             slot->acknowledged_offset = ack.next_expected_offset;
             slot->retry_count = 0U;
+            slot->recovery_waiting_ack = false;
             if (slot->resend_active &&
                 slot->resend_offset < slot->acknowledged_offset) {
                 slot->resend_offset = slot->acknowledged_offset;
@@ -693,7 +837,8 @@ static void handle_ack(ucn_transfer_t *transfer, const ucn_frame_t *frame)
                 slot->ack_deadline_ms = ucn_deadline_from_now(
                     transfer->now_ms, transfer->config.ack_timeout_ms);
             }
-        } else if (slot->awaiting_ack && !slot->resend_active) {
+        } else if (slot->awaiting_ack && !slot->resend_active &&
+                   !slot->recovery_waiting_ack) {
             /* A duplicate cumulative ACK means the receiver still has a gap.
              * Start one bounded Go-Back-N round immediately instead of
              * waiting for the full ACK timeout. */
@@ -703,6 +848,10 @@ static void handle_ack(ucn_transfer_t *transfer, const ucn_frame_t *frame)
     }
 }
 
+/*
+ * EN: Validates and processes `node_rx_handler` in the Transfer receive path.
+ * 中文：在 Transfer 接收路径中验证并处理 `node_rx_handler`。
+ */
 static void transfer_node_rx_handler(void *context, const ucn_frame_t *frame)
 {
     ucn_transfer_t *transfer = (ucn_transfer_t *)context;
@@ -721,6 +870,10 @@ static void transfer_node_rx_handler(void *context, const ucn_frame_t *frame)
     }
 }
 
+/*
+ * EN: Initializes the bounded Transfer sender and reassembly state around an existing Node.
+ * 中文：围绕现有 Node 初始化有界的 Transfer 发送与重组状态。
+ */
 ucn_result_t ucn_transfer_init(ucn_transfer_t *transfer,
                                const ucn_transfer_config_t *config)
 {
@@ -775,6 +928,10 @@ ucn_result_t ucn_transfer_init(ucn_transfer_t *transfer,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `tx_window_size` in Transfer state.
+ * 中文：验证并设置 Transfer 状态中的 `tx_window_size`。
+ */
 ucn_result_t ucn_transfer_set_tx_window_size(ucn_transfer_t *transfer,
                                               uint8_t tx_window_size)
 {
@@ -793,6 +950,10 @@ ucn_result_t ucn_transfer_set_tx_window_size(ucn_transfer_t *transfer,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and installs `bind_endpoint` into bounded Transfer state.
+ * 中文：验证 `bind_endpoint` 并将其安装到固定容量的 Transfer 状态中。
+ */
 ucn_result_t ucn_transfer_bind_endpoint(
     ucn_transfer_t *transfer,
     ucn_endpoint_t endpoint,
@@ -844,6 +1005,10 @@ ucn_result_t ucn_transfer_bind_endpoint(
     }
 }
 
+/*
+ * EN: Validates and sets `peer_capability` in Transfer state.
+ * 中文：验证并设置 Transfer 状态中的 `peer_capability`。
+ */
 ucn_result_t ucn_transfer_set_peer_capability(
     ucn_transfer_t *transfer,
     ucn_node_id_t node_id,
@@ -881,6 +1046,10 @@ ucn_result_t ucn_transfer_set_peer_capability(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `peer_window_capability` in Transfer state.
+ * 中文：验证并设置 Transfer 状态中的 `peer_window_capability`。
+ */
 ucn_result_t ucn_transfer_set_peer_window_capability(
     ucn_transfer_t *transfer,
     ucn_node_id_t node_id,
@@ -901,6 +1070,10 @@ ucn_result_t ucn_transfer_set_peer_window_capability(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `peer_concurrency_capability` in Transfer state.
+ * 中文：验证并设置 Transfer 状态中的 `peer_concurrency_capability`。
+ */
 ucn_result_t ucn_transfer_set_peer_concurrency_capability(
     ucn_transfer_t *transfer,
     ucn_node_id_t node_id,
@@ -921,6 +1094,10 @@ ucn_result_t ucn_transfer_set_peer_concurrency_capability(
     return UCN_OK;
 }
 
+/*
+ * EN: Starts one bounded message transfer and chooses its class, fragmentation, and retry state.
+ * 中文：启动一次有界消息传输，并确定其等级、分片与重试状态。
+ */
 ucn_result_t ucn_transfer_send(
     ucn_transfer_t *transfer,
     ucn_node_id_t destination,
@@ -952,7 +1129,7 @@ ucn_result_t ucn_transfer_send(
     if (transfer_class <= UCN_TRANSFER_CLASS_T64) {
         ucn_result_t result = ucn_node_send_endpoint(
             transfer->config.node, destination, endpoint,
-            UCN_TRAFFIC_Q1_REALTIME, data, length);
+            UCN_TRAFFIC_Q2_NORMAL, data, length);
 
         if (result == UCN_OK) {
             transfer->stats.direct_sent++;
@@ -1008,6 +1185,10 @@ ucn_result_t ucn_transfer_send(
     return UCN_ERR_NO_SPACE;
 }
 
+/*
+ * EN: Calculates the bounded `outstanding_fragment_count` value used by Transfer.
+ * 中文：计算 Transfer 使用的有界 `outstanding_fragment_count` 值。
+ */
 static uint8_t outstanding_fragment_count(
     const ucn_transfer_tx_slot_t *slot)
 {
@@ -1025,6 +1206,10 @@ static uint8_t outstanding_fragment_count(
     return fragments > UINT8_MAX ? UINT8_MAX : (uint8_t)fragments;
 }
 
+/*
+ * EN: Validates and submits `send_tx_fragment` through the bounded Transfer transmit path.
+ * 中文：验证 `send_tx_fragment` 并将其提交到有界的 Transfer 发送路径。
+ */
 static ucn_result_t send_tx_fragment(ucn_transfer_t *transfer,
                                      ucn_transfer_tx_slot_t *slot,
                                      uint16_t fragment_offset,
@@ -1090,7 +1275,7 @@ static ucn_result_t send_tx_fragment(ucn_transfer_t *transfer,
     prospective_in_flight = outstanding_fragment_count(slot);
     result = ucn_node_send(transfer->config.node, slot->destination,
                            UCN_MSG_TRANSFER_FRAGMENT,
-                           UCN_TRAFFIC_Q1_REALTIME, payload,
+                           UCN_TRAFFIC_Q3_BULK, payload,
                            (uint16_t)payload_length);
     if (result == UCN_OK) {
         transfer->stats.fragments_sent++;
@@ -1111,6 +1296,8 @@ static ucn_result_t send_tx_fragment(ucn_transfer_t *transfer,
         if (retry && slot->resend_active &&
             slot->resend_offset >= slot->resend_end_offset) {
             slot->resend_active = false;
+            slot->recovery_waiting_ack =
+                slot->acknowledged_offset < slot->resend_end_offset;
         }
         return UCN_OK;
     }
@@ -1141,6 +1328,10 @@ static ucn_result_t send_tx_fragment(ucn_transfer_t *transfer,
     return result;
 }
 
+/*
+ * EN: Checks or removes expired `expire_transfer_state` state in Transfer.
+ * 中文：检查或移除 Transfer 中已过期的 `expire_transfer_state` 状态。
+ */
 static void expire_transfer_state(ucn_transfer_t *transfer)
 {
     size_t index;
@@ -1179,6 +1370,10 @@ static void expire_transfer_state(ucn_transfer_t *transfer)
     }
 }
 
+/*
+ * EN: Advances at most one bounded Transfer fragment, retry, or completion action.
+ * 中文：推进至多一个有界的 Transfer 分片、重试或完成动作。
+ */
 ucn_result_t ucn_transfer_step(ucn_transfer_t *transfer)
 {
     uint32_t now_ms;
@@ -1211,6 +1406,10 @@ ucn_result_t ucn_transfer_step(ucn_transfer_t *transfer)
         }
         if (slot->awaiting_ack &&
             ucn_deadline_expired(now_ms, slot->ack_deadline_ms)) {
+            /* A fully submitted recovery round owns the same ACK deadline as
+             * ordinary outstanding data.  Only that timeout (or cumulative
+             * progress in handle_ack) may release the duplicate-ACK fence. */
+            slot->recovery_waiting_ack = false;
             if (!begin_window_recovery(transfer, slot)) {
                 return UCN_ERR_NOT_FOUND;
             }
@@ -1238,6 +1437,10 @@ handle_send_result:
     return UCN_ERR_NOT_FOUND;
 }
 
+/*
+ * EN: Removes or releases `release_received` from Transfer state with bounded work.
+ * 中文：以有界工作量从 Transfer 状态移除或释放 `release_received`。
+ */
 ucn_result_t ucn_transfer_release_received(ucn_transfer_t *transfer,
                                            ucn_transfer_rx_handle_t handle)
 {
@@ -1265,6 +1468,10 @@ ucn_result_t ucn_transfer_release_received(ucn_transfer_t *transfer,
     return UCN_OK;
 }
 
+/*
+ * EN: Returns the current `stats` view from Transfer state.
+ * 中文：从 Transfer 状态返回当前 `stats` 视图。
+ */
 const ucn_transfer_stats_t *ucn_transfer_get_stats(
     const ucn_transfer_t *transfer)
 {

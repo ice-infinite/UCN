@@ -66,7 +66,14 @@ int test_node(void)
     TEST_ASSERT(ucn_node_send(&node, UINT32_C(3), UCN_MSG_DATA_Q1,
                               UCN_TRAFFIC_Q1_REALTIME, NULL, 0U) == UCN_ERR_NOT_FOUND);
     TEST_ASSERT(ucn_node_send(&node, UINT32_C(2), UCN_MSG_DATA_Q1,
-                              UCN_TRAFFIC_Q2_NORMAL, NULL, 0U) == UCN_ERR_UNSUPPORTED);
+                              UCN_TRAFFIC_Q2_NORMAL, NULL, 0U) == UCN_OK);
+    TEST_ASSERT(ucn_node_send(&node, UINT32_C(2), UCN_MSG_DATA_Q1,
+                              UCN_TRAFFIC_Q3_BULK, NULL, 0U) == UCN_OK);
+    TEST_ASSERT(ucn_node_send(&node, UINT32_C(2), UCN_MSG_DATA_Q1,
+                              (ucn_traffic_class_t)UCN_TRAFFIC_CLASS_COUNT,
+                              NULL, 0U) == UCN_ERR_UNSUPPORTED);
+    TEST_ASSERT(node.stats.tx_sent_by_class[UCN_TRAFFIC_Q2_NORMAL] == 1U &&
+                node.stats.tx_sent_by_class[UCN_TRAFFIC_Q3_BULK] == 1U);
 
     context.is_up = false;
     TEST_ASSERT(ucn_node_send(&node, UINT32_C(2), UCN_MSG_DATA_Q1,

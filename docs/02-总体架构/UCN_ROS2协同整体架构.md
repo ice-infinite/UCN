@@ -70,7 +70,7 @@ flowchart TB
 | ROS2 / 上层应用 | 规划、导航、视觉、任务状态机、用户交互。 | Topic、Service、Action、地图、轨迹、高层命令。 | 负责 MCU 入网、无线路由或 PWM/FOC 闭环。 |
 | ROS2-UCN Bridge | 将有限的 ROS2/MAVLink 业务映射为 UCN 消息；做类型转换、ACL、频率和截止时间检查。 | ROS 消息 ↔ UCN 业务负载。 | 自动桥接整个 ROS Graph，或绕过安全策略。 |
 | UCN-Host Node | 像普通节点一样加入网络，执行帧、会话、AEAD、QoS 与 Link 收发。 | UCN 帧 ↔ UDP/Ethernet/SocketCAN。 | 成为 MCU 路由中心、唯一 Coordinator 或特权节点。 |
-| UCN-Core（MCU） | 认证入网、可信邻居、AODV-Lite、逐跳转发、Q0/Q1 和失联事件。 | UCN 帧 ↔ MCU 本地消息。 | 理解 ROS Topic 名称、DDS Discovery 或大数据语义。 |
+| UCN-Core（MCU） | 认证入网、可信邻居、AODV-Lite、逐跳转发、Q0～Q3 和失联事件。 | UCN 帧 ↔ MCU 本地消息。 | 理解 ROS Topic 名称、DDS Discovery 或大数据语义。 |
 | MCU 本地控制 | 执行器驱动、飞控状态机、限幅、看门狗、失联安全。 | 高层目标 ↔ 本地控制输出。 | 依赖无线消息按时抵达才保持安全。 |
 | 物理 Link | 承载帧收发，如无线、CAN-FD、RS485、UART、UDP。 | 字节/帧。 | 处理 UCN 身份、路由或 ROS2 业务。 |
 

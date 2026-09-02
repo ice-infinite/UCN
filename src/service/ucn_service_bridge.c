@@ -3,6 +3,10 @@
 #include "ucn/ucn_service_bridge.h"
 #include "ucn/ucn_node_storage.h"
 
+/*
+ * EN: Searches bounded Service Bridge state for `binding`.
+ * 中文：在固定容量的 Service Bridge 状态中查找 `binding`。
+ */
 static const ucn_service_binding_t *ucn_service_protocol_bridge_find_binding(
     const ucn_service_protocol_bridge_t *bridge,
     ucn_endpoint_t endpoint)
@@ -24,6 +28,10 @@ static const ucn_service_binding_t *ucn_service_protocol_bridge_find_binding(
 }
 
 static ucn_service_bridge_validator_entry_t *
+/*
+ * EN: Searches bounded Service Bridge state for `validator`.
+ * 中文：在固定容量的 Service Bridge 状态中查找 `validator`。
+ */
 ucn_service_protocol_bridge_find_validator(
     ucn_service_protocol_bridge_t *bridge,
     ucn_endpoint_t endpoint)
@@ -40,6 +48,10 @@ ucn_service_protocol_bridge_find_validator(
     return NULL;
 }
 
+/*
+ * EN: Completes `complete_inbound` and records its terminal Service Bridge result.
+ * 中文：完成 `complete_inbound` 并记录其 Service Bridge 终态结果。
+ */
 static void ucn_service_protocol_bridge_complete_inbound(
     ucn_service_protocol_bridge_t *bridge,
     const ucn_frame_t *frame,
@@ -56,6 +68,10 @@ static void ucn_service_protocol_bridge_complete_inbound(
     }
 }
 
+/*
+ * EN: Receives a Core Endpoint frame and submits it to the Service Bridge ingress path.
+ * 中文：接收 Core Endpoint 帧并提交到 Service Bridge 入站路径。
+ */
 static void ucn_service_protocol_bridge_endpoint_rx(void *context,
                                                     const ucn_frame_t *frame)
 {
@@ -105,6 +121,10 @@ static void ucn_service_protocol_bridge_endpoint_rx(void *context,
     ucn_service_protocol_bridge_complete_inbound(bridge, frame, result);
 }
 
+/*
+ * EN: Checks the `binding_has_foreign_handler` condition against current Service Bridge state.
+ * 中文：根据当前 Service Bridge 状态检查 `binding_has_foreign_handler` 条件。
+ */
 static bool ucn_service_protocol_bridge_binding_has_foreign_handler(
     const ucn_service_protocol_bridge_t *bridge,
     ucn_endpoint_t endpoint,
@@ -129,6 +149,10 @@ static bool ucn_service_protocol_bridge_binding_has_foreign_handler(
     return false;
 }
 
+/*
+ * EN: Initializes the Service Bridge object from validated caller-owned configuration without heap allocation.
+ * 中文：使用经验证的调用方配置初始化 Service Bridge 对象，且不使用堆内存。
+ */
 ucn_result_t ucn_service_protocol_bridge_init(
     ucn_service_protocol_bridge_t *bridge,
     ucn_service_router_t *router,
@@ -150,6 +174,10 @@ ucn_result_t ucn_service_protocol_bridge_init(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `validator` in Service Bridge state.
+ * 中文：验证并设置 Service Bridge 状态中的 `validator`。
+ */
 ucn_result_t ucn_service_protocol_bridge_set_validator(
     ucn_service_protocol_bridge_t *bridge,
     ucn_endpoint_t endpoint,
@@ -199,6 +227,10 @@ ucn_result_t ucn_service_protocol_bridge_set_validator(
     return UCN_ERR_NO_SPACE;
 }
 
+/*
+ * EN: Validates and installs `install_endpoint_handlers` into bounded Service Bridge state.
+ * 中文：验证 `install_endpoint_handlers` 并将其安装到固定容量的 Service Bridge 状态中。
+ */
 ucn_result_t ucn_service_protocol_bridge_install_endpoint_handlers(
     ucn_service_protocol_bridge_t *bridge)
 {
@@ -252,6 +284,10 @@ ucn_result_t ucn_service_protocol_bridge_install_endpoint_handlers(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `inbound_hooks` in Service Bridge state.
+ * 中文：验证并设置 Service Bridge 状态中的 `inbound_hooks`。
+ */
 ucn_result_t ucn_service_protocol_bridge_set_inbound_hooks(
     ucn_service_protocol_bridge_t *bridge,
     const ucn_service_bridge_inbound_hooks_t *hooks)
@@ -270,6 +306,10 @@ ucn_result_t ucn_service_protocol_bridge_set_inbound_hooks(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `q0_backpressure_policy` in Service Bridge state.
+ * 中文：验证并设置 Service Bridge 状态中的 `q0_backpressure_policy`。
+ */
 ucn_result_t ucn_service_protocol_bridge_set_q0_backpressure_policy(
     ucn_service_protocol_bridge_t *bridge,
     const ucn_service_bridge_q0_backpressure_policy_t *policy)
@@ -297,6 +337,10 @@ ucn_result_t ucn_service_protocol_bridge_set_q0_backpressure_policy(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `outbound_observer` in Service Bridge state.
+ * 中文：验证并设置 Service Bridge 状态中的 `outbound_observer`。
+ */
 ucn_result_t ucn_service_protocol_bridge_set_outbound_observer(
     ucn_service_protocol_bridge_t *bridge,
     ucn_service_bridge_outbound_observer_fn observer,
@@ -310,6 +354,10 @@ ucn_result_t ucn_service_protocol_bridge_set_outbound_observer(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `outbound_event_observer` in Service Bridge state.
+ * 中文：验证并设置 Service Bridge 状态中的 `outbound_event_observer`。
+ */
 ucn_result_t ucn_service_protocol_bridge_set_outbound_event_observer(
     ucn_service_protocol_bridge_t *bridge,
     ucn_service_bridge_outbound_event_observer_fn observer,
@@ -323,6 +371,10 @@ ucn_result_t ucn_service_protocol_bridge_set_outbound_event_observer(
     return UCN_OK;
 }
 
+/*
+ * EN: Completes `complete_outbound` and records its terminal Service Bridge result.
+ * 中文：完成 `complete_outbound` 并记录其 Service Bridge 终态结果。
+ */
 static void ucn_service_protocol_bridge_complete_outbound(
     ucn_service_protocol_bridge_t *bridge,
     const ucn_service_message_t *message,
@@ -352,6 +404,10 @@ static void ucn_service_protocol_bridge_complete_outbound(
     }
 }
 
+/*
+ * EN: Copies or submits `submit` to a bounded Service Bridge queue.
+ * 中文：把 `submit` 复制或提交到固定容量的 Service Bridge 队列。
+ */
 static ucn_result_t ucn_service_protocol_bridge_submit(
     ucn_service_protocol_bridge_t *bridge,
     ucn_service_message_t *message,
@@ -411,6 +467,10 @@ static ucn_result_t ucn_service_protocol_bridge_submit(
     return result;
 }
 
+/*
+ * EN: Advances one bounded `step` state-machine step in Service Bridge.
+ * 中文：在 Service Bridge 中推进一次有界的 `step` 状态机步骤。
+ */
 ucn_result_t ucn_service_protocol_bridge_step(
     ucn_service_protocol_bridge_t *bridge,
     uint8_t max_requests,
@@ -426,6 +486,10 @@ ucn_result_t ucn_service_protocol_bridge_step(
         bridge, bridge->node->now_ms, max_requests, processed);
 }
 
+/*
+ * EN: Advances one bounded `step_at` state-machine step in Service Bridge.
+ * 中文：在 Service Bridge 中推进一次有界的 `step_at` 状态机步骤。
+ */
 ucn_result_t ucn_service_protocol_bridge_step_at(
     ucn_service_protocol_bridge_t *bridge,
     uint32_t now_ms,
@@ -514,12 +578,20 @@ ucn_result_t ucn_service_protocol_bridge_step_at(
     return UCN_OK;
 }
 
+/*
+ * EN: Returns the current `stats` view from Service Bridge state.
+ * 中文：从 Service Bridge 状态返回当前 `stats` 视图。
+ */
 const ucn_service_bridge_stats_t *ucn_service_protocol_bridge_get_stats(
     const ucn_service_protocol_bridge_t *bridge)
 {
     return bridge == NULL ? NULL : &bridge->stats;
 }
 
+/*
+ * EN: Initializes `bridge_replay_init` for Service Bridge using caller-owned fixed storage.
+ * 中文：使用调用方提供的固定存储初始化 Service Bridge 的 `bridge_replay_init`。
+ */
 void ucn_service_bridge_replay_init(
     ucn_service_bridge_replay_state_t *state)
 {
@@ -528,6 +600,10 @@ void ucn_service_bridge_replay_init(
     }
 }
 
+/*
+ * EN: Checks and records a remote command in the Service replay window.
+ * 中文：在 Service 重放窗口中检查并记录远端命令。
+ */
 ucn_result_t ucn_service_bridge_replay_accept_command(
     ucn_service_bridge_replay_state_t *state,
     ucn_node_id_t source_node_id,
@@ -578,6 +654,10 @@ ucn_result_t ucn_service_bridge_replay_accept_command(
     return UCN_OK;
 }
 
+/*
+ * EN: Rotates the Service replay window to a strictly newer peer Session.
+ * 中文：把 Service 重放窗口切换到严格更新的对端 Session。
+ */
 ucn_result_t ucn_service_bridge_replay_rotate_session(
     ucn_service_bridge_replay_state_t *state,
     ucn_node_id_t source_node_id,

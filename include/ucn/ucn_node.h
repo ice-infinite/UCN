@@ -42,9 +42,21 @@ extern "C" {
 #define UCN_TX_Q1_DEPTH ((size_t)4U)
 #endif
 
+#ifndef UCN_TX_Q2_DEPTH
+#define UCN_TX_Q2_DEPTH ((size_t)2U)
+#endif
+
+#ifndef UCN_TX_Q3_DEPTH
+#define UCN_TX_Q3_DEPTH ((size_t)1U)
+#endif
+
+typedef char ucn_tx_queue_depths_must_be_nonzero[
+    UCN_TX_Q0_DEPTH > 0U && UCN_TX_Q1_DEPTH > 0U &&
+    UCN_TX_Q2_DEPTH > 0U && UCN_TX_Q3_DEPTH > 0U ? 1 : -1];
+
 /* A due liveness/path maintenance control frame may use one scheduling slot
  * after this many business transmissions.  It is not a periodic reservation:
- * when no maintenance is due, Q0/Q1 continue without an injected frame.
+ * when no maintenance is due, Q0-Q3 continue without an injected frame.
  * Snapshot and policy diagnostics never use this exception. */
 #ifndef UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE
 #define UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE ((uint8_t)4U)
@@ -58,15 +70,21 @@ extern "C" {
 #define UCN_MAX_STEP_INTERVAL_MS UINT32_C(10)
 #endif
 
-/* Optional Q0 local-admission retry.  A request must explicitly select
+/* Optional Q0 bounded recovery.  A request must explicitly select
  * UCN_DELIVERY_RETRY_ON_BACKPRESSURE and provide a non-zero absolute
- * deadline.  Only UCN_ERR_NO_SPACE is retried; every other error is final. */
+ * deadline.  Local UCN_ERR_NO_SPACE uses the fixed retry budget; a dynamic
+ * route gap uses the same FIFO item and original deadline without consuming
+ * that backpressure budget.  Permanent errors remain final. */
 #ifndef UCN_Q0_BACKPRESSURE_MAX_RETRIES
 #define UCN_Q0_BACKPRESSURE_MAX_RETRIES ((uint8_t)3U)
 #endif
 
 #ifndef UCN_Q0_BACKPRESSURE_RETRY_INTERVAL_MS
 #define UCN_Q0_BACKPRESSURE_RETRY_INTERVAL_MS UINT32_C(5)
+#endif
+
+#ifndef UCN_Q0_ROUTE_WAIT_RETRY_INTERVAL_MS
+#define UCN_Q0_ROUTE_WAIT_RETRY_INTERVAL_MS UINT32_C(50)
 #endif
 
 #ifndef UCN_MAX_ROUTES
@@ -182,6 +200,10 @@ typedef char ucn_q0_backpressure_max_retries_must_be_positive[
 typedef char ucn_q0_backpressure_retry_interval_must_be_valid[
     UCN_Q0_BACKPRESSURE_RETRY_INTERVAL_MS > 0U &&
             UCN_Q0_BACKPRESSURE_RETRY_INTERVAL_MS <= INT32_MAX ?
+        1 : -1];
+typedef char ucn_q0_route_wait_retry_interval_must_be_valid[
+    UCN_Q0_ROUTE_WAIT_RETRY_INTERVAL_MS > 0U &&
+            UCN_Q0_ROUTE_WAIT_RETRY_INTERVAL_MS <= INT32_MAX ?
         1 : -1];
 #if UCN_FEATURE_DYNAMIC_MESH
 typedef char ucn_route_refresh_advance_must_fit_lifetime[
@@ -579,6 +601,7 @@ typedef char ucn_fast_maintenance_service_bound_must_precede_suspect[
 #endif
 typedef char ucn_node_relative_durations_must_be_wrap_safe[
     UCN_Q0_BACKPRESSURE_RETRY_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_Q0_ROUTE_WAIT_RETRY_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
 #if UCN_FEATURE_DYNAMIC_MESH
     UCN_ROUTE_ENTRY_LIFETIME_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_ROUTE_REQUEST_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
@@ -828,10 +851,22 @@ typedef struct ucn_node_stats {
     uint32_t tx_sent;
     uint32_t tx_expired_dropped;
     uint32_t tx_error_dropped;
+    /* Indexed by ucn_traffic_class_t.  These counters make the four-class
+     * scheduler observable without exposing private queue storage. */
+    uint32_t tx_enqueued_by_class[UCN_TRAFFIC_CLASS_COUNT];
+    uint32_t tx_sent_by_class[UCN_TRAFFIC_CLASS_COUNT];
+    uint32_t tx_scheduled_by_class[UCN_TRAFFIC_CLASS_COUNT];
     uint32_t q0_backpressure_retries;
     uint32_t q0_backpressure_exhausted;
     uint32_t q0_backpressure_expired;
     uint32_t q0_backpressure_terminal_failed;
+#if UCN_FEATURE_DYNAMIC_MESH
+    uint32_t q0_route_wait_started;
+    uint32_t q0_route_wait_retried;
+    uint32_t q0_route_wait_recovered;
+    uint32_t q0_route_wait_expired;
+    uint32_t q0_route_wait_terminal_failed;
+#endif
 #if UCN_FEATURE_DYNAMIC_MESH
     uint32_t maintenance_preemptions;
 #endif

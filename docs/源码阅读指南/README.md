@@ -7,6 +7,25 @@
 
 > 事实边界：本目录解释的是当前 `UCN 5.0.0 / Core Wire v5` 源码。准确签名、条件编译和行为始终以 `CMakeLists.txt`、`include/ucn/`、`src/` 为准。Cluster 是建立在 Core 之上的可选控制体系，不属于本轮 Core 阅读主线。
 
+## 源码中的双语函数注释
+
+非 Cluster 核心的每个实际函数定义前均有两行用途说明：`EN:` 给出英文职责，`中文：` 给出对应中文职责。覆盖 Core、Node、Routing、Transport、Adapter/Source、Port、Service、Transfer，以及非 Cluster 公共头中的 `static inline` 函数；函数指针类型、宏和 Cluster 函数不计入本轮覆盖范围。
+
+修改 Core 函数后可执行以下只读门禁，检查是否存在漏写注释的新函数：
+
+```powershell
+python tools/manage_core_bilingual_comments.py
+```
+
+预期结果为 `missing=0`。函数签名或源码位置发生变化后，再执行：
+
+```powershell
+python tools/generate_core_reading_function_index.py
+python tools/generate_core_reading_function_index.py --check
+```
+
+双语注释用于建立阅读入口，参数所有权、上下文限制和失败语义仍以公共头合同、实现及对应测试为准。
+
 ## 推荐阅读顺序
 
 | 顺序 | 文档 | 读完应得到什么 |

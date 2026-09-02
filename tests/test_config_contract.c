@@ -66,6 +66,8 @@ CONFIG_ASSERT(config_override_validators,
               UCN_SERVICE_BRIDGE_MAX_VALIDATORS == 1U);
 /* An omitted product value is still supplied by the global defaults. */
 CONFIG_ASSERT(config_override_keeps_default_q1, UCN_TX_Q1_DEPTH == 4U);
+CONFIG_ASSERT(config_override_keeps_default_q2, UCN_TX_Q2_DEPTH == 2U);
+CONFIG_ASSERT(config_override_keeps_default_q3, UCN_TX_Q3_DEPTH == 1U);
 CONFIG_ASSERT(config_override_keeps_default_routes, UCN_MAX_ROUTES == 8U);
 #else
 /* This same contract is compiled once with global defaults and once with
@@ -110,11 +112,15 @@ CONFIG_ASSERT(config_default_security_required,
 CONFIG_ASSERT(config_default_links, UCN_MAX_LINKS == 4U);
 CONFIG_ASSERT(config_default_q0, UCN_TX_Q0_DEPTH == 4U);
 CONFIG_ASSERT(config_default_q1, UCN_TX_Q1_DEPTH == 4U);
+CONFIG_ASSERT(config_default_q2, UCN_TX_Q2_DEPTH == 2U);
+CONFIG_ASSERT(config_default_q3, UCN_TX_Q3_DEPTH == 1U);
 CONFIG_ASSERT(config_default_business_burst,
               UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE == 4U);
 CONFIG_ASSERT(config_default_step, UCN_MAX_STEP_INTERVAL_MS == 10U);
 CONFIG_ASSERT(config_default_q0_retries,
               UCN_Q0_BACKPRESSURE_MAX_RETRIES == 3U);
+CONFIG_ASSERT(config_default_q0_route_wait_retry,
+              UCN_Q0_ROUTE_WAIT_RETRY_INTERVAL_MS == 50U);
 CONFIG_ASSERT(config_default_routes, UCN_MAX_ROUTES == 8U);
 CONFIG_ASSERT(config_default_duplicate_sources,
               UCN_DUPLICATE_SOURCE_WINDOWS == 32U);
@@ -151,6 +157,16 @@ CONFIG_ASSERT(config_default_service_payload,
               UCN_SERVICE_MAX_PAYLOAD_BYTES == 32U);
 CONFIG_ASSERT(config_default_service_q0, UCN_SERVICE_REMOTE_TX_Q0_DEPTH == 4U);
 CONFIG_ASSERT(config_default_service_q1, UCN_SERVICE_REMOTE_TX_Q1_DEPTH == 4U);
+CONFIG_ASSERT(config_default_service_q2, UCN_SERVICE_REMOTE_TX_Q2_DEPTH == 2U);
+CONFIG_ASSERT(config_default_service_q3, UCN_SERVICE_REMOTE_TX_Q3_DEPTH == 1U);
+CONFIG_ASSERT(config_default_service_q2_bindings,
+              UCN_SERVICE_MAX_Q2_BINDINGS == 1U);
+CONFIG_ASSERT(config_default_service_q3_bindings,
+              UCN_SERVICE_MAX_Q3_BINDINGS == 1U);
+CONFIG_ASSERT(config_default_service_q2_inbox,
+              UCN_SERVICE_Q2_INBOX_DEPTH == 2U);
+CONFIG_ASSERT(config_default_service_q3_inbox,
+              UCN_SERVICE_Q3_INBOX_DEPTH == 1U);
 CONFIG_ASSERT(config_default_validators,
               UCN_SERVICE_BRIDGE_MAX_VALIDATORS == 2U);
 CONFIG_ASSERT(config_default_replay, UCN_SERVICE_BRIDGE_REPLAY_DEPTH == 4U);

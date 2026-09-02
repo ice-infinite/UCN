@@ -135,15 +135,17 @@ typedef enum ucn_traffic_class {
     UCN_TRAFFIC_Q0_CRITICAL = 0,
     UCN_TRAFFIC_Q1_REALTIME = 1,
     UCN_TRAFFIC_Q2_NORMAL = 2,
-    UCN_TRAFFIC_Q3_BULK = 3
+    UCN_TRAFFIC_Q3_BULK = 3,
+    UCN_TRAFFIC_CLASS_COUNT = 4
 } ucn_traffic_class_t;
 
 typedef enum ucn_delivery_semantic {
     UCN_DELIVERY_BEST_EFFORT = 0,
     UCN_DELIVERY_LATEST_VALUE = 1,
-    /* Q0 queue ownership is retained only while a local Link TX queue reports
-     * transient UCN_ERR_NO_SPACE.  This is bounded admission retry, not a
-     * remote delivery guarantee or an end-to-end retransmission mode. */
+    /* Q0 queue ownership is retained across transient local Link backpressure
+     * and a recoverable dynamic-route gap, bounded by the request deadline and
+     * fixed retry policy.  This is local admission/route recovery, not a remote
+     * delivery guarantee or an end-to-end retransmission mode. */
     UCN_DELIVERY_RETRY_ON_BACKPRESSURE = 2
 } ucn_delivery_semantic_t;
 

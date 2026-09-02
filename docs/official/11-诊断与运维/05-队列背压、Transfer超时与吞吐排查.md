@@ -4,7 +4,7 @@
 > 实现状态：`CURRENT（诊断方法）`
 > 适用版本：UCN 5.0.0 / Core Wire v5
 > 事实源：状态视图、统计 API、测试与现有实测记录
-> 最近核对：`codex/v5-adaptive-wire@a093862`，2026-08-25
+> 最近核对：当前工作区，2026-08-31
 > 硬件状态：部分实测；未测项不得推断
 
 先定位哪一层满：驱动/DMA ring、Source carrier、Adapter Queue、Node pending、Transfer window 或应用 completion handle。队列满表示生产速度超过消费预算，不等于 Wi-Fi/UART 本身很慢。
@@ -15,8 +15,8 @@ Transfer 吞吐排查同时记录 MTU、fragment 数、窗口、ACK RTT、重传
 
 ```text
 应用产生
- → Service remote/Q0-Q1
- → Node Q0/Q1/pending
+ → Service remote/Q0-Q3
+ → Node Q0-Q3/pending
  → Link TX queue/DMA
  → 物理链路
  → Driver RX ring
@@ -31,9 +31,9 @@ Transfer 吞吐排查同时记录 MTU、fragment 数、窗口、ACK RTT、重传
 
 ## 背压语义
 
-- Q0 `RETRY_ON_BACKPRESSURE`只对本地Link queue `NO_SPACE`做有界重试，不是远端可靠送达；
+- Q0 `RETRY_ON_BACKPRESSURE`保留本地 FIFO 所有权：Link queue `NO_SPACE`按固定次数有界重试；Full/Lite 的可恢复 route gap 在原 Deadline 内合并发现并等待路由。两组统计必须分开，且都不是远端可靠送达；
 - Q1 Latest可覆盖旧值，适合实时状态；
-- Q2/Q3按产品best-effort/低优先级；
+- Q2 Normal、Q3 Bulk 都是独立固定 FIFO，满载返回背压；四级持续满载时 Node/Service Remote TX 的目标比例为 `6:3:2:1`；
 - Transfer有自己的窗口/ACK，不应靠无限扩大Node queue；
 - Service Q0满应让生产任务感知，不能覆盖未执行命令。
 
@@ -44,6 +44,13 @@ Transfer 吞吐排查同时记录 MTU、fragment 数、窗口、ACK RTT、重传
 3. 查Owner wake/step是否满足10ms保底；
 4. 关闭日志，排除printf阻塞；
 5. 单跳/单Bearer复现，再逐步增加中继与流量。
+
+Node 应同时查看 `tx_enqueued_by_class[]`、`tx_scheduled_by_class[]` 和 `tx_sent_by_class[]`。入队数高但调度数低说明等待发生在 Node 四级仲裁之前；调度数高但发送数低说明 Route/Link/Deadline 失败。Service 另看 `q2_inbox_full`、`q3_inbox_full`、`remote_q2_full`、`remote_q3_full` 和 `remote_tx_reads_by_class[]`，不要把 Service 满载误判为物理 Wi-Fi 或 UART 限速。
+
+如果源端 `accepted` 大于目标端普通 Q0 `rx`，先确认是否错误地把“本地队列接纳”当成端到端
+完成。route-wait 只能防止 Core 在可恢复的无路由窗口提前释放本地项；帧一旦被 Link 接受，
+普通 Q0 没有远端 ACK，也不会像 Transfer 一样根据丢失自动重传。必须逐条送达时查看 Transfer
+completion；必须确认远端执行时查看 Result Endpoint。
 
 ## Transfer timeout
 

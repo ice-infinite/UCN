@@ -92,8 +92,8 @@ Linux、ROS 2、地面站可以通过一个 Link/Adapter 作为普通 Node 接�
 | --- | --- | --- | --- | --- |
 | Q0 | `UCN_TRAFFIC_Q0_CRITICAL` | 最重要、失败必须显式处理 | 电机/舵机安全控制 | 不因未知路由等待或自动寻路；本地必须有超时失效安全。 |
 | Q1 | `UCN_TRAFFIC_Q1_REALTIME` | 只关心最新值，旧值可覆盖 | IMU、气压、温度、状态 | 可在未知多跳目的地触发受限寻路；可使用流级均衡。 |
-| Q2 | `UCN_TRAFFIC_Q2_NORMAL` | 一般业务 | Core 可承载的普通数据 | 当前 Service R1 未向业务任务开放该类。 |
-| Q3 | `UCN_TRAFFIC_Q3_BULK` | 低优先级批量数据 | Core 可承载的大宗数据 | 当前 Service R1 未向业务任务开放该类。 |
+| Q2 | `UCN_TRAFFIC_Q2_NORMAL` | 一般业务 FIFO | 参数、查询、普通状态、T32/T64 Direct | Node 与 Service 已开放；Best Effort，不自动重试。 |
+| Q3 | `UCN_TRAFFIC_Q3_BULK` | 低优先级批量 FIFO | Transfer Fragment、日志、批量数据 | Node 与 Service 已开放；固定小队列，满载明确背压。 |
 
 R1 已冻结的业务 Endpoint 如下。Payload 按文档约定采用 big-endian；不要在不同 MCU 间直接发送 C 结构体内存镜像。
 

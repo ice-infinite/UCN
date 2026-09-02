@@ -181,7 +181,7 @@ GATT notification/write的ATT MTU可能小于Core Frame，应选择较窄Wire或
 - metrics timestamp；
 - product administrative bias。
 
-不要把Core Q0/Q1队列占用写进Adapter queue pressure，也不要将同一个RSSI样本同时重复映射成多个罚分来源。
+不要把 Core Q0～Q3 队列占用写进 Adapter queue pressure，也不要将同一个 RSSI 样本同时重复映射成多个罚分来源。
 
 ## 8. 介质验收清单
 

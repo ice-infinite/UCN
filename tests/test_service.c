@@ -15,6 +15,8 @@ enum {
 #define TEST_MASK_CONTROL UCN_SERVICE_SOURCE_MASK(TEST_SERVICE_CONTROL)
 #define TEST_Q0_MASK UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q0_CRITICAL)
 #define TEST_Q1_MASK UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q1_REALTIME)
+#define TEST_Q2_MASK UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q2_NORMAL)
+#define TEST_Q3_MASK UCN_SERVICE_TRAFFIC_MASK(UCN_TRAFFIC_Q3_BULK)
 
 static const ucn_service_binding_t TEST_BINDINGS[] = {
     { 0x40U, TEST_SERVICE_CONTROL, 24U, TEST_Q1_MASK,
@@ -298,6 +300,97 @@ static int test_service_restart_purges_inbox(void)
     return 0;
 }
 
+static int test_service_q2_q3_and_weighted_remote(void)
+{
+    static const ucn_service_binding_t bindings[] = {
+        { 0x70U, TEST_SERVICE_CONTROL, 8U, TEST_Q0_MASK,
+          UCN_SERVICE_DELIVERY_Q0_FIFO, TEST_MASK_CONTROL, true, true, false },
+        { 0x71U, TEST_SERVICE_CONTROL, 8U, TEST_Q1_MASK,
+          UCN_SERVICE_DELIVERY_Q1_LATEST, TEST_MASK_CONTROL, true, true, false },
+        { 0x72U, TEST_SERVICE_CONTROL, 8U, TEST_Q2_MASK,
+          UCN_SERVICE_DELIVERY_Q2_FIFO, TEST_MASK_CONTROL, true, true, false },
+        { 0x73U, TEST_SERVICE_CONTROL, 8U, TEST_Q3_MASK,
+          UCN_SERVICE_DELIVERY_Q3_FIFO, TEST_MASK_CONTROL, true, true, false }
+    };
+    static const ucn_traffic_class_t expected[12] = {
+        UCN_TRAFFIC_Q0_CRITICAL, UCN_TRAFFIC_Q1_REALTIME,
+        UCN_TRAFFIC_Q0_CRITICAL, UCN_TRAFFIC_Q2_NORMAL,
+        UCN_TRAFFIC_Q0_CRITICAL, UCN_TRAFFIC_Q1_REALTIME,
+        UCN_TRAFFIC_Q0_CRITICAL, UCN_TRAFFIC_Q3_BULK,
+        UCN_TRAFFIC_Q0_CRITICAL, UCN_TRAFFIC_Q1_REALTIME,
+        UCN_TRAFFIC_Q0_CRITICAL, UCN_TRAFFIC_Q2_NORMAL
+    };
+    const ucn_service_router_config_t config = {
+        UINT32_C(1), bindings, (uint8_t)(sizeof(bindings) / sizeof(bindings[0]))
+    };
+    ucn_service_router_t router;
+    ucn_service_message_t message;
+    uint8_t payloads[UCN_TRAFFIC_CLASS_COUNT] = { 10U, 11U, 12U, 13U };
+    uint8_t index;
+    uint32_t decision;
+
+    TEST_ASSERT(ucn_service_router_init(&router, &config) == UCN_OK);
+    for (index = 0U; index < UCN_SERVICE_Q2_INBOX_DEPTH; ++index) {
+        payloads[UCN_TRAFFIC_Q2_NORMAL] = (uint8_t)(20U + index);
+        TEST_ASSERT(ucn_service_send(
+                        &router, UINT32_C(1), TEST_SERVICE_CONTROL, 0x72U,
+                        UCN_TRAFFIC_Q2_NORMAL,
+                        &payloads[UCN_TRAFFIC_Q2_NORMAL], 1U) == UCN_OK);
+    }
+    TEST_ASSERT(ucn_service_send(
+                    &router, UINT32_C(1), TEST_SERVICE_CONTROL, 0x72U,
+                    UCN_TRAFFIC_Q2_NORMAL,
+                    &payloads[UCN_TRAFFIC_Q2_NORMAL], 1U) == UCN_ERR_NO_SPACE);
+    for (index = 0U; index < UCN_SERVICE_Q2_INBOX_DEPTH; ++index) {
+        TEST_ASSERT(ucn_service_inbox_take(
+                        &router, TEST_SERVICE_CONTROL, 0x72U, &message) == UCN_OK);
+        TEST_ASSERT(message.payload[0] == (uint8_t)(20U + index));
+    }
+    TEST_ASSERT(ucn_service_send(
+                    &router, UINT32_C(1), TEST_SERVICE_CONTROL, 0x73U,
+                    UCN_TRAFFIC_Q3_BULK,
+                    &payloads[UCN_TRAFFIC_Q3_BULK], 1U) == UCN_OK);
+    TEST_ASSERT(ucn_service_send(
+                    &router, UINT32_C(1), TEST_SERVICE_CONTROL, 0x73U,
+                    UCN_TRAFFIC_Q3_BULK,
+                    &payloads[UCN_TRAFFIC_Q3_BULK], 1U) == UCN_ERR_NO_SPACE);
+    TEST_ASSERT(router.stats.q2_inbox_full == 1U &&
+                router.stats.q3_inbox_full == 1U);
+    TEST_ASSERT(ucn_service_set_ready(&router, 0x73U, false) == UCN_OK);
+    TEST_ASSERT(ucn_service_set_ready(&router, 0x73U, true) == UCN_OK);
+    TEST_ASSERT(ucn_service_inbox_take(
+                    &router, TEST_SERVICE_CONTROL, 0x73U, &message) ==
+                UCN_ERR_NOT_FOUND);
+
+    TEST_ASSERT(ucn_service_router_init(&router, &config) == UCN_OK);
+    for (index = 0U; index < UCN_TRAFFIC_CLASS_COUNT; ++index) {
+        TEST_ASSERT(ucn_service_send(
+                        &router, UINT32_C(2), TEST_SERVICE_CONTROL,
+                        (ucn_endpoint_t)(0x70U + index),
+                        (ucn_traffic_class_t)index, &payloads[index], 1U) == UCN_OK);
+    }
+    for (decision = 0U; decision < UINT32_C(12000); ++decision) {
+        const ucn_traffic_class_t selected = expected[decision % 12U];
+        const uint8_t traffic = (uint8_t)selected;
+
+        TEST_ASSERT(ucn_service_remote_tx_take(&router, &message) == UCN_OK);
+        TEST_ASSERT(message.traffic_class == selected);
+        TEST_ASSERT(ucn_service_send(
+                        &router, UINT32_C(2), TEST_SERVICE_CONTROL,
+                        (ucn_endpoint_t)(0x70U + traffic), selected,
+                        &payloads[traffic], 1U) == UCN_OK);
+    }
+    TEST_ASSERT(router.stats.remote_tx_reads_by_class[UCN_TRAFFIC_Q0_CRITICAL] ==
+                UINT32_C(6000));
+    TEST_ASSERT(router.stats.remote_tx_reads_by_class[UCN_TRAFFIC_Q1_REALTIME] ==
+                UINT32_C(3000));
+    TEST_ASSERT(router.stats.remote_tx_reads_by_class[UCN_TRAFFIC_Q2_NORMAL] ==
+                UINT32_C(2000));
+    TEST_ASSERT(router.stats.remote_tx_reads_by_class[UCN_TRAFFIC_Q3_BULK] ==
+                UINT32_C(1000));
+    return 0;
+}
+
 static int test_service_command_guard(void)
 {
     uint8_t payload[UCN_SERVICE_COMMAND_GUARD_BYTES];
@@ -405,6 +498,9 @@ int test_service(void)
         return 1;
     }
     if (test_service_restart_purges_inbox() != 0) {
+        return 1;
+    }
+    if (test_service_q2_q3_and_weighted_remote() != 0) {
         return 1;
     }
     return test_service_command_guard() |

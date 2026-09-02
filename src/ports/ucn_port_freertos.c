@@ -2,6 +2,10 @@
 
 #include "ucn/ports/ucn_port_freertos.h"
 
+/*
+ * EN: Initializes the FreeRTOS Port object from validated caller-owned configuration without heap allocation.
+ * 中文：使用经验证的调用方配置初始化 FreeRTOS Port 对象，且不使用堆内存。
+ */
 ucn_result_t ucn_freertos_port_init(
     ucn_freertos_port_t *port,
     const ucn_freertos_port_config_t *config)
@@ -24,6 +28,10 @@ ucn_result_t ucn_freertos_port_init(
     return UCN_OK;
 }
 
+/*
+ * EN: Copies `rx_enqueue` into a bounded FreeRTOS Port queue.
+ * 中文：把 `rx_enqueue` 复制到固定容量的 FreeRTOS Port 队列。
+ */
 ucn_result_t ucn_freertos_port_rx_enqueue(
     ucn_freertos_port_t *port,
     ucn_link_t *ingress_link,
@@ -51,6 +59,10 @@ ucn_result_t ucn_freertos_port_rx_enqueue(
     return UCN_OK;
 }
 
+/*
+ * EN: Advances one bounded `task_step` state-machine step in FreeRTOS Port.
+ * 中文：在 FreeRTOS Port 中推进一次有界的 `task_step` 状态机步骤。
+ */
 ucn_result_t ucn_freertos_port_task_step(
     ucn_freertos_port_t *port,
     size_t *pumped,
@@ -60,6 +72,10 @@ ucn_result_t ucn_freertos_port_task_step(
         ucn_protocol_owner_step(&port->owner, pumped, bridged);
 }
 
+/*
+ * EN: Waits for `task_wait` using the scheduler contract of FreeRTOS Port.
+ * 中文：按照 FreeRTOS Port 的调度合同等待 `task_wait`。
+ */
 ucn_result_t ucn_freertos_port_task_wait(
     ucn_freertos_port_t *port,
     uint32_t requested_wait_ms)
@@ -78,12 +94,20 @@ ucn_result_t ucn_freertos_port_task_wait(
 }
 
 const ucn_protocol_owner_stats_t *
+/*
+ * EN: Returns the current `stats` view from FreeRTOS Port state.
+ * 中文：从 FreeRTOS Port 状态返回当前 `stats` 视图。
+ */
 ucn_freertos_port_get_stats(const ucn_freertos_port_t *port)
 {
     return port == NULL ? NULL : ucn_protocol_owner_get_stats(&port->owner);
 }
 
 const ucn_port_runtime_stats_t *
+/*
+ * EN: Returns the current `runtime_stats` view from FreeRTOS Port state.
+ * 中文：从 FreeRTOS Port 状态返回当前 `runtime_stats` 视图。
+ */
 ucn_freertos_port_get_runtime_stats(const ucn_freertos_port_t *port)
 {
     return port == NULL ? NULL : &port->runtime_stats;

@@ -2,6 +2,10 @@
 
 #include "ucn/ports/ucn_event_runtime.h"
 
+/*
+ * EN: Checks whether `source_events` satisfies the Event Runtime module's validity rules.
+ * 中文：检查 `source_events` 是否满足 Event Runtime 模块的合法性规则。
+ */
 static bool source_events_are_valid(ucn_event_source_events_t events)
 {
     return events != 0U &&
@@ -9,6 +13,10 @@ static bool source_events_are_valid(ucn_event_source_events_t events)
                0U;
 }
 
+/*
+ * EN: Checks whether `owner_events` satisfies the Event Runtime module's validity rules.
+ * 中文：检查 `owner_events` 是否满足 Event Runtime 模块的合法性规则。
+ */
 static bool owner_events_are_valid(ucn_event_owner_events_t events)
 {
     return events != 0U &&
@@ -16,11 +24,19 @@ static bool owner_events_are_valid(ucn_event_owner_events_t events)
                0U;
 }
 
+/*
+ * EN: Checks whether `source_id` satisfies the Event Runtime module's validity rules.
+ * 中文：检查 `source_id` 是否满足 Event Runtime 模块的合法性规则。
+ */
 static bool source_id_is_valid(ucn_event_source_id_t source_id)
 {
     return source_id < UCN_EVENT_RUNTIME_MAX_SOURCES;
 }
 
+/*
+ * EN: Enters or leaves the bounded `enter_task` critical section for Event Runtime.
+ * 中文：进入或退出 Event Runtime 的有界 `enter_task` 临界区。
+ */
 static void enter_task(ucn_event_runtime_t *runtime)
 {
     if (runtime->port_ops->enter_critical != NULL) {
@@ -28,6 +44,10 @@ static void enter_task(ucn_event_runtime_t *runtime)
     }
 }
 
+/*
+ * EN: Enters or leaves the bounded `exit_task` critical section for Event Runtime.
+ * 中文：进入或退出 Event Runtime 的有界 `exit_task` 临界区。
+ */
 static void exit_task(ucn_event_runtime_t *runtime)
 {
     if (runtime->port_ops->exit_critical != NULL) {
@@ -35,23 +55,39 @@ static void exit_task(ucn_event_runtime_t *runtime)
     }
 }
 
+/*
+ * EN: Checks the `isr_critical_is_configured` condition against current Event Runtime state.
+ * 中文：根据当前 Event Runtime 状态检查 `isr_critical_is_configured` 条件。
+ */
 static bool isr_critical_is_configured(const ucn_event_runtime_t *runtime)
 {
     return runtime->port_ops->enter_critical_from_isr != NULL &&
            runtime->port_ops->exit_critical_from_isr != NULL;
 }
 
+/*
+ * EN: Enters or leaves the bounded `enter_isr` critical section for Event Runtime.
+ * 中文：进入或退出 Event Runtime 的有界 `enter_isr` 临界区。
+ */
 static ucn_port_critical_token_t enter_isr(ucn_event_runtime_t *runtime)
 {
     return runtime->port_ops->enter_critical_from_isr(runtime->port_context);
 }
 
+/*
+ * EN: Enters or leaves the bounded `exit_isr` critical section for Event Runtime.
+ * 中文：进入或退出 Event Runtime 的有界 `exit_isr` 临界区。
+ */
 static void exit_isr(ucn_event_runtime_t *runtime,
                      ucn_port_critical_token_t token)
 {
     runtime->port_ops->exit_critical_from_isr(runtime->port_context, token);
 }
 
+/*
+ * EN: Schedules `scheduler_notify` using the wrap-safe Event Runtime time domain.
+ * 中文：使用回绕安全的 Event Runtime 时间域调度 `scheduler_notify`。
+ */
 static void scheduler_notify(ucn_event_runtime_t *runtime, bool from_isr)
 {
     if (runtime->scheduler_ops != NULL) {
@@ -60,6 +96,10 @@ static void scheduler_notify(ucn_event_runtime_t *runtime, bool from_isr)
     }
 }
 
+/*
+ * EN: Initializes the Event Runtime object from validated caller-owned configuration without heap allocation.
+ * 中文：使用经验证的调用方配置初始化 Event Runtime 对象，且不使用堆内存。
+ */
 ucn_result_t ucn_event_runtime_init(
     ucn_event_runtime_t *runtime,
     const ucn_event_runtime_config_t *config)
@@ -101,6 +141,10 @@ ucn_result_t ucn_event_runtime_init(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and installs `bind_source` into bounded Event Runtime state.
+ * 中文：验证 `bind_source` 并将其安装到固定容量的 Event Runtime 状态中。
+ */
 ucn_result_t ucn_event_runtime_bind_source(
     ucn_event_runtime_t *runtime,
     ucn_event_source_id_t source_id,
@@ -124,6 +168,10 @@ ucn_result_t ucn_event_runtime_bind_source(
     return UCN_OK;
 }
 
+/*
+ * EN: Records `signal_source` and notifies the bounded Event Runtime owner path.
+ * 中文：记录 `signal_source` 并通知有界的 Event Runtime Owner 路径。
+ */
 static ucn_result_t signal_source(ucn_event_runtime_t *runtime,
                                   ucn_event_source_id_t source_id,
                                   ucn_event_source_events_t events,
@@ -163,6 +211,10 @@ static ucn_result_t signal_source(ucn_event_runtime_t *runtime,
     return UCN_OK;
 }
 
+/*
+ * EN: Records `signal_source` and notifies the bounded Event Runtime owner path.
+ * 中文：记录 `signal_source` 并通知有界的 Event Runtime Owner 路径。
+ */
 ucn_result_t ucn_event_runtime_signal_source(
     ucn_event_runtime_t *runtime,
     ucn_event_source_id_t source_id,
@@ -171,6 +223,10 @@ ucn_result_t ucn_event_runtime_signal_source(
     return signal_source(runtime, source_id, events, false);
 }
 
+/*
+ * EN: Records `signal_source_from_isr` and notifies the bounded Event Runtime owner path.
+ * 中文：记录 `signal_source_from_isr` 并通知有界的 Event Runtime Owner 路径。
+ */
 ucn_result_t ucn_event_runtime_signal_source_from_isr(
     ucn_event_runtime_t *runtime,
     ucn_event_source_id_t source_id,
@@ -179,6 +235,10 @@ ucn_result_t ucn_event_runtime_signal_source_from_isr(
     return signal_source(runtime, source_id, events, true);
 }
 
+/*
+ * EN: Records `signal_owner` and notifies the bounded Event Runtime owner path.
+ * 中文：记录 `signal_owner` 并通知有界的 Event Runtime Owner 路径。
+ */
 static ucn_result_t signal_owner(ucn_event_runtime_t *runtime,
                                  ucn_event_owner_events_t events,
                                  bool from_isr)
@@ -214,6 +274,10 @@ static ucn_result_t signal_owner(ucn_event_runtime_t *runtime,
     return UCN_OK;
 }
 
+/*
+ * EN: Records `signal_owner` and notifies the bounded Event Runtime owner path.
+ * 中文：记录 `signal_owner` 并通知有界的 Event Runtime Owner 路径。
+ */
 ucn_result_t ucn_event_runtime_signal_owner(
     ucn_event_runtime_t *runtime,
     ucn_event_owner_events_t events)
@@ -221,6 +285,10 @@ ucn_result_t ucn_event_runtime_signal_owner(
     return signal_owner(runtime, events, false);
 }
 
+/*
+ * EN: Records `signal_owner_from_isr` and notifies the bounded Event Runtime owner path.
+ * 中文：记录 `signal_owner_from_isr` 并通知有界的 Event Runtime Owner 路径。
+ */
 ucn_result_t ucn_event_runtime_signal_owner_from_isr(
     ucn_event_runtime_t *runtime,
     ucn_event_owner_events_t events)
@@ -228,6 +296,10 @@ ucn_result_t ucn_event_runtime_signal_owner_from_isr(
     return signal_owner(runtime, events, true);
 }
 
+/*
+ * EN: Updates `record_frame_result` in bounded Event Runtime state.
+ * 中文：更新固定容量 Event Runtime 状态中的 `record_frame_result`。
+ */
 static void record_frame_result(ucn_event_runtime_t *runtime,
                                 ucn_result_t result,
                                 bool from_isr)
@@ -251,6 +323,10 @@ static void record_frame_result(ucn_event_runtime_t *runtime,
     }
 }
 
+/*
+ * EN: Copies or submits `submit_frame` to a bounded Event Runtime queue.
+ * 中文：把 `submit_frame` 复制或提交到固定容量的 Event Runtime 队列。
+ */
 ucn_result_t ucn_event_runtime_submit_frame(
     ucn_event_runtime_t *runtime,
     ucn_link_t *ingress_link,
@@ -271,6 +347,10 @@ ucn_result_t ucn_event_runtime_submit_frame(
     return ucn_event_runtime_signal_owner(runtime, UCN_EVENT_OWNER_RX_QUEUE);
 }
 
+/*
+ * EN: Derives `submit_frame_from_isr` with the canonical Event Runtime conversion rules.
+ * 中文：按照规范的 Event Runtime 转换规则推导 `submit_frame_from_isr`。
+ */
 ucn_result_t ucn_event_runtime_submit_frame_from_isr(
     ucn_event_runtime_t *runtime,
     ucn_link_t *ingress_link,
@@ -295,6 +375,10 @@ ucn_result_t ucn_event_runtime_submit_frame_from_isr(
         runtime, UCN_EVENT_OWNER_RX_QUEUE);
 }
 
+/*
+ * EN: Checks the `has_pending_locked` condition in current Event Runtime state.
+ * 中文：检查当前 Event Runtime 状态中的 `has_pending_locked` 条件。
+ */
 static bool has_pending_locked(const ucn_event_runtime_t *runtime)
 {
     ucn_event_source_id_t source_id;
@@ -311,6 +395,10 @@ static bool has_pending_locked(const ucn_event_runtime_t *runtime)
     return false;
 }
 
+/*
+ * EN: Checks the `has_pending` condition in current Event Runtime state.
+ * 中文：检查当前 Event Runtime 状态中的 `has_pending` 条件。
+ */
 bool ucn_event_runtime_has_pending(ucn_event_runtime_t *runtime)
 {
     bool pending;
@@ -324,6 +412,10 @@ bool ucn_event_runtime_has_pending(ucn_event_runtime_t *runtime)
     return pending;
 }
 
+/*
+ * EN: Checks the current `take_pending` condition in Event Runtime state.
+ * 中文：检查当前 Event Runtime 状态中的 `take_pending` 条件。
+ */
 static void take_pending(ucn_event_runtime_t *runtime,
                          ucn_event_source_events_t *source_events,
                          ucn_event_owner_events_t *owner_events)
@@ -338,6 +430,10 @@ static void take_pending(ucn_event_runtime_t *runtime,
     exit_task(runtime);
 }
 
+/*
+ * EN: Re-arms pending Source events after an Event Runtime budget boundary.
+ * 中文：在 Event Runtime 预算边界后重新挂起 Source 事件。
+ */
 static void rearm_source(ucn_event_runtime_t *runtime,
                          ucn_event_source_id_t source_id,
                          ucn_event_source_events_t events)
@@ -347,6 +443,10 @@ static void rearm_source(ucn_event_runtime_t *runtime,
     exit_task(runtime);
 }
 
+/*
+ * EN: Re-arms pending Owner work after an Event Runtime budget boundary.
+ * 中文：在 Event Runtime 预算边界后重新挂起 Owner 工作。
+ */
 static void rearm_owner(ucn_event_runtime_t *runtime,
                         ucn_event_owner_events_t events)
 {
@@ -355,6 +455,10 @@ static void rearm_owner(ucn_event_runtime_t *runtime,
     exit_task(runtime);
 }
 
+/*
+ * EN: Runs one bounded multi-Source drain and Protocol-Owner cycle.
+ * 中文：运行一次有界的多 Source 排空与 Protocol Owner 周期。
+ */
 ucn_result_t ucn_event_runtime_run(
     ucn_event_runtime_t *runtime,
     bool fallback_scan,
@@ -509,6 +613,10 @@ ucn_result_t ucn_event_runtime_run(
     return first_error;
 }
 
+/*
+ * EN: Waits when idle and then runs one bounded Event Runtime task cycle.
+ * 中文：空闲时等待，然后运行一次有界的 Event Runtime 任务周期。
+ */
 ucn_result_t ucn_event_runtime_task_cycle(
     ucn_event_runtime_t *runtime,
     uint32_t requested_wait_ms,
@@ -537,12 +645,20 @@ ucn_result_t ucn_event_runtime_task_cycle(
     return ucn_event_runtime_run(runtime, !notified, result);
 }
 
+/*
+ * EN: Returns the current `stats` view from Event Runtime state.
+ * 中文：从 Event Runtime 状态返回当前 `stats` 视图。
+ */
 const ucn_event_runtime_stats_t *ucn_event_runtime_get_stats(
     const ucn_event_runtime_t *runtime)
 {
     return runtime == NULL || !runtime->initialized ? NULL : &runtime->stats;
 }
 
+/*
+ * EN: Returns the current `owner_stats` view from Event Runtime state.
+ * 中文：从 Event Runtime 状态返回当前 `owner_stats` 视图。
+ */
 const ucn_protocol_owner_stats_t *ucn_event_runtime_get_owner_stats(
     const ucn_event_runtime_t *runtime)
 {

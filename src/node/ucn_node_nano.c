@@ -12,6 +12,10 @@
 #error "ucn_node_nano.c is only for the Nano profile"
 #endif
 
+/*
+ * EN: Checks the current `link_is_registered` condition in Nano Node state.
+ * 中文：检查当前 Nano Node 状态中的 `link_is_registered` 条件。
+ */
 static bool nano_link_is_registered(const ucn_node_t *node,
                                     const ucn_link_t *link)
 {
@@ -25,6 +29,10 @@ static bool nano_link_is_registered(const ucn_node_t *node,
     return false;
 }
 
+/*
+ * EN: Selects or resolves `resolve_link_local_receive_profile` using deterministic Nano Node rules.
+ * 中文：按照确定性的 Nano Node 规则选择或解析 `resolve_link_local_receive_profile`。
+ */
 static ucn_result_t nano_resolve_link_local_receive_profile(
     const ucn_node_t *node,
     const ucn_link_t *link,
@@ -48,6 +56,10 @@ static ucn_result_t nano_resolve_link_local_receive_profile(
     return UCN_OK;
 }
 
+/*
+ * EN: Reads and validates the current status of a Nano Link.
+ * 中文：读取并验证 Nano Link 的当前状态。
+ */
 static ucn_result_t nano_link_status(const ucn_link_t *link,
                                      ucn_link_status_t *status)
 {
@@ -59,6 +71,10 @@ static ucn_result_t nano_link_status(const ucn_link_t *link,
     return link->ops->get_status(link, status);
 }
 
+/*
+ * EN: Searches bounded Nano Node state for `link`.
+ * 中文：在固定容量的 Nano Node 状态中查找 `link`。
+ */
 static ucn_link_t *nano_find_link(ucn_node_t *node,
                                   ucn_node_id_t destination)
 {
@@ -78,6 +94,10 @@ static ucn_link_t *nano_find_link(ucn_node_t *node,
     return NULL;
 }
 
+/*
+ * EN: Searches bounded Nano Node state for `endpoint_handler`.
+ * 中文：在固定容量的 Nano Node 状态中查找 `endpoint_handler`。
+ */
 static ucn_endpoint_handler_entry_t *nano_find_endpoint_handler(
     ucn_node_t *node,
     ucn_endpoint_t endpoint)
@@ -93,6 +113,10 @@ static ucn_endpoint_handler_entry_t *nano_find_endpoint_handler(
     return NULL;
 }
 
+/*
+ * EN: Allocates `allocate_sequence` from fixed Nano Node slots without heap use.
+ * 中文：从 Nano Node 的固定槽位分配 `allocate_sequence`，不使用堆内存。
+ */
 static ucn_sequence_t nano_allocate_sequence(ucn_node_t *node)
 {
     ucn_sequence_t sequence = node->next_sequence++;
@@ -106,6 +130,10 @@ static ucn_sequence_t nano_allocate_sequence(ucn_node_t *node)
     return sequence;
 }
 
+/*
+ * EN: Validates and submits `send_frame` through the bounded Nano Node transmit path.
+ * 中文：验证 `send_frame` 并将其提交到有界的 Nano Node 发送路径。
+ */
 static ucn_result_t nano_send_frame(ucn_node_t *node,
                                     ucn_link_t *link,
                                     ucn_frame_t *frame)
@@ -159,12 +187,19 @@ static ucn_result_t nano_send_frame(ucn_node_t *node,
     result = link->ops->send(link, encoded, encoded_length);
     if (result == UCN_OK) {
         node->stats.tx_sent++;
+        if ((uint8_t)frame->traffic_class < (uint8_t)UCN_TRAFFIC_CLASS_COUNT) {
+            node->stats.tx_sent_by_class[(uint8_t)frame->traffic_class]++;
+        }
     } else {
         node->stats.tx_error_dropped++;
     }
     return result;
 }
 
+/*
+ * EN: Validates and submits `send_existing_frame` through the bounded Nano Node transmit path.
+ * 中文：验证 `send_existing_frame` 并将其提交到有界的 Nano Node 发送路径。
+ */
 static ucn_result_t nano_send_existing_frame(ucn_node_t *node,
                                              ucn_link_t *link,
                                              ucn_frame_t *frame)
@@ -176,6 +211,10 @@ static ucn_result_t nano_send_existing_frame(ucn_node_t *node,
     return nano_send_frame(node, link, frame);
 }
 
+/*
+ * EN: Validates and processes `dispatch_endpoint` in the Nano Node receive path.
+ * 中文：在 Nano Node 接收路径中验证并处理 `dispatch_endpoint`。
+ */
 static bool nano_dispatch_endpoint(ucn_node_t *node,
                                    const ucn_frame_t *frame)
 {
@@ -193,6 +232,10 @@ static bool nano_dispatch_endpoint(ucn_node_t *node,
     return true;
 }
 
+/*
+ * EN: Selects or resolves `select_queue_item` using deterministic Nano Node rules.
+ * 中文：按照确定性的 Nano Node 规则选择或解析 `select_queue_item`。
+ */
 static ucn_tx_item_t *nano_select_queue_item(ucn_tx_item_t *queue,
                                              size_t depth)
 {
@@ -208,6 +251,92 @@ static ucn_tx_item_t *nano_select_queue_item(ucn_tx_item_t *queue,
     return oldest;
 }
 
+/*
+ * EN: Resolves one Nano queue and its compile-time capacity by traffic class.
+ * 中文：按业务等级解析 Nano 队列及其编译期容量。
+ */
+static ucn_tx_item_t *nano_queue_items(ucn_node_t *node,
+                                       ucn_traffic_class_t traffic_class,
+                                       size_t *depth)
+{
+    switch (traffic_class) {
+    case UCN_TRAFFIC_Q0_CRITICAL:
+        *depth = UCN_TX_Q0_DEPTH;
+        return node->q0;
+    case UCN_TRAFFIC_Q1_REALTIME:
+        *depth = UCN_TX_Q1_DEPTH;
+        return node->q1;
+    case UCN_TRAFFIC_Q2_NORMAL:
+        *depth = UCN_TX_Q2_DEPTH;
+        return node->q2;
+    case UCN_TRAFFIC_Q3_BULK:
+        *depth = UCN_TX_Q3_DEPTH;
+        return node->q3;
+    default:
+        *depth = 0U;
+        return NULL;
+    }
+}
+
+#define UCN_NANO_BUSINESS_SCHEDULE_LENGTH ((uint8_t)12U)
+static const ucn_traffic_class_t
+    ucn_nano_business_schedule[UCN_NANO_BUSINESS_SCHEDULE_LENGTH] = {
+        UCN_TRAFFIC_Q0_CRITICAL,
+        UCN_TRAFFIC_Q1_REALTIME,
+        UCN_TRAFFIC_Q0_CRITICAL,
+        UCN_TRAFFIC_Q2_NORMAL,
+        UCN_TRAFFIC_Q0_CRITICAL,
+        UCN_TRAFFIC_Q1_REALTIME,
+        UCN_TRAFFIC_Q0_CRITICAL,
+        UCN_TRAFFIC_Q3_BULK,
+        UCN_TRAFFIC_Q0_CRITICAL,
+        UCN_TRAFFIC_Q1_REALTIME,
+        UCN_TRAFFIC_Q0_CRITICAL,
+        UCN_TRAFFIC_Q2_NORMAL
+    };
+
+/*
+ * EN: Selects one Nano business item with the common 6:3:2:1 schedule.
+ * 中文：使用统一的 6:3:2:1 调度表选择一条 Nano 业务消息。
+ */
+static ucn_tx_item_t *nano_select_business_item(ucn_node_t *node,
+                                                uint8_t *next_cursor)
+{
+    uint8_t offset;
+    ucn_tx_item_t *retained_q0 = nano_select_queue_item(
+        node->q0, UCN_TX_Q0_DEPTH);
+
+    if (retained_q0 != NULL &&
+        retained_q0->delivery == UCN_DELIVERY_RETRY_ON_BACKPRESSURE &&
+        (retained_q0->next_attempt_ms != 0U ||
+         retained_q0->backpressure_retries != 0U)) {
+        *next_cursor = node->business_schedule_cursor;
+        return retained_q0;
+    }
+    for (offset = 0U; offset < UCN_NANO_BUSINESS_SCHEDULE_LENGTH; ++offset) {
+        const uint8_t schedule_index = (uint8_t)(
+            (node->business_schedule_cursor + offset) %
+            UCN_NANO_BUSINESS_SCHEDULE_LENGTH);
+        const ucn_traffic_class_t traffic_class =
+            ucn_nano_business_schedule[schedule_index];
+        size_t depth;
+        ucn_tx_item_t *queue = nano_queue_items(node, traffic_class, &depth);
+        ucn_tx_item_t *item = nano_select_queue_item(queue, depth);
+
+        if (item != NULL) {
+            *next_cursor = (uint8_t)(
+                (schedule_index + 1U) % UCN_NANO_BUSINESS_SCHEDULE_LENGTH);
+            return item;
+        }
+    }
+    *next_cursor = node->business_schedule_cursor;
+    return NULL;
+}
+
+/*
+ * EN: Initializes a Node instance from validated caller-owned configuration and fixed storage.
+ * 中文：使用经验证的调用方配置与固定存储初始化一个 Node 实例。
+ */
 ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config)
 {
     ucn_result_t result;
@@ -228,6 +357,10 @@ ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config)
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `wire_profiles` in Nano Node state.
+ * 中文：验证并设置 Nano Node 状态中的 `wire_profiles`。
+ */
 ucn_result_t ucn_node_set_wire_profiles(
     ucn_node_t *node,
     ucn_wire_profile_t tx_profile,
@@ -258,11 +391,19 @@ ucn_result_t ucn_node_set_wire_profiles(
     return UCN_OK;
 }
 
+/*
+ * EN: Returns the current `tx_wire_profile` view from Nano Node state.
+ * 中文：从 Nano Node 状态返回当前 `tx_wire_profile` 视图。
+ */
 ucn_wire_profile_t ucn_node_get_tx_wire_profile(const ucn_node_t *node)
 {
     return node == NULL ? UCN_WIRE_PROFILE_UNSPECIFIED : node->tx_wire_profile;
 }
 
+/*
+ * EN: Returns the current `max_receive_wire_profile` view from Nano Node state.
+ * 中文：从 Nano Node 状态返回当前 `max_receive_wire_profile` 视图。
+ */
 ucn_wire_profile_t ucn_node_get_max_receive_wire_profile(
     const ucn_node_t *node)
 {
@@ -270,6 +411,10 @@ ucn_wire_profile_t ucn_node_get_max_receive_wire_profile(
                           node->max_receive_wire_profile;
 }
 
+/*
+ * EN: Validates and sets `wire_profile_auto` in Nano Node state.
+ * 中文：验证并设置 Nano Node 状态中的 `wire_profile_auto`。
+ */
 ucn_result_t ucn_node_set_wire_profile_auto(ucn_node_t *node, bool enabled)
 {
     if (node == NULL) {
@@ -279,11 +424,19 @@ ucn_result_t ucn_node_set_wire_profile_auto(ucn_node_t *node, bool enabled)
     return UCN_OK;
 }
 
+/*
+ * EN: Returns whether route-aware automatic Wire-Profile selection is enabled.
+ * 中文：返回是否已启用路由感知的自动 Wire Profile 选择。
+ */
 bool ucn_node_wire_profile_auto(const ucn_node_t *node)
 {
     return node != NULL && node->automatic_wire_profile;
 }
 
+/*
+ * EN: Validates and sets `link_wire_profile_limit` in Nano Node state.
+ * 中文：验证并设置 Nano Node 状态中的 `link_wire_profile_limit`。
+ */
 ucn_result_t ucn_node_set_link_wire_profile_limit(
     ucn_node_t *node,
     ucn_link_t *link,
@@ -303,6 +456,10 @@ ucn_result_t ucn_node_set_link_wire_profile_limit(
     return UCN_OK;
 }
 
+/*
+ * EN: Returns the current `link_wire_profile_limit` view from Nano Node state.
+ * 中文：从 Nano Node 状态返回当前 `link_wire_profile_limit` 视图。
+ */
 ucn_wire_profile_t ucn_node_get_link_wire_profile_limit(
     const ucn_node_t *node,
     const ucn_link_t *link)
@@ -312,6 +469,10 @@ ucn_wire_profile_t ucn_node_get_link_wire_profile_limit(
                UCN_WIRE_PROFILE_UNSPECIFIED : link->peer_wire_profile;
 }
 
+/*
+ * EN: Validates and sets `link_local_wire_profile_limit` in Nano Node state.
+ * 中文：验证并设置 Nano Node 状态中的 `link_local_wire_profile_limit`。
+ */
 ucn_result_t ucn_node_set_link_local_wire_profile_limit(
     ucn_node_t *node,
     ucn_link_t *link,
@@ -336,6 +497,10 @@ ucn_result_t ucn_node_set_link_local_wire_profile_limit(
     return UCN_OK;
 }
 
+/*
+ * EN: Returns the current `link_local_wire_profile_limit` view from Nano Node state.
+ * 中文：从 Nano Node 状态返回当前 `link_local_wire_profile_limit` 视图。
+ */
 ucn_wire_profile_t ucn_node_get_link_local_wire_profile_limit(
     const ucn_node_t *node,
     const ucn_link_t *link)
@@ -346,6 +511,10 @@ ucn_wire_profile_t ucn_node_get_link_local_wire_profile_limit(
     return (ucn_wire_profile_t)link->local_receive_wire_profile;
 }
 
+/*
+ * EN: Validates and sets `plain_session_id` in Nano Node state.
+ * 中文：验证并设置 Nano Node 状态中的 `plain_session_id`。
+ */
 ucn_result_t ucn_node_set_plain_session_id(ucn_node_t *node,
                                            ucn_session_id_t session_id)
 {
@@ -360,6 +529,10 @@ ucn_result_t ucn_node_set_plain_session_id(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `security_required` in Nano Node state.
+ * 中文：验证并设置 Nano Node 状态中的 `security_required`。
+ */
 ucn_result_t ucn_node_set_security_required(ucn_node_t *node, bool required)
 {
     if (node == NULL) {
@@ -368,11 +541,19 @@ ucn_result_t ucn_node_set_security_required(ucn_node_t *node, bool required)
     return required ? UCN_ERR_CONFIG : UCN_OK;
 }
 
+/*
+ * EN: Checks the current `security_ready` condition in Nano Node state.
+ * 中文：检查当前 Nano Node 状态中的 `security_ready` 条件。
+ */
 bool ucn_node_security_ready(const ucn_node_t *node)
 {
     return node != NULL;
 }
 
+/*
+ * EN: Validates and sets `security` in Nano Node state.
+ * 中文：验证并设置 Nano Node 状态中的 `security`。
+ */
 ucn_result_t ucn_node_set_security(ucn_node_t *node,
                                    const ucn_security_ops_t *ops,
                                    void *context)
@@ -382,6 +563,10 @@ ucn_result_t ucn_node_set_security(ucn_node_t *node,
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
 
+/*
+ * EN: Validates and sets `security_policy` in Nano Node state.
+ * 中文：验证并设置 Nano Node 状态中的 `security_policy`。
+ */
 ucn_result_t ucn_node_set_security_policy(ucn_node_t *node,
                                           const ucn_security_policy_t *policy)
 {
@@ -389,6 +574,10 @@ ucn_result_t ucn_node_set_security_policy(ucn_node_t *node,
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
 
+/*
+ * EN: Validates and sets `endpoint_security_policy` in Nano Node state.
+ * 中文：验证并设置 Nano Node 状态中的 `endpoint_security_policy`。
+ */
 ucn_result_t ucn_node_set_endpoint_security_policy(
     ucn_node_t *node,
     ucn_endpoint_t endpoint,
@@ -399,6 +588,10 @@ ucn_result_t ucn_node_set_endpoint_security_policy(
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
 
+/*
+ * EN: Validates and sets `join_policy` in Nano Node state.
+ * 中文：验证并设置 Nano Node 状态中的 `join_policy`。
+ */
 ucn_result_t ucn_node_set_join_policy(ucn_node_t *node,
                                       ucn_join_policy_t policy,
                                       ucn_neighbor_authorize_fn authorize,
@@ -410,6 +603,10 @@ ucn_result_t ucn_node_set_join_policy(ucn_node_t *node,
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
 
+/*
+ * EN: Updates `observe_neighbor` in bounded Nano Node state.
+ * 中文：更新固定容量 Nano Node 状态中的 `observe_neighbor`。
+ */
 ucn_result_t ucn_node_observe_neighbor(ucn_node_t *node,
                                        ucn_link_t *link,
                                        uint32_t now_ms)
@@ -419,6 +616,10 @@ ucn_result_t ucn_node_observe_neighbor(ucn_node_t *node,
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
 
+/*
+ * EN: Builds and submits `probe_neighbor` through the bounded Nano Node transmit path.
+ * 中文：构造 `probe_neighbor` 并将其提交到有界的 Nano Node 发送路径。
+ */
 ucn_result_t ucn_node_probe_neighbor(ucn_node_t *node,
                                      ucn_link_t *link,
                                      uint32_t now_ms)
@@ -428,6 +629,10 @@ ucn_result_t ucn_node_probe_neighbor(ucn_node_t *node,
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
 
+/*
+ * EN: Builds and submits `broadcast_hello` through the bounded Nano Node transmit path.
+ * 中文：构造 `broadcast_hello` 并将其提交到有界的 Nano Node 发送路径。
+ */
 ucn_result_t ucn_node_broadcast_hello(ucn_node_t *node,
                                       ucn_link_t *link,
                                       uint32_t now_ms)
@@ -437,6 +642,10 @@ ucn_result_t ucn_node_broadcast_hello(ucn_node_t *node,
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
 
+/*
+ * EN: Validates and installs `admit_neighbor` into bounded Nano Node state.
+ * 中文：验证 `admit_neighbor` 并将其安装到固定容量的 Nano Node 状态中。
+ */
 ucn_result_t ucn_node_admit_neighbor(ucn_node_t *node,
                                      ucn_node_id_t peer_node_id)
 {
@@ -444,6 +653,10 @@ ucn_result_t ucn_node_admit_neighbor(ucn_node_t *node,
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
 
+/*
+ * EN: Removes or releases `reject_neighbor` from Nano Node state with bounded work.
+ * 中文：以有界工作量从 Nano Node 状态移除或释放 `reject_neighbor`。
+ */
 ucn_result_t ucn_node_reject_neighbor(ucn_node_t *node,
                                       ucn_node_id_t peer_node_id)
 {
@@ -451,6 +664,10 @@ ucn_result_t ucn_node_reject_neighbor(ucn_node_t *node,
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
 
+/*
+ * EN: Calculates the bounded `neighbor_count` value used by Nano Node.
+ * 中文：计算 Nano Node 使用的有界 `neighbor_count` 值。
+ */
 size_t ucn_node_neighbor_count(const ucn_node_t *node,
                                ucn_neighbor_state_t state)
 {
@@ -459,6 +676,10 @@ size_t ucn_node_neighbor_count(const ucn_node_t *node,
     return 0U;
 }
 
+/*
+ * EN: Copies `neighbor_summaries` from Nano Node into caller-owned storage.
+ * 中文：把 Nano Node 中的 `neighbor_summaries` 复制到调用方存储。
+ */
 size_t ucn_node_copy_neighbor_summaries(
     const ucn_node_t *node,
     ucn_neighbor_summary_t *output,
@@ -470,6 +691,10 @@ size_t ucn_node_copy_neighbor_summaries(
     return 0U;
 }
 
+/*
+ * EN: Validates and installs `register_link` into bounded Nano Node state.
+ * 中文：验证 `register_link` 并将其安装到固定容量的 Nano Node 状态中。
+ */
 ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
 {
     size_t index;
@@ -513,6 +738,10 @@ ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and installs `add_route` into bounded Nano Node state.
+ * 中文：验证 `add_route` 并将其安装到固定容量的 Nano Node 状态中。
+ */
 ucn_result_t ucn_node_add_route(ucn_node_t *node,
                                 ucn_node_id_t destination,
                                 ucn_link_t *egress_link)
@@ -546,6 +775,10 @@ ucn_result_t ucn_node_add_route(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Builds and submits `discover_route` through the bounded Nano Node transmit path.
+ * 中文：构造 `discover_route` 并将其提交到有界的 Nano Node 发送路径。
+ */
 ucn_result_t ucn_node_discover_route(ucn_node_t *node,
                                      ucn_node_id_t destination,
                                      uint32_t now_ms)
@@ -555,6 +788,10 @@ ucn_result_t ucn_node_discover_route(ucn_node_t *node,
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
 
+/*
+ * EN: Updates `refresh_route` in bounded Nano Node state.
+ * 中文：更新固定容量 Nano Node 状态中的 `refresh_route`。
+ */
 ucn_result_t ucn_node_refresh_route(ucn_node_t *node,
                                     ucn_node_id_t destination,
                                     uint32_t now_ms)
@@ -564,6 +801,10 @@ ucn_result_t ucn_node_refresh_route(ucn_node_t *node,
     return node == NULL ? UCN_ERR_ARGUMENT : UCN_ERR_CONFIG;
 }
 
+/*
+ * EN: Checks the current `route_pending` condition in Nano Node state.
+ * 中文：检查当前 Nano Node 状态中的 `route_pending` 条件。
+ */
 bool ucn_node_route_pending(const ucn_node_t *node,
                             ucn_node_id_t destination)
 {
@@ -572,6 +813,10 @@ bool ucn_node_route_pending(const ucn_node_t *node,
     return false;
 }
 
+/*
+ * EN: Validates and sets `rx_handler` in Nano Node state.
+ * 中文：验证并设置 Nano Node 状态中的 `rx_handler`。
+ */
 void ucn_node_set_rx_handler(ucn_node_t *node,
                              ucn_rx_handler_t handler,
                              void *context)
@@ -582,6 +827,10 @@ void ucn_node_set_rx_handler(ucn_node_t *node,
     }
 }
 
+/*
+ * EN: Validates and sets `endpoint_handler` in Nano Node state.
+ * 中文：验证并设置 Nano Node 状态中的 `endpoint_handler`。
+ */
 ucn_result_t ucn_node_set_endpoint_handler(ucn_node_t *node,
                                             ucn_endpoint_t endpoint,
                                             ucn_endpoint_rx_handler_t handler,
@@ -618,6 +867,10 @@ ucn_result_t ucn_node_set_endpoint_handler(ucn_node_t *node,
     return UCN_ERR_NO_SPACE;
 }
 
+/*
+ * EN: Validates and submits one application message to the Node transmit and routing pipeline.
+ * 中文：验证一个应用消息，并将其提交到 Node 发送与路由流水线。
+ */
 ucn_result_t ucn_node_send(ucn_node_t *node,
                            ucn_node_id_t destination,
                            uint8_t message_type,
@@ -635,8 +888,8 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
         (payload == NULL && payload_length != 0U)) {
         return UCN_ERR_ARGUMENT;
     }
-    if (traffic_class != UCN_TRAFFIC_Q0_CRITICAL &&
-        traffic_class != UCN_TRAFFIC_Q1_REALTIME) {
+    if (traffic_class < UCN_TRAFFIC_Q0_CRITICAL ||
+        traffic_class > UCN_TRAFFIC_Q3_BULK) {
         return UCN_ERR_UNSUPPORTED;
     }
     if (payload_length > ucn_frame_max_payload_for_profile(
@@ -663,6 +916,10 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
     return nano_send_frame(node, link, &frame);
 }
 
+/*
+ * EN: Validates and submits `send_endpoint` through the bounded Nano Node transmit path.
+ * 中文：验证 `send_endpoint` 并将其提交到有界的 Nano Node 发送路径。
+ */
 ucn_result_t ucn_node_send_endpoint(ucn_node_t *node,
                                     ucn_node_id_t destination,
                                     ucn_endpoint_t endpoint,
@@ -677,6 +934,10 @@ ucn_result_t ucn_node_send_endpoint(ucn_node_t *node,
                          payload, payload_length);
 }
 
+/*
+ * EN: Copies `enqueue` into a bounded Nano Node queue.
+ * 中文：把 `enqueue` 复制到固定容量的 Nano Node 队列。
+ */
 ucn_result_t ucn_node_enqueue(ucn_node_t *node,
                               const ucn_send_request_t *request)
 {
@@ -692,8 +953,8 @@ ucn_result_t ucn_node_enqueue(ucn_node_t *node,
         ucn_message_type_is_control(request->message_type)) {
         return UCN_ERR_ARGUMENT;
     }
-    if (request->traffic_class != UCN_TRAFFIC_Q0_CRITICAL &&
-        request->traffic_class != UCN_TRAFFIC_Q1_REALTIME) {
+    if (request->traffic_class < UCN_TRAFFIC_Q0_CRITICAL ||
+        request->traffic_class > UCN_TRAFFIC_Q3_BULK) {
         return UCN_ERR_UNSUPPORTED;
     }
     if (request->payload_length > UCN_MAX_PAYLOAD_BYTES) {
@@ -709,10 +970,11 @@ ucn_result_t ucn_node_enqueue(ucn_node_t *node,
          request->deadline_ms == 0U)) {
         return UCN_ERR_ARGUMENT;
     }
-    queue = request->traffic_class == UCN_TRAFFIC_Q0_CRITICAL ?
-                node->q0 : node->q1;
-    depth = request->traffic_class == UCN_TRAFFIC_Q0_CRITICAL ?
-                UCN_TX_Q0_DEPTH : UCN_TX_Q1_DEPTH;
+    if (request->delivery == UCN_DELIVERY_LATEST_VALUE &&
+        request->traffic_class != UCN_TRAFFIC_Q1_REALTIME) {
+        return UCN_ERR_ARGUMENT;
+    }
+    queue = nano_queue_items(node, request->traffic_class, &depth);
     for (index = 0U; index < depth; ++index) {
         if (request->delivery == UCN_DELIVERY_LATEST_VALUE &&
             queue[index].occupied &&
@@ -740,12 +1002,18 @@ ucn_result_t ucn_node_enqueue(ucn_node_t *node,
     if (request->payload_length != 0U) {
         (void)memcpy(slot->payload, request->payload, request->payload_length);
     }
+    node->stats.tx_enqueued_by_class[(uint8_t)request->traffic_class]++;
     return UCN_OK;
 }
 
+/*
+ * EN: Advances one bounded Node maintenance and transmit scheduling cycle.
+ * 中文：推进一次有界的 Node 维护与发送调度周期。
+ */
 ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
 {
     ucn_tx_item_t *item;
+    uint8_t next_schedule_cursor;
     ucn_result_t result;
 
     if (node == NULL) {
@@ -766,19 +1034,18 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
         }
     }
     node->now_ms = now_ms;
-    item = nano_select_queue_item(node->q0, UCN_TX_Q0_DEPTH);
-    if (item == NULL) {
-        item = nano_select_queue_item(node->q1, UCN_TX_Q1_DEPTH);
-    }
+    item = nano_select_business_item(node, &next_schedule_cursor);
     if (item == NULL) {
         return UCN_ERR_NOT_FOUND;
     }
+    node->stats.tx_scheduled_by_class[(uint8_t)item->traffic_class]++;
     if (ucn_deadline_expired(now_ms, item->deadline_ms)) {
         if (item->delivery == UCN_DELIVERY_RETRY_ON_BACKPRESSURE &&
             item->backpressure_retries != 0U) {
             node->stats.q0_backpressure_expired++;
         }
         item->occupied = false;
+        node->business_schedule_cursor = next_schedule_cursor;
         node->stats.tx_expired_dropped++;
         return UCN_ERR_TTL;
     }
@@ -807,6 +1074,7 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
         }
     }
     item->occupied = false;
+    node->business_schedule_cursor = next_schedule_cursor;
     if (result == UCN_ERR_NO_SPACE &&
         item->delivery == UCN_DELIVERY_RETRY_ON_BACKPRESSURE) {
         node->stats.q0_backpressure_exhausted++;
@@ -817,11 +1085,19 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
     return result;
 }
 
+/*
+ * EN: Returns the current `stats` view from Nano Node state.
+ * 中文：从 Nano Node 状态返回当前 `stats` 视图。
+ */
 const ucn_node_stats_t *ucn_node_get_stats(const ucn_node_t *node)
 {
     return node == NULL ? NULL : &node->stats;
 }
 
+/*
+ * EN: Validates one received frame and routes, forwards, or locally delivers it.
+ * 中文：验证一个接收帧，并对其进行路由、转发或本地投递。
+ */
 ucn_result_t ucn_node_receive(ucn_node_t *node,
                               ucn_link_t *ingress_link,
                               const uint8_t *data,

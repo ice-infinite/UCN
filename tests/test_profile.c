@@ -284,12 +284,13 @@ int test_profile(void)
     TEST_ASSERT(test_profile_service_switch() == 0);
 #endif
     printf("UCN_PROFILE name=%s value=%d service=%d node_bytes=%zu "
-           "link_bytes=%zu event_runtime_bytes=%zu stream_source_bytes=%zu "
+           "tx_item_bytes=%zu link_bytes=%zu event_runtime_bytes=%zu "
+           "stream_source_bytes=%zu "
            "stream_default_storage_bytes=%zu can_source_bytes=%zu "
            "can_default_storage_bytes=%zu transfer_bytes=%zu "
            "transfer_rx_bytes=%zu cluster_bytes=%zu federation_bytes=%zu\n",
            UCN_PROFILE_NAME, UCN_PROFILE, UCN_FEATURE_SERVICE,
-           sizeof(ucn_node_t), sizeof(ucn_link_t),
+           sizeof(ucn_node_t), sizeof(ucn_tx_item_t), sizeof(ucn_link_t),
            sizeof(ucn_event_runtime_t), sizeof(ucn_stream_source_t),
            sizeof(ucn_stream_source_default_storage_t),
            sizeof(ucn_can_source_t),

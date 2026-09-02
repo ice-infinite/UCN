@@ -7,6 +7,53 @@
 
 #include "ucn_duplicate_internal.h"
 
+/* Hardware-isolation seam used only when an embedding product explicitly
+ * defines the macro. The default value preserves the complete production
+ * Step pipeline. Values 1..6 stop after progressively later maintenance
+ * phases so an MCU test can isolate one bounded Step phase without forking
+ * the protocol implementation. */
+#ifndef UCN_TEST_NODE_STEP_STAGE_LIMIT
+#define UCN_TEST_NODE_STEP_STAGE_LIMIT 7
+#endif
+#if UCN_TEST_NODE_STEP_STAGE_LIMIT < 1 || UCN_TEST_NODE_STEP_STAGE_LIMIT > 7
+#error "UCN_TEST_NODE_STEP_STAGE_LIMIT must be in [1, 7]"
+#endif
+
+/* Hardware-isolation seam for the Stage-7 maintenance scheduler. The
+ * production default (5) executes every maintenance class. Test firmware may
+ * stop after an earlier class to identify the first driver-facing operation
+ * that destabilizes a target without changing the public UCN API or ABI. */
+#ifndef UCN_TEST_NODE_MAINTENANCE_STAGE_LIMIT
+#define UCN_TEST_NODE_MAINTENANCE_STAGE_LIMIT 5
+#endif
+#if UCN_TEST_NODE_MAINTENANCE_STAGE_LIMIT < 1 || \
+    UCN_TEST_NODE_MAINTENANCE_STAGE_LIMIT > 5
+#error "UCN_TEST_NODE_MAINTENANCE_STAGE_LIMIT must be in [1, 5]"
+#endif
+
+/* Full-profile hardware isolation for live Link metrics. The default keeps
+ * Policy refresh enabled; an embedding test may disable only this phase while
+ * retaining the Full object layout and the rest of the Step scheduler. */
+#ifndef UCN_TEST_NODE_POLICY_REFRESH_ENABLED
+#define UCN_TEST_NODE_POLICY_REFRESH_ENABLED 1
+#endif
+#if UCN_TEST_NODE_POLICY_REFRESH_ENABLED != 0 && \
+    UCN_TEST_NODE_POLICY_REFRESH_ENABLED != 1
+#error "UCN_TEST_NODE_POLICY_REFRESH_ENABLED must be 0 or 1"
+#endif
+
+/* Hardware-only heartbeat response isolation.  Production keeps immediate
+ * one-hop ACKs enabled.  A target bench may disable only the response side so
+ * scheduled Heartbeat request TX and full RX validation remain active while
+ * proving whether a driver failure requires RX-pump -> Link TX nesting. */
+#ifndef UCN_TEST_NODE_HEARTBEAT_ACK_ENABLED
+#define UCN_TEST_NODE_HEARTBEAT_ACK_ENABLED 1
+#endif
+#if UCN_TEST_NODE_HEARTBEAT_ACK_ENABLED != 0 && \
+    UCN_TEST_NODE_HEARTBEAT_ACK_ENABLED != 1
+#error "UCN_TEST_NODE_HEARTBEAT_ACK_ENABLED must be 0 or 1"
+#endif
+
 static ucn_result_t get_link_status(const ucn_link_t *link,
                                     ucn_link_status_t *status);
 
@@ -53,6 +100,10 @@ static void invalidate_routes_by_link(ucn_node_t *node, const ucn_link_t *link);
 static ucn_result_t get_link_status(const ucn_link_t *link, ucn_link_status_t *status);
 static bool link_is_usable(const ucn_link_t *link);
 static uint32_t link_heartbeat_interval_ms(const ucn_link_t *link);
+static uint32_t initial_heartbeat_phase_ms(
+    const ucn_node_t *node,
+    const ucn_neighbor_entry_t *entry,
+    const ucn_neighbor_bearer_t *bearer);
 static uint32_t link_suspect_timeout_ms(const ucn_link_t *link);
 static uint32_t link_remove_timeout_ms(const ucn_link_t *link);
 static ucn_link_t *resolve_egress_link(ucn_node_t *node, ucn_link_t *link);
@@ -93,12 +144,20 @@ static ucn_result_t send_path_route_error(ucn_node_t *node,
                                           ucn_wire_profile_t wire_profile);
 #endif
 
+/*
+ * EN: Reads `u32_be` from the canonical Lite/Full Node byte order.
+ * 中文：按规范的 Lite/Full Node 字节序读取 `u32_be`。
+ */
 static uint32_t read_u32_be(const uint8_t *data)
 {
     return ((uint32_t)data[0] << 24U) | ((uint32_t)data[1] << 16U) |
            ((uint32_t)data[2] << 8U) | (uint32_t)data[3];
 }
 
+/*
+ * EN: Writes `u32_be` in the canonical Lite/Full Node byte order.
+ * 中文：按规范的 Lite/Full Node 字节序写入 `u32_be`。
+ */
 static void write_u32_be(uint8_t *data, uint32_t value)
 {
     data[0] = (uint8_t)(value >> 24U);
@@ -108,11 +167,19 @@ static void write_u32_be(uint8_t *data, uint32_t value)
 }
 
 #if UCN_FEATURE_CANDIDATE_ROUTING || UCN_FEATURE_DIAGNOSTICS
+/*
+ * EN: Reads `u16_be` from the canonical Lite/Full Node byte order.
+ * 中文：按规范的 Lite/Full Node 字节序读取 `u16_be`。
+ */
 static uint16_t read_u16_be(const uint8_t *data)
 {
     return (uint16_t)(((uint16_t)data[0] << 8U) | (uint16_t)data[1]);
 }
 
+/*
+ * EN: Writes `u16_be` in the canonical Lite/Full Node byte order.
+ * 中文：按规范的 Lite/Full Node 字节序写入 `u16_be`。
+ */
 static void write_u16_be(uint8_t *data, uint16_t value)
 {
     data[0] = (uint8_t)(value >> 8U);
@@ -120,6 +187,10 @@ static void write_u16_be(uint8_t *data, uint16_t value)
 }
 #endif
 
+/*
+ * EN: Reads `uint_be` from the canonical Lite/Full Node byte order.
+ * 中文：按规范的 Lite/Full Node 字节序读取 `uint_be`。
+ */
 static uint32_t read_uint_be(const uint8_t *data, uint8_t width)
 {
     uint8_t index;
@@ -131,6 +202,10 @@ static uint32_t read_uint_be(const uint8_t *data, uint8_t width)
     return value;
 }
 
+/*
+ * EN: Writes `uint_be` in the canonical Lite/Full Node byte order.
+ * 中文：按规范的 Lite/Full Node 字节序写入 `uint_be`。
+ */
 static void write_uint_be(uint8_t *data, uint8_t width, uint32_t value)
 {
     uint8_t index;
@@ -142,6 +217,10 @@ static void write_uint_be(uint8_t *data, uint8_t width, uint32_t value)
     }
 }
 
+/*
+ * EN: Calculates the bounded `route_request_payload_size` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `route_request_payload_size` 值。
+ */
 static size_t route_request_payload_size(ucn_wire_profile_t profile)
 {
     const ucn_wire_profile_descriptor_t *descriptor =
@@ -153,6 +232,10 @@ static size_t route_request_payload_size(ucn_wire_profile_t profile)
                UCN_ROUTE_CONTROL_TRAILER_BYTES;
 }
 
+/*
+ * EN: Calculates the bounded `route_request_id_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `route_request_id_offset` 值。
+ */
 static size_t route_request_id_offset(const ucn_frame_t *frame)
 {
     const ucn_wire_profile_descriptor_t *descriptor =
@@ -161,11 +244,19 @@ static size_t route_request_id_offset(const ucn_frame_t *frame)
     return descriptor == NULL ? 0U : descriptor->address_bytes;
 }
 
+/*
+ * EN: Calculates the bounded `route_request_cost_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `route_request_cost_offset` 值。
+ */
 static size_t route_request_cost_offset(const ucn_frame_t *frame)
 {
     return route_request_id_offset(frame) + UCN_ROUTE_REQUEST_ID_BYTES;
 }
 
+/*
+ * EN: Calculates the bounded `route_request_hop_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `route_request_hop_offset` 值。
+ */
 static size_t route_request_hop_offset(const ucn_frame_t *frame)
 {
     const ucn_wire_profile_descriptor_t *descriptor =
@@ -175,11 +266,19 @@ static size_t route_request_hop_offset(const ucn_frame_t *frame)
            route_request_cost_offset(frame) + descriptor->route_cost_bytes;
 }
 
+/*
+ * EN: Calculates the bounded `route_request_flags_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `route_request_flags_offset` 值。
+ */
 static size_t route_request_flags_offset(const ucn_frame_t *frame)
 {
     return route_request_hop_offset(frame) + 1U;
 }
 
+/*
+ * EN: Builds and submits `route_request_target` through the bounded Lite/Full Node transmit path.
+ * 中文：构造 `route_request_target` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_node_id_t route_request_target(const ucn_frame_t *frame)
 {
     const ucn_wire_profile_descriptor_t *descriptor =
@@ -189,6 +288,10 @@ static ucn_node_id_t route_request_target(const ucn_frame_t *frame)
            read_uint_be(frame->payload, descriptor->address_bytes);
 }
 
+/*
+ * EN: Calculates the bounded `route_reply_payload_size` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `route_reply_payload_size` 值。
+ */
 static size_t route_reply_payload_size(ucn_wire_profile_t profile)
 {
     const ucn_wire_profile_descriptor_t *descriptor =
@@ -200,11 +303,19 @@ static size_t route_reply_payload_size(ucn_wire_profile_t profile)
                descriptor->route_epoch_bytes;
 }
 
+/*
+ * EN: Calculates the bounded `route_reply_cost_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `route_reply_cost_offset` 值。
+ */
 static size_t route_reply_cost_offset(void)
 {
     return UCN_ROUTE_REQUEST_ID_BYTES;
 }
 
+/*
+ * EN: Calculates the bounded `route_reply_hop_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `route_reply_hop_offset` 值。
+ */
 static size_t route_reply_hop_offset(const ucn_frame_t *frame)
 {
     const ucn_wire_profile_descriptor_t *descriptor =
@@ -214,16 +325,28 @@ static size_t route_reply_hop_offset(const ucn_frame_t *frame)
            route_reply_cost_offset() + descriptor->route_cost_bytes;
 }
 
+/*
+ * EN: Calculates the bounded `route_reply_flags_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `route_reply_flags_offset` 值。
+ */
 static size_t route_reply_flags_offset(const ucn_frame_t *frame)
 {
     return route_reply_hop_offset(frame) + 1U;
 }
 
+/*
+ * EN: Calculates the bounded `route_reply_epoch_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `route_reply_epoch_offset` 值。
+ */
 static size_t route_reply_epoch_offset(const ucn_frame_t *frame)
 {
     return route_reply_flags_offset(frame) + 1U;
 }
 
+/*
+ * EN: Calculates the bounded `route_error_payload_size` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `route_error_payload_size` 值。
+ */
 static size_t route_error_payload_size(ucn_wire_profile_t profile,
                                        bool path_scoped)
 {
@@ -241,6 +364,10 @@ static size_t route_error_payload_size(ucn_wire_profile_t profile,
 }
 
 #if UCN_FEATURE_PATH
+/*
+ * EN: Calculates the bounded `path_install_base_payload_size` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `path_install_base_payload_size` 值。
+ */
 static size_t path_install_base_payload_size(ucn_wire_profile_t profile)
 {
     const ucn_wire_profile_descriptor_t *descriptor =
@@ -251,6 +378,10 @@ static size_t path_install_base_payload_size(ucn_wire_profile_t profile)
                (size_t)descriptor->address_bytes * 2U + 5U;
 }
 
+/*
+ * EN: Calculates the bounded `path_install_capable_payload_size` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `path_install_capable_payload_size` 值。
+ */
 static size_t path_install_capable_payload_size(ucn_wire_profile_t profile)
 {
     const size_t base_size = path_install_base_payload_size(profile);
@@ -258,6 +389,10 @@ static size_t path_install_capable_payload_size(ucn_wire_profile_t profile)
     return base_size == 0U ? 0U : base_size + 3U;
 }
 
+/*
+ * EN: Checks the `path_install_payload_length_supported` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `path_install_payload_length_supported` 条件。
+ */
 static bool path_install_payload_length_supported(
     ucn_wire_profile_t profile,
     uint16_t payload_length)
@@ -270,12 +405,20 @@ static bool path_install_payload_length_supported(
             (size_t)payload_length == capable_size);
 }
 
+/*
+ * EN: Calculates the bounded `path_install_destination_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `path_install_destination_offset` 值。
+ */
 static size_t path_install_destination_offset(
     const ucn_wire_profile_descriptor_t *descriptor)
 {
     return descriptor == NULL ? 0U : descriptor->path_id_bytes;
 }
 
+/*
+ * EN: Calculates the bounded `path_install_next_hop_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `path_install_next_hop_offset` 值。
+ */
 static size_t path_install_next_hop_offset(
     const ucn_wire_profile_descriptor_t *descriptor)
 {
@@ -283,6 +426,10 @@ static size_t path_install_next_hop_offset(
            (size_t)descriptor->path_id_bytes + descriptor->address_bytes;
 }
 
+/*
+ * EN: Calculates the bounded `path_install_lease_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `path_install_lease_offset` 值。
+ */
 static size_t path_install_lease_offset(
     const ucn_wire_profile_descriptor_t *descriptor)
 {
@@ -291,24 +438,40 @@ static size_t path_install_lease_offset(
                (size_t)descriptor->address_bytes * 2U;
 }
 
+/*
+ * EN: Calculates the bounded `path_install_remaining_hops_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `path_install_remaining_hops_offset` 值。
+ */
 static size_t path_install_remaining_hops_offset(
     const ucn_wire_profile_descriptor_t *descriptor)
 {
     return path_install_lease_offset(descriptor) + 4U;
 }
 
+/*
+ * EN: Calculates the bounded `path_install_maximum_profile_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `path_install_maximum_profile_offset` 值。
+ */
 static size_t path_install_maximum_profile_offset(
     const ucn_wire_profile_descriptor_t *descriptor)
 {
     return path_install_remaining_hops_offset(descriptor) + 1U;
 }
 
+/*
+ * EN: Calculates the bounded `path_install_minimum_mtu_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `path_install_minimum_mtu_offset` 值。
+ */
 static size_t path_install_minimum_mtu_offset(
     const ucn_wire_profile_descriptor_t *descriptor)
 {
     return path_install_maximum_profile_offset(descriptor) + 1U;
 }
 
+/*
+ * EN: Calculates the bounded `path_revoke_payload_size` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `path_revoke_payload_size` 值。
+ */
 static size_t path_revoke_payload_size(ucn_wire_profile_t profile)
 {
     const ucn_wire_profile_descriptor_t *descriptor =
@@ -320,6 +483,10 @@ static size_t path_revoke_payload_size(ucn_wire_profile_t profile)
 #endif
 
 #if UCN_FEATURE_DIAGNOSTICS
+/*
+ * EN: Calculates the bounded `path_trace_payload_size` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `path_trace_payload_size` 值。
+ */
 static size_t path_trace_payload_size(ucn_wire_profile_t profile,
                                       uint8_t record_count)
 {
@@ -331,6 +498,10 @@ static size_t path_trace_payload_size(ucn_wire_profile_t profile,
                (size_t)record_count * descriptor->address_bytes;
 }
 
+/*
+ * EN: Calculates the bounded `node_snapshot_reply_payload_size` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `node_snapshot_reply_payload_size` 值。
+ */
 static size_t node_snapshot_reply_payload_size(ucn_wire_profile_t profile)
 {
     const ucn_wire_profile_descriptor_t *descriptor =
@@ -340,12 +511,20 @@ static size_t node_snapshot_reply_payload_size(ucn_wire_profile_t profile)
            4U + (size_t)descriptor->address_bytes + 4U;
 }
 
+/*
+ * EN: Calculates the bounded `node_snapshot_reply_neighbor_count_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `node_snapshot_reply_neighbor_count_offset` 值。
+ */
 static size_t node_snapshot_reply_neighbor_count_offset(
     const ucn_wire_profile_descriptor_t *descriptor)
 {
     return descriptor == NULL ? 0U : 4U + descriptor->address_bytes;
 }
 
+/*
+ * EN: Calculates the bounded `node_snapshot_reply_flags_offset` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `node_snapshot_reply_flags_offset` 值。
+ */
 static size_t node_snapshot_reply_flags_offset(
     const ucn_wire_profile_descriptor_t *descriptor)
 {
@@ -353,6 +532,10 @@ static size_t node_snapshot_reply_flags_offset(
 }
 #endif
 
+/*
+ * EN: Selects or resolves `select_route_request_profile` using deterministic Lite/Full Node rules.
+ * 中文：按照确定性的 Lite/Full Node 规则选择或解析 `select_route_request_profile`。
+ */
 static ucn_result_t select_route_request_profile(
     const ucn_node_t *node,
     ucn_node_id_t destination,
@@ -393,12 +576,20 @@ static ucn_result_t select_route_request_profile(
     return UCN_ERR_TOO_LARGE;
 }
 
+/*
+ * EN: Calculates `maximum_value_for_wire_bytes` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `maximum_value_for_wire_bytes`。
+ */
 static uint32_t maximum_value_for_wire_bytes(uint8_t width)
 {
     return width >= 4U ? UINT32_MAX :
            (UINT32_C(1) << ((uint32_t)width * 8U)) - UINT32_C(1);
 }
 
+/*
+ * EN: Writes `route_cost_for_profile` in the canonical Lite/Full Node byte order.
+ * 中文：按规范的 Lite/Full Node 字节序写入 `route_cost_for_profile`。
+ */
 static ucn_result_t write_route_cost_for_profile(
     uint8_t *output,
     ucn_wire_profile_t profile,
@@ -423,6 +614,10 @@ static ucn_result_t write_route_cost_for_profile(
     return UCN_OK;
 }
 
+/*
+ * EN: Reads `route_cost_for_profile` from the canonical Lite/Full Node byte order.
+ * 中文：按规范的 Lite/Full Node 字节序读取 `route_cost_for_profile`。
+ */
 static ucn_route_cost_t read_route_cost_for_profile(
     const uint8_t *input,
     ucn_wire_profile_t profile)
@@ -441,6 +636,10 @@ static ucn_route_cost_t read_route_cost_for_profile(
 }
 
 #if UCN_FEATURE_PATH
+/*
+ * EN: Validates `path_wire_scope` before Lite/Full Node state is used or changed.
+ * 中文：在使用或修改 Lite/Full Node 状态前验证 `path_wire_scope`。
+ */
 static ucn_result_t validate_path_wire_scope(ucn_wire_profile_t profile,
                                              ucn_path_id_t path_id,
                                              ucn_node_id_t destination,
@@ -461,6 +660,10 @@ static ucn_result_t validate_path_wire_scope(ucn_wire_profile_t profile,
 }
 #endif
 
+/*
+ * EN: Calculates `accumulate_route_cost` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `accumulate_route_cost`。
+ */
 static ucn_result_t accumulate_route_cost(ucn_route_cost_t left,
                                           ucn_route_cost_t right,
                                           ucn_route_cost_t *output)
@@ -479,11 +682,19 @@ static ucn_result_t accumulate_route_cost(ucn_route_cost_t left,
     return UCN_OK;
 }
 
+/*
+ * EN: Checks the current `route_cost_is_known` condition in Lite/Full Node state.
+ * 中文：检查当前 Lite/Full Node 状态中的 `route_cost_is_known` 条件。
+ */
 static bool route_cost_is_known(ucn_route_cost_t route_cost)
 {
     return route_cost != 0U && route_cost != UCN_ROUTE_COST_UNKNOWN;
 }
 
+/*
+ * EN: Checks the current `route_cost_is_better` condition in Lite/Full Node state.
+ * 中文：检查当前 Lite/Full Node 状态中的 `route_cost_is_better` 条件。
+ */
 static bool route_cost_is_better(ucn_route_cost_t candidate_cost,
                                  ucn_route_cost_t active_cost)
 {
@@ -493,6 +704,10 @@ static bool route_cost_is_better(ucn_route_cost_t candidate_cost,
     return !route_cost_is_known(active_cost) || candidate_cost < active_cost;
 }
 
+/*
+ * EN: Derives `route_epoch_from_request_id` with the canonical Lite/Full Node conversion rules.
+ * 中文：按照规范的 Lite/Full Node 转换规则推导 `route_epoch_from_request_id`。
+ */
 static uint16_t route_epoch_from_request_id(ucn_wire_profile_t profile,
                                             uint32_t request_id)
 {
@@ -506,6 +721,10 @@ static uint16_t route_epoch_from_request_id(ucn_wire_profile_t profile,
     return route_epoch == 0U ? 1U : route_epoch;
 }
 
+/*
+ * EN: Calculates `link_route_cost` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `link_route_cost`。
+ */
 static ucn_route_cost_t link_route_cost(const ucn_link_t *link)
 {
     ucn_link_metrics_t metrics;
@@ -523,6 +742,10 @@ static ucn_route_cost_t link_route_cost(const ucn_link_t *link)
 /* LC-1 never replaces the additive on-wire Cost.  This helper exposes the
  * Full-only local selection score and deliberately falls back to the stable
  * base Cost in Lite builds or before the first quality sample. */
+/*
+ * EN: Calculates `link_local_select_cost` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `link_local_select_cost`。
+ */
 static bool link_local_select_cost(ucn_node_t *node,
                                    ucn_link_t *link,
                                    bool *cost_known,
@@ -555,6 +778,10 @@ static bool link_local_select_cost(ucn_node_t *node,
     return true;
 }
 
+/*
+ * EN: Checks or removes expired `route_is_expired` state in Lite/Full Node.
+ * 中文：检查或移除 Lite/Full Node 中已过期的 `route_is_expired` 状态。
+ */
 static bool route_is_expired(const ucn_node_t *node, const ucn_route_entry_t *route)
 {
     return !route->is_static &&
@@ -562,6 +789,10 @@ static bool route_is_expired(const ucn_node_t *node, const ucn_route_entry_t *ro
 }
 
 #if UCN_FEATURE_CANDIDATE_ROUTING
+/*
+ * EN: Checks or removes expired `candidate_is_expired` state in Lite/Full Node.
+ * 中文：检查或移除 Lite/Full Node 中已过期的 `candidate_is_expired` 状态。
+ */
 static bool candidate_is_expired(const ucn_node_t *node,
                                  const ucn_candidate_route_t *candidate)
 {
@@ -569,6 +800,10 @@ static bool candidate_is_expired(const ucn_node_t *node,
 }
 #endif
 
+/*
+ * EN: Calculates `cost_is_sufficiently_better` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `cost_is_sufficiently_better`。
+ */
 static bool cost_is_sufficiently_better(ucn_route_cost_t active_cost,
                                         ucn_route_cost_t candidate_cost,
                                         uint8_t improvement_percent)
@@ -592,6 +827,10 @@ static bool cost_is_sufficiently_better(ucn_route_cost_t active_cost,
 }
 
 #if UCN_FEATURE_CANDIDATE_ROUTING
+/*
+ * EN: Checks the current `candidate_is_sufficiently_better` condition in Lite/Full Node state.
+ * 中文：检查当前 Lite/Full Node 状态中的 `candidate_is_sufficiently_better` 条件。
+ */
 static bool candidate_is_sufficiently_better(ucn_route_cost_t active_cost,
                                              ucn_route_cost_t candidate_cost)
 {
@@ -602,6 +841,10 @@ static bool candidate_is_sufficiently_better(ucn_route_cost_t active_cost,
 /* Replace only this node's stable one-hop base contribution with LC-1's
  * local effective score.  The stored/forwarded multi-hop route_cost remains
  * byte-for-byte unchanged. */
+/*
+ * EN: Calculates `route_local_selection_score` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `route_local_selection_score`。
+ */
 static bool route_local_selection_score(ucn_node_t *node,
                                         ucn_route_cost_t route_cost,
                                         ucn_link_t *local_link,
@@ -634,6 +877,10 @@ static bool route_local_selection_score(ucn_node_t *node,
     return true;
 }
 
+/*
+ * EN: Checks the current `candidate_route_is_locally_better` condition in Lite/Full Node state.
+ * 中文：检查当前 Lite/Full Node 状态中的 `candidate_route_is_locally_better` 条件。
+ */
 static bool candidate_route_is_locally_better(
     ucn_node_t *node,
     const ucn_route_entry_t *active_route,
@@ -668,6 +915,10 @@ static bool candidate_route_is_locally_better(
 }
 #endif
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `direct_link`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `direct_link`。
+ */
 static ucn_link_t *find_direct_link(ucn_node_t *node,
                                     ucn_node_id_t destination)
 {
@@ -714,6 +965,10 @@ static ucn_link_t *find_direct_link(ucn_node_t *node,
     return best_direct == NULL ? fallback_direct : best_direct;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `link`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `link`。
+ */
 static ucn_link_t *find_link(ucn_node_t *node, ucn_node_id_t destination)
 {
     size_t index;
@@ -734,6 +989,10 @@ static ucn_link_t *find_link(ucn_node_t *node, ucn_node_id_t destination)
     return NULL;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `link_for_route_epoch`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `link_for_route_epoch`。
+ */
 static ucn_link_t *find_link_for_route_epoch(ucn_node_t *node,
                                              ucn_node_id_t destination,
                                              bool has_route_extension,
@@ -771,6 +1030,10 @@ static ucn_link_t *find_link_for_route_epoch(ucn_node_t *node,
     return NULL;
 }
 
+/*
+ * EN: Checks the `route_epoch_is_accepted` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `route_epoch_is_accepted` 条件。
+ */
 static bool route_epoch_is_accepted(ucn_node_t *node,
                                     ucn_node_id_t source,
                                     const ucn_frame_t *frame)
@@ -782,6 +1045,10 @@ static bool route_epoch_is_accepted(ucn_node_t *node,
                                      frame->route_epoch) != NULL;
 }
 
+/*
+ * EN: Checks the current `link_is_registered` condition in Lite/Full Node state.
+ * 中文：检查当前 Lite/Full Node 状态中的 `link_is_registered` 条件。
+ */
 static bool link_is_registered(const ucn_node_t *node, const ucn_link_t *link)
 {
     size_t index;
@@ -796,6 +1063,10 @@ static bool link_is_registered(const ucn_node_t *node, const ucn_link_t *link)
 }
 
 #if UCN_FEATURE_PATH
+/*
+ * EN: Searches bounded Lite/Full Node state for `active_path`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `active_path`。
+ */
 static const ucn_path_forward_entry_t *find_active_path(
     const ucn_node_t *node,
     ucn_node_id_t owner,
@@ -810,6 +1081,10 @@ static const ucn_path_forward_entry_t *find_active_path(
 }
 #endif
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `neighbor`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `neighbor`。
+ */
 static ucn_neighbor_entry_t *find_neighbor(ucn_node_t *node,
                                             ucn_node_id_t peer_node_id)
 {
@@ -824,6 +1099,10 @@ static ucn_neighbor_entry_t *find_neighbor(ucn_node_t *node,
     return NULL;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `neighbor_by_link`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `neighbor_by_link`。
+ */
 static ucn_neighbor_entry_t *find_neighbor_by_link(ucn_node_t *node,
                                                     const ucn_link_t *link)
 {
@@ -845,6 +1124,10 @@ static ucn_neighbor_entry_t *find_neighbor_by_link(ucn_node_t *node,
     return NULL;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `neighbor_bearer`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `neighbor_bearer`。
+ */
 static ucn_neighbor_bearer_t *find_neighbor_bearer(ucn_neighbor_entry_t *entry,
                                                     const ucn_link_t *link)
 {
@@ -861,6 +1144,10 @@ static ucn_neighbor_bearer_t *find_neighbor_bearer(ucn_neighbor_entry_t *entry,
     return NULL;
 }
 
+/*
+ * EN: Allocates `allocate_neighbor_bearer` from fixed Lite/Full Node slots without heap use.
+ * 中文：从 Lite/Full Node 的固定槽位分配 `allocate_neighbor_bearer`，不使用堆内存。
+ */
 static ucn_neighbor_bearer_t *allocate_neighbor_bearer(ucn_neighbor_entry_t *entry)
 {
     size_t index;
@@ -876,6 +1163,10 @@ static ucn_neighbor_bearer_t *allocate_neighbor_bearer(ucn_neighbor_entry_t *ent
     return NULL;
 }
 
+/*
+ * EN: Calculates `adjust_route_cost_for_bearer_switch` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `adjust_route_cost_for_bearer_switch`。
+ */
 static void adjust_route_cost_for_bearer_switch(
     ucn_route_cost_t *route_cost,
     const ucn_link_t *old_link,
@@ -904,6 +1195,10 @@ static void adjust_route_cost_for_bearer_switch(
  * permanently pinned physical carrier.  Keep their stored representative in
  * sync with the Neighbor Primary so diagnostics, Route Epoch emission and
  * local Cost constraints cannot continue to reference an unadmitted Bearer. */
+/*
+ * EN: Remaps routes and Path references after a neighbor changes its primary Bearer.
+ * 中文：在邻居切换主 Bearer 后重映射 Route 与 Path 引用。
+ */
 static void remap_neighbor_egress_references(ucn_node_t *node,
                                              ucn_neighbor_entry_t *entry,
                                              ucn_link_t *new_link)
@@ -946,18 +1241,30 @@ static void remap_neighbor_egress_references(ucn_node_t *node,
 #endif
 }
 
+/*
+ * EN: Derives `bearer_index_from_entry` with the canonical Lite/Full Node conversion rules.
+ * 中文：按照规范的 Lite/Full Node 转换规则推导 `bearer_index_from_entry`。
+ */
 static size_t bearer_index_from_entry(const ucn_neighbor_entry_t *entry,
                                       const ucn_neighbor_bearer_t *bearer)
 {
     return (size_t)(bearer - entry->bearers);
 }
 
+/*
+ * EN: Checks the `bearer_is_active` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `bearer_is_active` 条件。
+ */
 static bool bearer_is_active(const ucn_neighbor_bearer_t *bearer)
 {
     return bearer != NULL && (bearer->state == UCN_NEIGHBOR_BEARER_ADMITTED ||
                                bearer->state == UCN_NEIGHBOR_BEARER_SUSPECT);
 }
 
+/*
+ * EN: Selects or resolves `select_neighbor_bearer` using deterministic Lite/Full Node rules.
+ * 中文：按照确定性的 Lite/Full Node 规则选择或解析 `select_neighbor_bearer`。
+ */
 static ucn_neighbor_bearer_t *select_neighbor_bearer(ucn_node_t *node,
                                                       ucn_neighbor_entry_t *entry)
 {
@@ -1029,6 +1336,10 @@ static ucn_neighbor_bearer_t *select_neighbor_bearer(ucn_node_t *node,
 /* Quality switching deliberately stays inside one Neighbor's fixed Bearer
  * set.  It never changes an end-to-end route and therefore does not share
  * PATH_PROBE's multi-hop control plane. */
+/*
+ * EN: Resets `bearer_quality_probe` to its canonical Lite/Full Node state.
+ * 中文：把 `bearer_quality_probe` 重置为规范的 Lite/Full Node 状态。
+ */
 static void reset_bearer_quality_probe(ucn_neighbor_bearer_t *bearer)
 {
     if (bearer == NULL) {
@@ -1042,6 +1353,10 @@ static void reset_bearer_quality_probe(ucn_neighbor_bearer_t *bearer)
     bearer->quality_probe_pending = false;
 }
 
+/*
+ * EN: Resets `neighbor_quality_probes` to its canonical Lite/Full Node state.
+ * 中文：把 `neighbor_quality_probes` 重置为规范的 Lite/Full Node 状态。
+ */
 static void reset_neighbor_quality_probes(ucn_neighbor_entry_t *entry)
 {
     size_t index;
@@ -1054,6 +1369,10 @@ static void reset_neighbor_quality_probes(ucn_neighbor_entry_t *entry)
     }
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `better_neighbor_bearer`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `better_neighbor_bearer`。
+ */
 static ucn_neighbor_bearer_t *find_better_neighbor_bearer(
     ucn_node_t *node,
     ucn_neighbor_entry_t *entry,
@@ -1100,6 +1419,10 @@ static ucn_neighbor_bearer_t *find_better_neighbor_bearer(
     return best;
 }
 
+/*
+ * EN: Atomically switches a neighbor to a verified primary Bearer and remaps dependents.
+ * 中文：把邻居原子切换到已验证的主 Bearer，并重映射依赖项。
+ */
 static void switch_neighbor_primary(ucn_node_t *node,
                                     ucn_neighbor_entry_t *entry,
                                     ucn_neighbor_bearer_t *bearer)
@@ -1121,6 +1444,10 @@ static void switch_neighbor_primary(ucn_node_t *node,
     reset_neighbor_quality_probes(entry);
 }
 
+/*
+ * EN: Calculates `evaluate_bearer_quality` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `evaluate_bearer_quality`。
+ */
 static void evaluate_bearer_quality(ucn_node_t *node, uint32_t now_ms)
 {
     size_t index;
@@ -1190,6 +1517,10 @@ static void evaluate_bearer_quality(ucn_node_t *node, uint32_t now_ms)
 /* Routes retain the Link that learned them, while a Neighbor may later move
  * its active physical carrier to a healthy backup.  Resolve at send time so
  * that Bearer failover does not invalidate the logical next hop. */
+/*
+ * EN: Selects or resolves `resolve_egress_link` using deterministic Lite/Full Node rules.
+ * 中文：按照确定性的 Lite/Full Node 规则选择或解析 `resolve_egress_link`。
+ */
 static ucn_link_t *resolve_egress_link(ucn_node_t *node, ucn_link_t *link)
 {
     ucn_neighbor_entry_t *entry = find_neighbor_by_link(node, link);
@@ -1208,6 +1539,10 @@ typedef struct ucn_path_effective_capability {
     size_t minimum_mtu;
 } ucn_path_effective_capability_t;
 
+/*
+ * EN: Reduces a Path capability to the bottleneck imposed by one additional Link.
+ * 中文：根据新增 Link 的瓶颈收缩 Path 能力。
+ */
 static ucn_result_t include_link_in_path_capability(
     const ucn_link_t *link,
     ucn_path_effective_capability_t *capability,
@@ -1251,6 +1586,10 @@ static ucn_result_t include_link_in_path_capability(
 
 /* Build the failover-safe intersection of every currently eligible Bearer
  * for one logical next hop.  A non-Neighbor Link is a one-member set. */
+/*
+ * EN: Selects or resolves `resolve_path_bearer_capability` using deterministic Lite/Full Node rules.
+ * 中文：按照确定性的 Lite/Full Node 规则选择或解析 `resolve_path_bearer_capability`。
+ */
 static ucn_result_t resolve_path_bearer_capability(
     ucn_node_t *node,
     ucn_link_t *configured_link,
@@ -1285,6 +1624,10 @@ static ucn_result_t resolve_path_bearer_capability(
     return included ? UCN_OK : UCN_ERR_LINK_DOWN;
 }
 
+/*
+ * EN: Selects or resolves `resolve_path_effective_capability` using deterministic Lite/Full Node rules.
+ * 中文：按照确定性的 Lite/Full Node 规则选择或解析 `resolve_path_effective_capability`。
+ */
 static ucn_result_t resolve_path_effective_capability(
     ucn_node_t *node,
     const ucn_path_forward_entry_t *path,
@@ -1317,6 +1660,10 @@ static ucn_result_t resolve_path_effective_capability(
     return UCN_OK;
 }
 
+/*
+ * EN: Checks the `path_result_is_capability_failure` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `path_result_is_capability_failure` 条件。
+ */
 static bool path_result_is_capability_failure(ucn_result_t result)
 {
     return result == UCN_ERR_UNSUPPORTED || result == UCN_ERR_TOO_LARGE;
@@ -1328,6 +1675,10 @@ static bool path_result_is_capability_failure(ucn_result_t result)
  * Bearer set is unavailable; a primary-to-backup switch must preserve the
  * authenticated Path ID and its forwarding entry. */
 #if UCN_FEATURE_PATH
+/*
+ * EN: Removes or releases `revoke_path_and_mark_local_policy` from Lite/Full Node state with bounded work.
+ * 中文：以有界工作量从 Lite/Full Node 状态移除或释放 `revoke_path_and_mark_local_policy`。
+ */
 static void revoke_path_and_mark_local_policy(ucn_node_t *node,
                                                ucn_node_id_t owner,
                                                ucn_session_id_t owner_session_id,
@@ -1357,6 +1708,10 @@ static void revoke_path_and_mark_local_policy(ucn_node_t *node,
     }
 }
 
+/*
+ * EN: Removes or releases `revoke_paths_by_unavailable_egress` from Lite/Full Node state with bounded work.
+ * 中文：以有界工作量从 Lite/Full Node 状态移除或释放 `revoke_paths_by_unavailable_egress`。
+ */
 static void revoke_paths_by_unavailable_egress(ucn_node_t *node,
                                                 ucn_link_t *failed_link)
 {
@@ -1397,6 +1752,10 @@ static void revoke_paths_by_unavailable_egress(ucn_node_t *node,
  * carry its existing active traffic during SUSPECT, but it must not be used
  * to construct or validate a new candidate path. */
 #if UCN_FEATURE_CANDIDATE_ROUTING || UCN_FEATURE_DIAGNOSTICS
+/*
+ * EN: Checks the `link_is_candidate_eligible` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `link_is_candidate_eligible` 条件。
+ */
 static bool link_is_candidate_eligible(ucn_node_t *node, const ucn_link_t *link)
 {
     ucn_neighbor_entry_t *entry = find_neighbor_by_link(node, link);
@@ -1411,6 +1770,10 @@ static bool link_is_candidate_eligible(ucn_node_t *node, const ucn_link_t *link)
 }
 #endif
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `endpoint_handler`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `endpoint_handler`。
+ */
 static ucn_endpoint_handler_entry_t *find_endpoint_handler(ucn_node_t *node,
                                                             ucn_endpoint_t endpoint)
 {
@@ -1425,6 +1788,10 @@ static ucn_endpoint_handler_entry_t *find_endpoint_handler(ucn_node_t *node,
     return NULL;
 }
 
+/*
+ * EN: Checks whether `security_policy` satisfies the Lite/Full Node module's validity rules.
+ * 中文：检查 `security_policy` 是否满足 Lite/Full Node 模块的合法性规则。
+ */
 static bool security_policy_is_valid(const ucn_security_policy_t *policy)
 {
     return policy != NULL && policy->tx_mode <= UCN_SECURITY_TX_AUTO &&
@@ -1432,6 +1799,10 @@ static bool security_policy_is_valid(const ucn_security_policy_t *policy)
            policy->forward_mode <= UCN_SECURITY_FORWARD_TERMINAL_ONLY;
 }
 
+/*
+ * EN: Checks the current `security_policy_is_production_ready` condition in Lite/Full Node state.
+ * 中文：检查当前 Lite/Full Node 状态中的 `security_policy_is_production_ready` 条件。
+ */
 static bool security_policy_is_production_ready(
     const ucn_security_policy_t *policy)
 {
@@ -1442,6 +1813,10 @@ static bool security_policy_is_production_ready(
                UCN_SECURITY_FORWARD_PLAIN_AND_OPAQUE_E2E;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `endpoint_security_policy`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `endpoint_security_policy`。
+ */
 static ucn_endpoint_security_policy_entry_t *find_endpoint_security_policy(
     ucn_node_t *node,
     ucn_endpoint_t endpoint)
@@ -1457,6 +1832,10 @@ static ucn_endpoint_security_policy_entry_t *find_endpoint_security_policy(
     return NULL;
 }
 
+/*
+ * EN: Selects or resolves `resolve_security_policy` using deterministic Lite/Full Node rules.
+ * 中文：按照确定性的 Lite/Full Node 规则选择或解析 `resolve_security_policy`。
+ */
 static const ucn_security_policy_t *resolve_security_policy(ucn_node_t *node,
                                                              uint8_t message_type)
 {
@@ -1469,6 +1848,10 @@ static const ucn_security_policy_t *resolve_security_policy(ucn_node_t *node,
     return entry == NULL ? &node->security_policy : &entry->policy;
 }
 
+/*
+ * EN: Validates and processes `dispatch_endpoint` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `dispatch_endpoint`。
+ */
 static bool dispatch_endpoint(ucn_node_t *node, const ucn_frame_t *frame)
 {
     ucn_endpoint_handler_entry_t *entry;
@@ -1491,6 +1874,10 @@ typedef enum ucn_rreq_cache_classification {
     UCN_RREQ_CACHE_FULL
 } ucn_rreq_cache_classification_t;
 
+/*
+ * EN: Builds and submits `classify_route_request` through the bounded Lite/Full Node transmit path.
+ * 中文：构造 `classify_route_request` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_rreq_cache_classification_t classify_route_request(
     ucn_node_t *node,
     const ucn_frame_t *frame,
@@ -1527,6 +1914,10 @@ static ucn_rreq_cache_classification_t classify_route_request(
     return UCN_RREQ_CACHE_NEW;
 }
 
+/*
+ * EN: Applies `commit_route_request` after validating the current Lite/Full Node state.
+ * 中文：验证当前 Lite/Full Node 状态后应用 `commit_route_request`。
+ */
 static void commit_route_request(ucn_node_t *node,
                                  const ucn_frame_t *frame,
                                  ucn_route_cost_t route_cost,
@@ -1543,6 +1934,10 @@ static void commit_route_request(ucn_node_t *node,
     slot->last_observed_ms = node->now_ms;
 }
 
+/*
+ * EN: Removes and returns `take_control_token` from a bounded Lite/Full Node queue or slot.
+ * 中文：从固定容量的 Lite/Full Node 队列或槽位中移除并返回 `take_control_token`。
+ */
 static bool take_control_token(ucn_node_t *node)
 {
     uint32_t elapsed = node->now_ms - node->control_last_refill_ms;
@@ -1563,6 +1958,10 @@ static bool take_control_token(ucn_node_t *node)
     return true;
 }
 
+/*
+ * EN: Records `note_control_rx_drop` in bounded Lite/Full Node state or statistics.
+ * 中文：在固定容量的 Lite/Full Node 状态或统计中记录 `note_control_rx_drop`。
+ */
 static void note_control_rx_drop(ucn_node_t *node,
                                  ucn_control_rx_budget_type_t type)
 {
@@ -1575,6 +1974,10 @@ static void note_control_rx_drop(ucn_node_t *node,
     }
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `control_rx_peer_budget`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `control_rx_peer_budget`。
+ */
 static ucn_control_rx_peer_budget_t *find_control_rx_peer_budget(
     ucn_node_t *node,
     ucn_node_id_t peer_node_id,
@@ -1611,6 +2014,10 @@ static ucn_control_rx_peer_budget_t *find_control_rx_peer_budget(
     return free_slot;
 }
 
+/*
+ * EN: Removes or releases `release_control_rx_peer_budget` from Lite/Full Node state with bounded work.
+ * 中文：以有界工作量从 Lite/Full Node 状态移除或释放 `release_control_rx_peer_budget`。
+ */
 static void release_control_rx_peer_budget(ucn_node_t *node,
                                            ucn_node_id_t peer_node_id)
 {
@@ -1622,6 +2029,10 @@ static void release_control_rx_peer_budget(ucn_node_t *node,
     }
 }
 
+/*
+ * EN: Removes and returns `take_control_rx_token` from a bounded Lite/Full Node queue or slot.
+ * 中文：从固定容量的 Lite/Full Node 队列或槽位中移除并返回 `take_control_rx_token`。
+ */
 static bool take_control_rx_token(ucn_node_t *node,
                                   const ucn_link_t *ingress_link,
                                   ucn_control_rx_budget_type_t type)
@@ -1682,6 +2093,10 @@ static bool take_control_rx_token(ucn_node_t *node,
  * topology query can therefore never consume the Q0 control budget used by
  * join, liveness, and route recovery. */
 #if UCN_FEATURE_DIAGNOSTICS
+/*
+ * EN: Removes and returns `take_path_trace_token` from a bounded Lite/Full Node queue or slot.
+ * 中文：从固定容量的 Lite/Full Node 队列或槽位中移除并返回 `take_path_trace_token`。
+ */
 static bool take_path_trace_token(ucn_node_t *node)
 {
     uint32_t elapsed = node->now_ms - node->path_trace_last_refill_ms;
@@ -1706,6 +2121,10 @@ static bool take_path_trace_token(ucn_node_t *node)
 
 /* A snapshot touches the whole reachable component, unlike a single-path
  * trace.  It therefore has its own, slower token bucket. */
+/*
+ * EN: Removes and returns `take_node_snapshot_token` from a bounded Lite/Full Node queue or slot.
+ * 中文：从固定容量的 Lite/Full Node 队列或槽位中移除并返回 `take_node_snapshot_token`。
+ */
 static bool take_node_snapshot_token(ucn_node_t *node)
 {
     uint32_t elapsed = node->now_ms - node->node_snapshot_last_refill_ms;
@@ -1730,6 +2149,10 @@ static bool take_node_snapshot_token(ucn_node_t *node)
 
 /* Per-node strategy inspection is unicast, but still must never consume the
  * Q0 control budget or become a periodic telemetry stream. */
+/*
+ * EN: Removes and returns `take_policy_diagnostic_token` from a bounded Lite/Full Node queue or slot.
+ * 中文：从固定容量的 Lite/Full Node 队列或槽位中移除并返回 `take_policy_diagnostic_token`。
+ */
 static bool take_policy_diagnostic_token(ucn_node_t *node)
 {
     uint32_t elapsed = node->now_ms - node->policy_diagnostic_last_refill_ms;
@@ -1753,6 +2176,10 @@ static bool take_policy_diagnostic_token(ucn_node_t *node)
 }
 #endif
 
+/*
+ * EN: Checks or removes expired `expire_neighbor_candidates` state in Lite/Full Node.
+ * 中文：检查或移除 Lite/Full Node 中已过期的 `expire_neighbor_candidates` 状态。
+ */
 static void expire_neighbor_candidates(ucn_node_t *node, uint32_t now_ms)
 {
     size_t index;
@@ -1792,6 +2219,10 @@ static void expire_neighbor_candidates(ucn_node_t *node, uint32_t now_ms)
     }
 }
 
+/*
+ * EN: Allocates `allocate_neighbor_slot` from fixed Lite/Full Node slots without heap use.
+ * 中文：从 Lite/Full Node 的固定槽位分配 `allocate_neighbor_slot`，不使用堆内存。
+ */
 static ucn_neighbor_entry_t *allocate_neighbor_slot(ucn_node_t *node)
 {
     size_t index;
@@ -1807,6 +2238,10 @@ static ucn_neighbor_entry_t *allocate_neighbor_slot(ucn_node_t *node)
     return NULL;
 }
 
+/*
+ * EN: Validates and installs `admit_neighbor_entry` into bounded Lite/Full Node state.
+ * 中文：验证 `admit_neighbor_entry` 并将其安装到固定容量的 Lite/Full Node 状态中。
+ */
 static ucn_result_t admit_neighbor_entry(ucn_node_t *node,
                                          ucn_neighbor_entry_t *entry)
 {
@@ -1847,6 +2282,10 @@ static ucn_result_t admit_neighbor_entry(ucn_node_t *node,
     return result;
 }
 
+/*
+ * EN: Clears `discovery` from Lite/Full Node without allocating memory.
+ * 中文：从 Lite/Full Node 中清除 `discovery`，且不进行动态分配。
+ */
 static void clear_discovery(ucn_node_t *node, ucn_node_id_t destination)
 {
     size_t index;
@@ -1862,6 +2301,10 @@ static void clear_discovery(ucn_node_t *node, ucn_node_id_t destination)
 #endif
 }
 
+/*
+ * EN: Checks or removes expired `expire_dynamic_state` state in Lite/Full Node.
+ * 中文：检查或移除 Lite/Full Node 中已过期的 `expire_dynamic_state` 状态。
+ */
 static void expire_dynamic_state(ucn_node_t *node, uint32_t now_ms)
 {
     size_t index;
@@ -1894,6 +2337,10 @@ static void expire_dynamic_state(ucn_node_t *node, uint32_t now_ms)
     }
 }
 
+/*
+ * EN: Updates `learn_route` in bounded Lite/Full Node state.
+ * 中文：更新固定容量 Lite/Full Node 状态中的 `learn_route`。
+ */
 static ucn_result_t learn_route(ucn_node_t *node,
                                 ucn_node_id_t destination,
                                 ucn_link_t *egress_link,
@@ -1989,6 +2436,10 @@ static ucn_result_t learn_route(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `active_route`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `active_route`。
+ */
 static ucn_route_entry_t *find_active_route(ucn_node_t *node,
                                             ucn_node_id_t destination)
 {
@@ -2005,6 +2456,10 @@ static ucn_route_entry_t *find_active_route(ucn_node_t *node,
 }
 
 #if UCN_FEATURE_CANDIDATE_ROUTING
+/*
+ * EN: Searches bounded Lite/Full Node state for `candidate_route`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `candidate_route`。
+ */
 static ucn_candidate_route_t *find_candidate_route(ucn_node_t *node,
                                                     ucn_node_id_t destination,
                                                     uint32_t candidate_id)
@@ -2022,6 +2477,10 @@ static ucn_candidate_route_t *find_candidate_route(ucn_node_t *node,
     return NULL;
 }
 
+/*
+ * EN: Updates `learn_candidate_route` in bounded Lite/Full Node state.
+ * 中文：更新固定容量 Lite/Full Node 状态中的 `learn_candidate_route`。
+ */
 static ucn_result_t learn_candidate_route(ucn_node_t *node,
                                           ucn_node_id_t destination,
                                           uint32_t candidate_id,
@@ -2087,6 +2546,10 @@ static ucn_result_t learn_candidate_route(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Applies `activate_candidate_route` after validating the current Lite/Full Node state.
+ * 中文：验证当前 Lite/Full Node 状态后应用 `activate_candidate_route`。
+ */
 static ucn_result_t activate_candidate_route(ucn_node_t *node,
                                              ucn_node_id_t destination,
                                              uint32_t candidate_id,
@@ -2154,6 +2617,10 @@ static ucn_result_t activate_candidate_route(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Checks or removes expired `expire_candidate_routes` state in Lite/Full Node.
+ * 中文：检查或移除 Lite/Full Node 中已过期的 `expire_candidate_routes` 状态。
+ */
 static void expire_candidate_routes(ucn_node_t *node)
 {
     size_t index;
@@ -2167,6 +2634,10 @@ static void expire_candidate_routes(ucn_node_t *node)
 }
 #endif
 
+/*
+ * EN: Updates `mark_route_used` in bounded Lite/Full Node state.
+ * 中文：更新固定容量 Lite/Full Node 状态中的 `mark_route_used`。
+ */
 static void mark_route_used(ucn_node_t *node, ucn_node_id_t destination)
 {
     ucn_route_entry_t *route = find_active_route(node, destination);
@@ -2177,6 +2648,10 @@ static void mark_route_used(ucn_node_t *node, ucn_node_id_t destination)
 }
 
 #if UCN_FEATURE_CANDIDATE_ROUTING
+/*
+ * EN: Starts or prepares `start_due_route_refresh` after validating Lite/Full Node prerequisites.
+ * 中文：验证 Lite/Full Node 前置条件后启动或准备 `start_due_route_refresh`。
+ */
 static ucn_result_t start_due_route_refresh(ucn_node_t *node, uint32_t now_ms)
 {
     size_t index;
@@ -2200,6 +2675,10 @@ static ucn_result_t start_due_route_refresh(ucn_node_t *node, uint32_t now_ms)
 }
 #endif
 
+/*
+ * EN: Clears or releases `invalidate_routes_by_link` from bounded Lite/Full Node state.
+ * 中文：从固定容量的 Lite/Full Node 状态中清除或释放 `invalidate_routes_by_link`。
+ */
 static void invalidate_routes_by_link(ucn_node_t *node, const ucn_link_t *link)
 {
     size_t index;
@@ -2225,6 +2704,10 @@ static void invalidate_routes_by_link(ucn_node_t *node, const ucn_link_t *link)
 #endif
 }
 
+/*
+ * EN: Clears or releases `unregister_link` from bounded Lite/Full Node state.
+ * 中文：从固定容量的 Lite/Full Node 状态中清除或释放 `unregister_link`。
+ */
 static void unregister_link(ucn_node_t *node, ucn_link_t *link)
 {
     size_t index;
@@ -2247,6 +2730,10 @@ static void unregister_link(ucn_node_t *node, ucn_link_t *link)
     }
 }
 
+/*
+ * EN: Removes or releases `remove_neighbor_entry` from Lite/Full Node state with bounded work.
+ * 中文：以有界工作量从 Lite/Full Node 状态移除或释放 `remove_neighbor_entry`。
+ */
 static void remove_neighbor_entry(ucn_node_t *node, ucn_neighbor_entry_t *entry)
 {
     size_t index;
@@ -2282,6 +2769,10 @@ static void remove_neighbor_entry(ucn_node_t *node, ucn_neighbor_entry_t *entry)
     node->stats.neighbor_removed++;
 }
 
+/*
+ * EN: Records `touch_neighbor` in bounded Lite/Full Node state or statistics.
+ * 中文：在固定容量的 Lite/Full Node 状态或统计中记录 `touch_neighbor`。
+ */
 static void touch_neighbor(ucn_node_t *node, ucn_link_t *link)
 {
     ucn_neighbor_entry_t *entry = find_neighbor_by_link(node, link);
@@ -2300,6 +2791,10 @@ static void touch_neighbor(ucn_node_t *node, ucn_link_t *link)
     }
 }
 
+/*
+ * EN: Checks the `neighbor_has_active_bearer` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `neighbor_has_active_bearer` 条件。
+ */
 static bool neighbor_has_active_bearer(const ucn_neighbor_entry_t *entry)
 {
     size_t index;
@@ -2312,6 +2807,10 @@ static bool neighbor_has_active_bearer(const ucn_neighbor_entry_t *entry)
     return false;
 }
 
+/*
+ * EN: Checks the `neighbor_has_admitted_bearer` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `neighbor_has_admitted_bearer` 条件。
+ */
 static bool neighbor_has_admitted_bearer(const ucn_neighbor_entry_t *entry)
 {
     size_t index;
@@ -2324,6 +2823,10 @@ static bool neighbor_has_admitted_bearer(const ucn_neighbor_entry_t *entry)
     return false;
 }
 
+/*
+ * EN: Updates `refresh_neighbor_liveness_state` in bounded Lite/Full Node state.
+ * 中文：更新固定容量 Lite/Full Node 状态中的 `refresh_neighbor_liveness_state`。
+ */
 static void refresh_neighbor_liveness_state(ucn_node_t *node,
                                              ucn_neighbor_entry_t *entry,
                                              uint32_t now_ms)
@@ -2349,6 +2852,10 @@ static void refresh_neighbor_liveness_state(ucn_node_t *node,
 /* A Link may transition down between a caller's selection and the local
  * status check in send_frame_on_link().  Treat that observed local failure
  * like a sampled-down Bearer so a later Path resolution can use its backup. */
+/*
+ * EN: Updates `mark_neighbor_bearer_down` in bounded Lite/Full Node state.
+ * 中文：更新固定容量 Lite/Full Node 状态中的 `mark_neighbor_bearer_down`。
+ */
 static void mark_neighbor_bearer_down(ucn_node_t *node, ucn_link_t *link)
 {
     ucn_neighbor_entry_t *entry = find_neighbor_by_link(node, link);
@@ -2364,6 +2871,10 @@ static void mark_neighbor_bearer_down(ucn_node_t *node, ucn_link_t *link)
     refresh_neighbor_liveness_state(node, entry, node->now_ms);
 }
 
+/*
+ * EN: Processes one bounded `maintain_neighbor_liveness` work unit for Lite/Full Node.
+ * 中文：为 Lite/Full Node 处理一个有界的 `maintain_neighbor_liveness` 工作单元。
+ */
 static void maintain_neighbor_liveness(ucn_node_t *node, uint32_t now_ms)
 {
     size_t index;
@@ -2409,6 +2920,10 @@ static void maintain_neighbor_liveness(ucn_node_t *node, uint32_t now_ms)
     }
 }
 
+/*
+ * EN: Allocates `allocate_sequence` from fixed Lite/Full Node slots without heap use.
+ * 中文：从 Lite/Full Node 的固定槽位分配 `allocate_sequence`，不使用堆内存。
+ */
 static ucn_result_t allocate_sequence(ucn_node_t *node, ucn_sequence_t *sequence)
 {
     ucn_sequence_t next_sequence;
@@ -2457,19 +2972,37 @@ static ucn_result_t allocate_sequence(ucn_node_t *node, ucn_sequence_t *sequence
     return UCN_OK;
 }
 
+/*
+ * EN: Copies or submits `queue_items` to a bounded Lite/Full Node queue.
+ * 中文：把 `queue_items` 复制或提交到固定容量的 Lite/Full Node 队列。
+ */
 static ucn_tx_item_t *queue_items(ucn_node_t *node,
                                   ucn_traffic_class_t traffic_class,
                                   size_t *count)
 {
-    if (traffic_class == UCN_TRAFFIC_Q0_CRITICAL) {
+    switch (traffic_class) {
+    case UCN_TRAFFIC_Q0_CRITICAL:
         *count = UCN_TX_Q0_DEPTH;
         return node->q0;
+    case UCN_TRAFFIC_Q1_REALTIME:
+        *count = UCN_TX_Q1_DEPTH;
+        return node->q1;
+    case UCN_TRAFFIC_Q2_NORMAL:
+        *count = UCN_TX_Q2_DEPTH;
+        return node->q2;
+    case UCN_TRAFFIC_Q3_BULK:
+        *count = UCN_TX_Q3_DEPTH;
+        return node->q3;
+    default:
+        *count = 0U;
+        return NULL;
     }
-
-    *count = UCN_TX_Q1_DEPTH;
-    return node->q1;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `next_item`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `next_item`。
+ */
 static ucn_tx_item_t *find_next_item(ucn_tx_item_t *items, size_t count)
 {
     size_t index;
@@ -2485,6 +3018,70 @@ static ucn_tx_item_t *find_next_item(ucn_tx_item_t *items, size_t count)
     return oldest;
 }
 
+/* Interleaved 6:3:2:1 weighted service.  Q0 appears at least every second
+ * slot, while a continuously backlogged Q3 is still served once per cycle. */
+#define UCN_BUSINESS_SCHEDULE_LENGTH ((uint8_t)12U)
+static const ucn_traffic_class_t ucn_business_schedule[UCN_BUSINESS_SCHEDULE_LENGTH] = {
+    UCN_TRAFFIC_Q0_CRITICAL,
+    UCN_TRAFFIC_Q1_REALTIME,
+    UCN_TRAFFIC_Q0_CRITICAL,
+    UCN_TRAFFIC_Q2_NORMAL,
+    UCN_TRAFFIC_Q0_CRITICAL,
+    UCN_TRAFFIC_Q1_REALTIME,
+    UCN_TRAFFIC_Q0_CRITICAL,
+    UCN_TRAFFIC_Q3_BULK,
+    UCN_TRAFFIC_Q0_CRITICAL,
+    UCN_TRAFFIC_Q1_REALTIME,
+    UCN_TRAFFIC_Q0_CRITICAL,
+    UCN_TRAFFIC_Q2_NORMAL
+};
+
+/*
+ * EN: Selects the next queued business item using bounded weighted service.
+ * 中文：使用有界加权服务选择下一条排队业务消息。
+ */
+static ucn_tx_item_t *select_business_item(ucn_node_t *node,
+                                           uint8_t *next_cursor)
+{
+    uint8_t offset;
+    ucn_tx_item_t *retained_q0;
+
+    retained_q0 = find_next_item(node->q0, UCN_TX_Q0_DEPTH);
+    if (retained_q0 != NULL &&
+        retained_q0->delivery == UCN_DELIVERY_RETRY_ON_BACKPRESSURE &&
+        (retained_q0->next_attempt_ms != 0U ||
+         retained_q0->backpressure_retries != 0U
+#if UCN_FEATURE_DYNAMIC_MESH
+         || retained_q0->waiting_for_route
+#endif
+        )) {
+        *next_cursor = node->business_schedule_cursor;
+        return retained_q0;
+    }
+
+    for (offset = 0U; offset < UCN_BUSINESS_SCHEDULE_LENGTH; ++offset) {
+        const uint8_t schedule_index = (uint8_t)(
+            (node->business_schedule_cursor + offset) % UCN_BUSINESS_SCHEDULE_LENGTH);
+        const ucn_traffic_class_t traffic_class =
+            ucn_business_schedule[schedule_index];
+        size_t count;
+        ucn_tx_item_t *items = queue_items(node, traffic_class, &count);
+        ucn_tx_item_t *item = find_next_item(items, count);
+
+        if (item != NULL) {
+            *next_cursor = (uint8_t)(
+                (schedule_index + 1U) % UCN_BUSINESS_SCHEDULE_LENGTH);
+            return item;
+        }
+    }
+    *next_cursor = node->business_schedule_cursor;
+    return NULL;
+}
+
+/*
+ * EN: Checks the `queue_pending_q1` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `queue_pending_q1` 条件。
+ */
 static ucn_result_t queue_pending_q1(ucn_node_t *node,
                                      ucn_node_id_t destination,
                                      uint8_t message_type,
@@ -2529,6 +3126,10 @@ static ucn_result_t queue_pending_q1(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and submits `send_pending_q1_if_ready` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_pending_q1_if_ready` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_pending_q1_if_ready(ucn_node_t *node, uint32_t now_ms)
 {
     size_t index;
@@ -2575,6 +3176,10 @@ static ucn_result_t send_pending_q1_if_ready(ucn_node_t *node, uint32_t now_ms)
     return UCN_ERR_NOT_FOUND;
 }
 
+/*
+ * EN: Returns the current `link_status` view from Lite/Full Node state.
+ * 中文：从 Lite/Full Node 状态返回当前 `link_status` 视图。
+ */
 static ucn_result_t get_link_status(const ucn_link_t *link, ucn_link_status_t *status)
 {
     if (link == NULL || link->ops == NULL || link->ops->send == NULL ||
@@ -2585,6 +3190,10 @@ static ucn_result_t get_link_status(const ucn_link_t *link, ucn_link_status_t *s
     return link->ops->get_status(link, status);
 }
 
+/*
+ * EN: Checks the `link_is_usable` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `link_is_usable` 条件。
+ */
 static bool link_is_usable(const ucn_link_t *link)
 {
     ucn_link_status_t status;
@@ -2593,6 +3202,10 @@ static bool link_is_usable(const ucn_link_t *link)
            ucn_link_effective_mtu(link, &status) != 0U;
 }
 
+/*
+ * EN: Calculates `link_heartbeat_interval_ms` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `link_heartbeat_interval_ms`。
+ */
 static uint32_t link_heartbeat_interval_ms(const ucn_link_t *link)
 {
     return link != NULL &&
@@ -2601,6 +3214,34 @@ static uint32_t link_heartbeat_interval_ms(const ucn_link_t *link)
                UCN_HEARTBEAT_INTERVAL_MS;
 }
 
+/*
+ * EN: Derives a directional, deterministic post-admission Heartbeat phase so
+ * MCU nodes do not keep every Bearer synchronized onto one radio burst. The
+ * phase is local state only and does not change the wire format.
+ * 中文：为入网后的心跳计算带方向且确定性的相位，避免 MCU 把所有 Bearer
+ * 长期同步成同一无线突发；该相位只属于本地状态，不改变线协议格式。
+ */
+static uint32_t initial_heartbeat_phase_ms(const ucn_node_t *node,
+                                           const ucn_neighbor_entry_t *entry,
+                                           const ucn_neighbor_bearer_t *bearer)
+{
+    const uint32_t interval_ms = link_heartbeat_interval_ms(bearer->link);
+    uint32_t mixed = (uint32_t)node->config.node_id * UINT32_C(0x9E3779B1);
+
+    mixed ^= (uint32_t)entry->peer_node_id * UINT32_C(0x85EBCA6B);
+    mixed ^= (uint32_t)bearer->link->link_id * UINT32_C(0xC2B2AE35);
+    mixed ^= mixed >> 16U;
+    mixed *= UINT32_C(0x7FEB352D);
+    mixed ^= mixed >> 15U;
+    mixed *= UINT32_C(0x846CA68B);
+    mixed ^= mixed >> 16U;
+    return mixed % interval_ms;
+}
+
+/*
+ * EN: Calculates `link_suspect_timeout_ms` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `link_suspect_timeout_ms`。
+ */
 static uint32_t link_suspect_timeout_ms(const ucn_link_t *link)
 {
     return link != NULL &&
@@ -2609,6 +3250,10 @@ static uint32_t link_suspect_timeout_ms(const ucn_link_t *link)
                UCN_NEIGHBOR_SUSPECT_TIMEOUT_MS;
 }
 
+/*
+ * EN: Calculates `link_remove_timeout_ms` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `link_remove_timeout_ms`。
+ */
 static uint32_t link_remove_timeout_ms(const ucn_link_t *link)
 {
     return link != NULL &&
@@ -2617,6 +3262,10 @@ static uint32_t link_remove_timeout_ms(const ucn_link_t *link)
                UCN_NEIGHBOR_REMOVE_TIMEOUT_MS;
 }
 
+/*
+ * EN: Selects or resolves `resolve_link_local_receive_profile` using deterministic Lite/Full Node rules.
+ * 中文：按照确定性的 Lite/Full Node 规则选择或解析 `resolve_link_local_receive_profile`。
+ */
 static ucn_result_t resolve_link_local_receive_profile(
     const ucn_node_t *node,
     const ucn_link_t *link,
@@ -2640,6 +3289,10 @@ static ucn_result_t resolve_link_local_receive_profile(
     return UCN_OK;
 }
 
+/*
+ * EN: Builds `prepare_outbound_wire_profile` in caller-provided storage for Lite/Full Node.
+ * 中文：在调用方存储中为 Lite/Full Node 构造 `prepare_outbound_wire_profile`。
+ */
 static ucn_result_t prepare_outbound_wire_profile(
     const ucn_node_t *node,
     const ucn_link_t *link,
@@ -2702,6 +3355,10 @@ static ucn_result_t prepare_outbound_wire_profile(
         &frame->wire_profile);
 }
 
+/*
+ * EN: Validates and submits `send_frame_on_link` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_frame_on_link` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_frame_on_link(ucn_node_t *node,
                                        ucn_link_t *link,
                                        const ucn_frame_t *frame)
@@ -2760,6 +3417,9 @@ static ucn_result_t send_frame_on_link(ucn_node_t *node,
     result = link->ops->send(link, encoded, encoded_length);
     if (result == UCN_OK) {
         node->stats.tx_sent++;
+        if ((uint8_t)frame->traffic_class < (uint8_t)UCN_TRAFFIC_CLASS_COUNT) {
+            node->stats.tx_sent_by_class[(uint8_t)frame->traffic_class]++;
+        }
     } else {
         node->stats.tx_error_dropped++;
         if (result == UCN_ERR_LINK_DOWN) {
@@ -2772,6 +3432,10 @@ static ucn_result_t send_frame_on_link(ucn_node_t *node,
 /* A Driver may report LINK_DOWN only after its status snapshot was selected.
  * That first attempt cannot have delivered successfully, so a single retry on
  * the same logical Neighbor's newly selected admitted Bearer is safe. */
+/*
+ * EN: Validates and submits `send_frame_on_logical_egress` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_frame_on_logical_egress` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_frame_on_logical_egress(ucn_node_t *node,
                                                  ucn_link_t *configured_link,
                                                  const ucn_frame_t *frame,
@@ -2811,6 +3475,10 @@ static ucn_result_t send_frame_on_logical_egress(ucn_node_t *node,
     return send_frame_on_link(node, link, frame);
 }
 
+/*
+ * EN: Validates `protect_outbound_business` against the Lite/Full Node security or authorization contract.
+ * 中文：按照 Lite/Full Node 的安全或授权合同验证 `protect_outbound_business`。
+ */
 static ucn_result_t protect_outbound_business(ucn_node_t *node,
                                               ucn_link_t *link,
                                               const ucn_link_status_t *status,
@@ -2865,6 +3533,10 @@ static ucn_result_t protect_outbound_business(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates `inbound_business_security` before Lite/Full Node state is used or changed.
+ * 中文：在使用或修改 Lite/Full Node 状态前验证 `inbound_business_security`。
+ */
 static ucn_result_t validate_inbound_business_security(
     ucn_node_t *node,
     ucn_link_t *ingress_link,
@@ -2919,6 +3591,10 @@ static ucn_result_t validate_inbound_business_security(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and submits `send_control_on_link_profile` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_control_on_link_profile` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_control_on_link_profile(
     ucn_node_t *node,
     ucn_link_t *link,
@@ -2964,6 +3640,10 @@ static ucn_result_t send_control_on_link_profile(
 /* Only use this wrapper for control payloads whose semantics do not contain
  * additional profile-sized identifiers.  Profile-dependent payload codecs are
  * migrated explicitly in V5-14/V5-15 instead of being silently narrowed. */
+/*
+ * EN: Validates and submits `send_adaptive_control_on_link` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_adaptive_control_on_link` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_adaptive_control_on_link(
     ucn_node_t *node,
     ucn_link_t *link,
@@ -2980,6 +3660,10 @@ static ucn_result_t send_adaptive_control_on_link(
 }
 
 #if UCN_FEATURE_PATH
+/*
+ * EN: Selects or resolves `select_path_control_profile` using deterministic Lite/Full Node rules.
+ * 中文：按照确定性的 Lite/Full Node 规则选择或解析 `select_path_control_profile`。
+ */
 static ucn_result_t select_path_control_profile(
     const ucn_node_t *node,
     const ucn_link_t *link,
@@ -3053,6 +3737,10 @@ static ucn_result_t select_path_control_profile(
     return UCN_ERR_TOO_LARGE;
 }
 
+/*
+ * EN: Validates and submits `send_control_to_node_profile` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_control_to_node_profile` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_control_to_node_profile(
     ucn_node_t *node,
     ucn_node_id_t control_target,
@@ -3078,11 +3766,19 @@ static ucn_result_t send_control_to_node_profile(
 #endif
 
 #if UCN_FEATURE_PATH
+/*
+ * EN: Creates the wrap-safe expiration deadline for a Path lease.
+ * 中文：为 Path 租约生成回绕安全的到期时间。
+ */
 static uint32_t path_expires_at(const ucn_node_t *node, uint32_t lease_ms)
 {
     return node == NULL ? 0U : ucn_deadline_from_now(node->now_ms, lease_ms);
 }
 
+/*
+ * EN: Validates and installs `install_path_forward_entry` into bounded Lite/Full Node state.
+ * 中文：验证 `install_path_forward_entry` 并将其安装到固定容量的 Lite/Full Node 状态中。
+ */
 static ucn_result_t install_path_forward_entry(ucn_node_t *node,
                                                ucn_node_id_t owner,
                                                ucn_session_id_t owner_session_id,
@@ -3162,6 +3858,10 @@ static ucn_result_t install_path_forward_entry(ucn_node_t *node,
 #endif
 
 #if UCN_FEATURE_DIAGNOSTICS
+/*
+ * EN: Selects or resolves `select_path_trace_profile` using deterministic Lite/Full Node rules.
+ * 中文：按照确定性的 Lite/Full Node 规则选择或解析 `select_path_trace_profile`。
+ */
 static ucn_result_t select_path_trace_profile(
     const ucn_node_t *node,
     const ucn_link_t *link,
@@ -3216,11 +3916,19 @@ static ucn_result_t select_path_trace_profile(
     return UCN_ERR_TOO_LARGE;
 }
 
+/*
+ * EN: Checks the `path_trace_status_is_wire_valid` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `path_trace_status_is_wire_valid` 条件。
+ */
 static bool path_trace_status_is_wire_valid(uint8_t status)
 {
     return status <= (uint8_t)UCN_PATH_TRACE_STATUS_TRUNCATED;
 }
 
+/*
+ * EN: Checks whether `path_trace_payload` satisfies the Lite/Full Node module's validity rules.
+ * 中文：检查 `path_trace_payload` 是否满足 Lite/Full Node 模块的合法性规则。
+ */
 static bool path_trace_payload_is_valid(const ucn_frame_t *frame)
 {
     const ucn_wire_profile_descriptor_t *descriptor;
@@ -3265,6 +3973,10 @@ static bool path_trace_payload_is_valid(const ucn_frame_t *frame)
     return true;
 }
 
+/*
+ * EN: Appends `append_path_trace_node` to bounded Lite/Full Node storage.
+ * 中文：把 `append_path_trace_node` 追加到固定容量的 Lite/Full Node 存储中。
+ */
 static bool append_path_trace_node(const ucn_frame_t *frame,
                                    ucn_node_id_t node_id,
                                    uint8_t *output,
@@ -3298,6 +4010,10 @@ static bool append_path_trace_node(const ucn_frame_t *frame,
     return true;
 }
 
+/*
+ * EN: Validates and submits `send_path_trace_request_on_link` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_path_trace_request_on_link` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_path_trace_request_on_link(ucn_node_t *node,
                                                      ucn_link_t *link,
                                                      ucn_node_id_t destination,
@@ -3328,6 +4044,10 @@ static ucn_result_t send_path_trace_request_on_link(ucn_node_t *node,
     return send_frame_on_link(node, link, &frame);
 }
 
+/*
+ * EN: Validates and submits `send_path_trace_reply_on_link` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_path_trace_reply_on_link` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_path_trace_reply_on_link(ucn_node_t *node,
                                                    ucn_link_t *link,
                                                    ucn_node_id_t destination,
@@ -3375,6 +4095,10 @@ static ucn_result_t send_path_trace_reply_on_link(ucn_node_t *node,
     return result;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `path_trace_pending`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `path_trace_pending`。
+ */
 static ucn_path_trace_pending_t *find_path_trace_pending(ucn_node_t *node,
                                                           uint32_t trace_id)
 {
@@ -3389,6 +4113,10 @@ static ucn_path_trace_pending_t *find_path_trace_pending(ucn_node_t *node,
     return NULL;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `free_path_trace_pending`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `free_path_trace_pending`。
+ */
 static ucn_path_trace_pending_t *find_free_path_trace_pending(ucn_node_t *node)
 {
     size_t index;
@@ -3401,6 +4129,10 @@ static ucn_path_trace_pending_t *find_free_path_trace_pending(ucn_node_t *node)
     return NULL;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `path_trace_reverse`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `path_trace_reverse`。
+ */
 static ucn_path_trace_reverse_t *find_path_trace_reverse(ucn_node_t *node,
                                                           ucn_node_id_t origin,
                                                           uint32_t trace_id)
@@ -3422,6 +4154,10 @@ static ucn_path_trace_reverse_t *find_path_trace_reverse(ucn_node_t *node,
     return NULL;
 }
 
+/*
+ * EN: Allocates `allocate_path_trace_reverse` from fixed Lite/Full Node slots without heap use.
+ * 中文：从 Lite/Full Node 的固定槽位分配 `allocate_path_trace_reverse`，不使用堆内存。
+ */
 static ucn_path_trace_reverse_t *allocate_path_trace_reverse(
     ucn_node_t *node,
     ucn_node_id_t origin,
@@ -3458,6 +4194,10 @@ static ucn_path_trace_reverse_t *allocate_path_trace_reverse(
     return free_slot;
 }
 
+/*
+ * EN: Checks or removes expired `expire_path_trace_state` state in Lite/Full Node.
+ * 中文：检查或移除 Lite/Full Node 中已过期的 `expire_path_trace_state` 状态。
+ */
 static void expire_path_trace_state(ucn_node_t *node, uint32_t now_ms)
 {
     size_t index;
@@ -3490,6 +4230,10 @@ static void expire_path_trace_state(ucn_node_t *node, uint32_t now_ms)
     }
 }
 
+/*
+ * EN: Completes `complete_path_trace` and records its terminal Lite/Full Node result.
+ * 中文：完成 `complete_path_trace` 并记录其 Lite/Full Node 终态结果。
+ */
 static ucn_result_t complete_path_trace(ucn_node_t *node,
                                         const ucn_frame_t *frame)
 {
@@ -3547,6 +4291,10 @@ static ucn_result_t complete_path_trace(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and processes `handle_path_trace_request` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_path_trace_request`。
+ */
 static ucn_result_t handle_path_trace_request(ucn_node_t *node,
                                               ucn_link_t *ingress_link,
                                               const ucn_frame_t *frame)
@@ -3632,6 +4380,10 @@ static ucn_result_t handle_path_trace_request(ucn_node_t *node,
     return result;
 }
 
+/*
+ * EN: Validates and processes `handle_path_trace_reply` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_path_trace_reply`。
+ */
 static ucn_result_t handle_path_trace_reply(ucn_node_t *node,
                                             ucn_link_t *ingress_link,
                                             const ucn_frame_t *frame)
@@ -3669,6 +4421,10 @@ static ucn_result_t handle_path_trace_reply(ucn_node_t *node,
     return result;
 }
 
+/*
+ * EN: Checks whether `node_snapshot_request_payload` satisfies the Lite/Full Node module's validity rules.
+ * 中文：检查 `node_snapshot_request_payload` 是否满足 Lite/Full Node 模块的合法性规则。
+ */
 static bool node_snapshot_request_payload_is_valid(const ucn_frame_t *frame)
 {
     size_t index;
@@ -3689,6 +4445,10 @@ static bool node_snapshot_request_payload_is_valid(const ucn_frame_t *frame)
     return true;
 }
 
+/*
+ * EN: Checks whether `node_snapshot_reply_payload` satisfies the Lite/Full Node module's validity rules.
+ * 中文：检查 `node_snapshot_reply_payload` 是否满足 Lite/Full Node 模块的合法性规则。
+ */
 static bool node_snapshot_reply_payload_is_valid(const ucn_frame_t *frame)
 {
     const ucn_wire_profile_descriptor_t *descriptor;
@@ -3722,6 +4482,10 @@ static bool node_snapshot_reply_payload_is_valid(const ucn_frame_t *frame)
                UCN_MAX_NEIGHBORS;
 }
 
+/*
+ * EN: Validates and submits `send_node_snapshot_reply_on_link` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_node_snapshot_reply_on_link` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_node_snapshot_reply_on_link(
     ucn_node_t *node,
     ucn_link_t *link,
@@ -3769,6 +4533,10 @@ static ucn_result_t send_node_snapshot_reply_on_link(
     return result;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `node_snapshot_pending`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `node_snapshot_pending`。
+ */
 static ucn_node_snapshot_pending_t *find_node_snapshot_pending(
     ucn_node_t *node,
     uint32_t query_id)
@@ -3784,6 +4552,10 @@ static ucn_node_snapshot_pending_t *find_node_snapshot_pending(
     return NULL;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `free_node_snapshot_pending`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `free_node_snapshot_pending`。
+ */
 static ucn_node_snapshot_pending_t *find_free_node_snapshot_pending(
     ucn_node_t *node)
 {
@@ -3797,6 +4569,10 @@ static ucn_node_snapshot_pending_t *find_free_node_snapshot_pending(
     return NULL;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `node_snapshot_reverse`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `node_snapshot_reverse`。
+ */
 static ucn_node_snapshot_reverse_t *find_node_snapshot_reverse(
     ucn_node_t *node,
     ucn_node_id_t origin,
@@ -3818,6 +4594,10 @@ static ucn_node_snapshot_reverse_t *find_node_snapshot_reverse(
     return NULL;
 }
 
+/*
+ * EN: Allocates `allocate_node_snapshot_reverse` from fixed Lite/Full Node slots without heap use.
+ * 中文：从 Lite/Full Node 的固定槽位分配 `allocate_node_snapshot_reverse`，不使用堆内存。
+ */
 static ucn_node_snapshot_reverse_t *allocate_node_snapshot_reverse(
     ucn_node_t *node,
     ucn_node_id_t origin,
@@ -3851,6 +4631,10 @@ static ucn_node_snapshot_reverse_t *allocate_node_snapshot_reverse(
     return free_slot;
 }
 
+/*
+ * EN: Copies or submits `queue_node_snapshot_reply` to a bounded Lite/Full Node queue.
+ * 中文：把 `queue_node_snapshot_reply` 复制或提交到固定容量的 Lite/Full Node 队列。
+ */
 static bool queue_node_snapshot_reply(ucn_node_t *node,
                                       ucn_node_id_t origin,
                                       uint32_t query_id,
@@ -3891,6 +4675,10 @@ static bool queue_node_snapshot_reply(ucn_node_t *node,
     return true;
 }
 
+/*
+ * EN: Forwards or delivers `forward_node_snapshot_request` through the bounded Lite/Full Node path.
+ * 中文：通过有界的 Lite/Full Node 路径转发或投递 `forward_node_snapshot_request`。
+ */
 static ucn_result_t forward_node_snapshot_request(ucn_node_t *node,
                                                    ucn_link_t *ingress_link,
                                                    const ucn_frame_t *frame)
@@ -3921,6 +4709,10 @@ static ucn_result_t forward_node_snapshot_request(ucn_node_t *node,
     return sent_count != 0U ? UCN_OK : last_error;
 }
 
+/*
+ * EN: Checks or removes expired `expire_node_snapshot_state` state in Lite/Full Node.
+ * 中文：检查或移除 Lite/Full Node 中已过期的 `expire_node_snapshot_state` 状态。
+ */
 static void expire_node_snapshot_state(ucn_node_t *node, uint32_t now_ms)
 {
     size_t index;
@@ -3970,6 +4762,10 @@ static void expire_node_snapshot_state(ucn_node_t *node, uint32_t now_ms)
     }
 }
 
+/*
+ * EN: Validates and submits `send_due_node_snapshot_reply` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_due_node_snapshot_reply` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_due_node_snapshot_reply(ucn_node_t *node,
                                                   uint32_t now_ms)
 {
@@ -3993,6 +4789,10 @@ static ucn_result_t send_due_node_snapshot_reply(ucn_node_t *node,
     return UCN_ERR_NOT_FOUND;
 }
 
+/*
+ * EN: Checks whether `policy_diagnostic_selector` satisfies the Lite/Full Node module's validity rules.
+ * 中文：检查 `policy_diagnostic_selector` 是否满足 Lite/Full Node 模块的合法性规则。
+ */
 static bool policy_diagnostic_selector_is_valid(uint8_t section, uint8_t index)
 {
     switch ((ucn_policy_diagnostic_section_t)section) {
@@ -4011,6 +4811,10 @@ static bool policy_diagnostic_selector_is_valid(uint8_t section, uint8_t index)
     }
 }
 
+/*
+ * EN: Checks whether `policy_diagnostic_request` satisfies the Lite/Full Node module's validity rules.
+ * 中文：检查 `policy_diagnostic_request` 是否满足 Lite/Full Node 模块的合法性规则。
+ */
 static bool policy_diagnostic_request_is_valid(const ucn_frame_t *frame)
 {
     const uint8_t section = frame == NULL || frame->payload == NULL ? UINT8_MAX :
@@ -4030,6 +4834,10 @@ static bool policy_diagnostic_request_is_valid(const ucn_frame_t *frame)
     return policy_diagnostic_selector_is_valid(section, index);
 }
 
+/*
+ * EN: Checks whether `policy_diagnostic_reply` satisfies the Lite/Full Node module's validity rules.
+ * 中文：检查 `policy_diagnostic_reply` 是否满足 Lite/Full Node 模块的合法性规则。
+ */
 static bool policy_diagnostic_reply_is_valid(const ucn_frame_t *frame)
 {
     const uint8_t section = frame == NULL || frame->payload == NULL ? UINT8_MAX :
@@ -4066,6 +4874,10 @@ static bool policy_diagnostic_reply_is_valid(const ucn_frame_t *frame)
     }
 }
 
+/*
+ * EN: Calculates `policy_diagnostic_quality_flags` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `policy_diagnostic_quality_flags`。
+ */
 static uint8_t policy_diagnostic_quality_flags(
     const ucn_policy_link_quality_snapshot_t *quality)
 {
@@ -4092,6 +4904,10 @@ static uint8_t policy_diagnostic_quality_flags(
     return flags;
 }
 
+/*
+ * EN: Calculates `policy_diagnostic_write_quality` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `policy_diagnostic_write_quality`。
+ */
 static void policy_diagnostic_write_quality(
     uint8_t *record,
     size_t offset,
@@ -4106,6 +4922,10 @@ static void policy_diagnostic_write_quality(
     write_u16_be(record + offset + 6U, quality->queue_pressure_ewma_per_mille);
 }
 
+/*
+ * EN: Builds one bounded Policy diagnostic reply page.
+ * 中文：构造一页有界的 Policy 诊断响应。
+ */
 static void policy_diagnostic_build_reply(
     const ucn_node_t *node,
     uint32_t request_id,
@@ -4247,6 +5067,10 @@ static void policy_diagnostic_build_reply(
     payload[UCN_POLICY_DIAGNOSTIC_REPLY_STATUS_OFFSET] = (uint8_t)status;
 }
 
+/*
+ * EN: Reads and validates `policy_diagnostic_decode_result` from the canonical Lite/Full Node representation.
+ * 中文：从规范的 Lite/Full Node 表示中读取并验证 `policy_diagnostic_decode_result`。
+ */
 static void policy_diagnostic_decode_result(
     ucn_policy_diagnostic_result_t *result,
     ucn_node_id_t source,
@@ -4346,6 +5170,10 @@ static void policy_diagnostic_decode_result(
     }
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `policy_diagnostic_pending`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `policy_diagnostic_pending`。
+ */
 static ucn_policy_diagnostic_pending_t *find_policy_diagnostic_pending(
     ucn_node_t *node,
     uint32_t request_id)
@@ -4361,6 +5189,10 @@ static ucn_policy_diagnostic_pending_t *find_policy_diagnostic_pending(
     return NULL;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `free_policy_diagnostic_pending`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `free_policy_diagnostic_pending`。
+ */
 static ucn_policy_diagnostic_pending_t *find_free_policy_diagnostic_pending(
     ucn_node_t *node)
 {
@@ -4374,6 +5206,10 @@ static ucn_policy_diagnostic_pending_t *find_free_policy_diagnostic_pending(
     return NULL;
 }
 
+/*
+ * EN: Copies or submits `queue_policy_diagnostic_reply` to a bounded Lite/Full Node queue.
+ * 中文：把 `queue_policy_diagnostic_reply` 复制或提交到固定容量的 Lite/Full Node 队列。
+ */
 static bool queue_policy_diagnostic_reply(ucn_node_t *node,
                                           ucn_node_id_t destination,
                                           const uint8_t *payload)
@@ -4398,6 +5234,10 @@ static bool queue_policy_diagnostic_reply(ucn_node_t *node,
     return false;
 }
 
+/*
+ * EN: Checks or removes expired `expire_policy_diagnostic_state` state in Lite/Full Node.
+ * 中文：检查或移除 Lite/Full Node 中已过期的 `expire_policy_diagnostic_state` 状态。
+ */
 static void expire_policy_diagnostic_state(ucn_node_t *node, uint32_t now_ms)
 {
     size_t index;
@@ -4437,6 +5277,10 @@ static void expire_policy_diagnostic_state(ucn_node_t *node, uint32_t now_ms)
     }
 }
 
+/*
+ * EN: Validates and submits `send_policy_diagnostic_frame_on_link` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_policy_diagnostic_frame_on_link` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_policy_diagnostic_frame_on_link(
     ucn_node_t *node,
     ucn_link_t *link,
@@ -4467,6 +5311,10 @@ static ucn_result_t send_policy_diagnostic_frame_on_link(
     return send_frame_on_link(node, link, &frame);
 }
 
+/*
+ * EN: Validates and submits `send_due_policy_diagnostic_request` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_due_policy_diagnostic_request` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_due_policy_diagnostic_request(ucn_node_t *node)
 {
     size_t index;
@@ -4501,6 +5349,10 @@ static ucn_result_t send_due_policy_diagnostic_request(ucn_node_t *node)
     return UCN_ERR_NOT_FOUND;
 }
 
+/*
+ * EN: Validates and submits `send_due_policy_diagnostic_reply` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_due_policy_diagnostic_reply` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_due_policy_diagnostic_reply(ucn_node_t *node)
 {
     size_t index;
@@ -4532,6 +5384,10 @@ static ucn_result_t send_due_policy_diagnostic_reply(ucn_node_t *node)
     return UCN_ERR_NOT_FOUND;
 }
 
+/*
+ * EN: Validates and processes `handle_policy_diagnostic_request` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_policy_diagnostic_request`。
+ */
 static ucn_result_t handle_policy_diagnostic_request(
     ucn_node_t *node,
     const ucn_frame_t *frame)
@@ -4563,6 +5419,10 @@ static ucn_result_t handle_policy_diagnostic_request(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and processes `handle_policy_diagnostic_reply` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_policy_diagnostic_reply`。
+ */
 static ucn_result_t handle_policy_diagnostic_reply(
     ucn_node_t *node,
     const ucn_frame_t *frame)
@@ -4600,6 +5460,10 @@ static ucn_result_t handle_policy_diagnostic_reply(
     return UCN_OK;
 }
 
+/*
+ * EN: Completes `complete_node_snapshot_reply` and records its terminal Lite/Full Node result.
+ * 中文：完成 `complete_node_snapshot_reply` 并记录其 Lite/Full Node 终态结果。
+ */
 static ucn_result_t complete_node_snapshot_reply(ucn_node_t *node,
                                                   const ucn_frame_t *frame)
 {
@@ -4633,6 +5497,10 @@ static ucn_result_t complete_node_snapshot_reply(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and processes `handle_node_snapshot_request` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_node_snapshot_request`。
+ */
 static ucn_result_t handle_node_snapshot_request(ucn_node_t *node,
                                                   ucn_link_t *ingress_link,
                                                   const ucn_frame_t *frame)
@@ -4666,6 +5534,10 @@ static ucn_result_t handle_node_snapshot_request(ucn_node_t *node,
     return result == UCN_ERR_NOT_FOUND || result == UCN_ERR_TTL ? UCN_OK : result;
 }
 
+/*
+ * EN: Validates and processes `handle_node_snapshot_reply` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_node_snapshot_reply`。
+ */
 static ucn_result_t handle_node_snapshot_reply(ucn_node_t *node,
                                                 ucn_link_t *ingress_link,
                                                 const ucn_frame_t *frame)
@@ -4704,6 +5576,10 @@ static ucn_result_t handle_node_snapshot_reply(ucn_node_t *node,
 
 #endif
 
+/*
+ * EN: Updates `record_max_service_delay` in bounded Lite/Full Node state.
+ * 中文：更新固定容量 Lite/Full Node 状态中的 `record_max_service_delay`。
+ */
 static void record_max_service_delay(uint32_t *maximum_ms, uint32_t delay_ms)
 {
     if (delay_ms > *maximum_ms) {
@@ -4711,6 +5587,10 @@ static void record_max_service_delay(uint32_t *maximum_ms, uint32_t delay_ms)
     }
 }
 
+/*
+ * EN: Validates and submits `send_due_heartbeat` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_due_heartbeat` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_due_heartbeat(ucn_node_t *node, uint32_t now_ms)
 {
     size_t index;
@@ -4729,6 +5609,7 @@ static ucn_result_t send_due_heartbeat(ucn_node_t *node, uint32_t now_ms)
             ucn_neighbor_bearer_t *bearer = &entry->bearers[bearer_index];
             uint8_t payload[UCN_HEARTBEAT_PAYLOAD_BYTES];
             uint32_t service_delay_ms = 0U;
+            const bool first_heartbeat = !bearer->heartbeat_sent;
             ucn_result_t result;
 
             if (!bearer_is_active(bearer) || !link_is_usable(bearer->link) ||
@@ -4759,7 +5640,19 @@ static ucn_result_t send_due_heartbeat(ucn_node_t *node, uint32_t now_ms)
                 payload, (uint16_t)sizeof(payload));
             if (result == UCN_OK) {
                 bearer->heartbeat_sent = true;
-                bearer->last_heartbeat_sent_ms = now_ms;
+                /* Keep the first link-local liveness proof immediate, then
+                 * shift the recurring cadence into a deterministic local
+                 * phase.  No extra timer/state is required: wrap-safe
+                 * elapsed arithmetic treats `now - phase` as an earlier
+                 * successful send, so the next request is due after
+                 * `interval - phase` and later requests retain that phase.
+                 * 首个链路本地存活证明仍立即发送，随后把周期心跳平移到确定性
+                 * 本地相位；借助回绕安全的 elapsed 算术，无需新增定时器或状态。 */
+                bearer->last_heartbeat_sent_ms =
+                    first_heartbeat ?
+                        now_ms - initial_heartbeat_phase_ms(node, entry,
+                                                           bearer) :
+                        now_ms;
                 node->stats.heartbeat_requests_sent++;
                 record_max_service_delay(
                     &node->stats.max_heartbeat_service_delay_ms,
@@ -4775,6 +5668,10 @@ static ucn_result_t send_due_heartbeat(ucn_node_t *node, uint32_t now_ms)
  * quality probe.  The candidate is addressed on its own Link, so a relay
  * never needs to parse or forward it.  State is installed before the send:
  * virtual Links and some Drivers may synchronously deliver the ACK. */
+/*
+ * EN: Validates and submits `send_due_bearer_quality_probe` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_due_bearer_quality_probe` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_due_bearer_quality_probe(ucn_node_t *node,
                                                    uint32_t now_ms)
 {
@@ -4854,6 +5751,10 @@ static ucn_result_t send_due_bearer_quality_probe(ucn_node_t *node,
     return UCN_ERR_NOT_FOUND;
 }
 
+/*
+ * EN: Validates and processes `handle_heartbeat` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_heartbeat`。
+ */
 static ucn_result_t handle_heartbeat(ucn_node_t *node,
                                      ucn_link_t *ingress_link,
                                      const ucn_frame_t *frame)
@@ -4896,6 +5797,13 @@ static ucn_result_t handle_heartbeat(ucn_node_t *node,
         return UCN_OK;
     }
 
+#if !UCN_TEST_NODE_HEARTBEAT_ACK_ENABLED
+    /* Diagnostic-only: the request has still passed security, duplicate,
+     * peer-budget and liveness handling; stop immediately before the nested
+     * Link send used to return its ACK. */
+    return UCN_OK;
+#endif
+
     (void)memcpy(response, frame->payload, sizeof(response));
     response[0] = UCN_HEARTBEAT_ACK;
     result = send_adaptive_control_on_link(
@@ -4908,6 +5816,10 @@ static ucn_result_t handle_heartbeat(ucn_node_t *node,
 }
 
 #if UCN_FEATURE_CANDIDATE_ROUTING
+/*
+ * EN: Searches bounded Lite/Full Node state for `candidate_link`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `candidate_link`。
+ */
 static ucn_link_t *find_candidate_link(ucn_node_t *node,
                                        ucn_node_id_t destination,
                                        uint32_t candidate_id)
@@ -4924,6 +5836,10 @@ static ucn_link_t *find_candidate_link(ucn_node_t *node,
            NULL : egress_link;
 }
 
+/*
+ * EN: Calculates `allocate_route_epoch` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `allocate_route_epoch`。
+ */
 static uint16_t allocate_route_epoch(ucn_node_t *node,
                                      ucn_node_id_t destination,
                                      ucn_wire_profile_t wire_profile)
@@ -4951,6 +5867,10 @@ static uint16_t allocate_route_epoch(ucn_node_t *node,
     }
 }
 
+/*
+ * EN: Validates and submits `send_due_path_probe` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_due_path_probe` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_due_path_probe(ucn_node_t *node, uint32_t now_ms)
 {
     size_t index;
@@ -5025,6 +5945,10 @@ static ucn_result_t send_due_path_probe(ucn_node_t *node, uint32_t now_ms)
     return UCN_ERR_NOT_FOUND;
 }
 
+/*
+ * EN: Validates and processes `handle_path_probe` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_path_probe`。
+ */
 static ucn_result_t handle_path_probe(ucn_node_t *node,
                                       const ucn_frame_t *frame)
 {
@@ -5058,6 +5982,10 @@ static ucn_result_t handle_path_probe(ucn_node_t *node,
         frame->payload, frame->payload_length, frame->wire_profile);
 }
 
+/*
+ * EN: Validates and processes `handle_path_probe_ack` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_path_probe_ack`。
+ */
 static ucn_result_t handle_path_probe_ack(ucn_node_t *node,
                                           const ucn_frame_t *frame)
 {
@@ -5105,6 +6033,10 @@ static ucn_result_t handle_path_probe_ack(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and processes `handle_path_activate` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_path_activate`。
+ */
 static ucn_result_t handle_path_activate(ucn_node_t *node,
                                          const ucn_frame_t *frame)
 {
@@ -5158,6 +6090,10 @@ static ucn_result_t handle_path_activate(ucn_node_t *node,
                                     route_epoch, frame->wire_profile);
 }
 
+/*
+ * EN: Validates and processes `handle_path_activate_ack` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_path_activate_ack`。
+ */
 static ucn_result_t handle_path_activate_ack(ucn_node_t *node,
                                              const ucn_frame_t *frame)
 {
@@ -5183,6 +6119,10 @@ static ucn_result_t handle_path_activate_ack(ucn_node_t *node,
 }
 #endif
 
+/*
+ * EN: Forwards or delivers `forward_route_request` through the bounded Lite/Full Node path.
+ * 中文：通过有界的 Lite/Full Node 路径转发或投递 `forward_route_request`。
+ */
 static ucn_result_t forward_route_request(ucn_node_t *node,
                                           ucn_link_t *ingress_link,
                                           const ucn_frame_t *frame)
@@ -5258,6 +6198,10 @@ static ucn_result_t forward_route_request(ucn_node_t *node,
     return sent_count != 0U ? UCN_OK : last_error;
 }
 
+/*
+ * EN: Validates and submits `send_route_error` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_route_error` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_route_error(ucn_node_t *node,
                                      ucn_link_t *upstream_link,
                                      ucn_node_id_t origin,
@@ -5287,6 +6231,10 @@ static ucn_result_t send_route_error(ucn_node_t *node,
 }
 
 #if UCN_FEATURE_PATH
+/*
+ * EN: Validates and submits `send_path_route_error` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_path_route_error` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_path_route_error(ucn_node_t *node,
                                           ucn_link_t *upstream_link,
                                           ucn_node_id_t origin,
@@ -5327,6 +6275,10 @@ static ucn_result_t send_path_route_error(ucn_node_t *node,
 }
 #endif
 
+/*
+ * EN: Clears or releases `invalidate_route_to` from bounded Lite/Full Node state.
+ * 中文：从固定容量的 Lite/Full Node 状态中清除或释放 `invalidate_route_to`。
+ */
 static void invalidate_route_to(ucn_node_t *node, ucn_node_id_t destination)
 {
     size_t index;
@@ -5348,6 +6300,10 @@ static void invalidate_route_to(ucn_node_t *node, ucn_node_id_t destination)
     clear_discovery(node, destination);
 }
 
+/*
+ * EN: Validates `route_request_frame` before Lite/Full Node state is used or changed.
+ * 中文：在使用或修改 Lite/Full Node 状态前验证 `route_request_frame`。
+ */
 static ucn_result_t validate_route_request_frame(ucn_node_t *node,
                                                  ucn_link_t *ingress_link,
                                                  const ucn_frame_t *frame)
@@ -5385,6 +6341,10 @@ static ucn_result_t validate_route_request_frame(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates `inbound_hop_scope` before Lite/Full Node state is used or changed.
+ * 中文：在使用或修改 Lite/Full Node 状态前验证 `inbound_hop_scope`。
+ */
 static ucn_result_t validate_inbound_hop_scope(ucn_node_t *node,
                                                const ucn_frame_t *frame)
 {
@@ -5432,6 +6392,10 @@ static ucn_result_t validate_inbound_hop_scope(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and processes `handle_route_request` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_route_request`。
+ */
 static ucn_result_t handle_route_request(ucn_node_t *node,
                                          ucn_link_t *ingress_link,
                                          const ucn_frame_t *frame)
@@ -5519,6 +6483,10 @@ static ucn_result_t handle_route_request(ucn_node_t *node,
     return forward_route_request(node, ingress_link, frame);
 }
 
+/*
+ * EN: Validates and processes `handle_route_reply` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_route_reply`。
+ */
 static ucn_result_t handle_route_reply(ucn_node_t *node,
                                        ucn_link_t *ingress_link,
                                        const ucn_frame_t *frame,
@@ -5673,6 +6641,10 @@ static ucn_result_t handle_route_reply(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and processes `handle_route_error` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_route_error`。
+ */
 static ucn_result_t handle_route_error(ucn_node_t *node,
                                        const ucn_frame_t *frame,
                                        bool *consumed)
@@ -5724,6 +6696,10 @@ static ucn_result_t handle_route_error(ucn_node_t *node,
 }
 
 #if UCN_FEATURE_PATH
+/*
+ * EN: Verifies whether `authorize_path_control` is authorized by the Lite/Full Node contract.
+ * 中文：验证 `authorize_path_control` 是否获得 Lite/Full Node 合同授权。
+ */
 static ucn_result_t authorize_path_control(ucn_node_t *node,
                                            ucn_link_t *ingress_link,
                                            const ucn_frame_t *frame,
@@ -5746,6 +6722,10 @@ typedef enum path_control_budget_take_result {
     PATH_CONTROL_BUDGET_SOURCE_FULL = 2
 } path_control_budget_take_result_t;
 
+/*
+ * EN: Records `note_path_control_authorization_rejected` in bounded Lite/Full Node state or statistics.
+ * 中文：在固定容量的 Lite/Full Node 状态或统计中记录 `note_path_control_authorization_rejected`。
+ */
 static void note_path_control_authorization_rejected(
     ucn_node_t *node,
     uint8_t message_type)
@@ -5757,6 +6737,10 @@ static void note_path_control_authorization_rejected(
     }
 }
 
+/*
+ * EN: Initializes `initialize_path_control_source_budget` for Lite/Full Node using caller-owned fixed storage.
+ * 中文：使用调用方提供的固定存储初始化 Lite/Full Node 的 `initialize_path_control_source_budget`。
+ */
 static void initialize_path_control_source_budget(
     ucn_path_control_source_budget_t *budget,
     ucn_node_id_t source,
@@ -5776,6 +6760,10 @@ static void initialize_path_control_source_budget(
     }
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `path_control_source_budget`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `path_control_source_budget`。
+ */
 static ucn_path_control_source_budget_t *find_path_control_source_budget(
     ucn_node_t *node,
     ucn_node_id_t source,
@@ -5830,6 +6818,10 @@ static ucn_path_control_source_budget_t *find_path_control_source_budget(
     return free_slot;
 }
 
+/*
+ * EN: Removes and returns `take_path_control_source_token` from a bounded Lite/Full Node queue or slot.
+ * 中文：从固定容量的 Lite/Full Node 队列或槽位中移除并返回 `take_path_control_source_token`。
+ */
 static path_control_budget_take_result_t take_path_control_source_token(
     ucn_node_t *node,
     const ucn_frame_t *frame,
@@ -5870,6 +6862,10 @@ static path_control_budget_take_result_t take_path_control_source_token(
     return PATH_CONTROL_BUDGET_TAKEN;
 }
 
+/*
+ * EN: Validates and processes `handle_path_install` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_path_install`。
+ */
 static ucn_result_t handle_path_install(ucn_node_t *node,
                                         ucn_link_t *ingress_link,
                                         const ucn_frame_t *frame)
@@ -5976,6 +6972,10 @@ static ucn_result_t handle_path_install(ucn_node_t *node,
     return result;
 }
 
+/*
+ * EN: Validates and processes `handle_path_revoke` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_path_revoke`。
+ */
 static ucn_result_t handle_path_revoke(ucn_node_t *node,
                                        ucn_link_t *ingress_link,
                                        const ucn_frame_t *frame)
@@ -6032,6 +7032,10 @@ static ucn_result_t handle_path_revoke(ucn_node_t *node,
 /* HELLO is strictly link-local: it binds an ingress Link to one Node ID and
  * then hands the candidate to the configured join policy.  It is never
  * delivered to the application or forwarded by the mesh router. */
+/*
+ * EN: Validates and processes `handle_hello` in the Lite/Full Node receive path.
+ * 中文：在 Lite/Full Node 接收路径中验证并处理 `handle_hello`。
+ */
 static ucn_result_t handle_hello(ucn_node_t *node,
                                  ucn_link_t *ingress_link,
                                  const ucn_frame_t *frame)
@@ -6071,6 +7075,10 @@ static ucn_result_t handle_hello(ucn_node_t *node,
                                                  peer_receive_profile);
 }
 
+/*
+ * EN: Initializes a Node instance from validated caller-owned configuration and fixed storage.
+ * 中文：使用经验证的调用方配置与固定存储初始化一个 Node 实例。
+ */
 ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config)
 {
     ucn_result_t result;
@@ -6112,6 +7120,10 @@ ucn_result_t ucn_node_init(ucn_node_t *node, const ucn_config_t *config)
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `wire_profiles` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `wire_profiles`。
+ */
 ucn_result_t ucn_node_set_wire_profiles(
     ucn_node_t *node,
     ucn_wire_profile_t tx_profile,
@@ -6142,11 +7154,19 @@ ucn_result_t ucn_node_set_wire_profiles(
     return UCN_OK;
 }
 
+/*
+ * EN: Returns the current `tx_wire_profile` view from Lite/Full Node state.
+ * 中文：从 Lite/Full Node 状态返回当前 `tx_wire_profile` 视图。
+ */
 ucn_wire_profile_t ucn_node_get_tx_wire_profile(const ucn_node_t *node)
 {
     return node == NULL ? UCN_WIRE_PROFILE_UNSPECIFIED : node->tx_wire_profile;
 }
 
+/*
+ * EN: Returns the current `max_receive_wire_profile` view from Lite/Full Node state.
+ * 中文：从 Lite/Full Node 状态返回当前 `max_receive_wire_profile` 视图。
+ */
 ucn_wire_profile_t ucn_node_get_max_receive_wire_profile(
     const ucn_node_t *node)
 {
@@ -6154,6 +7174,10 @@ ucn_wire_profile_t ucn_node_get_max_receive_wire_profile(
                           node->max_receive_wire_profile;
 }
 
+/*
+ * EN: Validates and sets `wire_profile_auto` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `wire_profile_auto`。
+ */
 ucn_result_t ucn_node_set_wire_profile_auto(ucn_node_t *node, bool enabled)
 {
     if (node == NULL) {
@@ -6163,11 +7187,19 @@ ucn_result_t ucn_node_set_wire_profile_auto(ucn_node_t *node, bool enabled)
     return UCN_OK;
 }
 
+/*
+ * EN: Returns whether route-aware automatic Wire-Profile selection is enabled.
+ * 中文：返回是否已启用路由感知的自动 Wire Profile 选择。
+ */
 bool ucn_node_wire_profile_auto(const ucn_node_t *node)
 {
     return node != NULL && node->automatic_wire_profile;
 }
 
+/*
+ * EN: Validates and sets `link_wire_profile_limit` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `link_wire_profile_limit`。
+ */
 ucn_result_t ucn_node_set_link_wire_profile_limit(
     ucn_node_t *node,
     ucn_link_t *link,
@@ -6187,6 +7219,10 @@ ucn_result_t ucn_node_set_link_wire_profile_limit(
     return UCN_OK;
 }
 
+/*
+ * EN: Returns the current `link_wire_profile_limit` view from Lite/Full Node state.
+ * 中文：从 Lite/Full Node 状态返回当前 `link_wire_profile_limit` 视图。
+ */
 ucn_wire_profile_t ucn_node_get_link_wire_profile_limit(
     const ucn_node_t *node,
     const ucn_link_t *link)
@@ -6195,6 +7231,10 @@ ucn_wire_profile_t ucn_node_get_link_wire_profile_limit(
                UCN_WIRE_PROFILE_UNSPECIFIED : link->peer_wire_profile;
 }
 
+/*
+ * EN: Validates and sets `link_local_wire_profile_limit` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `link_local_wire_profile_limit`。
+ */
 ucn_result_t ucn_node_set_link_local_wire_profile_limit(
     ucn_node_t *node,
     ucn_link_t *link,
@@ -6219,6 +7259,10 @@ ucn_result_t ucn_node_set_link_local_wire_profile_limit(
     return UCN_OK;
 }
 
+/*
+ * EN: Returns the current `link_local_wire_profile_limit` view from Lite/Full Node state.
+ * 中文：从 Lite/Full Node 状态返回当前 `link_local_wire_profile_limit` 视图。
+ */
 ucn_wire_profile_t ucn_node_get_link_local_wire_profile_limit(
     const ucn_node_t *node,
     const ucn_link_t *link)
@@ -6229,6 +7273,10 @@ ucn_wire_profile_t ucn_node_get_link_local_wire_profile_limit(
     return (ucn_wire_profile_t)link->local_receive_wire_profile;
 }
 
+/*
+ * EN: Validates and sets `plain_session_id` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `plain_session_id`。
+ */
 ucn_result_t ucn_node_set_plain_session_id(ucn_node_t *node,
                                            ucn_session_id_t session_id)
 {
@@ -6246,6 +7294,10 @@ ucn_result_t ucn_node_set_plain_session_id(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Checks the current `security_ready` condition in Lite/Full Node state.
+ * 中文：检查当前 Lite/Full Node 状态中的 `security_ready` 条件。
+ */
 bool ucn_node_security_ready(const ucn_node_t *node)
 {
     size_t index;
@@ -6273,6 +7325,10 @@ bool ucn_node_security_ready(const ucn_node_t *node)
     return true;
 }
 
+/*
+ * EN: Validates and sets `security_required` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `security_required`。
+ */
 ucn_result_t ucn_node_set_security_required(ucn_node_t *node, bool required)
 {
     if (node == NULL) {
@@ -6282,6 +7338,10 @@ ucn_result_t ucn_node_set_security_required(ucn_node_t *node, bool required)
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `security` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `security`。
+ */
 ucn_result_t ucn_node_set_security(ucn_node_t *node,
                                    const ucn_security_ops_t *ops,
                                    void *context)
@@ -6330,6 +7390,10 @@ ucn_result_t ucn_node_set_security(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `security_policy` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `security_policy`。
+ */
 ucn_result_t ucn_node_set_security_policy(ucn_node_t *node,
                                           const ucn_security_policy_t *policy)
 {
@@ -6340,6 +7404,10 @@ ucn_result_t ucn_node_set_security_policy(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `endpoint_security_policy` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `endpoint_security_policy`。
+ */
 ucn_result_t ucn_node_set_endpoint_security_policy(
     ucn_node_t *node,
     ucn_endpoint_t endpoint,
@@ -6376,6 +7444,10 @@ ucn_result_t ucn_node_set_endpoint_security_policy(
     return UCN_ERR_NO_SPACE;
 }
 
+/*
+ * EN: Validates and sets `join_policy` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `join_policy`。
+ */
 ucn_result_t ucn_node_set_join_policy(ucn_node_t *node,
                                       ucn_join_policy_t policy,
                                       ucn_neighbor_authorize_fn authorize,
@@ -6402,6 +7474,10 @@ ucn_result_t ucn_node_set_join_policy(ucn_node_t *node,
 }
 
 #if UCN_FEATURE_DIAGNOSTICS
+/*
+ * EN: Validates and sets `node_snapshot_authorizer` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `node_snapshot_authorizer`。
+ */
 ucn_result_t ucn_node_set_node_snapshot_authorizer(
     ucn_node_t *node,
     ucn_node_snapshot_authorize_fn authorize,
@@ -6415,6 +7491,10 @@ ucn_result_t ucn_node_set_node_snapshot_authorizer(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `path_trace_authorizer` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `path_trace_authorizer`。
+ */
 ucn_result_t ucn_node_set_path_trace_authorizer(
     ucn_node_t *node,
     ucn_path_trace_authorize_fn authorize,
@@ -6428,6 +7508,10 @@ ucn_result_t ucn_node_set_path_trace_authorizer(
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and sets `policy_diagnostic_authorizer` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `policy_diagnostic_authorizer`。
+ */
 ucn_result_t ucn_node_set_policy_diagnostic_authorizer(
     ucn_node_t *node,
     ucn_policy_diagnostic_authorize_fn authorize,
@@ -6443,6 +7527,10 @@ ucn_result_t ucn_node_set_policy_diagnostic_authorizer(
 #endif
 
 #if UCN_FEATURE_PATH
+/*
+ * EN: Validates and sets `path_control_authorizer` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `path_control_authorizer`。
+ */
 ucn_result_t ucn_node_set_path_control_authorizer(
     ucn_node_t *node,
     ucn_path_control_authorize_fn authorize,
@@ -6457,6 +7545,10 @@ ucn_result_t ucn_node_set_path_control_authorizer(
 }
 #endif
 
+/*
+ * EN: Updates `observe_neighbor` in bounded Lite/Full Node state.
+ * 中文：更新固定容量 Lite/Full Node 状态中的 `observe_neighbor`。
+ */
 ucn_result_t ucn_node_observe_neighbor(ucn_node_t *node,
                                        ucn_link_t *link,
                                        uint32_t now_ms)
@@ -6560,6 +7652,10 @@ ucn_result_t ucn_node_observe_neighbor(ucn_node_t *node,
     return result;
 }
 
+/*
+ * EN: Builds and submits `probe_neighbor` through the bounded Lite/Full Node transmit path.
+ * 中文：构造 `probe_neighbor` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 ucn_result_t ucn_node_probe_neighbor(ucn_node_t *node,
                                      ucn_link_t *link,
                                      uint32_t now_ms)
@@ -6585,6 +7681,10 @@ ucn_result_t ucn_node_probe_neighbor(ucn_node_t *node,
         (uint16_t)UCN_HELLO_PAYLOAD_BYTES);
 }
 
+/*
+ * EN: Builds and submits `broadcast_hello` through the bounded Lite/Full Node transmit path.
+ * 中文：构造 `broadcast_hello` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 ucn_result_t ucn_node_broadcast_hello(ucn_node_t *node,
                                       ucn_link_t *link,
                                       uint32_t now_ms)
@@ -6610,6 +7710,10 @@ ucn_result_t ucn_node_broadcast_hello(ucn_node_t *node,
         (uint16_t)UCN_HELLO_PAYLOAD_BYTES);
 }
 
+/*
+ * EN: Validates and installs `admit_neighbor` into bounded Lite/Full Node state.
+ * 中文：验证 `admit_neighbor` 并将其安装到固定容量的 Lite/Full Node 状态中。
+ */
 ucn_result_t ucn_node_admit_neighbor(ucn_node_t *node,
                                      ucn_node_id_t peer_node_id)
 {
@@ -6625,6 +7729,10 @@ ucn_result_t ucn_node_admit_neighbor(ucn_node_t *node,
     return admit_neighbor_entry(node, entry);
 }
 
+/*
+ * EN: Removes or releases `reject_neighbor` from Lite/Full Node state with bounded work.
+ * 中文：以有界工作量从 Lite/Full Node 状态移除或释放 `reject_neighbor`。
+ */
 ucn_result_t ucn_node_reject_neighbor(ucn_node_t *node,
                                       ucn_node_id_t peer_node_id)
 {
@@ -6645,6 +7753,10 @@ ucn_result_t ucn_node_reject_neighbor(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Calculates the bounded `neighbor_count` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `neighbor_count` 值。
+ */
 size_t ucn_node_neighbor_count(const ucn_node_t *node,
                                ucn_neighbor_state_t state)
 {
@@ -6662,6 +7774,10 @@ size_t ucn_node_neighbor_count(const ucn_node_t *node,
     return count;
 }
 
+/*
+ * EN: Copies `neighbor_summaries` from Lite/Full Node into caller-owned storage.
+ * 中文：把 Lite/Full Node 中的 `neighbor_summaries` 复制到调用方存储。
+ */
 size_t ucn_node_copy_neighbor_summaries(
     const ucn_node_t *node,
     ucn_neighbor_summary_t *output,
@@ -6708,6 +7824,10 @@ size_t ucn_node_copy_neighbor_summaries(
     return count;
 }
 
+/*
+ * EN: Validates and installs `register_link` into bounded Lite/Full Node state.
+ * 中文：验证 `register_link` 并将其安装到固定容量的 Lite/Full Node 状态中。
+ */
 ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
 {
     size_t index;
@@ -6756,6 +7876,10 @@ ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link)
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and installs `add_route` into bounded Lite/Full Node state.
+ * 中文：验证 `add_route` 并将其安装到固定容量的 Lite/Full Node 状态中。
+ */
 ucn_result_t ucn_node_add_route(ucn_node_t *node,
                                 ucn_node_id_t destination,
                                 ucn_link_t *egress_link)
@@ -6799,6 +7923,10 @@ ucn_result_t ucn_node_add_route(ucn_node_t *node,
     return UCN_ERR_NO_SPACE;
 }
 
+/*
+ * EN: Validates and sets `default_route_constraints` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `default_route_constraints`。
+ */
 ucn_result_t ucn_node_set_default_route_constraints(
     ucn_node_t *node,
     const ucn_route_constraints_t *constraints)
@@ -6826,6 +7954,10 @@ ucn_result_t ucn_node_set_default_route_constraints(
 #endif
 }
 
+/*
+ * EN: Returns the current `default_route_constraints` view from Lite/Full Node state.
+ * 中文：从 Lite/Full Node 状态返回当前 `default_route_constraints` 视图。
+ */
 ucn_result_t ucn_node_get_default_route_constraints(
     const ucn_node_t *node,
     ucn_route_constraints_t *constraints)
@@ -6842,6 +7974,10 @@ ucn_result_t ucn_node_get_default_route_constraints(
 #endif
 }
 
+/*
+ * EN: Returns the current `route_quality` view from Lite/Full Node state.
+ * 中文：从 Lite/Full Node 状态返回当前 `route_quality` 视图。
+ */
 ucn_result_t ucn_node_get_route_quality(const ucn_node_t *node,
                                         ucn_node_id_t destination,
                                         ucn_route_quality_t *quality)
@@ -6909,11 +8045,19 @@ ucn_result_t ucn_node_get_route_quality(const ucn_node_t *node,
 #endif
 }
 
+/*
+ * EN: Initializes `initial_route_discovery_hop_limit` for Lite/Full Node using caller-owned fixed storage.
+ * 中文：使用调用方提供的固定存储初始化 Lite/Full Node 的 `initial_route_discovery_hop_limit`。
+ */
 static uint8_t initial_route_discovery_hop_limit(uint8_t maximum_hop_limit)
 {
     return maximum_hop_limit < 2U ? maximum_hop_limit : 2U;
 }
 
+/*
+ * EN: Derives `next_route_discovery_hop_limit` without unbounded work or allocation in Lite/Full Node.
+ * 中文：在 Lite/Full Node 中以无动态分配的有界方式推导 `next_route_discovery_hop_limit`。
+ */
 static uint8_t next_route_discovery_hop_limit(uint8_t current_hop_limit,
                                               uint8_t maximum_hop_limit)
 {
@@ -6922,6 +8066,10 @@ static uint8_t next_route_discovery_hop_limit(uint8_t current_hop_limit,
     return doubled >= maximum_hop_limit ? maximum_hop_limit : (uint8_t)doubled;
 }
 
+/*
+ * EN: Validates and submits `send_route_discovery_ring` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_route_discovery_ring` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_route_discovery_ring(ucn_node_t *node,
                                               ucn_route_discovery_t *slot,
                                               uint8_t hop_limit,
@@ -7023,6 +8171,10 @@ static ucn_result_t send_route_discovery_ring(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Validates and submits `send_due_route_discovery_ring` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_due_route_discovery_ring` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_due_route_discovery_ring(ucn_node_t *node,
                                                    uint32_t now_ms)
 {
@@ -7045,6 +8197,10 @@ static ucn_result_t send_due_route_discovery_ring(ucn_node_t *node,
     return UCN_ERR_NOT_FOUND;
 }
 
+/*
+ * EN: Starts or prepares `begin_route_discovery` after validating Lite/Full Node prerequisites.
+ * 中文：验证 Lite/Full Node 前置条件后启动或准备 `begin_route_discovery`。
+ */
 static ucn_result_t begin_route_discovery(ucn_node_t *node,
                                           ucn_node_id_t destination,
                                           uint32_t now_ms,
@@ -7157,6 +8313,33 @@ static ucn_result_t begin_route_discovery(ucn_node_t *node,
     return UCN_OK;
 }
 
+#if UCN_FEATURE_DYNAMIC_MESH
+/* EN: A Q0 item may encounter the short gap between an expiring active Route
+ * and its replacement. Candidate refresh and ordinary discovery share the
+ * same destination contract here, so avoid a second slot or duplicate ring.
+ * 中文：Q0 项可能遇到活动路由过期与替代路由安装之间的短暂空窗；候选刷新和
+ * 普通发现共享同一目的地事务，因此不得重复分配槽位或发送首轮发现。 */
+static ucn_result_t ensure_q0_route_discovery(ucn_node_t *node,
+                                              ucn_node_id_t destination,
+                                              uint32_t now_ms)
+{
+    size_t index;
+
+    for (index = 0U; index < UCN_MAX_ROUTE_DISCOVERIES; ++index) {
+        if (node->discoveries[index].active &&
+            node->discoveries[index].destination == destination) {
+            return UCN_OK;
+        }
+    }
+    return begin_route_discovery(node, destination, now_ms, false, 0U, false,
+                                 false);
+}
+#endif
+
+/*
+ * EN: Builds and submits `discover_route` through the bounded Lite/Full Node transmit path.
+ * 中文：构造 `discover_route` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 ucn_result_t ucn_node_discover_route(ucn_node_t *node,
                                      ucn_node_id_t destination,
                                      uint32_t now_ms)
@@ -7165,6 +8348,10 @@ ucn_result_t ucn_node_discover_route(ucn_node_t *node,
                                  false);
 }
 
+/*
+ * EN: Updates `refresh_route` in bounded Lite/Full Node state.
+ * 中文：更新固定容量 Lite/Full Node 状态中的 `refresh_route`。
+ */
 ucn_result_t ucn_node_refresh_route(ucn_node_t *node,
                                     ucn_node_id_t destination,
                                     uint32_t now_ms)
@@ -7179,6 +8366,10 @@ ucn_result_t ucn_node_refresh_route(ucn_node_t *node,
 #endif
 }
 
+/*
+ * EN: Checks the current `route_pending` condition in Lite/Full Node state.
+ * 中文：检查当前 Lite/Full Node 状态中的 `route_pending` 条件。
+ */
 bool ucn_node_route_pending(const ucn_node_t *node, ucn_node_id_t destination)
 {
     size_t index;
@@ -7195,6 +8386,10 @@ bool ucn_node_route_pending(const ucn_node_t *node, ucn_node_id_t destination)
     return false;
 }
 
+/*
+ * EN: Validates and sets `rx_handler` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `rx_handler`。
+ */
 void ucn_node_set_rx_handler(ucn_node_t *node,
                              ucn_rx_handler_t handler,
                              void *context)
@@ -7205,6 +8400,10 @@ void ucn_node_set_rx_handler(ucn_node_t *node,
     }
 }
 
+/*
+ * EN: Validates and sets `endpoint_handler` in Lite/Full Node state.
+ * 中文：验证并设置 Lite/Full Node 状态中的 `endpoint_handler`。
+ */
 ucn_result_t ucn_node_set_endpoint_handler(ucn_node_t *node,
                                             ucn_endpoint_t endpoint,
                                             ucn_endpoint_rx_handler_t handler,
@@ -7242,6 +8441,10 @@ ucn_result_t ucn_node_set_endpoint_handler(ucn_node_t *node,
 }
 
 #if UCN_FEATURE_PATH
+/*
+ * EN: Validates and installs `install_local_path` into bounded Lite/Full Node state.
+ * 中文：验证 `install_local_path` 并将其安装到固定容量的 Lite/Full Node 状态中。
+ */
 ucn_result_t ucn_node_install_local_path(ucn_node_t *node,
                                          ucn_path_id_t path_id,
                                          ucn_node_id_t destination,
@@ -7253,6 +8456,10 @@ ucn_result_t ucn_node_install_local_path(ucn_node_t *node,
         node, path_id, destination, next_hop, remaining_hops, lease_ms, NULL);
 }
 
+/*
+ * EN: Validates and installs `install_local_path_capable` into bounded Lite/Full Node state.
+ * 中文：验证 `install_local_path_capable` 并将其安装到固定容量的 Lite/Full Node 状态中。
+ */
 ucn_result_t ucn_node_install_local_path_capable(
     ucn_node_t *node,
     ucn_path_id_t path_id,
@@ -7283,6 +8490,10 @@ ucn_result_t ucn_node_install_local_path_capable(
                                       remaining_hops, lease_ms, capability);
 }
 
+/*
+ * EN: Removes or releases `revoke_local_path` from Lite/Full Node state with bounded work.
+ * 中文：以有界工作量从 Lite/Full Node 状态移除或释放 `revoke_local_path`。
+ */
 ucn_result_t ucn_node_revoke_local_path(ucn_node_t *node,
                                         ucn_path_id_t path_id,
                                         ucn_node_id_t destination)
@@ -7304,6 +8515,10 @@ ucn_result_t ucn_node_revoke_local_path(ucn_node_t *node,
                            node->session_id, path_id, destination);
 }
 
+/*
+ * EN: Validates and submits `send_path_install_internal` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_path_install_internal` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_path_install_internal(
     ucn_node_t *node,
     ucn_node_id_t control_target,
@@ -7390,6 +8605,10 @@ static ucn_result_t send_path_install_internal(
     return result;
 }
 
+/*
+ * EN: Validates and submits `send_path_install` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_path_install` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 ucn_result_t ucn_node_send_path_install(ucn_node_t *node,
                                         ucn_node_id_t control_target,
                                         ucn_path_id_t path_id,
@@ -7403,6 +8622,10 @@ ucn_result_t ucn_node_send_path_install(ucn_node_t *node,
         lease_ms, NULL, false);
 }
 
+/*
+ * EN: Validates and submits `send_path_install_capable` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_path_install_capable` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 ucn_result_t ucn_node_send_path_install_capable(
     ucn_node_t *node,
     ucn_node_id_t control_target,
@@ -7418,6 +8641,10 @@ ucn_result_t ucn_node_send_path_install_capable(
         lease_ms, capability, true);
 }
 
+/*
+ * EN: Validates and submits `send_path_revoke` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_path_revoke` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 ucn_result_t ucn_node_send_path_revoke(ucn_node_t *node,
                                        ucn_node_id_t control_target,
                                        ucn_path_id_t path_id,
@@ -7470,6 +8697,10 @@ ucn_result_t ucn_node_send_path_revoke(ucn_node_t *node,
     return result;
 }
 
+/*
+ * EN: Searches bounded Lite/Full Node state for `path_forward`.
+ * 中文：在固定容量的 Lite/Full Node 状态中查找 `path_forward`。
+ */
 const ucn_path_forward_entry_t *ucn_node_find_path_forward(
     const ucn_node_t *node,
     ucn_node_id_t owner,
@@ -7484,6 +8715,10 @@ const ucn_path_forward_entry_t *ucn_node_find_path_forward(
 }
 #endif
 
+/*
+ * EN: Validates and submits one application message to the Node transmit and routing pipeline.
+ * 中文：验证一个应用消息，并将其提交到 Node 发送与路由流水线。
+ */
 ucn_result_t ucn_node_send(ucn_node_t *node,
                            ucn_node_id_t destination,
                            uint8_t message_type,
@@ -7507,8 +8742,8 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
         return UCN_ERR_SECURITY;
     }
 
-    if (traffic_class != UCN_TRAFFIC_Q0_CRITICAL &&
-        traffic_class != UCN_TRAFFIC_Q1_REALTIME) {
+    if (traffic_class < UCN_TRAFFIC_Q0_CRITICAL ||
+        traffic_class > UCN_TRAFFIC_Q3_BULK) {
         return UCN_ERR_UNSUPPORTED;
     }
     if (ucn_message_type_is_control(message_type)) {
@@ -7569,6 +8804,10 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
  * first send returned LINK_DOWN, so retrying the unchanged frame once on the
  * newly selected Bearer cannot create a second successful delivery. */
 #if UCN_FEATURE_PATH
+/*
+ * EN: Validates `frame_for_path_capability` before Lite/Full Node state is used or changed.
+ * 中文：在使用或修改 Lite/Full Node 状态前验证 `frame_for_path_capability`。
+ */
 static ucn_result_t validate_frame_for_path_capability(
     ucn_node_t *node,
     const ucn_path_forward_entry_t *path,
@@ -7590,6 +8829,10 @@ static ucn_result_t validate_frame_for_path_capability(
         UCN_OK : UCN_ERR_TOO_LARGE;
 }
 
+/*
+ * EN: Validates and submits `send_frame_on_path_egress` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_frame_on_path_egress` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_frame_on_path_egress(
     ucn_node_t *node,
     const ucn_path_forward_entry_t *path,
@@ -7639,6 +8882,10 @@ static ucn_result_t send_frame_on_path_egress(
     return result;
 }
 
+/*
+ * EN: Validates and submits `send_path` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_path` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 ucn_result_t ucn_node_send_path(ucn_node_t *node,
                                 ucn_node_id_t destination,
                                 uint8_t message_type,
@@ -7660,8 +8907,8 @@ ucn_result_t ucn_node_send_path(ucn_node_t *node,
         (payload_length != 0U && payload == NULL)) {
         return UCN_ERR_ARGUMENT;
     }
-    if (traffic_class != UCN_TRAFFIC_Q0_CRITICAL &&
-        traffic_class != UCN_TRAFFIC_Q1_REALTIME) {
+    if (traffic_class < UCN_TRAFFIC_Q0_CRITICAL ||
+        traffic_class > UCN_TRAFFIC_Q3_BULK) {
         return UCN_ERR_UNSUPPORTED;
     }
     if (ucn_message_type_is_control(message_type)) {
@@ -7737,6 +8984,10 @@ ucn_result_t ucn_node_send_path(ucn_node_t *node,
 #endif
 
 #if UCN_FEATURE_POLICY
+/*
+ * EN: Selects or resolves `resolve_policy_path_active_egress` using deterministic Lite/Full Node rules.
+ * 中文：按照确定性的 Lite/Full Node 规则选择或解析 `resolve_policy_path_active_egress`。
+ */
 static ucn_link_t *resolve_policy_path_active_egress(
     ucn_node_t *node,
     const ucn_policy_path_entry_t *policy_path,
@@ -7767,6 +9018,10 @@ static ucn_link_t *resolve_policy_path_active_egress(
     return resolve_egress_link(node, policy_path->egress_link);
 }
 
+/*
+ * EN: Updates `refresh_policy_path_bearers` in bounded Lite/Full Node state.
+ * 中文：更新固定容量 Lite/Full Node 状态中的 `refresh_policy_path_bearers`。
+ */
 static void refresh_policy_path_bearers(ucn_node_t *node)
 {
     size_t index;
@@ -7786,6 +9041,10 @@ static void refresh_policy_path_bearers(ucn_node_t *node)
     }
 }
 
+/*
+ * EN: Checks the `pinned_path_has_hard_failure` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `pinned_path_has_hard_failure` 条件。
+ */
 static bool pinned_path_has_hard_failure(ucn_result_t result)
 {
     /* These two results mean the selected authenticated Path no longer has a
@@ -7796,6 +9055,10 @@ static bool pinned_path_has_hard_failure(ucn_result_t result)
 }
 #endif
 
+/*
+ * EN: Selects or resolves `resolve_route_constraints` using deterministic Lite/Full Node rules.
+ * 中文：按照确定性的 Lite/Full Node 规则选择或解析 `resolve_route_constraints`。
+ */
 static void resolve_route_constraints(
     const ucn_node_t *node,
     const ucn_route_constraints_t *specific,
@@ -7818,6 +9081,10 @@ static void resolve_route_constraints(
         resolved->require_verified_rtt || specific->require_verified_rtt;
 }
 
+/*
+ * EN: Checks the `route_quality_meets_constraints` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `route_quality_meets_constraints` 条件。
+ */
 static bool route_quality_meets_constraints(
     const ucn_route_quality_t *quality,
     const ucn_route_constraints_t *constraints)
@@ -7843,6 +9110,10 @@ static bool route_quality_meets_constraints(
            quality->verified_rtt_ms <= constraints->max_verified_rtt_ms;
 }
 
+/*
+ * EN: Validates and submits `send_endpoint_auto_best` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_endpoint_auto_best` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_endpoint_auto_best(
                                              ucn_node_t *node,
                                              ucn_node_id_t destination,
@@ -7894,6 +9165,10 @@ static ucn_result_t send_endpoint_auto_best(
 }
 
 #if UCN_FEATURE_POLICY
+/*
+ * EN: Checks the `policy_path_meets_constraints` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `policy_path_meets_constraints` 条件。
+ */
 static bool policy_path_meets_constraints(
     const ucn_node_t *node,
     const ucn_policy_path_entry_t *policy_path,
@@ -7922,6 +9197,10 @@ static bool policy_path_meets_constraints(
            policy_path->verified_rtt_ms <= constraints.max_verified_rtt_ms;
 }
 
+/*
+ * EN: Validates and submits `send_endpoint_on_policy_path` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_endpoint_on_policy_path` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_endpoint_on_policy_path(
     ucn_node_t *node,
     ucn_node_id_t destination,
@@ -7962,6 +9241,10 @@ static ucn_result_t send_endpoint_on_policy_path(
     return result;
 }
 
+/*
+ * EN: Checks the `auto_balance_path_is_member` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `auto_balance_path_is_member` 条件。
+ */
 static bool auto_balance_path_is_member(const ucn_route_policy_config_t *config,
                                         uint16_t local_path_id)
 {
@@ -7970,6 +9253,10 @@ static bool auto_balance_path_is_member(const ucn_route_policy_config_t *config,
             local_path_id == config->backup_local_path_id);
 }
 
+/*
+ * EN: Checks the `auto_balance_path_is_usable` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `auto_balance_path_is_usable` 条件。
+ */
 static bool auto_balance_path_is_usable(const ucn_node_t *node,
                                          const ucn_route_policy_config_t *config,
                                          ucn_node_id_t destination,
@@ -7999,6 +9286,10 @@ static bool auto_balance_path_is_usable(const ucn_node_t *node,
                                            &config->constraints);
 }
 
+/*
+ * EN: Checks the `auto_balance_path_is_congested` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `auto_balance_path_is_congested` 条件。
+ */
 static bool auto_balance_path_is_congested(const ucn_node_t *node,
                                            uint16_t local_path_id)
 {
@@ -8009,6 +9300,10 @@ static bool auto_balance_path_is_congested(const ucn_node_t *node,
                                UCN_POLICY_BALANCE_CONGESTED_SAMPLE_LIMIT;
 }
 
+/*
+ * EN: Calculates the bounded `auto_balance_active_flow_count` value used by Lite/Full Node.
+ * 中文：计算 Lite/Full Node 使用的有界 `auto_balance_active_flow_count` 值。
+ */
 static size_t auto_balance_active_flow_count(const ucn_node_t *node,
                                              uint16_t local_path_id)
 {
@@ -8026,6 +9321,10 @@ static size_t auto_balance_active_flow_count(const ucn_node_t *node,
     return count;
 }
 
+/*
+ * EN: Calculates `auto_balance_path_score` with bounded, deterministic Lite/Full Node arithmetic.
+ * 中文：使用有界且确定性的 Lite/Full Node 算术计算 `auto_balance_path_score`。
+ */
 static uint32_t auto_balance_path_score(const ucn_node_t *node,
                                         uint16_t local_path_id)
 {
@@ -8063,6 +9362,10 @@ static uint32_t auto_balance_path_score(const ucn_node_t *node,
     return score;
 }
 
+/*
+ * EN: Checks the `auto_balance_has_configured_path` condition against current Lite/Full Node state.
+ * 中文：根据当前 Lite/Full Node 状态检查 `auto_balance_has_configured_path` 条件。
+ */
 static bool auto_balance_has_configured_path(
     const ucn_node_t *node,
     const ucn_route_policy_config_t *config,
@@ -8078,6 +9381,10 @@ static bool auto_balance_has_configured_path(
     return path != NULL && path->destination == destination;
 }
 
+/*
+ * EN: Selects an eligible Path from the bounded automatic-balance candidate set.
+ * 中文：从固定容量的自动均衡候选集中选择合格 Path。
+ */
 static uint16_t auto_balance_select_path(const ucn_node_t *node,
                                          const ucn_route_policy_config_t *config,
                                          ucn_node_id_t destination,
@@ -8121,6 +9428,10 @@ static uint16_t auto_balance_select_path(const ucn_node_t *node,
     return selected;
 }
 
+/*
+ * EN: Validates and installs `auto_balance_bind_path` in bounded Lite/Full Node state.
+ * 中文：验证 `auto_balance_bind_path` 并将其安装到固定容量的 Lite/Full Node 状态中。
+ */
 static ucn_result_t auto_balance_bind_path(ucn_node_t *node,
                                            ucn_node_id_t destination,
                                            ucn_endpoint_t endpoint,
@@ -8131,6 +9442,10 @@ static ucn_result_t auto_balance_bind_path(ucn_node_t *node,
                                  lease_ms);
 }
 
+/*
+ * EN: Validates and submits `send_endpoint_auto_balance` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_endpoint_auto_balance` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_endpoint_auto_balance(
     ucn_node_t *node,
     const ucn_route_policy_entry_t *policy,
@@ -8238,6 +9553,10 @@ static ucn_result_t send_endpoint_auto_balance(
     return result;
 }
 
+/*
+ * EN: Validates and submits `send_endpoint_pinned` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_endpoint_pinned` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_endpoint_pinned(
     ucn_node_t *node,
     const ucn_route_policy_entry_t *policy,
@@ -8308,6 +9627,10 @@ static ucn_result_t send_endpoint_pinned(
 }
 #endif
 
+/*
+ * EN: Validates and submits `send_endpoint_internal` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_endpoint_internal` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_endpoint_internal(
     ucn_node_t *node,
     ucn_node_id_t destination,
@@ -8357,6 +9680,10 @@ static ucn_result_t send_endpoint_internal(
                                    allow_pending_queue);
 }
 
+/*
+ * EN: Validates and submits `send_endpoint` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_endpoint` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 ucn_result_t ucn_node_send_endpoint(ucn_node_t *node,
                                     ucn_node_id_t destination,
                                     ucn_endpoint_t endpoint,
@@ -8368,6 +9695,10 @@ ucn_result_t ucn_node_send_endpoint(ucn_node_t *node,
                                   payload, payload_length, true);
 }
 
+/*
+ * EN: Copies `enqueue` into a bounded Lite/Full Node queue.
+ * 中文：把 `enqueue` 复制到固定容量的 Lite/Full Node 队列。
+ */
 ucn_result_t ucn_node_enqueue(ucn_node_t *node,
                               const ucn_send_request_t *request)
 {
@@ -8381,8 +9712,8 @@ ucn_result_t ucn_node_enqueue(ucn_node_t *node,
         return UCN_ERR_ARGUMENT;
     }
 
-    if (request->traffic_class != UCN_TRAFFIC_Q0_CRITICAL &&
-        request->traffic_class != UCN_TRAFFIC_Q1_REALTIME) {
+    if (request->traffic_class < UCN_TRAFFIC_Q0_CRITICAL ||
+        request->traffic_class > UCN_TRAFFIC_Q3_BULK) {
         return UCN_ERR_UNSUPPORTED;
     }
     if (ucn_message_type_is_control(request->message_type)) {
@@ -8397,6 +9728,10 @@ ucn_result_t ucn_node_enqueue(ucn_node_t *node,
     if (request->delivery == UCN_DELIVERY_RETRY_ON_BACKPRESSURE &&
         (request->traffic_class != UCN_TRAFFIC_Q0_CRITICAL ||
          request->deadline_ms == 0U)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (request->delivery == UCN_DELIVERY_LATEST_VALUE &&
+        request->traffic_class != UCN_TRAFFIC_Q1_REALTIME) {
         return UCN_ERR_ARGUMENT;
     }
 
@@ -8438,14 +9773,20 @@ ucn_result_t ucn_node_enqueue(ucn_node_t *node,
     slot->next_attempt_ms = 0U;
     slot->order = node->next_queue_order++;
     slot->backpressure_retries = 0U;
+    slot->waiting_for_route = false;
     slot->payload_length = request->payload_length;
     if (request->payload_length != 0U) {
         (void)memcpy(slot->payload, request->payload, request->payload_length);
     }
+    node->stats.tx_enqueued_by_class[(uint8_t)request->traffic_class]++;
     return UCN_OK;
 }
 
 #if UCN_FEATURE_DIAGNOSTICS
+/*
+ * EN: Builds and submits `request_path_trace` through the bounded Lite/Full Node transmit path.
+ * 中文：构造 `request_path_trace` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 ucn_result_t ucn_node_request_path_trace(ucn_node_t *node,
                                          ucn_node_id_t destination,
                                          uint8_t record_limit,
@@ -8529,6 +9870,10 @@ ucn_result_t ucn_node_request_path_trace(ucn_node_t *node,
     return UCN_OK;
 }
 
+/*
+ * EN: Builds and submits `request_node_snapshot` through the bounded Lite/Full Node transmit path.
+ * 中文：构造 `request_node_snapshot` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 ucn_result_t ucn_node_request_node_snapshot(
     ucn_node_t *node,
     uint8_t result_limit,
@@ -8613,6 +9958,10 @@ ucn_result_t ucn_node_request_node_snapshot(
     return UCN_OK;
 }
 
+/*
+ * EN: Builds and submits `request_policy_diagnostic` through the bounded Lite/Full Node transmit path.
+ * 中文：构造 `request_policy_diagnostic` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 ucn_result_t ucn_node_request_policy_diagnostic(
     ucn_node_t *node,
     ucn_node_id_t destination,
@@ -8660,6 +10009,10 @@ ucn_result_t ucn_node_request_policy_diagnostic(
 }
 #endif
 
+/*
+ * EN: Records `note_business_transmission` in bounded Lite/Full Node state or statistics.
+ * 中文：在固定容量的 Lite/Full Node 状态或统计中记录 `note_business_transmission`。
+ */
 static void note_business_transmission(ucn_node_t *node)
 {
     if (node->business_tx_since_maintenance <
@@ -8671,6 +10024,10 @@ static void note_business_transmission(ucn_node_t *node)
 /* Only liveness and path/routing maintenance belongs here.  Snapshot and
  * policy diagnostics remain best-effort background work and must not take a
  * Q0/Q1 budget slot. */
+/*
+ * EN: Validates and submits `send_due_essential_maintenance` through the bounded Lite/Full Node transmit path.
+ * 中文：验证 `send_due_essential_maintenance` 并将其提交到有界的 Lite/Full Node 发送路径。
+ */
 static ucn_result_t send_due_essential_maintenance(ucn_node_t *node,
                                                     uint32_t now_ms)
 {
@@ -8680,25 +10037,41 @@ static ucn_result_t send_due_essential_maintenance(ucn_node_t *node,
     if (result != UCN_ERR_NOT_FOUND) {
         return result;
     }
+#if UCN_TEST_NODE_MAINTENANCE_STAGE_LIMIT == 1
+    return UCN_ERR_NOT_FOUND;
+#endif
     result = send_due_heartbeat(node, now_ms);
     if (result != UCN_ERR_NOT_FOUND) {
         return result;
     }
+#if UCN_TEST_NODE_MAINTENANCE_STAGE_LIMIT == 2
+    return UCN_ERR_NOT_FOUND;
+#endif
     result = send_due_bearer_quality_probe(node, now_ms);
     if (result != UCN_ERR_NOT_FOUND) {
         return result;
     }
+#if UCN_TEST_NODE_MAINTENANCE_STAGE_LIMIT == 3
+    return UCN_ERR_NOT_FOUND;
+#endif
 #if UCN_FEATURE_CANDIDATE_ROUTING
     result = send_due_path_probe(node, now_ms);
     if (result != UCN_ERR_NOT_FOUND) {
         return result;
     }
+#if UCN_TEST_NODE_MAINTENANCE_STAGE_LIMIT == 4
+    return UCN_ERR_NOT_FOUND;
+#endif
     return start_due_route_refresh(node, now_ms);
 #else
     return UCN_ERR_NOT_FOUND;
 #endif
 }
 
+/*
+ * EN: Updates `observe_step_interval` in bounded Lite/Full Node state.
+ * 中文：更新固定容量 Lite/Full Node 状态中的 `observe_step_interval`。
+ */
 static void observe_step_interval(ucn_node_t *node, uint32_t now_ms)
 {
     uint32_t gap_ms;
@@ -8719,12 +10092,21 @@ static void observe_step_interval(ucn_node_t *node, uint32_t now_ms)
     }
 }
 
+/*
+ * EN: Advances one bounded Node maintenance and transmit scheduling cycle.
+ * 中文：推进一次有界的 Node 维护与发送调度周期。
+ */
 ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
 {
     ucn_tx_item_t *item;
+    uint8_t next_schedule_cursor;
     size_t count;
     uint32_t error_drops_before;
     ucn_result_t result;
+#if UCN_FEATURE_DYNAMIC_MESH
+    bool was_waiting_for_route;
+    bool route_wait_failure = false;
+#endif
 
     if (node == NULL) {
         return UCN_ERR_ARGUMENT;
@@ -8737,14 +10119,23 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
      * contributes to the product timing contract.  A violation is diagnostic:
      * stopping an already-late scheduler would only delay liveness further. */
     observe_step_interval(node, now_ms);
+#if UCN_TEST_NODE_STEP_STAGE_LIMIT == 1
+    return UCN_ERR_NOT_FOUND;
+#endif
 
     expire_dynamic_state(node, now_ms);
-#if UCN_FEATURE_POLICY
+#if UCN_TEST_NODE_STEP_STAGE_LIMIT == 2
+    return UCN_ERR_NOT_FOUND;
+#endif
+#if UCN_FEATURE_POLICY && UCN_TEST_NODE_POLICY_REFRESH_ENABLED
     if (ucn_policy_refresh_link_quality(&node->policy_state, node->links,
                                         node->link_count, now_ms)) {
         refresh_policy_path_bearers(node);
     }
     ucn_policy_expire_flows(&node->policy_state, now_ms);
+#endif
+#if UCN_TEST_NODE_STEP_STAGE_LIMIT == 3
+    return UCN_ERR_NOT_FOUND;
 #endif
 #if UCN_FEATURE_PATH
     ucn_path_expire(&node->path_state, now_ms);
@@ -8755,19 +10146,26 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
     expire_policy_diagnostic_state(node, now_ms);
 #endif
     expire_neighbor_candidates(node, now_ms);
+#if UCN_TEST_NODE_STEP_STAGE_LIMIT == 4
+    return UCN_ERR_NOT_FOUND;
+#endif
     maintain_neighbor_liveness(node, now_ms);
+#if UCN_TEST_NODE_STEP_STAGE_LIMIT == 5
+    return UCN_ERR_NOT_FOUND;
+#endif
     evaluate_bearer_quality(node, now_ms);
+#if UCN_TEST_NODE_STEP_STAGE_LIMIT == 6
+    return UCN_ERR_NOT_FOUND;
+#endif
 
-    item = find_next_item(node->q0, UCN_TX_Q0_DEPTH);
-    if (item == NULL) {
-        item = find_next_item(node->q1, UCN_TX_Q1_DEPTH);
-    }
+    item = select_business_item(node, &next_schedule_cursor);
 
     /* A permanently non-empty business queue must not indefinitely suppress
      * neighbor liveness or path maintenance.  The burst counter saturates,
      * therefore once a control action becomes due it gets a scheduling slot
      * in this call.  Q0 remains FIFO and is delayed only by an actually-due
-     * essential maintenance action; diagnostics never preempt either queue. */
+     * essential maintenance action; diagnostics never preempt a business
+     * queue.  Q0-Q3 arbitration is handled by the bounded weighted schedule. */
     if (node->business_tx_since_maintenance >=
         UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE) {
         result = send_due_essential_maintenance(node, now_ms);
@@ -8813,19 +10211,28 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
 #endif
     }
 
+    node->stats.tx_scheduled_by_class[(uint8_t)item->traffic_class]++;
+
     if (ucn_deadline_expired(now_ms, item->deadline_ms)) {
+#if UCN_FEATURE_DYNAMIC_MESH
+        if (item->waiting_for_route) {
+            node->stats.q0_route_wait_expired++;
+        } else
+#endif
         if (item->delivery == UCN_DELIVERY_RETRY_ON_BACKPRESSURE &&
             item->backpressure_retries != 0U) {
             node->stats.q0_backpressure_expired++;
         }
         item->occupied = false;
+        node->business_schedule_cursor = next_schedule_cursor;
         node->stats.tx_expired_dropped++;
         return UCN_ERR_TTL;
     }
 
-    /* A retained Q0 item preserves FIFO ownership while it waits for its next
-     * bounded admission attempt.  Lower-priority business and diagnostics do
-     * not use the gap, but essential liveness/path maintenance may proceed. */
+    /* A retained Q0 item preserves FIFO ownership while it waits for either
+     * local backpressure or a dynamic Route to clear.  Lower-priority business
+     * and diagnostics do not use the gap, but essential liveness/path
+     * maintenance may proceed and drive the pending discovery. */
     if (item->delivery == UCN_DELIVERY_RETRY_ON_BACKPRESSURE &&
         item->next_attempt_ms != 0U &&
         !ucn_deadline_expired(now_ms, item->next_attempt_ms)) {
@@ -8838,6 +10245,9 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
 
     count = item->payload_length;
     error_drops_before = node->stats.tx_error_dropped;
+#if UCN_FEATURE_DYNAMIC_MESH
+    was_waiting_for_route = item->waiting_for_route;
+#endif
     result = ucn_node_send(node,
                            item->destination,
                            item->message_type,
@@ -8846,9 +10256,43 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
                            (uint16_t)count);
     note_business_transmission(node);
     if (result == UCN_OK) {
+#if UCN_FEATURE_DYNAMIC_MESH
+        if (was_waiting_for_route) {
+            node->stats.q0_route_wait_recovered++;
+        }
+#endif
         item->occupied = false;
+        node->business_schedule_cursor = next_schedule_cursor;
         return UCN_OK;
     }
+
+#if UCN_FEATURE_DYNAMIC_MESH
+    if (result == UCN_ERR_NOT_FOUND &&
+        item->delivery == UCN_DELIVERY_RETRY_ON_BACKPRESSURE) {
+        const ucn_result_t discovery_result = ensure_q0_route_discovery(
+            node, item->destination, now_ms);
+
+        if (discovery_result == UCN_OK ||
+            discovery_result == UCN_ERR_NO_SPACE ||
+            discovery_result == UCN_ERR_NOT_FOUND) {
+            node->stats.tx_error_dropped = error_drops_before;
+            if (was_waiting_for_route) {
+                node->stats.q0_route_wait_retried++;
+            } else {
+                node->stats.q0_route_wait_started++;
+            }
+            item->waiting_for_route = true;
+            item->next_attempt_ms = ucn_deadline_from_now(
+                now_ms, UCN_Q0_ROUTE_WAIT_RETRY_INTERVAL_MS);
+            return result;
+        }
+        route_wait_failure = true;
+    }
+    if (was_waiting_for_route && result == UCN_ERR_NO_SPACE) {
+        item->waiting_for_route = false;
+        node->stats.q0_route_wait_recovered++;
+    }
+#endif
 
     if (result == UCN_ERR_NO_SPACE &&
         item->delivery == UCN_DELIVERY_RETRY_ON_BACKPRESSURE) {
@@ -8871,6 +10315,7 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
             return result;
         }
         item->occupied = false;
+        node->business_schedule_cursor = next_schedule_cursor;
         node->stats.q0_backpressure_exhausted++;
         if (node->stats.tx_error_dropped == error_drops_before) {
             node->stats.tx_error_dropped++;
@@ -8879,20 +10324,34 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
     }
 
     item->occupied = false;
+    node->business_schedule_cursor = next_schedule_cursor;
     if (node->stats.tx_error_dropped == error_drops_before) {
         node->stats.tx_error_dropped++;
     }
     if (item->delivery == UCN_DELIVERY_RETRY_ON_BACKPRESSURE) {
+#if UCN_FEATURE_DYNAMIC_MESH
+        if (was_waiting_for_route || route_wait_failure) {
+            node->stats.q0_route_wait_terminal_failed++;
+        } else
+#endif
         node->stats.q0_backpressure_terminal_failed++;
     }
     return result;
 }
 
+/*
+ * EN: Returns the current `stats` view from Lite/Full Node state.
+ * 中文：从 Lite/Full Node 状态返回当前 `stats` 视图。
+ */
 const ucn_node_stats_t *ucn_node_get_stats(const ucn_node_t *node)
 {
     return node == NULL ? NULL : &node->stats;
 }
 
+/*
+ * EN: Validates one received frame and routes, forwards, or locally delivers it.
+ * 中文：验证一个接收帧，并对其进行路由、转发或本地投递。
+ */
 ucn_result_t ucn_node_receive(ucn_node_t *node,
                               ucn_link_t *ingress_link,
                               const uint8_t *data,

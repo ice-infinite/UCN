@@ -108,6 +108,59 @@ static ucn_neighbor_bearer_t *heartbeat_find_bearer(ucn_node_t *node,
     return NULL;
 }
 
+static int heartbeat_run_directional_phase_spread(void)
+{
+    ucn_node_t a, b;
+    ucn_link_t ab, ba;
+    heartbeat_link_context_t cab, cba;
+    ucn_neighbor_bearer_t *a_bearer;
+    ucn_neighbor_bearer_t *b_bearer;
+    uint32_t a_phase_ms;
+    uint32_t b_phase_ms;
+    uint32_t a_next_delay_ms;
+
+    (void)memset(&a, 0, sizeof(a));
+    (void)memset(&b, 0, sizeof(b));
+    (void)memset(&ab, 0, sizeof(ab));
+    (void)memset(&ba, 0, sizeof(ba));
+    (void)memset(&cab, 0, sizeof(cab));
+    (void)memset(&cba, 0, sizeof(cba));
+    TEST_ASSERT(heartbeat_init_node(&a, UINT32_C(61)) == 0);
+    TEST_ASSERT(heartbeat_init_node(&b, UINT32_C(62)) == 0);
+    heartbeat_setup_link(&ab, &cab, 61U);
+    heartbeat_setup_link(&ba, &cba, 62U);
+    cab.peer = &b; cab.peer_ingress = &ba;
+    cba.peer = &a; cba.peer_ingress = &ab;
+    TEST_ASSERT(ucn_node_broadcast_hello(&a, &ab, 0U) == UCN_OK);
+    TEST_ASSERT(ucn_node_broadcast_hello(&b, &ba, 0U) == UCN_OK);
+
+    b.now_ms = 0U;
+    TEST_ASSERT(ucn_node_step(&a, 0U) == UCN_OK);
+    a.now_ms = 0U;
+    TEST_ASSERT(ucn_node_step(&b, 0U) == UCN_OK);
+    a_bearer = heartbeat_find_bearer(&a, &ab);
+    b_bearer = heartbeat_find_bearer(&b, &ba);
+    TEST_ASSERT(a_bearer != NULL && b_bearer != NULL);
+    TEST_ASSERT(a.stats.heartbeat_requests_sent == 1U &&
+                b.stats.heartbeat_requests_sent == 1U);
+
+    a_phase_ms = (uint32_t)(0U - a_bearer->last_heartbeat_sent_ms);
+    b_phase_ms = (uint32_t)(0U - b_bearer->last_heartbeat_sent_ms);
+    TEST_ASSERT(a_phase_ms < UCN_HEARTBEAT_INTERVAL_MS &&
+                b_phase_ms < UCN_HEARTBEAT_INTERVAL_MS);
+    TEST_ASSERT(a_phase_ms != b_phase_ms);
+    a_next_delay_ms = UCN_HEARTBEAT_INTERVAL_MS - a_phase_ms;
+    TEST_ASSERT(a_next_delay_ms > 0U);
+
+    b.now_ms = a_next_delay_ms - 1U;
+    (void)ucn_node_step(&a, a_next_delay_ms - 1U);
+    TEST_ASSERT(a.stats.heartbeat_requests_sent == 1U);
+    b.now_ms = a_next_delay_ms;
+    TEST_ASSERT(ucn_node_step(&a, a_next_delay_ms) == UCN_OK);
+    TEST_ASSERT(a.stats.heartbeat_requests_sent == 2U);
+    return 0;
+}
+
 static int heartbeat_run_mixed_liveness_profiles(void)
 {
     ucn_node_t a, b;
@@ -115,6 +168,7 @@ static int heartbeat_run_mixed_liveness_profiles(void)
     heartbeat_link_context_t cab_fast, cab_default, cba_fast, cba_default;
     ucn_neighbor_bearer_t *fast_bearer;
     ucn_neighbor_bearer_t *default_bearer;
+    uint32_t fast_last_seen_before_loss_ms;
 
     if (UCN_MAX_BEARERS_PER_NEIGHBOR < 2U) {
         return 0;
@@ -156,10 +210,12 @@ static int heartbeat_run_mixed_liveness_profiles(void)
     b.now_ms = 1U;
     TEST_ASSERT(ucn_node_step(&a, 1U) == UCN_OK);
     (void)ucn_node_step(&a, UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS - 1U);
-    TEST_ASSERT(cab_fast.heartbeat_send_count == 1U &&
+    TEST_ASSERT(cab_fast.heartbeat_send_count == 2U &&
                 cab_default.heartbeat_send_count == 1U);
-    /* Scheduled liveness is independently bounded per admitted Bearer and
-     * must not be starved by the generic RREQ/Probe control-token bucket. */
+    /* The deterministic directional phase spreads the recurring Bearers:
+     * this fixture's FAST Bearer becomes due before the DEFAULT Bearer. Both
+     * remain independently bounded and must not be starved by the generic
+     * RREQ/Probe control-token bucket. */
     a.control_tokens = 0U;
     a.control_last_refill_ms = UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS;
     b.now_ms = UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS;
@@ -167,9 +223,10 @@ static int heartbeat_run_mixed_liveness_profiles(void)
                               UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS) ==
                 UCN_OK);
     TEST_ASSERT(cab_fast.heartbeat_send_count == 2U &&
-                cab_default.heartbeat_send_count == 1U);
+                cab_default.heartbeat_send_count == 2U);
     TEST_ASSERT(a.control_tokens == 0U &&
                 a.stats.control_budget_dropped == 0U);
+    fast_last_seen_before_loss_ms = fast_bearer->last_seen_ms;
 
     /* UART-like FAST Bearer becomes physically silent while the DEFAULT
      * Backup continues to ACK. Local send still reports success. */
@@ -180,11 +237,11 @@ static int heartbeat_run_mixed_liveness_profiles(void)
     b.now_ms = UINT32_C(1001);
     (void)ucn_node_step(&a, UINT32_C(1001));
     (void)ucn_node_step(
-        &a, UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS +
+        &a, fast_last_seen_before_loss_ms +
                 UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS - 1U);
     TEST_ASSERT(fast_bearer->state == UCN_NEIGHBOR_BEARER_ADMITTED);
     (void)ucn_node_step(
-        &a, UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS +
+        &a, fast_last_seen_before_loss_ms +
                 UCN_LINK_LIVENESS_FAST_SUSPECT_TIMEOUT_MS);
     TEST_ASSERT(fast_bearer->state == UCN_NEIGHBOR_BEARER_SUSPECT &&
                 default_bearer->state == UCN_NEIGHBOR_BEARER_ADMITTED);
@@ -196,7 +253,7 @@ static int heartbeat_run_mixed_liveness_profiles(void)
     b.now_ms = UINT32_C(2001);
     (void)ucn_node_step(&a, UINT32_C(2001));
     (void)ucn_node_step(
-        &a, UCN_LINK_LIVENESS_FAST_HEARTBEAT_INTERVAL_MS +
+        &a, fast_last_seen_before_loss_ms +
                 UCN_LINK_LIVENESS_FAST_REMOVE_TIMEOUT_MS);
     TEST_ASSERT(fast_bearer->state == UCN_NEIGHBOR_BEARER_DOWN);
     TEST_ASSERT(ucn_node_neighbor_count(&a, UCN_NEIGHBOR_ADMITTED) == 1U);
@@ -640,6 +697,7 @@ int test_neighbor_heartbeat(void)
     TEST_ASSERT(heartbeat_run_sustained_backlog(true, true) == 0);
     TEST_ASSERT(heartbeat_run_sustained_q0_backpressure() == 0);
     TEST_ASSERT(heartbeat_run_multi_bearer_service_bound() == 0);
+    TEST_ASSERT(heartbeat_run_directional_phase_spread() == 0);
     TEST_ASSERT(heartbeat_run_wraparound_lifecycle() == 0);
     TEST_ASSERT(heartbeat_run_fast_wraparound_lifecycle() == 0);
     TEST_ASSERT(heartbeat_run_mixed_liveness_profiles() == 0);

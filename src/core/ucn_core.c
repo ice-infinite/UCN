@@ -1,10 +1,18 @@
 #include "ucn/ucn.h"
 
+/*
+ * EN: Returns the immutable UCN library version string.
+ * 中文：返回不可变的 UCN 库版本字符串。
+ */
 const char *ucn_version(void)
 {
     return "5.0.0";
 }
 
+/*
+ * EN: Validates the immutable Node identity and hop-limit configuration.
+ * 中文：验证不可变的 Node 身份与跳数上限配置。
+ */
 ucn_result_t ucn_validate_config(const ucn_config_t *config)
 {
     if (config == NULL) {
