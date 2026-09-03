@@ -851,11 +851,14 @@ typedef struct ucn_node_stats {
     uint32_t tx_sent;
     uint32_t tx_expired_dropped;
     uint32_t tx_error_dropped;
-    /* Indexed by ucn_traffic_class_t.  These counters make the four-class
-     * scheduler observable without exposing private queue storage. */
+    /* Indexed by ucn_traffic_class_t.  tx_sent_by_class counts every
+     * successful Link submission, including immediate sends and forwarding;
+     * the enqueued/scheduled/queue-sent counters describe only Node-owned
+     * business queue items. */
     uint32_t tx_enqueued_by_class[UCN_TRAFFIC_CLASS_COUNT];
     uint32_t tx_sent_by_class[UCN_TRAFFIC_CLASS_COUNT];
     uint32_t tx_scheduled_by_class[UCN_TRAFFIC_CLASS_COUNT];
+    uint32_t tx_queue_sent_by_class[UCN_TRAFFIC_CLASS_COUNT];
     uint32_t q0_backpressure_retries;
     uint32_t q0_backpressure_exhausted;
     uint32_t q0_backpressure_expired;
@@ -1224,7 +1227,7 @@ ucn_result_t ucn_node_request_node_snapshot(
     ucn_node_snapshot_handler_t handler,
     void *context);
 /* T22.6 management query.  The request is queued at diagnostic priority and
- * only sent after normal Q0/Q1 work; a remote target must opt in through the
+ * only sent after normal Q0-Q3 work; a remote target must opt in through the
  * explicit authorizer above.  `section` and `index` select one bounded page
  * or one fixed table slot, never a complete permanent topology dump. */
 ucn_result_t ucn_node_request_policy_diagnostic(

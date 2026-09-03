@@ -27,7 +27,7 @@ Network ID、Node ID 必须非零，Node ID 不能为广播，默认 Hop 必须�
 
 - 到期 HELLO/Heartbeat/路由发现/重试；
 - Neighbor/Route/Candidate/Path 老化；
-- Q0/Q1 发送调度；
+- Q0～Q3 发送调度；
 - 维护帧预算；
 - Pending Deadline 和故障恢复。
 
@@ -74,7 +74,7 @@ Endpoint 在 Link 后注册或 Link 在 Endpoint 后注册都可能由 API 允�
 
 ### 发送调度
 
-在 Q0、Q1 和到期维护帧之间按固定预算选择工作，调用 Link send，并处理同步接受、背压和 Link Down。
+在 Q0～Q3 和到期维护帧之间按固定预算选择工作；业务 Class 使用 12 槽 `6:3:2:1`，随后调用 Link send，并处理同步接受、背压和 Link Down。
 
 ### 故障收敛
 

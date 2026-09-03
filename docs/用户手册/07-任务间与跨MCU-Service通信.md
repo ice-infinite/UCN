@@ -254,7 +254,7 @@ Control Task
 | `NOT_FOUND` | Binding not-ready、Endpoint不存在或Inbox空 |
 | `NO_SPACE` | Q0 Inbox/Remote Queue满 |
 | `TOO_LARGE` | 超过Binding或Service最大Payload |
-| `CONFIG` | Binding重复、Q0/Q1数量超容量、缺Validator |
+| `CONFIG` | Binding 重复、Q0～Q3 数量超容量、缺 Validator，或固定深度超过 255 |
 
 ## 10. 验收
 

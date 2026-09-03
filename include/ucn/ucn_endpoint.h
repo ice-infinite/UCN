@@ -9,7 +9,7 @@ extern "C" {
 
 /* 静态 Endpoint 是 MCU 默认业务 ABI：不增加任何帧字段，直接复用
  * ucn_frame_t.message_type。每个产品必须在自己的 Endpoint 表中冻结具体
- * 编号、Payload、单位、字节序、版本和 Q0/Q1 语义。 */
+ * 编号、Payload、单位、字节序、版本和 Q0～Q3 语义。 */
 typedef uint8_t ucn_endpoint_t;
 
 #define UCN_STATIC_ENDPOINT_FIRST ((ucn_endpoint_t)0x40U)

@@ -46,7 +46,7 @@ typedef enum ucn_link_liveness_profile {
  *   its declared sampling window, in [0, UCN_LINK_METRIC_PER_MILLE_MAX].
  *   It is not an application or end-to-end delivery loss ratio.
  * - queue_pressure_per_mille is the Adapter's own outbound queue occupancy
- *   ratio in the same range.  It MUST NOT report UCN Core Q0/Q1 occupancy.
+ *   ratio in the same range.  It MUST NOT report UCN Core Q0～Q3 occupancy.
  * - rx_failure_per_mille covers only Carrier/CRC/reassembly failures observed
  *   before Core acceptance.  medium_busy and medium_quality are independent
  *   one-hop physical measurements and may be omitted.

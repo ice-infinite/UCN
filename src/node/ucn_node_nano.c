@@ -888,8 +888,7 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
         (payload == NULL && payload_length != 0U)) {
         return UCN_ERR_ARGUMENT;
     }
-    if (traffic_class < UCN_TRAFFIC_Q0_CRITICAL ||
-        traffic_class > UCN_TRAFFIC_Q3_BULK) {
+    if ((uint32_t)traffic_class >= (uint32_t)UCN_TRAFFIC_CLASS_COUNT) {
         return UCN_ERR_UNSUPPORTED;
     }
     if (payload_length > ucn_frame_max_payload_for_profile(
@@ -953,8 +952,8 @@ ucn_result_t ucn_node_enqueue(ucn_node_t *node,
         ucn_message_type_is_control(request->message_type)) {
         return UCN_ERR_ARGUMENT;
     }
-    if (request->traffic_class < UCN_TRAFFIC_Q0_CRITICAL ||
-        request->traffic_class > UCN_TRAFFIC_Q3_BULK) {
+    if ((uint32_t)request->traffic_class >=
+        (uint32_t)UCN_TRAFFIC_CLASS_COUNT) {
         return UCN_ERR_UNSUPPORTED;
     }
     if (request->payload_length > UCN_MAX_PAYLOAD_BYTES) {
@@ -1072,6 +1071,9 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
             node->stats.q0_backpressure_retries++;
             return result;
         }
+    }
+    if (result == UCN_OK) {
+        node->stats.tx_queue_sent_by_class[(uint8_t)item->traffic_class]++;
     }
     item->occupied = false;
     node->business_schedule_cursor = next_schedule_cursor;

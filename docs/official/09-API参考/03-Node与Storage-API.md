@@ -4,14 +4,14 @@
 > 实现状态：`CURRENT`
 > 适用版本：UCN 5.0.0 / Core Wire v5
 > 事实源：include/ucn 公共头、链接目标与公共 API 测试
-> 最近核对：`codex/v5-adaptive-wire@a093862`，2026-08-25
+> 最近核对：当前工作区，2026-09-02
 > 硬件状态：API 合同不等同于各平台实机驱动完成
 
 Node API 覆盖初始化、Link/Endpoint 注册、接收提交、发送、`step(now_ms)`、路由/邻居维护和只读状态复制。`ucn_node_t` 的静态存储由调用者持有，初始化前必须使用与当前 API/配置匹配的 storage。
 
 Owner 线程调用绝大多数 Node API。ISR/驱动通过 Adapter Source 或 Event Runtime 投递，不直接执行路由、业务 handler 或发送状态机。
 
-`send` 成功表示消息已被本地协议接受，不一定表示远端业务已执行。Q0/Q1、Transfer 和 Service 的完成语义分别查看对应 API。
+`send` 成功表示消息已被本地协议接受，不一定表示远端业务已执行。Q0～Q3、Transfer 和 Service 的完成语义分别查看对应 API。
 
 快照/诊断复制使用调用者 buffer；容量不足返回明确错误或截断标志，不暴露 Node 私有布局。
 
@@ -88,11 +88,13 @@ ucn_node_step(&node, now_ms);
 
 Node storage 与容量宏强相关。公共 storage helper/版本门禁用于阻止旧布局与新 API 混用；应用不要读取私有数组来“省一次 API”。需要状态时调用 `get_stats()`、Route quality、Neighbor summary、snapshot/diagnostic API。
 
+当前 Layout Version 为 8。`tx_enqueued_by_class[] → tx_scheduled_by_class[] → tx_queue_sent_by_class[]` 是 Node 四级 Queue 的同口径漏斗；`tx_sent_by_class[]` 则统计所有成功 Link 提交，包含即时发送与转发，不能直接和 Queue-only 计数相减。
+
 ## 错误与恢复
 
 - init 失败：对象不能投入运行；
 - register Link `NO_SPACE`：增加容量或减少实例，不能覆盖旧 Link；
 - send `NOT_FOUND`：可触发 route discovery；
-- send `NO_SPACE`：按 Q0/Q1 语义有界背压；
+- send `NO_SPACE`：Q0 仅在显式 Retry+Deadline 时有界保留；Q1 Latest 可覆盖同 key；Q2/Q3 FIFO 不覆盖；
 - receive `MALFORMED/SECURITY/REPLAY`：丢弃并统计，不交业务；
 - `LINK_DOWN`：更新 Link 状态并让选路处理，应用不要无限重试同一 Link。

@@ -16,9 +16,10 @@ static bool policy_node_id_is_valid(ucn_node_id_t node_id)
  * EN: Checks whether `traffic_class` satisfies the routing Policy module's validity rules.
  * 中文：检查 `traffic_class` 是否满足 路由 Policy 模块的合法性规则。
  */
-static bool policy_traffic_class_is_valid(uint8_t traffic_class)
+static bool policy_traffic_class_is_valid(
+    ucn_traffic_class_t traffic_class)
 {
-    return traffic_class <= (uint8_t)UCN_TRAFFIC_Q3_BULK;
+    return (uint32_t)traffic_class < (uint32_t)UCN_TRAFFIC_CLASS_COUNT;
 }
 
 /*
@@ -30,7 +31,8 @@ static bool policy_key_is_valid(const ucn_route_policy_key_t *key)
     return key != NULL && policy_node_id_is_valid(key->destination) &&
            ucn_endpoint_is_static(key->endpoint) &&
            (key->traffic_class == UCN_POLICY_ANY_TRAFFIC_CLASS ||
-            policy_traffic_class_is_valid(key->traffic_class));
+            policy_traffic_class_is_valid(
+                (ucn_traffic_class_t)key->traffic_class));
 }
 
 /*
@@ -129,7 +131,7 @@ static const ucn_route_policy_entry_t *find_route_policy_match(
 
     if (state == NULL || !policy_node_id_is_valid(destination) ||
         !ucn_endpoint_is_static(endpoint) ||
-        !policy_traffic_class_is_valid((uint8_t)traffic_class)) {
+        !policy_traffic_class_is_valid(traffic_class)) {
         return NULL;
     }
     for (index = 0U; index < UCN_MAX_ROUTE_POLICIES; ++index) {

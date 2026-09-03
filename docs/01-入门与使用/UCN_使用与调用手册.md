@@ -59,7 +59,7 @@ Linux、ROS 2、地面站可以通过一个 Link/Adapter 作为普通 Node 接�
 | `ucn_standard_adapter.h` | SDK 无关的 Bearer/Preset、静态产品 Link 配置和 Cost/MTU/RTT Resolver | Adapter 初始化前统一取得默认事实、校验产品覆盖 | 以为它会初始化 UART/CAN/Wi-Fi/USB、注册 `ucn_link_t` 或执行动态选路。 |
 | `ucn/ports/ucn_event_runtime.h` | 固定多 Source 注册、Task/ISR 事件合并、有界 Drain、公共 Owner 运行与超时兜底 | 新多 Bearer 产品的唯一 Protocol Task/裸机主循环；ISR 只调用 signal | 在 Source/ISR 中执行业务、把通知次数当数据队列、以为它自带 Carrier/驱动。 |
 | `ucn/ports/ucn_protocol_owner.h` + `ucn/ports/ucn_port_<platform>.h` | 公共唯一 Owner 与独立平台 RX 通知、等待、固定预算、统一时钟 | 只包含当前产品所选的裸机/FreeRTOS/Zephyr/NuttX/RT-Thread Port | 以为包含一个头就会创建真实 Task/Queue/Semaphore 或实现介质驱动。 |
-| `ucn_service.h` | Node 内任务通信：本机直投、远端请求、Q0/Q1 Inbox | Service/Port，短临界区保护 | 直接访问 Link 或 `ucn_node_t`。 |
+| `ucn_service.h` | Node 内任务通信：本机直投、远端请求、Q0～Q3 固定 Inbox | Service/Port，短临界区保护 | 直接访问 Link 或 `ucn_node_t`。 |
 | `ucn_service_bridge.h` | Router 和 Node 的唯一桥接 | **唯一 Protocol Task** | 创建 RTOS Task、动态队列或重试伪 ACK。 |
 | `ucn_cluster.h` | 可选单层簇选举、成员租约和只读 Cluster View | **唯一 Protocol Task** | 由业务/ISR 修改 Head、Member 或 Term。 |
 | `ucn_cluster_federation.h` | 可选 C06 Locator 发布/撤销、固定 Directory、有限 Query Cache、Cluster→Head 锚点和显式单帧 Tunnel | **唯一 Protocol Task** + 产品 Endpoint `0xA1` 绑定 | 以为普通 `ucn_node_send*()` 会自动跨簇，或以为它已支持跨簇 Transfer/自动 Gateway。 |
@@ -1063,7 +1063,7 @@ Core 支持三层控制：
 | `begin(router, bridge, consumers, count)` | 绑定已初始化的 Router/Bridge 和静态消费者表。 |
 | `bind_consumer_task(service_id, task_handle)` | 让某个 Service 只能由其绑定的业务 Task 读取。 |
 | `send(...)` | 业务 Task 的统一发送入口；自动区分本机 Fast Path 与远端。 |
-| `inbox_take(service_id, endpoint, message)` | 从本 Service 的 Inbox 取 Q0/Q1 消息。 |
+| `inbox_take(service_id, endpoint, message)` | 从本 Service 与 Binding 对应的 Q0～Q3 Inbox 取消息。 |
 | `event_take(service_id, endpoint*, ticks)` | 等待“可能有消息”的通知；之后必须 drain Inbox。 |
 | `snapshot_stats(...)` | 读取 Port 的固定统计。 |
 
@@ -1092,8 +1092,9 @@ UCN 的表和队列均是编译期数组。产品根据 MCU RAM 调整上限后�
 | `UCN_SECURITY_REQUIRED_BY_DEFAULT` | 0 | 产品设为 1 时从 Node 初始化起失败关闭；Nano 不允许。 |
 | `UCN_MAX_ROUTE_POLICIES` / `UCN_MAX_POLICY_PATHS` / `UCN_MAX_POLICY_FLOWS` | 8 / 8 / 8 | 策略、路径和 Q1 Flow 固定表。 |
 | `UCN_SERVICE_MAX_BINDINGS` | 6 | R1 Service Binding 数。 |
-| Service Remote TX Q0/Q1 | 4 / 4 | 跨 Node 的 Router 待发送请求。 |
-| Service Q0 Inbox | 4 | 每个 Q0 Endpoint 的 FIFO 深度。 |
+| Service Remote TX Q0/Q1/Q2/Q3 | 4 / 4 / 2 / 1 | 跨 Node 的四级 Router 待发送请求。 |
+| Service Q0/Q2/Q3 Inbox | 4 / 2 / 1 | 对应 FIFO Binding 的固定 Inbox 深度。 |
+| Service Q1 Latest Slots | 4 | Q1 按 `(Service, Endpoint)` 合并最新值，并以 Round-robin 防止多流饥饿。 |
 | `UCN_SERVICE_MAX_PAYLOAD_BYTES` | 32 B | 当前 Service Router 单消息最大 Payload。 |
 
 降低这些值适合 STM32 最小板等小 RAM Profile；提高前应先量化 `sizeof(ucn_node_t)`、静态 RAM、任务栈高水位和最坏队列压力。Q0 优先级、固定资源和“不能把失败藏进无限重试”不应改变。

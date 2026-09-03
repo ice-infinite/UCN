@@ -35,7 +35,7 @@ min(
 
 一帧是一次单向编码单元。发送、接收、ACK 或业务结果是不同帧/事件：
 
-- 普通 Q0/Q1 可以只有单向帧；
+- 普通 Q0～Q3 可以只有单向帧；
 - Transfer Fragment 可由 ACK 帧确认；
 - Service 命令的业务执行结果需要远端任务另发 Result 消息；
 - HELLO/Heartbeat 有各自周期，不是每个业务帧的应答。

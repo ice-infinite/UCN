@@ -19,7 +19,7 @@ ctest --test-dir build -C Debug --output-on-failure
 
 configure、build 和 CTest 都应返回 0。若某测试失败，先查看第一条失败输出，不要继续写硬件 glue。默认测试包含 Core/Frame/Route/Adapter 等软件门禁，但不代表 UART/CAN/Wi-Fi 驱动已经在目标板通过。
 
-最小 Host 程序创建两个 Node、各自静态 storage 和 Fake Link，把发送回调接到对端 RX 队列；注册 Endpoint 后循环调用两个节点的 `step(now_ms)`。应先验证一帧 Q0/Q1 收发，再加入路由、Transfer 或 Cluster。
+最小 Host 程序创建两个 Node、各自静态 storage 和 Fake Link，把发送回调接到对端 RX 队列；注册 Endpoint 后循环调用两个节点的 `step(now_ms)`。应先验证一帧 Q0～Q3 收发及所选 Delivery 语义，再加入路由、Transfer 或 Cluster。
 
 ## 最小拓扑
 

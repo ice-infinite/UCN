@@ -116,6 +116,13 @@ int test_qos(void)
     request.delivery = UCN_DELIVERY_LATEST_VALUE;
     request.payload = &q1_old;
     request.payload_length = 1U;
+    request.traffic_class = (ucn_traffic_class_t)-1;
+    TEST_ASSERT(ucn_node_enqueue(&node_a, &request) == UCN_ERR_UNSUPPORTED);
+    TEST_ASSERT(node_a.stats.tx_enqueued_by_class[UCN_TRAFFIC_Q0_CRITICAL] == 0U &&
+                node_a.stats.tx_enqueued_by_class[UCN_TRAFFIC_Q1_REALTIME] == 0U &&
+                node_a.stats.tx_enqueued_by_class[UCN_TRAFFIC_Q2_NORMAL] == 0U &&
+                node_a.stats.tx_enqueued_by_class[UCN_TRAFFIC_Q3_BULK] == 0U);
+    request.traffic_class = UCN_TRAFFIC_Q1_REALTIME;
     TEST_ASSERT(ucn_node_enqueue(&node_a, &request) == UCN_OK);
 
     request.message_type = UCN_MSG_DATA_Q0;
@@ -276,6 +283,14 @@ int test_qos(void)
         TEST_ASSERT(node_a.stats.tx_sent_by_class[UCN_TRAFFIC_Q2_NORMAL] ==
                     UINT32_C(2000));
         TEST_ASSERT(node_a.stats.tx_sent_by_class[UCN_TRAFFIC_Q3_BULK] ==
+                    UINT32_C(1000));
+        TEST_ASSERT(node_a.stats.tx_queue_sent_by_class[UCN_TRAFFIC_Q0_CRITICAL] ==
+                    UINT32_C(6000));
+        TEST_ASSERT(node_a.stats.tx_queue_sent_by_class[UCN_TRAFFIC_Q1_REALTIME] ==
+                    UINT32_C(3000));
+        TEST_ASSERT(node_a.stats.tx_queue_sent_by_class[UCN_TRAFFIC_Q2_NORMAL] ==
+                    UINT32_C(2000));
+        TEST_ASSERT(node_a.stats.tx_queue_sent_by_class[UCN_TRAFFIC_Q3_BULK] ==
                     UINT32_C(1000));
     }
     return 0;

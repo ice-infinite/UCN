@@ -37,7 +37,7 @@
 | 自动发现 | Auto 模式默认 2→4→8→16 Ring，250 ms/轮、1000 ms 总预算，每轮新 Request ID/重新选档 | Discovery 状态与 `test_aodv_lite.c` |
 | Candidate | 保存实际 Wire Profile；Probe/ACK/Activate/Epoch 保持同一 Profile | `ucn_candidate_route_t`、Candidate handlers |
 | Q1 Pending | 深度默认 4、绝对 Deadline 默认 1000 ms；内部重试不续期，新应用 Latest 才刷新 | Pending Q1 helpers、`test_endpoint.c` |
-| Storage ABI | `UCN_NODE_STORAGE_LAYOUT_VERSION=6` | `ucn_node_storage.h`；H6-FB-01 Q0 route-wait 状态 |
+| Storage ABI | `UCN_NODE_STORAGE_LAYOUT_VERSION=8` | `ucn_node_storage.h`；Layout 7 加入 Q2/Q3 队列，Layout 8 加入 Queue-only 四级成功发送统计 |
 | 安全 | AAD/透明密文与 Provider 门禁存在；生产身份、AEAD、逐跳认证、Authorized Class 执行层未完成 | Security Provider API、S02/V5-21 |
 | Gateway | 只有 V5-06 设计，没有 `ucn_gateway_ext` 代码 | V5-06 设计评审 |
 
@@ -94,7 +94,7 @@ Windows x64 GCC 14.2、Release、Service OFF：
 | Lite | 6,024 B | 40 B | 73,735 B |
 | Full | 10,080 B | 40 B | 139,017 B |
 
-V5-44/V5-36 的历史软件回归口径为 Windows Full/Lite/Nano `11/11、11/11、1/1`、Full Service OFF `11/11`、产品头 `15/15`，当时 Storage Layout Version=5。H6-FB-01 后当前 Storage Layout Version=6；最新门禁为 Windows Full/Lite/Nano/Release/Service-OFF `50/50、50/50、40/40、50/50、50/50`，WSL Full ASan+UBSan 与 GCC `-fanalyzer -Werror` 均 `50/50`。这些 Host/ABI 证据不能替代目标 MCU Flash/RAM/栈/CPU/功耗或其他介质实测；六板 UART-only H6-12 证据由 ESP32 测试工程独立保存。
+V5-44/V5-36 的历史软件回归口径为 Windows Full/Lite/Nano `11/11、11/11、1/1`、Full Service OFF `11/11`、产品头 `15/15`，当时 Storage Layout Version=5；H6-FB-01 升至 6，Q2/Q3 四级队列升至 7，本轮 Queue-only 统计升至当前 8。QOS-A01～A08 整改后的最新门禁为 Windows GCC Full/Lite/Release/Service-OFF `53/53`、Nano `43/43`，Windows MSVC Full `50/50`，WSL Full ASan+UBSan 与 GCC `-fanalyzer -Werror` 均 `53/53`；MSVC/GCC 非 ASCII 路径定向 `ucn_tests` 均 `1/1`。这些 Host/ABI 证据不能替代目标 MCU Flash/RAM/栈/CPU/功耗或其他介质实测；六板 UART-only H6-12 证据由 ESP32 测试工程独立保存。
 
 ## 6. 明确保留的未完成边界
 

@@ -13,7 +13,7 @@
  * mutate them outside the Core/Port owner and always compile every translation
  * unit with the same UCN_PROFILE and UCN_FEATURE_SERVICE definitions.
  */
-#define UCN_NODE_STORAGE_LAYOUT_VERSION UINT32_C(7)
+#define UCN_NODE_STORAGE_LAYOUT_VERSION UINT32_C(8)
 
 typedef struct ucn_endpoint_handler_entry {
     bool occupied;

@@ -59,7 +59,7 @@ flowchart TB
             SEC["Identity & Security Boundary<br/>HELLO、Provider、会话/防重放接口"]
             NBR["Neighbor<br/>可信邻居、Link 状态"]
             ROUTE["Route<br/>AODV-Lite、下一跳、修复"]
-            QOS["Core QoS<br/>Q0/Q1、截止时间、过期丢弃"]
+            QOS["Core QoS<br/>Q0～Q3、截止时间、过期丢弃"]
             HEALTH["Health<br/>Heartbeat、邻居/路由/候选老化"]
         end
         LINK["MCU Link<br/>无线 / CAN-FD / RS485 / UART"]
@@ -87,7 +87,7 @@ flowchart TB
 | Identity & Join | 最小 `HELLO`、Candidate/Admitted/Suspect/Removed/Rejected/Expired 邻居表、`Manual`/`Open`/`Provider` 准入。 | `JOIN_REQ`/挑战/接受状态机、出厂身份格式。 |
 | Session & Replay | 可注入 Provider 的会话 ID、发送序号持久化、TX/RX 授权、固定 `seal/open`、30 B 不可变 AAD（Path 帧含 Path ID）、明文/受保护策略和入站去重缓存。 | 生产 AEAD、密钥轮换、完整重放窗口与产品 ACL 表。 |
 | Route / Forwarding | 固定 Active/Candidate 表、2→4→8→16 有界 AODV-Lite、RREQ/RREP/RERR、`PATH_PROBE/ACK` 的端到端 RTT EWMA、携带 Candidate ID + Epoch 的 `PATH_ACTIVATE/ACK`、TTL、断链清表、32 bit Route Cost；Node/Policy 可按 Hop/Cost/已验证 RTT 门禁业务路线，按 `(destination, route_epoch)` 区分 Current/Previous，默认 1 s grace。 | 自动业务重发、全网拓扑。 |
-| Core QoS | Q0/Q1 固定队列、deadline、`best_effort`、`latest_value`；Endpoint Q1 首包固定 4 槽/1 s 等待并合并同 `(destination, Endpoint)`。Extended Transfer 以独立固定槽提供默认 Fragment 窗口 1、显式窗口 2～8、默认 Peer 消息并发 1、静态显式 Peer 并发、累计 ACK 和有界 Go-Back-N，不改变 Core 队列或 v5 Wire。 | 通用 Q2/Q3、文件级续传、动态并发能力协商和高吞吐流。 |
+| Core QoS | Q0 Critical FIFO、Q1 Realtime Latest、Q2 Normal FIFO、Q3 Bulk FIFO；四级使用独立固定队列和有界 `6:3:2:1` 调度。Endpoint Q1 首包固定 4 槽/1 s 等待并合并同 `(destination, Endpoint)`。Extended Transfer 以独立固定槽提供默认 Fragment 窗口 1、显式窗口 2～8、默认 Peer 消息并发 1、静态显式 Peer 并发、累计 ACK 和有界 Go-Back-N，不改变 Core 队列或 v5 Wire。 | 文件级续传、动态并发能力协商和高吞吐流。 |
 | Node 内任务通信 | Core 外已有固定 Router、本机 Inbox、Remote TX、Bridge、FreeRTOS 静态事件通知；高风险远端 Q0 可在入队前强制产品 Validator，并使用固定 Replay 表。 | 产品执行器、真实 Task 时延/失联安全与板级验收；详见[节点内任务通信建议](../05-传输与服务/UCN_节点内任务通信建议.md)。 |
 | Health | 8 B 一跳 `HEARTBEAT` 请求/ACK、业务帧刷新存活、`ADMITTED → SUSPECT → REMOVED`、路由/Link 槽回收。 | `LINK_STATE` 线协议消息、对应用的统一失联事件、介质专用 Profile 实机标定。 |
 
@@ -99,7 +99,7 @@ flowchart TB
 | 邻居与入网 | `JOIN_REQ`、`JOIN_CHALLENGE`、`JOIN_ACCEPT` | 已定义枚举值，尚无 Core 状态机；生产入网属于 T15。 |
 | 路由 | `ROUTE_REQ`、`ROUTE_REPLY`、`ROUTE_ERROR` | 已处理：受限发现、回程建表、失效清理；非 Candidate RREP 携带 Route Epoch。 |
 | 健康 | `HEARTBEAT` | 已处理：一跳 8 B 请求/ACK、认证后刷新存活、SUSPECT/REMOVED 回收；`LINK_STATE` 尚未定义为线协议消息。 |
-| 业务 | `DATA_Q0`、`DATA_Q1`、静态 Endpoint `0x40..0xBF` | 已处理：单跳/多跳转发与 Q0/Q1 API；Endpoint 可配置明文/受保护/接收/透明转发策略。 |
+| 业务 | `DATA_Q0`、`DATA_Q1`、静态 Endpoint `0x40..0xBF` | 已处理：单跳/多跳转发与 Q0～Q3 Traffic Class；Endpoint 可配置明文/受保护/接收/透明转发策略。消息 Type 与 Traffic Class 是两个独立维度，不额外制造 `DATA_Q2/Q3` Type。 |
 
 Core 只需支持：单播、受限广播、有限跳转发和小尺寸应用负载。组播、服务调用、文件和大包分片不属于 MCU 自组网成立条件。
 
@@ -328,7 +328,7 @@ ucn_node_step(&node, now_ms);
 
 - `ucn-core` 不创建线程、不调用 `malloc`、不依赖 Linux socket 或特定 RTOS。
 - 裸机主循环可周期调用 `ucn_node_step()`；FreeRTOS/Zephyr 可由端口层把 RX、TX、Timer 映射为任务或队列。
-- 应用通过 `ucn_node_send()` 或 `ucn_node_enqueue()` 提交 Node ID、消息类型、Q0/Q1 与截止时间；应用不直接指定 WiFi、CAN 或下一跳。
+- 应用通过 `ucn_node_send()` 或 `ucn_node_enqueue()` 提交 Node ID、消息类型、Q0～Q3 与相应 Delivery/Deadline；应用不直接指定 WiFi、CAN 或下一跳。
 
 ### 7.2 当前代码目录
 
@@ -395,11 +395,11 @@ Core RAM = 固定上下文
          + 邻居表 × UCN_MAX_NEIGHBORS
          + 路由表 × UCN_MAX_ROUTES
          + RREQ/去重缓存
-         + Q0/Q1 队列与帧缓冲
+         + Q0～Q3 队列与帧缓冲
          + Link Adapter 必需缓冲
 ```
 
-启用 Extended 后，其分片槽、Q2/Q3 队列、服务目录和诊断缓存必须单独计入；不能把它们隐藏在 Core RAM 中。
+Core 的 Q0～Q3 队列直接计入 `ucn_node_t`；启用 Extended 后，其分片槽、服务目录和诊断缓存必须另行计入，不能把可选资源隐藏在 Core RAM 中。
 
 ### 8.2 资源纪律
 
@@ -419,7 +419,7 @@ Core RAM = 固定上下文
 
 | 节点 | 必选档案 | 可选档案 | 说明 |
 | --- | --- | --- | --- |
-| 传感器/执行器 MCU | Core | 无 | 能入网、收发 Q0/Q1；是否允许转发由配置决定。 |
+| 传感器/执行器 MCU | Core | 无 | 能入网、收发 Q0～Q3；是否允许转发由配置决定。 |
 | 飞控/控制 MCU | Core | 少量 Extended | 本地闭环优先；网络只给高层命令与状态。 |
 | MCU Relay | Core | 无或少量 Extended | 承担有限多跳转发，路由容量按硬件配置。 |
 | MCU Coordinator | Core | Enrollment/Time 等 Extended | 只承担授权与策略角色，不承担业务中心。 |
@@ -434,7 +434,7 @@ Core RAM = 固定上下文
 
 - 固定帧、身份、加入、会话、AEAD、防重放。
 - 一个无线或总线 Link。
-- 邻居表、Q0/Q1、心跳、单跳通信。
+- 邻居表、Q0～Q3 固定队列、心跳、单跳通信。
 
 ### V1-B：MCU Core 自组网
 
@@ -454,7 +454,7 @@ Core RAM = 固定上下文
 
 1. MCU、无线模块、总线控制器、RTOS/裸机环境以及各自可用 RAM/Flash。
 2. 网络最大节点数、最大邻居数、最大并发会话数、最大跳数和最差 Link MTU。
-3. Core 最大帧、Q0/Q1 队列深度、路由请求频率、缓存老化和心跳策略。
+3. Core 最大帧、Q0～Q3 队列深度、路由请求频率、缓存老化和心跳策略。
 4. 设备身份保存方式、入网授权策略、所选 AEAD 套件和 Counter 持久化方案。
 5. 哪些设备可以作为中继、Coordinator，哪些业务允许多跳以及失联时的本地安全动作。
 6. 是否、在哪些节点启用 Extended；每个模块允许增加多少 Flash、RAM、CPU 与空口占用。

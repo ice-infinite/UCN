@@ -26,7 +26,7 @@
 4. [Node 生命周期](04-Node初始化、Step与发送接收生命周期.md)：理解初始化、Owner step、发送和接收顺序。
 5. [Neighbor、HELLO、准入与心跳](05-Neighbor发现、HELLO、准入与心跳.md)：理解设备如何加入、离开和维护直连状态。
 6. [Endpoint 与业务分发](06-Endpoint与业务消息分发.md)：解决同一节点多传感器/多任务的数据区分问题。
-7. [Q0/Q1、Deadline 与背压](07-Q0-Q1调度、Deadline与背压.md)：理解实时调度、Latest 与队列满。
+7. [Q0～Q3、Deadline 与背压](07-Q0-Q1调度、Deadline与背压.md)：理解四级调度、Latest 与队列满。
 8. [Sequence、Session 与重复抑制](08-Sequence、Session、重复抑制与重放边界.md)：区分网络去重和生产安全抗重放。
 9. [Hop、时间与错误](09-Hop、TTL、时间与错误模型.md)：建立多跳、回绕安全时间和失败责任模型。
 10. [Profile、MTU 与能力失败关闭](10-Profile协商、MTU与能力失败关闭.md)：理解异构节点/链路如何严格协商。

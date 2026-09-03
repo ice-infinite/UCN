@@ -25,7 +25,7 @@ Build Profile 决定实际编译的状态机和对象布局；Wire Profile 只�
 
 | Build Profile | 当前能力 | 不具备的高级能力 |
 | --- | --- | --- |
-| Nano | 静态 Link/Route、Endpoint、Q0/Q1、W0～W3 编解码。 | 动态 Mesh、Security、Candidate、Path、Policy、诊断。 |
+| Nano | 静态 Link/Route、Endpoint、Q0～Q3 固定队列与 `6:3:2:1` 调度、W0～W3 编解码。 | 动态 Mesh、Security、Candidate、Path、Policy、诊断。 |
 | Lite | Nano 基础能力、动态 Mesh、Security。 | Candidate、Path、Policy、诊断。 |
 | Full | 动态 Mesh、Security、Candidate、Path、Policy、诊断。 | 生产密码、真实 Carrier 与产品授权仍由外部实现。 |
 

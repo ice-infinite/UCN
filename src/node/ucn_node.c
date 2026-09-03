@@ -8742,8 +8742,7 @@ ucn_result_t ucn_node_send(ucn_node_t *node,
         return UCN_ERR_SECURITY;
     }
 
-    if (traffic_class < UCN_TRAFFIC_Q0_CRITICAL ||
-        traffic_class > UCN_TRAFFIC_Q3_BULK) {
+    if ((uint32_t)traffic_class >= (uint32_t)UCN_TRAFFIC_CLASS_COUNT) {
         return UCN_ERR_UNSUPPORTED;
     }
     if (ucn_message_type_is_control(message_type)) {
@@ -8907,8 +8906,7 @@ ucn_result_t ucn_node_send_path(ucn_node_t *node,
         (payload_length != 0U && payload == NULL)) {
         return UCN_ERR_ARGUMENT;
     }
-    if (traffic_class < UCN_TRAFFIC_Q0_CRITICAL ||
-        traffic_class > UCN_TRAFFIC_Q3_BULK) {
+    if ((uint32_t)traffic_class >= (uint32_t)UCN_TRAFFIC_CLASS_COUNT) {
         return UCN_ERR_UNSUPPORTED;
     }
     if (ucn_message_type_is_control(message_type)) {
@@ -9649,6 +9647,12 @@ static ucn_result_t send_endpoint_internal(
         (payload_length != 0U && payload == NULL)) {
         return UCN_ERR_ARGUMENT;
     }
+    /* Reject the enum in its original width before Policy converts its key to
+     * uint8_t.  Otherwise values such as -255/-256 can alias Q1/Q0 and reach a
+     * matching AUTO_BALANCE or wildcard rule. */
+    if ((uint32_t)traffic_class >= (uint32_t)UCN_TRAFFIC_CLASS_COUNT) {
+        return UCN_ERR_UNSUPPORTED;
+    }
 #if UCN_FEATURE_POLICY
     policy = ucn_node_find_route_policy(node, destination, endpoint, traffic_class);
     if (policy != NULL) {
@@ -9712,8 +9716,8 @@ ucn_result_t ucn_node_enqueue(ucn_node_t *node,
         return UCN_ERR_ARGUMENT;
     }
 
-    if (request->traffic_class < UCN_TRAFFIC_Q0_CRITICAL ||
-        request->traffic_class > UCN_TRAFFIC_Q3_BULK) {
+    if ((uint32_t)request->traffic_class >=
+        (uint32_t)UCN_TRAFFIC_CLASS_COUNT) {
         return UCN_ERR_UNSUPPORTED;
     }
     if (ucn_message_type_is_control(request->message_type)) {
@@ -10004,7 +10008,7 @@ ucn_result_t ucn_node_request_policy_diagnostic(
     pending->index = index;
     pending->handler = handler;
     pending->context = context;
-    /* `ucn_node_step()` sends this only after ordinary Q0/Q1 work. */
+    /* `ucn_node_step()` sends this only after ordinary Q0-Q3 work. */
     return UCN_OK;
 }
 #endif
@@ -10023,7 +10027,7 @@ static void note_business_transmission(ucn_node_t *node)
 
 /* Only liveness and path/routing maintenance belongs here.  Snapshot and
  * policy diagnostics remain best-effort background work and must not take a
- * Q0/Q1 budget slot. */
+ * Q0-Q3 budget slot. */
 /*
  * EN: Validates and submits `send_due_essential_maintenance` through the bounded Lite/Full Node transmit path.
  * 中文：验证 `send_due_essential_maintenance` 并将其提交到有界的 Lite/Full Node 发送路径。
@@ -10192,7 +10196,7 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
         if (result != UCN_ERR_NOT_FOUND) {
             return result;
         }
-        /* T22.6 queries are deliberately after normal Q0/Q1 work, liveness,
+        /* T22.6 queries are deliberately after normal Q0-Q3 work, liveness,
          * route maintenance and existing diagnostics.  They never enter the
          * business queues and cannot consume a Q0 slot. */
         result = send_due_policy_diagnostic_reply(node);
@@ -10261,6 +10265,7 @@ ucn_result_t ucn_node_step(ucn_node_t *node, uint32_t now_ms)
             node->stats.q0_route_wait_recovered++;
         }
 #endif
+        node->stats.tx_queue_sent_by_class[(uint8_t)item->traffic_class]++;
         item->occupied = false;
         node->business_schedule_cursor = next_schedule_cursor;
         return UCN_OK;

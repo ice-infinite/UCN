@@ -46,7 +46,7 @@
   → adapter.ucn_adapter_rx_pump（有限帧数）
   → service.ucn_service_protocol_bridge_step_at（有限请求数，共用本轮 now_ms）
   → node_runtime.ucn_node_step
-  → Q0/Q1/Pending Q1；Q0 背压等待时仍可插入必要维护；最后才是诊断
+  → Q0/Q1/Q2/Q3/Pending Q1；Q0 背压等待时仍可插入必要维护；最后才是诊断
 
 按需大消息（仅链接 `ucn_transfer` 的端点）
   → transfer.ucn_transfer_send（T32/T64 直接 Endpoint；T128～T8K 固定 TX Slot）
@@ -83,7 +83,7 @@ S16 给这条循环增加产品时间契约：`UCN_MAX_STEP_INTERVAL_MS` 默认 
 
 S19 给 Path 管理写状态增加独立门禁：目标 Node 只有依次通过 Security、产品 Path Authorizer 和按认证 `(Source, Session)` 的固定 Token Bucket 后才安装/撤销 Path。同一来源改变 Bearer 不会刷新额度；正常业务、Heartbeat/RREQ 使用不同预算。
 
-S04 后，本调用树以默认 `FULL + Service ON` 展示完整可达关系。`LITE` 仍走动态 `ucn_node.c` 的 HELLO/Neighbor/Heartbeat/AODV/Security 主链，但 Candidate、Path、Policy 和 Diagnostic 分支在编译期不存在；`NANO` 改走 `ucn_node_nano.c`，只保留静态 Link/Route、Q0/Q1、转发和 Endpoint 分发，不存在自动 Mesh 主链。Service 树仅在 `UCN_FEATURE_SERVICE=ON` 时成立。关闭能力对应的高级 API 只进入 `ucn_profile_stubs.c` 并返回 `UCN_ERR_CONFIG`。
+S04 后，本调用树以默认 `FULL + Service ON` 展示完整可达关系。`LITE` 仍走动态 `ucn_node.c` 的 HELLO/Neighbor/Heartbeat/AODV/Security 主链，但 Candidate、Path、Policy 和 Diagnostic 分支在编译期不存在；`NANO` 改走 `ucn_node_nano.c`，保留静态 Link/Route、Q0～Q3 固定队列、有界 `6:3:2:1` 调度、转发和 Endpoint 分发，不存在自动 Mesh 主链。Service 树仅在 `UCN_FEATURE_SERVICE=ON` 时成立。关闭能力对应的高级 API 只进入 `ucn_profile_stubs.c` 并返回 `UCN_ERR_CONFIG`。
 
 V5-10 后，默认发送仍固定 W3。产品只有显式调用 `ucn_node_set_wire_profile_auto(true)` 才进入自动最小档路径；HELLO 使用固定 TX 档并以 1 B 发布独立 Peer RX Ceiling，中继保留来源帧档位。业务发送先确定是否带 16 B Tag，再结合地址/Hop/Route/Path、Link MTU 和 Peer RX Ceiling 选档，最后才 Seal/Encode。
 
@@ -130,7 +130,7 @@ docs/calltree/
 | `layer` | `application`、`adapter`、`core`、`routing`、`security`、`service`、`extended`、`diagnostic`、`external`。 |
 | `called_by` | 已知上游入口；`external.*` 表示由产品/驱动/业务调用。 |
 | `calls` | 下游节点，`type` 说明是直接调用、回调、队列或外部操作。 |
-| `notes` | Q0/Q1、并发、固定容量、权限或验证边界。 |
+| `notes` | Q0～Q3、并发、固定容量、权限或验证边界。 |
 
 不是每一个 `static` 字节序/数组辅助函数都单独建节点；它们会写入对应主函数的 `calls` 或 `notes`。这样树重点呈现协议行为，而不是 C 语法细节。
 

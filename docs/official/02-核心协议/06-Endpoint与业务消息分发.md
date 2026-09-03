@@ -27,14 +27,14 @@ UCN 用 Endpoint 回答第二个问题：
 | `0x41` | Barometer sample | v1 | Q1 |
 | `0x42` | Temperature sample | v1 | Q1 |
 | `0x60` | Servo command | v2 | Q0 |
-| `0x61` | Servo result | v1 | Q0/Q1，按产品定义 |
+| `0x61` | Servo result | v1 | Q0～Q3 中由产品明确冻结一种语义 |
 
 每个产品 Endpoint 表至少还要写清：
 
 - Payload 的字节序、长度与版本；
 - 每个字段的单位、比例和有效范围；
 - 是否允许远端访问；
-- 允许 Q0、Q1 中的哪一种；
+- 允许 Q0～Q3 中的哪一种；
 - 是否必须经过安全校验、命令去重或业务授权；
 - 请求与结果如何关联，超时由谁管理。
 
@@ -159,7 +159,7 @@ Endpoint 号只是分发键，不是身份或权限凭证。安全边界至少�
 
 - [ ] 所有业务 Endpoint 有唯一编号和 Owner；
 - [ ] Payload 版本、长度、字节序、单位和范围已冻结；
-- [ ] Q0/Q1 与 FIFO/Latest 选择符合业务语义；
+- [ ] Q0～Q3 与 FIFO/Latest 选择符合业务语义；
 - [ ] 本地/远端 ACL 和 Validator 已定义；
 - [ ] 命令的接受、执行和结果阶段没有混淆；
 - [ ] Task Ready/Restart 会清除旧 Inbox；

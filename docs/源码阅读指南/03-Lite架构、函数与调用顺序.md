@@ -44,7 +44,7 @@ Node
  ├─ RREQ Cache / Discovery[]  动态发现和去重
  ├─ Duplicate/Replay state
  ├─ Security Provider/Policy
- ├─ Q0/Q1 Queue
+ ├─ Q0～Q3 Queue
  └─ Endpoint Handler[]
 ```
 
@@ -129,7 +129,7 @@ ucn_result_t ucn_node_set_join_policy(
 | `ucn_node_set_endpoint_handler(node, endpoint, handler, context)` | Endpoint 回调 | 业务推荐分发入口 |
 | `ucn_node_send(node, destination, message_type, traffic_class, payload, payload_length)` | 普通消息 | 立即解析 Route 并尝试发送 |
 | `ucn_node_send_endpoint(node, destination, endpoint, traffic_class, payload, payload_length)` | Endpoint 消息 | 推荐业务入口；Lite 走自动最佳活动 Route |
-| `ucn_node_enqueue(node, request)` | 完整发送请求 | 复制进 Q0/Q1，后续由 Step 发送 |
+| `ucn_node_enqueue(node, request)` | 完整发送请求 | 复制进 Q0～Q3 对应队列，后续由 Step 发送 |
 | `ucn_node_step(node, now_ms)` | 统一单调毫秒时间 | 推进 Queue、Heartbeat、Neighbor、Route 和 Discovery |
 | `ucn_node_get_stats(node)` | Node | 返回实时统计视图 |
 | `ucn_node_receive(node, ingress_link, data, length)` | 已注册入口 Link、完整 Wire Frame | 唯一 Core RX 入口 |
@@ -313,7 +313,7 @@ ucn_node_step(now_ms)
   → send_due_heartbeat
   → send_due_bearer_quality_probe
   → send_due_route_discovery_ring
-  → Q0/Q1发送与背压
+  → Q0～Q3 调度与背压
   → essential maintenance预算
 ```
 

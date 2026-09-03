@@ -20,13 +20,13 @@ UCN-Host      只有 Linux、地面站、ROS2 等外部主机使用
 
 上层只能依赖下层，不能反向依赖：关闭 `Extended` 或完全不部署 `Host` 时，`Core` 的认证、发现、路由、转发和失联恢复仍完整可用。
 
-当前仓库已实现 v5 W0～W3 Codec、所有 Build Profile 四档接收、Node 固定 TX/最大 RX 档、per-Link 本地 RX 上限、1 B RX Ceiling HELLO、Profile-aware 控制载荷、32 bit 累计 Cost、3/3/3/4 B Wire Cost、3 B Ingress Peek、运行期 Hop Scope、Profile 绑定安全、显式自动最小档、Candidate Profile 连续性、2→4→8→16 有界发现和 Q1 绝对 Deadline，以及从 v4 继承并演进的邻居保活/回收、Route Epoch/grace、受限 Candidate 选路、静态 Endpoint、Q0/Q1、透明密文中继、受认证 Path ID 逐跳表、按需诊断、Adapter 模拟和 Full LC-1 Bearer/Candidate/Q1 本地评分。公开编译参数集中在 `ucn_config.h`，产品头可覆盖且原文件默认保留。默认固定 W3；`Extended Gateway`、真实 Linux Host 产品实现、生产密码库、Authorized Class 执行层和真实介质驱动仍未实现。
+当前仓库已实现 v5 W0～W3 Codec、所有 Build Profile 四档接收、Node 固定 TX/最大 RX 档、per-Link 本地 RX 上限、1 B RX Ceiling HELLO、Profile-aware 控制载荷、32 bit 累计 Cost、3/3/3/4 B Wire Cost、3 B Ingress Peek、运行期 Hop Scope、Profile 绑定安全、显式自动最小档、Candidate Profile 连续性、2→4→8→16 有界发现和 Q1 绝对 Deadline，以及从 v4 继承并演进的邻居保活/回收、Route Epoch/grace、受限 Candidate 选路、静态 Endpoint、Q0～Q3 固定队列与 `6:3:2:1` 调度、透明密文中继、受认证 Path ID 逐跳表、按需诊断、Adapter 模拟和 Full LC-1 Bearer/Candidate/Q1 本地评分。公开编译参数集中在 `ucn_config.h`，产品头可覆盖且原文件默认保留。默认固定 W3；`Extended Gateway`、真实 Linux Host 产品实现、生产密码库、Authorized Class 执行层和真实介质驱动仍未实现。
 
 ## 2. 三个档案的边界
 
 | 档案 | 典型节点 | 必须解决的问题 | 明确不包含 |
 | --- | --- | --- | --- |
-| `UCN-Core` | 所有 MCU 自组网节点、MCU 中继、MCU Coordinator。 | 安全入网、可信邻居、有限多跳、逐跳转发、Q0/Q1、失联安全。 | 服务目录、文件分片、全网日志、ROS2、视频、Linux IPC。 |
+| `UCN-Core` | 所有 MCU 自组网节点、MCU 中继、MCU Coordinator。 | 安全入网、可信邻居、有限多跳、逐跳转发、Q0～Q3 固定队列与有界调度、失联安全。 | 服务目录、文件分片、全网日志、ROS2、视频、Linux IPC。 |
 | `UCN-Extended` | Coordinator、资源更充足的网关、少数主控 MCU。 | 服务发现、组播、时间同步、Q2 可靠传输、可控分片和诊断。 | Linux 特有 API、ROS2、图形化界面和无限大缓存。 |
 | `UCN-Host` | Linux、地面站、ROS2/AI 计算机。 | 将现有主机业务受控映射到 UCN，提供运维、日志和大数据能力。 | 作为 MCU 网络的必经路由、唯一身份中心或唯一 Coordinator。 |
 
@@ -36,7 +36,7 @@ Core/Extended/Host 是系统分层；Nano/Lite/Full 是 **Core 本身在某个�
 
 | `UCN_PROFILE` | Core 能力 | 典型节点 | 自动 Mesh |
 | --- | --- | --- | --- |
-| `NANO` | Frame、Link、Adapter RX Queue、Endpoint、Q0/Q1、静态直连和静态 Route。 | 资源很小且拓扑预配置的传感器/执行器。 | 否 |
+| `NANO` | Frame、Link、Adapter RX Queue、Endpoint、Q0～Q3 固定队列与 `6:3:2:1` 调度、静态直连和静态 Route。 | 资源很小且拓扑预配置的传感器/执行器。 | 否 |
 | `LITE` | Nano + HELLO/准入、Neighbor/Heartbeat、多 Bearer、AODV-Lite/RERR、最小 Security Provider。 | 普通 MCU Mesh 节点与中继。 | 是 |
 | `FULL` | Lite + Candidate、显式 Path、Policy/Balance、Path Trace、Node Snapshot、Policy Diagnostic。 | 主控、复杂中继、诊断或多路径节点。 | 是 |
 
@@ -140,7 +140,7 @@ Core 禁止以下实现方式：
 3. 协议任务 Pump 收包；双方用物理广播 `HELLO` 绑定一跳 Node ID。最小 HELLO 不转发、不进入应用。
 4. `Manual`、`Open` 或 `Provider` 决定是否记录已准入邻居；生产网络必须由 Provider/Coordinator 身份策略授权，中继不能擅自授权。
 5. Endpoint Q1 目标不在直连/Route Cache 时，`ucn_node_send_endpoint()` 通过受限 `ROUTE_REQ` 建立 Route Cache，并按 `(destination, Endpoint)` 在固定等待表中覆盖旧值；Q0 和兼容的原始 `ucn_node_send()` 仍显式寻路/不等待。
-6. Q0/Q1 通过缓存路径发送；路径断开时清理缓存并产生 `ROUTE_ERROR`。
+6. Q0～Q3 通过缓存路径发送；路径断开时清理缓存并产生 `ROUTE_ERROR`。
 7. 若找不到安全路径，应用收到不可达事件，飞控/执行器执行本地失联安全策略。
 
 这套流程只要求 MCU 能使用至少一种 Link。STM32 没有无线收发器时，可以通过 CAN-FD/RS485 成网，或外挂无线模块；协议本身不要求 Linux。

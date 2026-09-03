@@ -17,8 +17,7 @@ static bool ucn_service_id_is_valid(ucn_service_id_t service_id)
  */
 static bool ucn_service_traffic_is_supported(ucn_traffic_class_t traffic_class)
 {
-    return traffic_class >= UCN_TRAFFIC_Q0_CRITICAL &&
-           traffic_class <= UCN_TRAFFIC_Q3_BULK;
+    return (uint32_t)traffic_class < (uint32_t)UCN_TRAFFIC_CLASS_COUNT;
 }
 
 /*
@@ -633,7 +632,7 @@ static ucn_result_t ucn_service_remote_take_class(
     ucn_traffic_class_t traffic_class,
     ucn_service_message_t *message)
 {
-    uint8_t index;
+    uint8_t offset;
 
     if (traffic_class == UCN_TRAFFIC_Q0_CRITICAL) {
         return ucn_service_fifo_take(
@@ -641,10 +640,17 @@ static ucn_result_t ucn_service_remote_take_class(
             &router->remote_q0.head, &router->remote_q0.count, message);
     }
     if (traffic_class == UCN_TRAFFIC_Q1_REALTIME) {
-        for (index = 0U; index < UCN_SERVICE_REMOTE_TX_Q1_DEPTH; ++index) {
+        for (offset = 0U; offset < UCN_SERVICE_REMOTE_TX_Q1_DEPTH; ++offset) {
+            const uint8_t index = (uint8_t)(
+                ((uint32_t)router->remote_q1_cursor + (uint32_t)offset) %
+                (uint32_t)UCN_SERVICE_REMOTE_TX_Q1_DEPTH);
+
             if (router->remote_q1[index].occupied) {
                 *message = router->remote_q1[index].message;
                 router->remote_q1[index].occupied = false;
+                router->remote_q1_cursor = (uint8_t)(
+                    ((uint32_t)index + UINT32_C(1)) %
+                    (uint32_t)UCN_SERVICE_REMOTE_TX_Q1_DEPTH);
                 return UCN_OK;
             }
         }

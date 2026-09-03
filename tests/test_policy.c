@@ -79,6 +79,12 @@ static int policy_step(ucn_node_t *node, uint32_t now_ms)
 
 int test_policy(void)
 {
+    static const int invalid_traffic_classes[] = {
+        -1,
+        -255,
+        -256,
+        (int)UCN_TRAFFIC_CLASS_COUNT
+    };
     ucn_node_t node;
     ucn_link_t link, unregistered_link;
     policy_link_context_t link_context, unregistered_context;
@@ -201,6 +207,26 @@ int test_policy(void)
     matched = ucn_node_find_route_policy(&node, UINT32_C(9), 0x40U,
                                          UCN_TRAFFIC_Q1_REALTIME);
     TEST_ASSERT(matched != NULL && matched->config.mode == UCN_ROUTE_POLICY_AUTO_BEST);
+
+    /* Runtime enums must be validated before conversion to the uint8 Policy
+     * key.  -255 and -256 are the adversarial aliases for Q1 and Q0 on common
+     * compilers; neither a specific nor wildcard rule may observe them. */
+    for (index = 0U;
+         index < sizeof(invalid_traffic_classes) /
+                     sizeof(invalid_traffic_classes[0]);
+         ++index) {
+        const ucn_traffic_class_t invalid_class =
+            (ucn_traffic_class_t)invalid_traffic_classes[index];
+
+        TEST_ASSERT(ucn_node_find_route_policy(
+                        &node, UINT32_C(9), 0x40U, invalid_class) == NULL);
+        TEST_ASSERT(ucn_node_send_endpoint(
+                        &node, UINT32_C(9), 0x40U, invalid_class,
+                        &payload, 1U) == UCN_ERR_UNSUPPORTED);
+    }
+    stats = ucn_node_get_policy_stats(&node);
+    TEST_ASSERT(stats != NULL && stats->policy_match_hits == 0U);
+    TEST_ASSERT(link_context.send_count == 0U);
 
     policy.key.endpoint = 0x20U;
     TEST_ASSERT(ucn_node_set_route_policy(&node, &policy) == UCN_ERR_ARGUMENT);

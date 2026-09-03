@@ -25,7 +25,7 @@ UCN 当前只能发送一帧内能够容纳的业务 Payload；`UCN_MAX_FRAME_BY
 | 名称 | 当前/后续符号 | 作用 | 是否决定逻辑消息长度 |
 | --- | --- | --- | --- |
 | Wire Class | `W0`～`W3` | 地址、Payload Length、Route/Path/Cost 等字段在线上的宽度。 | 否。 |
-| QoS / Traffic Class | 当前 `Q0`、`Q1`，未来可选 Q2/Q3 | 调度优先级、Deadline、队列行为。 | 否。 |
+| QoS / Traffic Class | 当前 `Q0`～`Q3` | 调度优先级、Deadline、队列行为；四级均已有固定队列和有界 `6:3:2:1` 调度。 | 否。 |
 | **Transfer Class** | `T32`～`T8K` | 一个逻辑消息可占用的最大业务字节数，以及是否允许分片。 | **是。** |
 
 因此不得把 `T8K` 写入现有 v5 基础头，也不得把它误当成 W3 或 Q1。普通单帧业务保持现有编码和现有字节数；只有实际分片的业务才会使用新的 Extended Transfer 信封。
@@ -34,21 +34,21 @@ UCN 当前只能发送一帧内能够容纳的业务 Payload；`UCN_MAX_FRAME_BY
 
 | Class | 建议枚举 | 最大逻辑消息长度 | 最多片段数 | 默认调度规则 | 典型用途 |
 | --- | --- | ---: | ---: | --- | --- |
-| T32 | `UCN_TRANSFER_CLASS_T32` | 32 B | 1 | Transfer API 默认 Q1；**禁止分片**。Q0 直接用 Node API。 | 急停、舵机目标、短控制命令。 |
-| T64 | `UCN_TRANSFER_CLASS_T64` | 64 B | 1 | Transfer API 默认 Q1；**禁止分片**。Q0 直接用 Node API。 | IMU 小包、状态字、命令结果。 |
-| T128 | `UCN_TRANSFER_CLASS_T128` | 128 B | 8 | Q1 Fragment；Core 空闲时推进。 | 普通遥测、参数读写。 |
-| T256 | `UCN_TRANSFER_CLASS_T256` | 256 B | 16 | Q1 Fragment；Core 空闲时推进。 | 传感器批量数据、小诊断。 |
-| T512 | `UCN_TRANSFER_CLASS_T512` | 512 B | 32 | Q1 Fragment；Core 空闲时推进。 | 参数块、结构化状态。 |
-| T1K | `UCN_TRANSFER_CLASS_T1K` | 1,024 B | 64 | Q1 Fragment；Core 空闲时推进。 | 参数集、小日志块。 |
-| T2K | `UCN_TRANSFER_CLASS_T2K` | 2,048 B | 128 | Q1 Fragment；Core 空闲时推进。 | 日志块、配置导入。 |
-| T4K | `UCN_TRANSFER_CLASS_T4K` | 4,096 B | 256 | Q1 Fragment；Core 空闲时推进。 | 较大日志/配置块。 |
-| T8K | `UCN_TRANSFER_CLASS_T8K` | 8,192 B | 512 | Q1 Fragment；Core 空闲时推进。 | 小型 OTA 块或文件块。 |
+| T32 | `UCN_TRANSFER_CLASS_T32` | 32 B | 1 | Direct 固定 Q2；**禁止分片**。Q0/Q1 小消息直接用 Node API。 | 短普通命令、状态字。 |
+| T64 | `UCN_TRANSFER_CLASS_T64` | 64 B | 1 | Direct 固定 Q2；**禁止分片**。Q0/Q1 小消息直接用 Node API。 | IMU 批次、命令结果。 |
+| T128 | `UCN_TRANSFER_CLASS_T128` | 128 B | 8 | Q3 Fragment；由 Transfer Owner 有界推进。 | 普通遥测、参数读写。 |
+| T256 | `UCN_TRANSFER_CLASS_T256` | 256 B | 16 | Q3 Fragment；由 Transfer Owner 有界推进。 | 传感器批量数据、小诊断。 |
+| T512 | `UCN_TRANSFER_CLASS_T512` | 512 B | 32 | Q3 Fragment；由 Transfer Owner 有界推进。 | 参数块、结构化状态。 |
+| T1K | `UCN_TRANSFER_CLASS_T1K` | 1,024 B | 64 | Q3 Fragment；由 Transfer Owner 有界推进。 | 参数集、小日志块。 |
+| T2K | `UCN_TRANSFER_CLASS_T2K` | 2,048 B | 128 | Q3 Fragment；由 Transfer Owner 有界推进。 | 日志块、配置导入。 |
+| T4K | `UCN_TRANSFER_CLASS_T4K` | 4,096 B | 256 | Q3 Fragment；由 Transfer Owner 有界推进。 | 较大日志/配置块。 |
+| T8K | `UCN_TRANSFER_CLASS_T8K` | 8,192 B | 512 | Q3 Fragment；由 Transfer Owner 有界推进。 | 小型 OTA 块或文件块。 |
 
 规则固定如下：
 
 1. `T32`、`T64` 必须完整装入一帧；不够则立即拒绝，绝不拆成片段。
 2. `T128`～`T8K` 统一使用 Transfer 信封；能够装下时只有一个 Fragment，装不下时继续切为多个 Fragment。
-3. Fragment 固定使用 Q1 业务类型；**Q0 永远不分片**。Protocol Owner 必须先处理 Core Q0/Q1/维护，只有本轮 Core 空闲时才调用 `ucn_transfer_step()`。
+3. Direct 固定使用 Q2，Fragment 固定使用 Q3，累计 ACK 固定使用 Q1；接收端会拒绝错 Class。**Q0 永远不分片**，Q0/Q1 的小消息应直接使用 Node/Endpoint API。Protocol Owner 必须先按产品预算处理 Core Q0～Q3 与必要维护，再有界调用 `ucn_transfer_step()`；Transfer 的立即发送不会自动占用 Node Q3 队列。
 4. `最多片段数 = 最大长度 / 16 B`。每片至少携带 `16 B` 真实业务数据；小于此值的路径不支持 Extended Transfer，防止 8 KiB 消息被拆成数千片。
 5. Endpoint 的允许等级、是否允许分片、是否要求 E2E 保护，都由产品静态配置；节点不会因为收到一个更大等级的帧而自动扩容。
 
@@ -132,11 +132,11 @@ UCN_MSG_TRANSFER_ACK      = 0x23
 
 默认仍采用窗口 1；产品只有在本机和 Peer 都显式配置能力后才使用固定窗口 2～8。它不引入乱序 Bitmap、选择重传或无限重传：
 
-1. 正常 Q0、Heartbeat、必要路由维护始终优先于 Transfer Fragment。
+1. Q0/Q1 与 Heartbeat、必要路由维护的 Owner 预算优先于 Q3 Transfer Fragment；Q2/Q3 仍按有界公平规则获得机会，不能被永久饿死。
 2. 一个 Protocol Owner 单次 `ucn_transfer_step()` 最多提交 **1 个**新片或重传片；循环足够快时连续 Step 填充固定窗口。产品循环仍应先调用 Core Step，Core 空闲后再调用 Transfer Step。
 3. 缺口/超时默认最多进行 3 次恢复轮；当前 ACK 超时固定为 250 ms，可由产品配置覆盖。动态 RTT 计算尚未接入。
 4. 整条逻辑消息有绝对 Deadline：T128/T256/T512/T1K/T2K/T4K/T8K 默认分别为 `1/2/4/8/15/30/45 s`。超时不续命。
-5. Endpoint 若声明“严格实时”或 Q0，只允许 T32/T64 单帧；否则配置阶段失败。
+5. 严格实时或 Q0 业务不进入 Transfer；应用应使用 Node/Endpoint 单帧 API，并在产品配置中限制 Payload、路由和 Deadline。T32/T64 虽不分片，但 Transfer API 的当前 Class 仍是 Q2。
 
 这意味着 Transfer 解决的是“有界的大消息”，不是硬实时、不保证高吞吐，也不适合视频流。OTA/文件必须按 `T8K` 块逐块完成；每块有独立 `transfer_id`，不能一次申请无限大的文件缓存。
 

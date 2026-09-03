@@ -4,7 +4,7 @@
 > 实现状态：`CURRENT（诊断方法）`
 > 适用版本：UCN 5.0.0 / Core Wire v5
 > 事实源：状态视图、统计 API、测试与现有实测记录
-> 最近核对：当前工作区，2026-08-31
+> 最近核对：当前工作区，2026-09-02
 > 硬件状态：部分实测；未测项不得推断
 
 先定位哪一层满：驱动/DMA ring、Source carrier、Adapter Queue、Node pending、Transfer window 或应用 completion handle。队列满表示生产速度超过消费预算，不等于 Wi-Fi/UART 本身很慢。
@@ -45,7 +45,7 @@ Transfer 吞吐排查同时记录 MTU、fragment 数、窗口、ACK RTT、重传
 4. 关闭日志，排除printf阻塞；
 5. 单跳/单Bearer复现，再逐步增加中继与流量。
 
-Node 应同时查看 `tx_enqueued_by_class[]`、`tx_scheduled_by_class[]` 和 `tx_sent_by_class[]`。入队数高但调度数低说明等待发生在 Node 四级仲裁之前；调度数高但发送数低说明 Route/Link/Deadline 失败。Service 另看 `q2_inbox_full`、`q3_inbox_full`、`remote_q2_full`、`remote_q3_full` 和 `remote_tx_reads_by_class[]`，不要把 Service 满载误判为物理 Wi-Fi 或 UART 限速。
+Node Queue 必须用同一漏斗比较 `tx_enqueued_by_class[]`、`tx_scheduled_by_class[]` 和 `tx_queue_sent_by_class[]`：入队数高但调度数低说明消息仍在四级仲裁前等待；调度数高但 Queue 成功发送数低，再结合 `tx_expired_dropped`、Q0 route-wait/backpressure 与错误统计定位 Route/Link/Deadline。`tx_sent_by_class[]` 是所有成功 Link 提交总量，还包含即时发送、转发和 Transfer/控制路径，不能直接与 Queue 的 enqueued/scheduled 做差。Service 另看 `q2_inbox_full`、`q3_inbox_full`、`remote_q2_full`、`remote_q3_full` 和 `remote_tx_reads_by_class[]`，不要把 Service 满载误判为物理 Wi-Fi 或 UART 限速。
 
 如果源端 `accepted` 大于目标端普通 Q0 `rx`，先确认是否错误地把“本地队列接纳”当成端到端
 完成。route-wait 只能防止 Core 在可恢复的无路由窗口提前释放本地项；帧一旦被 Link 接受，

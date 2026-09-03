@@ -7,7 +7,7 @@ Nano 是 UCN 的固定拓扑最小实现。它保留：
 - Wire v5 W0～W3 Frame 编解码；
 - 固定 Link 注册；
 - 直连 Peer 和静态 Route 查找；
-- Q0/Q1 固定深度发送队列；
+- Q0～Q3 固定深度发送队列；
 - Endpoint handler 和通用 RX handler；
 - 普通业务帧的中继、Hop Limit 和重复抑制；
 - Adapter、Event Runtime、Protocol Owner、Stream/CAN Source。
@@ -38,7 +38,7 @@ Application / Service
     ├── Link 表
     ├── 静态 Route 表
     ├── Endpoint Handler 表
-    ├── Q0/Q1 Queue
+    ├── Q0～Q3 Queue
     └── Duplicate Window
         ↓
   Frame Codec → Link Ops
@@ -209,7 +209,7 @@ ucn_result_t ucn_node_enqueue(
     const ucn_send_request_t *request);
 ```
 
-`request` 还携带 delivery、deadline。Nano 将 payload 复制进固定 Q0/Q1 Item；因此函数成功后调用者可以释放原 Buffer。
+`request` 还携带 delivery、deadline。Nano 将 payload 复制进对应的固定 Q0～Q3 Item；因此函数成功后调用者可以释放原 Buffer。
 
 支持的 delivery：
 
@@ -240,7 +240,7 @@ ucn_node_send_endpoint
 
 ```text
 ucn_node_enqueue
-  → 复制到Q0/Q1固定Item
+  → 复制到 Q0～Q3 对应固定 Item
 
 后续Owner调用 ucn_node_step(now_ms)
   → 记录Step间隔

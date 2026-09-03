@@ -362,7 +362,7 @@ ucn_result_t ucn_transfer_send(
 
 /* Call from the single Protocol Owner.  The Transfer samples config.now_ms on
  * every call, so the callback must observe the same monotonic clock used by
- * the Node/Port.  To preserve Core Q0/Q1 and maintenance priority, call the
+ * the Node/Port.  To preserve Core Q0-Q3 and maintenance priority, call the
  * selected Port/Protocol Owner step first and call this only when Core reports
  * UCN_ERR_NOT_FOUND.  At most one new/retried fragment is submitted per call. */
 ucn_result_t ucn_transfer_step(ucn_transfer_t *transfer);

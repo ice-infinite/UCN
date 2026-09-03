@@ -14,7 +14,7 @@
 
 若把每个 FreeRTOS 任务都当作 Node，会为每个任务重复引入 Node ID、邻居/心跳/路由语义，并会把任务重启误认为设备离网。这既浪费 MCU RAM，也破坏“设备网络”和“本地调度”分层，因此不采用。
 
-当前 v4 已有 `0x40..0xBF` 静态 Endpoint、`ucn_node_send_endpoint()` 和固定 Endpoint 回调表；目标帧到达后回调在 Core 的协议任务上下文执行。T25.1 已在 Core 外实现纯 C `ucn_service`：固定 Binding、本机直投、远端 TX Q0/Q1、Inbox、就绪/ACL 与统计；T25.2 已用独立 Bridge 将远端 TX 有界提交给唯一 Protocol Task，并把 Endpoint callback 接回 Router。T25.3 已在 ESP32 产品工程以静态 Queue、任务通知、短临界区和静态业务 Task 接入它们；这些 FreeRTOS 对象仍完全留在产品 Port，不进入 C99 Core。
+当前 v5 已有 `0x40..0xBF` 静态 Endpoint、`ucn_node_send_endpoint()` 和固定 Endpoint 回调表；目标帧到达后回调在 Core 的协议任务上下文执行。T25 首版在 Core 外实现了纯 C `ucn_service`；当前 QOS4 又把固定 Binding、本机 Inbox、远端 TX 与 Bridge 扩展为 Q0～Q3。ESP32 产品工程仍以静态 Queue、任务通知、短临界区和静态业务 Task 接入它们；这些 FreeRTOS 对象完全留在产品 Port，不进入 C99 Core。
 
 ## 2. 推荐结构
 
@@ -23,7 +23,7 @@ MCU Node (一个 Node ID)
 │
 ├─ UCN 协议任务：唯一拥有 ucn_node_t
 │   ├─ Adapter RX Pump / ucn_node_step()
-│   ├─ 处理邻居、路由、Q0/Q1、安全和转发
+│   ├─ 处理邻居、路由、Q0～Q3、安全和转发
 │   └─ Endpoint 回调只做快速本地投递
 │
 ├─ Service / Task Adapter（固定表、固定队列）
@@ -77,9 +77,11 @@ Service/Task Adapter 属于 **Port / 产品层**，而不是把 FreeRTOS API 写
 | 对象 | 固定内容 | 规则 |
 | --- | --- | --- |
 | Service 表 | Endpoint、目标 Inbox、最大 Payload、允许 QoS、投递策略。 | 一个任务可注册多个 Endpoint；重复 Endpoint 或超限必须启动失败。 |
-| TX Request 队列 | 目标 Node、Endpoint、Q0/Q1、长度、固定 Payload 副本。 | 业务任务只入队；协议任务出队后调用 Core。满时立即失败并计数。 |
+| TX Request 队列 | 目标 Node、Endpoint、Q0～Q3、长度、固定 Payload 副本。 | 四级固定资源独立；业务任务只入队，协议任务按 `6:3:2:1` 出队后调用 Core。满时立即失败并计数。 |
 | Q0 Inbox | 控制命令的有界 FIFO。 | 保留顺序；不得把旧命令静默覆盖。舵机仍须本地超时/安全状态机。 |
 | Q1 Inbox | 传感器/状态的单槽或有界 Latest Value。 | 同一 Endpoint 的新值覆盖旧值，避免 IMU 等高速数据堆积。 |
+| Q2 Inbox | 普通业务的有界 FIFO。 | 保留顺序；适合参数和普通状态，不冒充实时或可靠交付。 |
+| Q3 Inbox | 批量业务的有界 FIFO。 | 最低调度份额但不得永久饥饿；适合日志块和 Transfer 数据面。 |
 | 本地投递统计 | 成功、未知 Endpoint、目标未就绪、队列满、过期。 | 不改变 UCN 帧统计；用于诊断任务负载。 |
 
 首版应使用固定长度 Payload **复制**，先保证所有权清晰和跨任务安全。若 RAM 压力证明复制不可接受，后续才增加固定 Buffer Pool + 引用计数；不得改为无边界动态分配或把调用方栈指针异步保存。
@@ -100,7 +102,7 @@ Endpoint 是业务 ABI，不是“任意函数名”。编号、Payload 布局�
 | 子任务 | 实现内容 | 单元测试 | 虚拟/实机验收 |
 | --- | --- | --- | --- |
 | T25.1 | 冻结静态 Service 表、Endpoint ABI、队列容量、Payload 所有权和错误码；Core 不引入 RTOS 头文件。 | 重复/非法 Endpoint、表满、长度/QoS 不匹配、启动失败。 | 在不链接 FreeRTOS 的 C99 测试中验证固定 Service 表。 |
-| T25.2 | 实现可替换的纯 C Service Router 与本机直投；仅协议任务拥有 Core。 | 本机 A→B 不调用 Link；远端请求只进入 TX Queue；未知/未就绪/满队列可见失败；Q1 覆盖、Q0 FIFO。 | 虚拟 A→B→C：C 的 Endpoint 投递到 C 的本机任务 Inbox；中继不出现业务回调。 |
+| T25.2 | 实现可替换的纯 C Service Router 与本机直投；仅协议任务拥有 Core。 | 首版证明 Q1 覆盖、Q0 FIFO；当前 QOS4 回归继续覆盖 Q2/Q3 FIFO、独立满载和四级无饥饿调度。 | 虚拟 A→B→C：C 的 Endpoint 投递到 C 的本机任务 Inbox；中继不出现业务回调。 |
 | T25.3 | 实现 FreeRTOS Port：静态 Queue/Task Handle 绑定、协议任务 Pump、无阻塞投递和统计。 | 并发业务任务入队、队列满、任务未就绪、协议任务所有权。 | 两块 ESP32-S3：本机模拟 IMU→Control→Servo 与远端控制 Endpoint 并发；测队列丢弃、时延、栈/RAM。 |
 | T25.4 | 与 T15/T19/T20 联动：Endpoint ACL、安全策略、首包 Q1 与产品 ABI。 | 本机/远端策略边界、Q0 不等待、受保护帧只在目标 Service 投递。 | 持续 IMU Q1 + 舵机 Q0 + 断链/重连；验证本地安全动作不受网络故障影响。 |
 

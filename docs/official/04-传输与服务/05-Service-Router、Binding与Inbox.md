@@ -3,7 +3,7 @@
 > 文档级别：`NORMATIVE`
 > 实现状态：`CURRENT`；`UCN_FEATURE_SERVICE` 可独立关闭
 > 事实源：`ucn_service.h/.c`、Service tests
-> 最近核对：`a093862`，2026-08-25
+> 最近核对：当前工作区，2026-09-02
 
 ## Service 是什么
 
@@ -17,11 +17,11 @@ Binding 冻结：
 
 - Endpoint；
 - owner Service ID；
--最大 Payload；
-- 允许 Q0/Q1；
+- 最大 Payload；
+- 允许的单一 Q0～Q3 Class；
 - 本地 Source ACL；
 - 是否接受远端；
-- Q0 FIFO 或 Q1 Latest；
+- Q0/Q2/Q3 FIFO 或 Q1 Latest；
 - 远端 Q0 是否要求 Validator。
 
 Binding table 是借用的 immutable 配置，整个 Router 生命周期保持有效且不修改。
@@ -30,6 +30,8 @@ Binding table 是借用的 immutable 配置，整个 Router 生命周期保持�
 
 - Q0：固定 FIFO，满时明确 NO_SPACE；
 - Q1：每 Binding 一个 Latest Slot，新值覆盖未消费旧值；
+- Q2：固定 Normal FIFO，满时明确 NO_SPACE；
+- Q3：固定 Bulk FIFO，满时明确 NO_SPACE；
 - Router 成功投递后拥有 Payload 固定副本，调用者可复用输入。
 
 ## Ready 生命周期
@@ -65,7 +67,8 @@ Node 10
 - Binding 数不超过编译上限；
 - Endpoint 位于静态业务范围且不重复；
 - Service ID、Payload、Traffic Mask、Delivery Mode 合法；
-- Q0/Q1 Binding 数分别不超过固定 Inbox 数；
+- Q0/Q1/Q2/Q3 Binding 数分别不超过对应固定 Inbox/Slot 数；
+- 使用 `uint8_t` 计数或索引的 Binding、Remote Queue 和 Inbox 深度都在 `1..255`；
 - ACL/远端 Q0 Validator 要求可满足。
 
 Binding 表是借用的 immutable 存储。应用若把它放在栈上，函数返回后 Router 就会悬空；正确做法是 `static const` 或寿命覆盖 Router 的产品配置对象。
@@ -76,7 +79,7 @@ Binding 表是借用的 immutable 存储。应用若把它放在栈上，函数�
 
 1. 查找 Endpoint Binding；
 2. 检查源 Service ACL、Traffic Class、Payload 长度和目标 Ready；
-3. Q0 复制进目标 FIFO，满则 NO_SPACE；或 Q1 覆盖 Latest；
+3. Q0/Q2/Q3 复制进各自目标 FIFO，满则 NO_SPACE；或 Q1 覆盖 Latest；
 4. Router 成为 Payload 固定副本所有者；
 5. 返回 `LOCAL_DELIVERED`；
 6. 目标任务被 Port/产品事件唤醒，调用 `ucn_service_inbox_take()`；
@@ -89,7 +92,7 @@ Binding 表是借用的 immutable 存储。应用若把它放在栈上，函数�
 目标 Node 不等于本机时，Router 不调用 Link：
 
 1. 完成相同 Binding/ACL/长度检查；
-2. Q0 进入固定 Remote FIFO，Q1 进入 Remote Latest Slot；
+2. Q0/Q2/Q3 进入各自固定 Remote FIFO，Q1 进入 Remote Latest Slot；
 3. 返回 `REMOTE_ENQUEUED`；
 4. 后续 Bridge/Protocol Owner 从 Remote Queue 取消息并调用 Node；
 5. 每一后续阶段可能独立失败并产生事件/统计。
@@ -102,11 +105,14 @@ Binding 表是借用的 immutable 存储。应用若把它放在栈上，函数�
 
 Ready 不是网络可达状态，也不是权限。它只表示当前本地 Owner 是否准备接管新业务。
 
-## Q0/Q1 的容量语义
+## Q0～Q3 的容量与公平语义
 
 - Q0 每条消息占一个完整固定 `ucn_service_message_t`；增加深度会按最大 Payload 成倍增加 RAM；
 - Q1 每 Binding 一个 Latest Slot，内存固定且不因产生速率增长；
-- Remote Q0/Q1 与本地 Inbox 是不同容量，不能只调一个宏；
+- Q2/Q3 各自使用独立 FIFO，满时不覆盖、不借用 Q0/Q1 的槽；
+- Remote Q0～Q3 与本地 Inbox 是不同容量，不能只调一个宏；
+- Remote TX 在 Class 之间按固定 12 槽 `6:3:2:1` 调度；同一 Q1 Class 内从上次成功槽的下一槽开始扫描，热点 Latest key 持续更新也不能让其他 Q1 key 永久饥饿；
+- 当前内部索引与计数是 `uint8_t`，所有对应配置的最大合法深度是 255，256 会在编译配置阶段失败；
 - stats 中的 full/overwrite 是调优证据，不应静默清零。
 
 ## 调用上下文
@@ -123,7 +129,7 @@ ISR 应只写驱动/请求 Ring 并通知，不能在 Handler 中直接 `ucn_ser
 | ACL/Traffic 拒绝 | 不写 Inbox | 不自动降级 |
 | Not Ready | 不写 Inbox | 等任务 ready 或报告失败 |
 | Payload 过长 | 不写 Inbox | 用更小 Payload/Transfer |
-| Q0 满 | 不覆盖旧命令 | 有界重试或业务失败 |
+| Q0/Q2/Q3 满 | 不覆盖旧消息 | 按 Class 语义有界重试或业务失败 |
 | Q1 已占用 | 覆盖旧样本 | 正常 Latest 语义并计数 |
 
 ## 验证清单
@@ -131,6 +137,8 @@ ISR 应只写驱动/请求 Ring 并通知，不能在 Handler 中直接 `ucn_ser
 - [ ] 重复 Endpoint/非法 Binding 初始化原子失败；
 - [ ] Binding 配置寿命覆盖 Router；
 - [ ] 本机 Fast Path 不进入 Frame/Route/Link；
-- [ ] Q0 满不覆盖，Q1 覆盖只发生在 Latest；
+- [ ] Q0/Q2/Q3 满不覆盖，Q1 覆盖只发生在 Latest；
+- [ ] 多个 Q1 key 在热点持续更新时仍按 slot round-robin 有界获得发送机会；
+- [ ] Service 深度 255 可编译，256 被编译期合同拒绝；
 - [ ] ready=false 清除旧消息，重启后不可消费；
 - [ ] acceptance 只描述本地所有权，不被报告为远端执行。

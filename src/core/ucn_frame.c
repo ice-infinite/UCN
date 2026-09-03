@@ -293,7 +293,9 @@ static ucn_result_t validate_frame_fields(
          frame->has_path_id) ||
         (frame->has_path_id &&
          (!frame->has_route_extension || frame->path_id == 0U)) ||
-        frame->traffic_class > UCN_TRAFFIC_Q3_BULK || frame->hop_limit == 0U) {
+        (uint32_t)frame->traffic_class >=
+            (uint32_t)UCN_TRAFFIC_CLASS_COUNT ||
+        frame->hop_limit == 0U) {
         return UCN_ERR_ARGUMENT;
     }
     if (frame->hop_limit > descriptor->max_hops || frame->network_id == 0U ||

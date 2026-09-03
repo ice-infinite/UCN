@@ -12,7 +12,7 @@
 | Route | 去目标 Node 的下一跳/Link 是什么？ | 自动发现或直连生成，有时效 |
 | Candidate | 同一目标还有哪些可替换路线？ | Full 有界缓存，按质量更新 |
 | Path | 一个显式端到端转发身份和每跳表项 | 受授权安装/撤销，独立于 Route Cache |
-| Policy | 某目标+Endpoint+Q0/Q1 应如何选 Path？ | Full 固定表配置 |
+| Policy | 某目标+Endpoint+Traffic Class 应如何选 Path？ | Full 固定表配置 |
 
 ## 多接口节点
 

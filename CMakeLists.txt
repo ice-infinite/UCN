@@ -6,6 +6,11 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+# Public sources and generated Host path literals are UTF-8.  Apply the
+# encoding contract to every MSVC target so bilingual comments and non-ASCII
+# source/build directories also remain valid when consumers enable /WX.
+add_compile_options($<$<C_COMPILER_ID:MSVC>:/utf-8>)
+
 option(UCN_BUILD_TESTS "Build UCN unit and simulation tests" ON)
 option(UCN_BUILD_SCALE_SIM "Build the host-only UCN scale simulator" ON)
 option(UCN_BUILD_CLUSTER_SIM "Build the host-only UCN Cluster simulator" ON)
@@ -910,6 +915,41 @@ add_test(NAME ucn_cluster_docs_contract_gate
     endif()
 
     if(UCN_BUILD_CONFIG_CONTRACT_TESTS)
+        # QOS-A03: every Service queue uses uint8_t head/tail/count state.
+        # Freeze 255 as the largest accepted depth and reject 256 during
+        # configure so the contract is checked by every supported compiler.
+        unset(UCN_SERVICE_DEPTH_255_COMPILES CACHE)
+        try_compile(UCN_SERVICE_DEPTH_255_COMPILES
+            "${CMAKE_CURRENT_BINARY_DIR}/service-depth-255-contract"
+            SOURCES
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_service_queue_depth_contract.c"
+            CMAKE_FLAGS
+                "-DINCLUDE_DIRECTORIES=${CMAKE_CURRENT_SOURCE_DIR}/include"
+            COMPILE_DEFINITIONS
+                "-DUCN_TEST_SERVICE_QUEUE_DEPTH=255"
+            OUTPUT_VARIABLE UCN_SERVICE_DEPTH_255_OUTPUT
+        )
+        if(NOT UCN_SERVICE_DEPTH_255_COMPILES)
+            message(FATAL_ERROR
+                "Service queue depth 255 must compile:\n${UCN_SERVICE_DEPTH_255_OUTPUT}")
+        endif()
+
+        unset(UCN_SERVICE_DEPTH_256_COMPILES CACHE)
+        try_compile(UCN_SERVICE_DEPTH_256_COMPILES
+            "${CMAKE_CURRENT_BINARY_DIR}/service-depth-256-contract"
+            SOURCES
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_service_queue_depth_contract.c"
+            CMAKE_FLAGS
+                "-DINCLUDE_DIRECTORIES=${CMAKE_CURRENT_SOURCE_DIR}/include"
+            COMPILE_DEFINITIONS
+                "-DUCN_TEST_SERVICE_QUEUE_DEPTH=256"
+            OUTPUT_VARIABLE UCN_SERVICE_DEPTH_256_OUTPUT
+        )
+        if(UCN_SERVICE_DEPTH_256_COMPILES)
+            message(FATAL_ERROR
+                "Service queue depth 256 must be rejected")
+        endif()
+
         add_executable(ucn_config_defaults_test tests/test_config_contract.c)
         target_include_directories(ucn_config_defaults_test PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include

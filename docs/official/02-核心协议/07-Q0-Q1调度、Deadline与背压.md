@@ -3,7 +3,7 @@
 > 文档级别：`NORMATIVE`
 > 实现状态：`CURRENT`
 > 事实源：`include/ucn/ucn_types.h`、`include/ucn/ucn_node.h`、`include/ucn/ucn_service.h`、Node/Service/QoS tests
-> 最近核对：当前工作区，2026-08-31
+> 最近核对：当前工作区，2026-09-02
 
 ## 1. 为什么不能把所有数据放进一个 FIFO
 
@@ -156,7 +156,8 @@ Latest 覆盖会改变业务语义。这不是协议丢包，而是错误的 Bin
 - Deadline 到期后旧消息是否确实不再发送；
 - Q1 Latest 是否只保留最新值；
 - 四级满载时是否维持 `6:3:2:1`，Q2/Q3 是否无饥饿；
-- `tx_enqueued_by_class`、`tx_scheduled_by_class`、`tx_sent_by_class` 差值是否可解释；
+- 同一 Queue 漏斗的 `tx_enqueued_by_class`、`tx_scheduled_by_class`、`tx_queue_sent_by_class` 差值是否可解释；
+- `tx_sent_by_class` 是否只被当作全部 Link 成功提交总量，而没有和 Queue-only 计数直接相减；
 - 两条不相干 Link/路径是否能由各自驱动并行推进；
 - Owner CPU 占用与每次 step 的工作预算。
 

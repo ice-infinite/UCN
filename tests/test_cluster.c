@@ -3,6 +3,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include "cluster_test_fixture.h"
 #include "ucn/ucn_cluster.h"
 #include "ucn/ucn_cluster_epoch.h"
@@ -12,6 +22,56 @@
 
 #define CLUSTER_TEST_NODES ((size_t)4U)
 #define CLUSTER_TEST_QUEUE ((size_t)512U)
+
+/* CMake paths are UTF-8.  The Windows narrow CRT API interprets them through
+ * the active ANSI code page, so a non-ASCII source/build directory can make a
+ * valid golden file appear missing.  Keep the production library independent
+ * of platform APIs and use wide paths only in this Host test. */
+static FILE *cluster_test_fopen_utf8(const char *path, const char *mode)
+{
+#ifdef _WIN32
+    wchar_t wide_path[512];
+    wchar_t wide_mode[8];
+
+    if (path == NULL || mode == NULL ||
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                            wide_path,
+                            (int)(sizeof(wide_path) / sizeof(wide_path[0]))) == 0 ||
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, mode, -1,
+                            wide_mode,
+                            (int)(sizeof(wide_mode) / sizeof(wide_mode[0]))) == 0) {
+        return NULL;
+    }
+    return _wfopen(wide_path, wide_mode);
+#else
+    return fopen(path, mode);
+#endif
+}
+
+static int cluster_test_replace_utf8(const char *source, const char *destination)
+{
+#ifdef _WIN32
+    wchar_t wide_source[512];
+    wchar_t wide_destination[512];
+
+    if (source == NULL || destination == NULL ||
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, source, -1,
+                            wide_source,
+                            (int)(sizeof(wide_source) /
+                                  sizeof(wide_source[0]))) == 0 ||
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, destination, -1,
+                            wide_destination,
+                            (int)(sizeof(wide_destination) /
+                                  sizeof(wide_destination[0]))) == 0) {
+        return -1;
+    }
+    return MoveFileExW(wide_source, wide_destination,
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ?
+               0 : -1;
+#else
+    return rename(source, destination);
+#endif
+}
 
 typedef struct cluster_test_network cluster_test_network_t;
 
@@ -2762,7 +2822,7 @@ static int cluster_test_golden_trace(void)
     if (update_env != NULL && strcmp(update_env, "1") == 0) {
         first_run = true;
     } else {
-        golden = fopen(golden_path, "r");
+        golden = cluster_test_fopen_utf8(golden_path, "r");
         if (golden == NULL) {
             fprintf(stderr,
                     "CLV2-M00-03: golden trace MISSING at %s; the gate "
@@ -2774,7 +2834,7 @@ static int cluster_test_golden_trace(void)
         (void)fclose(golden);
         golden = NULL;
     }
-    trace = fopen(trace_path, "w");
+    trace = cluster_test_fopen_utf8(trace_path, "w");
     TEST_ASSERT(trace != NULL);
 
     TEST_ASSERT(cluster_test_network_init(&network, 3U) == 0);
@@ -2789,7 +2849,7 @@ static int cluster_test_golden_trace(void)
     (void)fclose(trace);
 
     if (first_run) {
-        if (rename(trace_path, golden_path) != 0) {
+        if (cluster_test_replace_utf8(trace_path, golden_path) != 0) {
             fprintf(stderr,
                     "CLV2-M00-03: failed to install golden at %s\n",
                     golden_path);
@@ -2801,9 +2861,9 @@ static int cluster_test_golden_trace(void)
         return 0;
     }
     /* Byte-wise comparison of the actual trace against the golden file. */
-    golden = fopen(golden_path, "r");
+    golden = cluster_test_fopen_utf8(golden_path, "r");
     TEST_ASSERT(golden != NULL);
-    trace = fopen(trace_path, "r");
+    trace = cluster_test_fopen_utf8(trace_path, "r");
     TEST_ASSERT(trace != NULL);
     while (fgets(actual, sizeof(actual), trace) != NULL) {
         if (fgets(expected, sizeof(expected), golden) == NULL) {

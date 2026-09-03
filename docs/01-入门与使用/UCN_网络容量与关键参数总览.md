@@ -234,7 +234,7 @@ Windows x64、GCC 14.2、Release、Service OFF的当前静态证据：
 | Lite | 6,024 B | 73,735 B |
 | Full | 10,080 B | 139,017 B |
 
-这是 V5-33 阶段的 Host x64 GCC 14.2 Release/Service OFF 历史结果；当前 `ucn_link_t=40 B`，H6-FB-01 后 Storage Layout Version=6。表中对象/Archive 数字没有在本节冒充 H6-FB-01 后的新资源值；最新 Core 门禁另记录 Transfer 对象 8,840 B（ACK Fence 固定增加 8 B）。这些数据只证明固定对象与代码裁剪，不等于目标 MCU ELF/栈/功耗；历史基线见[V5-07 报告](../08-实现与验证/版本演进/UCN_V5_07_发布门禁与软件验证报告.md)。
+这是 V5-33 阶段的 Host x64 GCC 14.2 Release/Service OFF 历史结果；当前 `ucn_link_t=40 B`，QOS-A04 后 Storage Layout Version=8。表中对象/Archive 数字没有在本节冒充当前资源值；当前 Host x64 Debug Nano/Lite/Full Node 为 `3496/6888/10936 B`，Transfer 对象为 8,840 B。这些数据只证明固定对象与代码裁剪，不等于目标 MCU ELF/栈/功耗；历史基线见[V5-07 报告](../08-实现与验证/版本演进/UCN_V5_07_发布门禁与软件验证报告.md)。
 
 特性：
 
@@ -249,14 +249,17 @@ Windows x64、GCC 14.2、Release、Service OFF的当前静态证据：
 | --- | ---: |
 | Core Q0 FIFO | 4 |
 | Core Q1 Latest队列 | 4 |
+| Core Q2 FIFO | 2 |
+| Core Q3 FIFO | 1 |
 | Pending Q1 | 4 |
 | Adapter RX Queue | 2帧/Adapter |
 | Endpoint Handler | 8 |
 | Endpoint Security Policy | 8 |
 | Service Binding | 6 |
-| Service Remote TX Q0/Q1 | 各4 |
+| Service Remote TX Q0/Q1/Q2/Q3 | 4/4/2/1 |
 | Service本机Q0 Inbox | 每Binding 4 |
 | Service本机Q1 Inbox | 每Binding 1个Latest槽 |
+| Service本机Q2/Q3 Inbox | 每Binding 2/1 |
 
 默认Adapter RX Queue的两个槽都能保存完整256 B帧，仅帧数组约512 B，另有Ingress Link指针、长度、索引和统计。Service Router/Bridge、RTOS Task栈、驱动TX/RX队列、DMA、Wi-Fi系统任务和Security Provider都在Node对象之外。
 

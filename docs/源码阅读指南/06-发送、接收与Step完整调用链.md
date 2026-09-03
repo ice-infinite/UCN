@@ -140,7 +140,7 @@ Application
 Application/Service Bridge
   → ucn_node_enqueue(request)
       → 校验delivery/QoS/deadline
-      → payload复制进固定Q0/Q1 Item
+      → payload 复制进 Q0～Q3 对应固定 Item
       → 通知Owner（由外层Runtime/Port负责）
 
 Owner
@@ -278,7 +278,7 @@ ucn_node_step
   → Path expire
   → Policy quality/path/flow维护
   → Diagnostic pending/reply维护
-  → Q0/Q1业务Queue
+  → Q0～Q3 业务 Queue
   → 有界Essential Maintenance
 ```
 

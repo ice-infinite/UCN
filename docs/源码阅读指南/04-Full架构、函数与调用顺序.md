@@ -45,7 +45,7 @@ Node
  │   └─ Link Quality Snapshot[]
  ├─ Diagnostic Pending/Reverse/Reply[]
  ├─ Security / Replay / Control Budget
- ├─ Q0/Q1 Queue
+ ├─ Q0～Q3 Queue
  └─ Endpoint Handler[]
 ```
 
@@ -384,7 +384,7 @@ ucn_node_step
   → policy_refresh_path_egress
   → policy_expire_flows
   → expire diagnostic pending/reverse slots
-  → Q0/Q1与Essential maintenance
+  → Q0～Q3 与 Essential maintenance
 ```
 
 Full 的性能审计重点不是单个函数多快，而是一次 Step 的所有子系统是否都有固定预算，是否可能因大量 Link/Route/Path 同时到期导致长时间占用 Owner。

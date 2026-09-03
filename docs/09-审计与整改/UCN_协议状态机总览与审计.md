@@ -33,7 +33,7 @@
 | SM-03 | 路由发现槽 Discovery Slot | `ucn_node.c` | 2(有效/空闲)+环级 | 环 250ms / 总 1s |
 | SM-04 | 路由条目 Route Entry | `ucn_node.c` | 3(+Previous) | 寿命 30s / 提前刷新 6s / Grace 1s |
 | SM-05 | 候选路由 Candidate | `ucn_node.c` | 3 | 候选超时 / Probe RTT |
-| SM-06 | TX 队列项（Q0/Q1） | `ucn_node.c` | 4 | 绝对 deadline / 背压重试 5ms |
+| SM-06 | TX 队列项（Q0～Q3） | `ucn_node.c` | 4 | 绝对 deadline / Q0 背压重试 5ms |
 | SM-07 | Pending Q1 | `ucn_node.c` | 3 | 固定 1s |
 | SM-08 | 去重窗口 Duplicate Window | `ucn_duplicate_internal.h` | 2 | 源超时 |
 | SM-09 | RREQ Cache | `ucn_node.c` | 2 | 缓存超时 |
@@ -279,13 +279,13 @@ handle_path_activate_ack(node, frame): // 源端：activate_candidate_route → 
 
 ---
 
-## 6. SM-06 TX 队列项（Q0/Q1 生命周期）
+## 6. SM-06 TX 队列项（Q0～Q3 生命周期）
 
 ### 状态图
 
 ```mermaid
 stateDiagram-v2
-    [*] --> QUEUED : enqueue（Q0 找空槽；Q1 同(dst,type)覆盖旧值）
+    [*] --> QUEUED : enqueue（Q0/Q2/Q3 FIFO；Q1 可按(dst,type) Latest 覆盖）
     QUEUED --> SENT : step 发送成功（ucn_node_send OK）
     QUEUED --> RETRY_WAIT : Q0 背压 NO_SPACE 且有重试额度且 deadline 允许
     RETRY_WAIT --> SENT : 到 next_attempt 后发送成功
@@ -295,24 +295,25 @@ stateDiagram-v2
     SENT --> [*]
     EXPIRED --> [*]
     TERMINAL --> [*]
-    note right of QUEUED : Q0 FIFO 按 order；Q1 Latest 覆盖；\n等待重试期间保留 Q0 队首占有权，仅维护可插空
+    note right of QUEUED : 四级按 6:3:2:1 仲裁；Q0/Q2/Q3 FIFO；Q1 可 Latest；\n等待重试期间保留 Q0 队首占有权，仅维护可插空
 ```
 
 ### 伪代码
 
 ```
 ucn_node_enqueue(node, request):
-    校验 class∈{Q0,Q1}、非控制帧、delivery 合法
+    校验 class∈{Q0,Q1,Q2,Q3}、非控制帧、delivery 合法
     if Q1 && delivery==LATEST_VALUE: slot = 同(dst,message_type) 已占槽（覆盖）
-    else: slot = 第一个空槽（无则 UCN_ERR_NO_SPACE）
+    else: slot = 对应 Class 的第一个空槽（无则 UCN_ERR_NO_SPACE）
     写入 payload/deadline/order; retries=0; occupied=true
 
 // step 内的发送节拍（见 SM-17）：
-item = find_next_item(q0) 或（q0 空）find_next_item(q1)   // order 最小者
+class = schedule[cursor..] 中第一个非空类   // 12 槽 6:3:2:1
+item = find_next_item(class_queue)           // 该 Class 内 order 最小者
 if deadline 过期: 丢弃; return UCN_ERR_TTL
 if RETRY_ON_BACKPRESSURE 且 未到 next_attempt: 只做必要维护; return
 result = ucn_node_send(item...)
-if OK: 释放槽
+if OK: 释放槽; tx_queue_sent_by_class[class]++
 if NO_SPACE 且 可重试型 Q0: retries<上限 且 deadline 允许 → next_attempt=now+5ms; return
 else: 终态失败释放
 ```
@@ -345,7 +346,7 @@ queue_pending_q1(node, dst, type, payload):
     无槽 → UCN_ERR_NO_SPACE
     slot.deadline = now + UCN_PENDING_Q1_TIMEOUT_MS(1s)   // 固定超时，非业务 deadline
 
-send_pending_q1_if_ready(node, now):      // step：Q0/Q1 空时检查
+send_pending_q1_if_ready(node, now):      // 独立 Route-pending Q1 路径，并非四级 Queue 仲裁
     for slot 占位:
         if deadline 过期: 丢弃; return UCN_ERR_TTL
         if find_link(dst) != NULL:         // 路由就绪
@@ -878,7 +879,7 @@ flowchart LR
   候选/Path/发现槽的同类行为。
 - **C-03 RREQ 只传播更优副本**（SM-09 BETTER 语义）：多 Bearer 场景同 request_id
   可能被转发两次（高 cost 副本先到）；每 Peer 令牌限制放大效应。
-- **C-04 Q0/Q1 无端到端确认**（除 Transfer 外）：实时语义优先于可靠语义；
+- **C-04 普通 Q0～Q3 无端到端确认**（除 Transfer 外）：Traffic Class 只表达本地排队意图；
   关键确认走 Service Result Endpoint 或 Transfer。
 - **C-05 中继不解密**：安全与性能权衡（透明密文中继）。
 - **C-06 Cluster 首阶段边界**：簇间 Locator/Tunnel、多级簇、小时级长稳、功耗、
@@ -965,4 +966,3 @@ flowchart LR
 
 理想设计 ⊇ 现状：现状可定性为"设计的简化首阶段"（README 已声明首阶段边界），
 设计文档是下一步（C07 全闭环）的完整 FSM 规格。两者之间不存在矛盾，**差距 = 待办**。
-

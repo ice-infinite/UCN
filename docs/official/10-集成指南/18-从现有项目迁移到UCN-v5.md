@@ -31,7 +31,7 @@
 - 每块MCU确定可管理Node ID/Flash配置；
 - 每类传感器/命令定义Endpoint/Service ID和payload version；
 - 小消息走Endpoint/Service，大消息走Transfer；
-- 明确Q0/Q1和delivery/completion语义；
+- 明确 Q0～Q3 和 delivery/completion 语义；
 - 建立旧消息↔新消息adapter，支持双栈对比。
 
 ## 阶段3：切入Owner架构

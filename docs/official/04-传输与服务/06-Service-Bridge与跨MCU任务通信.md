@@ -16,7 +16,7 @@ Task A → Remote Queue → Service Bridge → Node/Route/Link
        → 目标 Node Bridge → Service Router → Task C Inbox
 ```
 
-本机 Fast Path 不完整走一遍 Frame 编解码和物理 Link，减少 CPU/RAM/延迟；但 Endpoint、Payload、Q0/Q1、ACL 和结果语义保持一致。
+本机 Fast Path 不完整走一遍 Frame 编解码和物理 Link，减少 CPU/RAM/延迟；但 Endpoint、Payload、Q0～Q3、ACL 和结果语义保持一致。
 
 ## Bridge 责任
 

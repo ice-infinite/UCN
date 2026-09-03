@@ -1,9 +1,10 @@
 # UCN v5 Q2/Q3 四级调度软件闭环报告
 
-> 状态：`SOFTWARE DONE / HARDWARE PENDING`
+> 状态：`AUDIT HOLD / REMEDIATION SELF-REVIEW PASS / EXTERNAL REVIEW PENDING`
 > 日期：2026-09-02
 > 适用范围：UCN Core Wire v5、Nano/Lite/Full Node、可选 Service、可选 Transfer
 > 不包含：ESP32 烧录、真实 UART/CAN/USB/Wi-Fi 优先级映射、目标 MCU 时延/吞吐/功耗结论
+> 当前结论：QOS-A01～A08 审计意见属实，整改与软件全矩阵自审已经通过；外部复审签字前不得写成最终软件接口冻结。
 
 ## 1. 为什么要补 Q2/Q3
 
@@ -161,19 +162,19 @@ Q3 只是 Fragment 的调度级别。当前 `ucn_transfer_step()` 通过立即�
 | `UCN_SERVICE_Q2_INBOX_DEPTH` | 2 |
 | `UCN_SERVICE_Q3_INBOX_DEPTH` | 1 |
 
-所有深度和 Binding 上限均在编译期验证为非零且不超过总 Binding 容量。未覆盖的值继续使用库 fallback。
+所有深度和 Binding 上限均在编译期验证为非零且不超过总 Binding 容量。由于 Service 的固定 Queue、Binding 和 Inbox 使用 `uint8_t` 索引/计数，相关上限还必须小于等于 255；产品若需要 256 或更深容量，必须先把整个索引 ABI 统一升级，而不能只覆盖一个宏。配置合同把 255 固定为可编译边界、256 固定为配置失败。未覆盖的值继续使用库 fallback。
 
 ### 7.3 Storage ABI
 
-Node Storage Layout 从 6 升到 7，因为 `ucn_node_t` 增加 Q2/Q3 数组与调度 cursor。库和应用必须使用同一配置头并全量重编，不能把旧 Layout 对象与新库混用。
+Q2/Q3 初次实现时 Node Storage Layout 从 6 升到 7，因为 `ucn_node_t` 增加 Q2/Q3 数组与调度 cursor。本轮 QOS-A04 又增加 Queue-only 成功发送统计，因此当前 Layout 从 7 升到 8。库和应用必须使用同一配置头并全量重编，不能把旧 Layout 对象与新库混用。
 
 Host x64 Debug 当前绝对值为：
 
 | Profile | `sizeof(ucn_node_t)` |
 | --- | ---: |
-| Nano | 3480 B |
-| Lite | 6872 B |
-| Full | 10920 B |
+| Nano | 3496 B |
+| Lite | 6888 B |
+| Full | 10936 B |
 
 这些数值只用于版本趋势。真实 ESP32/STM32 RAM、对齐、Flash、Task Stack 与 CPU 必须由目标工具链和固件 Map/高水位实测。
 
@@ -185,9 +186,19 @@ Node 新增四级数组：
 tx_enqueued_by_class[4]
 tx_scheduled_by_class[4]
 tx_sent_by_class[4]
+tx_queue_sent_by_class[4]
 ```
 
-三者分别回答“Node 接收了多少”“调度器选中了多少”“Link 成功接受了多少”。它们之间的差值可帮助区分过期、背压、路由等待和终态错误。
+这四组计数不是一个三段漏斗：
+
+| 计数 | 唯一口径 |
+| --- | --- |
+| `tx_enqueued_by_class[]` | Node 自己的四级业务 Queue 接纳数 |
+| `tx_scheduled_by_class[]` | Node Queue 调度器选中项的次数 |
+| `tx_queue_sent_by_class[]` | 由 Node Queue 发起且 Link 成功接纳的次数 |
+| `tx_sent_by_class[]` | 全部成功 Link 提交总数，包括即时发送、Queue 发送、转发和其他直接使用发送路径的组件 |
+
+因此只允许在 `enqueued → scheduled → queue_sent` 之间解释 Queue 排队、到期和发送失败。`tx_sent_by_class[]` 用来观察链路总发送量，不能减去 `tx_enqueued_by_class[]` 后称作“队列损失”。
 
 Service 增加：
 
@@ -203,22 +214,41 @@ Service 增加：
 
 - Q2/Q3 立即发送、入队、Endpoint 和 Path 交付；
 - Q2/Q3 Node 队列选择和非法 Class 拒绝；
+- `-1/-255/-256/CLASS_COUNT` Traffic Class 在 GCC/MSVC 都失败；Endpoint 会在 Policy 前拒绝，Policy 查找也独立拒绝，且失败不改变 Policy 统计或 Link 发送次数；
 - Service Q2/Q3 FIFO 顺序、满载、purge 和三节点 Bridge；
+- 两个 Q1 Latest key 在热点 key 每次发送后立即补充时，冷 key 仍在已占 slot 数量内得到服务；
+- Service 深度 255 可编译，256 在配置阶段失败；
 - Transfer Direct/Fragment/ACK 精确 Class 映射与错 Class 拒绝；
 - Node 与 Service 各自持续 12,000 次四队列满载，精确得到 `6000/3000/2000/1000`；
 - Full/Lite/Nano 都实际运行同一 QoS 测试，不只编译符号。
 
-### 9.2 构建矩阵
+### 9.2 QOS-A01～A08 整改映射
+
+| 审计项 | 核实 | 整改 |
+| --- | --- | --- |
+| QOS-A01 | 属实 | Frame、Node、Nano、Service 使用无符号 Class 范围判断；加入负枚举和失败不写回回归。 |
+| QOS-A02 | 属实 | Service Remote Q1 增加 `remote_q1_cursor`；从上次成功槽的下一槽扫描。 |
+| QOS-A03 | 属实 | Binding/Remote Queue/Inbox 深度增加 `<= UINT8_MAX` 静态断言；CMake 加 255/256 编译合同。 |
+| QOS-A04 | 属实 | 新增 `tx_queue_sent_by_class[]`，冻结 Queue-only 与 Link-total 两套统计口径；Layout 升至 8。 |
+| QOS-A05 | 属实 | Windows Host golden test 将 CMake UTF-8 路径转换为宽字符后使用 `_wfopen`/`MoveFileExW`；MSVC 全项目使用 `/utf-8`。 |
+| QOS-A06 | 属实 | official、状态机、用户/阅读入口同步到 Q0～Q3；历史阶段报告保留原始版本边界。 |
+| QOS-A07 | 属实 | `send_endpoint_internal()` 在任何 Policy 查询前以原枚举宽度拒绝非法 Class；`find_route_policy_match()` 同样独立校验，避免负值先截断为 `uint8_t` 后别名成 Q0/Q1。 |
+| QOS-A08 | 属实 | 更新仍作为当前入口的 Transfer、节点内任务、Call Tree、快速手册、容量、分层与整体架构文档；历史版本/当时测试说明不反向改写。 |
+
+### 9.3 构建矩阵
 
 | 环境 | 结果 |
 | --- | --- |
-| Windows GCC Full Debug | 50/50 CTest |
-| Windows GCC Lite Debug | 50/50 CTest |
-| Windows GCC Nano Debug | 40/40 CTest |
-| Windows GCC Full Release | 50/50 CTest |
-| Windows GCC Full / Service OFF | 50/50 CTest |
-| WSL GCC ASan + UBSan | 50/50 CTest |
-| WSL GCC `-fanalyzer -Wall -Wextra -Werror` | 50/50 CTest |
+| Windows GCC Full Debug + 配置合同 | 53/53 CTest |
+| Windows GCC Lite Debug + 配置合同 | 53/53 CTest |
+| Windows GCC Nano Debug + 配置合同 | 43/43 CTest |
+| Windows GCC Full Release + 配置合同 | 53/53 CTest |
+| Windows GCC Full / Service OFF + 配置合同 | 53/53 CTest |
+| Windows MSVC Full Debug / 非 ASCII 构建目录 | 50/50 CTest |
+| Windows MSVC / 非 ASCII 构建目录 | `ucn_tests` 1/1；Service 255/256 配置合同符合预期 |
+| Windows GCC / 非 ASCII 构建目录 | `ucn_tests` 1/1 |
+| WSL GCC ASan + UBSan + 配置合同 | 53/53 CTest |
+| WSL GCC `-fanalyzer -Wall -Wextra -Werror` + 配置合同 | 53/53 CTest |
 
 软件矩阵证明当前 C 实现、裁剪组合、优化构建与已定义的内存安全门禁通过；它不提供物理链路时延、带宽、公平、ISR 抖动或无线拥塞证据。
 
@@ -241,4 +271,4 @@ Service 增加：
 
 本阶段没有修改 Core Wire 字段或版本；Q0～Q3 本来就在 Wire 中，变化位于 Node/Service 的本地存储、调度、Transfer 映射和统计。Linux 不是依赖，Nano/Lite/Full 都可运行。没有增加动态内存，没有把 Q3 做成无限文件队列，也没有把 Traffic Class 与可靠性混为一体。
 
-软件阶段完成条件已经满足；产品阶段仍由 QOS4-08 持续跟踪。
+QOS-A01～A08 的整改必须先通过本轮全矩阵、自审和外部复审，才能重新签署“软件闭环”。产品阶段仍由 QOS4-08 持续跟踪，软件签字不代替任何 MCU/Bearer 实测。

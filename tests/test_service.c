@@ -139,6 +139,9 @@ static int test_service_local_qos_and_acl(void)
     TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_SENSOR, 0x40U,
                                  UCN_TRAFFIC_Q0_CRITICAL, &first, 1U) == UCN_ERR_ARGUMENT);
     TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_SENSOR, 0x40U,
+                                 (ucn_traffic_class_t)-1, &first, 1U) ==
+                UCN_ERR_ARGUMENT);
+    TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_SENSOR, 0x40U,
                                  UCN_TRAFFIC_Q1_REALTIME, &first, 25U) == UCN_ERR_TOO_LARGE);
     TEST_ASSERT(ucn_service_set_ready(&router, 0x43U, false) == UCN_OK);
     TEST_ASSERT(ucn_service_send(&router, UINT32_C(1), TEST_SERVICE_SENSOR, 0x43U,
@@ -297,6 +300,44 @@ static int test_service_restart_purges_inbox(void)
 
     stats = ucn_service_get_stats(&router);
     TEST_ASSERT(stats != NULL && stats->binding_purges == 2U && stats->not_ready == 3U);
+    return 0;
+}
+
+static int test_service_remote_q1_round_robin(void)
+{
+    ucn_service_router_t router;
+    ucn_service_message_t message;
+    uint8_t hot_value = 1U;
+    const uint8_t cold_value = 0xC2U;
+    uint32_t decision;
+    bool cold_seen = false;
+
+    TEST_ASSERT(service_init(&router, UINT32_C(1)) == 0);
+    TEST_ASSERT(ucn_service_send(
+                    &router, UINT32_C(2), TEST_SERVICE_SENSOR, 0x40U,
+                    UCN_TRAFFIC_Q1_REALTIME, &hot_value, 1U) == UCN_OK);
+    TEST_ASSERT(ucn_service_send(
+                    &router, UINT32_C(2), TEST_SERVICE_SENSOR, 0x42U,
+                    UCN_TRAFFIC_Q1_REALTIME, &cold_value, 1U) == UCN_OK);
+
+    /* Refill the first key immediately after every send.  A fixed scan from
+     * slot zero starves the second key forever; the Q1 cursor must serve it
+     * within the number of occupied slots. */
+    for (decision = 0U; decision < UINT32_C(1000); ++decision) {
+        TEST_ASSERT(ucn_service_remote_tx_take(&router, &message) == UCN_OK);
+        if (message.endpoint == 0x42U) {
+            TEST_ASSERT(message.payload[0] == cold_value);
+            cold_seen = true;
+            break;
+        }
+        TEST_ASSERT(message.endpoint == 0x40U &&
+                    message.payload[0] == hot_value);
+        hot_value++;
+        TEST_ASSERT(ucn_service_send(
+                        &router, UINT32_C(2), TEST_SERVICE_SENSOR, 0x40U,
+                        UCN_TRAFFIC_Q1_REALTIME, &hot_value, 1U) == UCN_OK);
+    }
+    TEST_ASSERT(cold_seen && decision < UINT32_C(2));
     return 0;
 }
 
@@ -498,6 +539,9 @@ int test_service(void)
         return 1;
     }
     if (test_service_restart_purges_inbox() != 0) {
+        return 1;
+    }
+    if (test_service_remote_q1_round_robin() != 0) {
         return 1;
     }
     if (test_service_q2_q3_and_weighted_remote() != 0) {

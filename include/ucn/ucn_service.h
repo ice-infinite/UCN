@@ -82,6 +82,9 @@ extern "C" {
 
 typedef char ucn_service_payload_must_fit_core_frame[
     UCN_SERVICE_MAX_PAYLOAD_BYTES <= UCN_MAX_PAYLOAD_BYTES ? 1 : -1];
+typedef char ucn_service_binding_count_must_fit_uint8[
+    UCN_SERVICE_MAX_BINDINGS > 0U &&
+    UCN_SERVICE_MAX_BINDINGS <= UINT8_MAX ? 1 : -1];
 typedef char ucn_service_q0_binding_limit_must_fit[
     UCN_SERVICE_MAX_Q0_BINDINGS > 0U &&
     UCN_SERVICE_MAX_Q0_BINDINGS <= UCN_SERVICE_MAX_BINDINGS ? 1 : -1];
@@ -102,6 +105,14 @@ typedef char ucn_service_queue_depths_must_be_nonzero[
     UCN_SERVICE_Q0_INBOX_DEPTH > 0U &&
     UCN_SERVICE_Q2_INBOX_DEPTH > 0U &&
     UCN_SERVICE_Q3_INBOX_DEPTH > 0U ? 1 : -1];
+typedef char ucn_service_queue_depths_must_fit_uint8[
+    UCN_SERVICE_REMOTE_TX_Q0_DEPTH <= UINT8_MAX &&
+    UCN_SERVICE_REMOTE_TX_Q1_DEPTH <= UINT8_MAX &&
+    UCN_SERVICE_REMOTE_TX_Q2_DEPTH <= UINT8_MAX &&
+    UCN_SERVICE_REMOTE_TX_Q3_DEPTH <= UINT8_MAX &&
+    UCN_SERVICE_Q0_INBOX_DEPTH <= UINT8_MAX &&
+    UCN_SERVICE_Q2_INBOX_DEPTH <= UINT8_MAX &&
+    UCN_SERVICE_Q3_INBOX_DEPTH <= UINT8_MAX ? 1 : -1];
 
 typedef uint8_t ucn_service_id_t;
 
@@ -294,6 +305,7 @@ typedef struct ucn_service_router {
     ucn_service_q3_inbox_t q3_inboxes[UCN_SERVICE_MAX_Q3_BINDINGS];
     ucn_service_remote_q0_queue_t remote_q0;
     ucn_service_remote_q1_slot_t remote_q1[UCN_SERVICE_REMOTE_TX_Q1_DEPTH];
+    uint8_t remote_q1_cursor;
     ucn_service_remote_q2_queue_t remote_q2;
     ucn_service_remote_q3_queue_t remote_q3;
     uint8_t remote_schedule_cursor;

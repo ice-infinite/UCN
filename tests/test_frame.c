@@ -22,6 +22,7 @@ int test_frame(void)
     ucn_frame_t source;
     ucn_frame_t decoded;
     uint8_t encoded[UCN_MAX_FRAME_BYTES];
+    uint8_t rejected_before[UCN_MAX_FRAME_BYTES];
     size_t encoded_length = 0U;
     ucn_wire_profile_t peeked_profile = UCN_WIRE_PROFILE_UNSPECIFIED;
 
@@ -59,6 +60,20 @@ int test_frame(void)
     TEST_ASSERT(decoded.session_id == source.session_id);
     TEST_ASSERT(decoded.payload_length == source.payload_length);
     TEST_ASSERT(memcmp(decoded.payload, payload, sizeof(payload)) == 0);
+
+    /* A negative enum value must fail identically on compilers that choose
+     * different enum comparison/packing behaviour.  Rejection happens before
+     * either output buffer or output length is changed. */
+    (void)memset(encoded, 0xA5, sizeof(encoded));
+    (void)memcpy(rejected_before, encoded, sizeof(encoded));
+    encoded_length = SIZE_MAX;
+    source.traffic_class = (ucn_traffic_class_t)-1;
+    TEST_ASSERT(ucn_frame_encoded_size(&source) == 0U);
+    TEST_ASSERT(ucn_frame_encode(&source, encoded, sizeof(encoded),
+                                 &encoded_length) == UCN_ERR_ARGUMENT);
+    TEST_ASSERT(encoded_length == SIZE_MAX);
+    TEST_ASSERT(memcmp(encoded, rejected_before, sizeof(encoded)) == 0);
+    source.traffic_class = UCN_TRAFFIC_Q1_REALTIME;
 
     source.flags = UCN_FRAME_FLAG_DIAGNOSTIC;
     TEST_ASSERT(ucn_frame_encode(&source, encoded, sizeof(encoded), &encoded_length) == UCN_OK);
