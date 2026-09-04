@@ -48,7 +48,11 @@ static const ucn_v6_feature_manifest_t compiled_manifest = {
     UCN_V6_CONFIG_CLUSTER_VOTERS,
     UCN_V6_CONFIG_CLUSTER_TOMBSTONES,
     UCN_V6_CONFIG_CLUSTER_DIRECTORY,
-    UCN_V6_CONFIG_CLUSTER_TUNNELS
+    UCN_V6_CONFIG_CLUSTER_TUNNELS,
+    UCN_V6_CONFIG_ADAPTER_LINKS,
+    UCN_V6_CONFIG_ADAPTER_RX_SLOTS,
+    UCN_V6_CONFIG_ADAPTER_TX_SLOTS,
+    UCN_V6_CONFIG_ADAPTER_FRAME_BYTES
 };
 
 const ucn_v6_feature_manifest_t *ucn_v6_compiled_manifest(void)
@@ -115,7 +119,11 @@ ucn_v6_result_t ucn_v6_manifest_validate_exact(
            manifest->cluster_voters == expected->cluster_voters &&
            manifest->cluster_tombstones == expected->cluster_tombstones &&
            manifest->cluster_directory == expected->cluster_directory &&
-           manifest->cluster_tunnels == expected->cluster_tunnels ?
+           manifest->cluster_tunnels == expected->cluster_tunnels &&
+           manifest->adapter_links == expected->adapter_links &&
+           manifest->adapter_rx_slots == expected->adapter_rx_slots &&
+           manifest->adapter_tx_slots == expected->adapter_tx_slots &&
+           manifest->adapter_frame_bytes == expected->adapter_frame_bytes ?
                UCN_V6_OK : UCN_V6_ERR_CONFIG;
 }
 

@@ -171,6 +171,28 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
         $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
     )
 
+    add_library(ucn_v6_adapter STATIC
+        src/v6/adapter/ucn_v6_adapter.c
+        src/v6/adapter/ucn_v6_uart.c
+        src/v6/adapter/ucn_v6_wifi.c
+        src/v6/adapter/ucn_v6_can.c
+        src/v6/adapter/ucn_v6_usb.c
+        src/v6/ports/ucn_v6_freertos.c
+        src/v6/reference/esp32s3/ucn_v6_esp32s3.c
+    )
+    target_include_directories(ucn_v6_adapter PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(ucn_v6_adapter PUBLIC
+        ucn_v6_config
+        ucn_v6_wire
+        ucn_v6_owner
+    )
+    target_compile_options(ucn_v6_adapter PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+        $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+    )
+
     add_library(ucn_v6_security STATIC
         src/v6/security/ucn_v6_security.c
     )
@@ -433,6 +455,29 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
             $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
         )
         add_test(NAME ucn_v6_cluster_tests COMMAND ucn_v6_cluster_tests)
+
+        add_executable(ucn_v6_adapter_tests
+            tests/v6/test_v6_adapter.c
+        )
+        target_link_libraries(ucn_v6_adapter_tests PRIVATE ucn_v6_adapter)
+        target_compile_options(ucn_v6_adapter_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+            $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+        )
+        add_test(NAME ucn_v6_adapter_tests COMMAND ucn_v6_adapter_tests)
+
+        if(UNIX)
+            find_package(Threads REQUIRED)
+            add_executable(ucn_v6_adapter_concurrency_tests
+                tests/v6/test_v6_adapter_concurrency.c
+            )
+            target_link_libraries(ucn_v6_adapter_concurrency_tests PRIVATE
+                ucn_v6_adapter Threads::Threads)
+            target_compile_options(ucn_v6_adapter_concurrency_tests PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+            add_test(NAME ucn_v6_adapter_concurrency_tests
+                COMMAND ucn_v6_adapter_concurrency_tests)
+        endif()
     endif()
 endif()
 

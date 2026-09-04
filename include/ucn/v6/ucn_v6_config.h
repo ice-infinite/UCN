@@ -138,6 +138,18 @@ extern "C" {
 #ifndef UCN_V6_CONFIG_CLUSTER_TUNNELS
 #define UCN_V6_CONFIG_CLUSTER_TUNNELS 8U
 #endif
+#ifndef UCN_V6_CONFIG_ADAPTER_LINKS
+#define UCN_V6_CONFIG_ADAPTER_LINKS 8U
+#endif
+#ifndef UCN_V6_CONFIG_ADAPTER_RX_SLOTS
+#define UCN_V6_CONFIG_ADAPTER_RX_SLOTS 32U
+#endif
+#ifndef UCN_V6_CONFIG_ADAPTER_TX_SLOTS
+#define UCN_V6_CONFIG_ADAPTER_TX_SLOTS 32U
+#endif
+#ifndef UCN_V6_CONFIG_ADAPTER_FRAME_BYTES
+#define UCN_V6_CONFIG_ADAPTER_FRAME_BYTES 512U
+#endif
 
 #if UCN_V6_CONFIG_MAX_BINDINGS < 1U || UCN_V6_CONFIG_MAX_BINDINGS > 255U
 #error "UCN_V6_CONFIG_MAX_BINDINGS must be 1..255"
@@ -295,6 +307,21 @@ extern "C" {
     UCN_V6_CONFIG_CLUSTER_TUNNELS > 255U
 #error "UCN_V6_CONFIG_CLUSTER_TUNNELS must be 1..255"
 #endif
+#if UCN_V6_CONFIG_ADAPTER_LINKS < 1U || UCN_V6_CONFIG_ADAPTER_LINKS > 255U
+#error "UCN_V6_CONFIG_ADAPTER_LINKS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_ADAPTER_RX_SLOTS < 1U || \
+    UCN_V6_CONFIG_ADAPTER_RX_SLOTS > 255U
+#error "UCN_V6_CONFIG_ADAPTER_RX_SLOTS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_ADAPTER_TX_SLOTS < 1U || \
+    UCN_V6_CONFIG_ADAPTER_TX_SLOTS > 255U
+#error "UCN_V6_CONFIG_ADAPTER_TX_SLOTS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_ADAPTER_FRAME_BYTES < 64U || \
+    UCN_V6_CONFIG_ADAPTER_FRAME_BYTES > 4096U
+#error "UCN_V6_CONFIG_ADAPTER_FRAME_BYTES must be 64..4096"
+#endif
 
 #include "ucn/v6/ucn_v6_identity.h"
 
@@ -307,7 +334,8 @@ enum {
     UCN_V6_FEATURE_TRANSFER = 1U << 5,
     UCN_V6_FEATURE_REALTIME = 1U << 6,
     UCN_V6_FEATURE_CLUSTER = 1U << 7,
-    UCN_V6_FEATURE_CAPABILITY = 1U << 8
+    UCN_V6_FEATURE_CAPABILITY = 1U << 8,
+    UCN_V6_FEATURE_ADAPTER = 1U << 9
 };
 
 #define UCN_V6_COMPILED_FEATURE_BITS                                      \
@@ -318,7 +346,8 @@ enum {
      (uint32_t)UCN_V6_FEATURE_ROUTE |                                   \
      (uint32_t)UCN_V6_FEATURE_TRANSFER |                                 \
      (uint32_t)UCN_V6_FEATURE_REALTIME |                                 \
-     (uint32_t)UCN_V6_FEATURE_CLUSTER)
+     (uint32_t)UCN_V6_FEATURE_CLUSTER |                                  \
+     (uint32_t)UCN_V6_FEATURE_ADAPTER)
 
 #define UCN_V6_COMPILED_LAYOUT_HASH                                        \
     (UINT64_C(0xD65A000100000000) ^                                       \
@@ -404,7 +433,15 @@ enum {
      ((uint64_t)UCN_V6_CONFIG_CLUSTER_DIRECTORY *                           \
       UINT64_C(0x91E10DA5C79E7B1D)) ^                                      \
      ((uint64_t)UCN_V6_CONFIG_CLUSTER_TUNNELS *                             \
-      UINT64_C(0xDB4F0B9175AE2165)))
+      UINT64_C(0xDB4F0B9175AE2165)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_ADAPTER_LINKS *                               \
+      UINT64_C(0xBBE0563303A4615F)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_ADAPTER_RX_SLOTS *                            \
+      UINT64_C(0x8EBC6AF09C88C6E3)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_ADAPTER_TX_SLOTS *                            \
+      UINT64_C(0x589965CC75374CC3)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_ADAPTER_FRAME_BYTES *                         \
+      UINT64_C(0x1D8E4E27C47D124F)))
 
 #if UCN_V6_CONFIG_TRANSFER_MAX_CLASS == 0U
 #define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 32U
@@ -472,6 +509,12 @@ enum {
               UCN_V6_CONFIG_CLUSTER_TOMBSTONES * 96U +                   \
               UCN_V6_CONFIG_CLUSTER_DIRECTORY * 192U +                   \
               UCN_V6_CONFIG_CLUSTER_TUNNELS * 256U))
+#define UCN_V6_ADAPTER_OWNER_STORAGE_BYTES                                \
+    ((size_t)(4096U + UCN_V6_CONFIG_ADAPTER_LINKS * 384U +                \
+              (UCN_V6_CONFIG_ADAPTER_RX_SLOTS +                          \
+               UCN_V6_CONFIG_ADAPTER_TX_SLOTS) *                         \
+                  (UCN_V6_CONFIG_ADAPTER_FRAME_BYTES + 128U)))
+#define UCN_V6_FREERTOS_PORT_STORAGE_BYTES ((size_t)2048U)
 
 #define UCN_V6_DECLARE_STORAGE_TYPE(name_, bytes_) \
     typedef union name_ {                         \
@@ -527,6 +570,10 @@ typedef struct ucn_v6_feature_manifest {
     uint16_t cluster_tombstones;
     uint16_t cluster_directory;
     uint16_t cluster_tunnels;
+    uint16_t adapter_links;
+    uint16_t adapter_rx_slots;
+    uint16_t adapter_tx_slots;
+    uint16_t adapter_frame_bytes;
 } ucn_v6_feature_manifest_t;
 
 /* EN: Returns the one build-time feature and storage manifest.

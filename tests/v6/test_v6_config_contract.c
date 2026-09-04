@@ -63,6 +63,10 @@ static ucn_v6_feature_manifest_t header_manifest(void)
     value.cluster_tombstones = UCN_V6_CONFIG_CLUSTER_TOMBSTONES;
     value.cluster_directory = UCN_V6_CONFIG_CLUSTER_DIRECTORY;
     value.cluster_tunnels = UCN_V6_CONFIG_CLUSTER_TUNNELS;
+    value.adapter_links = UCN_V6_CONFIG_ADAPTER_LINKS;
+    value.adapter_rx_slots = UCN_V6_CONFIG_ADAPTER_RX_SLOTS;
+    value.adapter_tx_slots = UCN_V6_CONFIG_ADAPTER_TX_SLOTS;
+    value.adapter_frame_bytes = UCN_V6_CONFIG_ADAPTER_FRAME_BYTES;
     return value;
 }
 

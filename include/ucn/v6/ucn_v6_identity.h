@@ -33,7 +33,8 @@ typedef enum ucn_v6_result {
     UCN_V6_ERR_STATE = -8,
     UCN_V6_ERR_EXHAUSTED = -9,
     UCN_V6_ERR_NOT_FOUND = -10,
-    UCN_V6_ERR_TIMEOUT = -11
+    UCN_V6_ERR_TIMEOUT = -11,
+    UCN_V6_ERR_CANCELLED = -12
 } ucn_v6_result_t;
 
 typedef struct ucn_v6_principal {
