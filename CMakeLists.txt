@@ -26,6 +26,8 @@ option(UCN_BUILD_CLUSTER_HANDOVER_EXPERIMENTAL
     "Build the isolated M11 Merge/Handover model (default OFF)" OFF)
 option(UCN_BUILD_CLUSTER_REKEY_EXPERIMENTAL
     "Build the isolated M13 Rekey/No-wrap model (default OFF)" OFF)
+option(UCN_BUILD_V6_EXPERIMENTAL
+    "Build isolated UCN v6 development modules and tests" OFF)
 set(UCN_PROFILE "FULL" CACHE STRING "UCN feature profile: NANO, LITE, or FULL")
 set_property(CACHE UCN_PROFILE PROPERTY STRINGS NANO LITE FULL)
 option(UCN_FEATURE_SERVICE "Build the orthogonal Service Router/Bridge" ON)
@@ -107,6 +109,32 @@ set(UCN_CORE_SOURCES
 )
 
 add_library(ucn_core STATIC ${UCN_CORE_SOURCES})
+
+if(UCN_BUILD_V6_EXPERIMENTAL)
+    add_library(ucn_v6_identity STATIC
+        src/v6/identity/ucn_v6_identity.c
+        src/v6/identity/ucn_v6_bootstrap.c
+    )
+    target_include_directories(ucn_v6_identity PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_compile_options(ucn_v6_identity PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+        $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+    )
+
+    if(UCN_BUILD_TESTS)
+        add_executable(ucn_v6_identity_tests
+            tests/v6/test_v6_identity.c
+        )
+        target_link_libraries(ucn_v6_identity_tests PRIVATE ucn_v6_identity)
+        target_compile_options(ucn_v6_identity_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+            $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+        )
+        add_test(NAME ucn_v6_identity_tests COMMAND ucn_v6_identity_tests)
+    endif()
+endif()
 
 target_include_directories(ucn_core
     PUBLIC
