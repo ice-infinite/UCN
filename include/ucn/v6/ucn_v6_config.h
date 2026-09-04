@@ -75,6 +75,27 @@ extern "C" {
 #ifndef UCN_V6_CONFIG_ROUTE_FLOW_PINS
 #define UCN_V6_CONFIG_ROUTE_FLOW_PINS 32U
 #endif
+#ifndef UCN_V6_CONFIG_METRIC_PATHS
+#define UCN_V6_CONFIG_METRIC_PATHS 32U
+#endif
+#ifndef UCN_V6_CONFIG_QOS_Q0_DEPTH
+#define UCN_V6_CONFIG_QOS_Q0_DEPTH 16U
+#endif
+#ifndef UCN_V6_CONFIG_QOS_Q1_DEPTH
+#define UCN_V6_CONFIG_QOS_Q1_DEPTH 16U
+#endif
+#ifndef UCN_V6_CONFIG_QOS_Q2_DEPTH
+#define UCN_V6_CONFIG_QOS_Q2_DEPTH 32U
+#endif
+#ifndef UCN_V6_CONFIG_QOS_Q3_DEPTH
+#define UCN_V6_CONFIG_QOS_Q3_DEPTH 32U
+#endif
+#ifndef UCN_V6_CONFIG_QOS_FLOW_SLOTS
+#define UCN_V6_CONFIG_QOS_FLOW_SLOTS 32U
+#endif
+#ifndef UCN_V6_CONFIG_QOS_INFLIGHT
+#define UCN_V6_CONFIG_QOS_INFLIGHT 32U
+#endif
 
 #if UCN_V6_CONFIG_MAX_BINDINGS < 1U || UCN_V6_CONFIG_MAX_BINDINGS > 255U
 #error "UCN_V6_CONFIG_MAX_BINDINGS must be 1..255"
@@ -157,6 +178,27 @@ extern "C" {
     UCN_V6_CONFIG_ROUTE_FLOW_PINS > 255U
 #error "UCN_V6_CONFIG_ROUTE_FLOW_PINS must be 1..255"
 #endif
+#if UCN_V6_CONFIG_METRIC_PATHS < 1U || UCN_V6_CONFIG_METRIC_PATHS > 255U
+#error "UCN_V6_CONFIG_METRIC_PATHS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_QOS_Q0_DEPTH < 1U || UCN_V6_CONFIG_QOS_Q0_DEPTH > 255U
+#error "UCN_V6_CONFIG_QOS_Q0_DEPTH must be 1..255"
+#endif
+#if UCN_V6_CONFIG_QOS_Q1_DEPTH < 1U || UCN_V6_CONFIG_QOS_Q1_DEPTH > 255U
+#error "UCN_V6_CONFIG_QOS_Q1_DEPTH must be 1..255"
+#endif
+#if UCN_V6_CONFIG_QOS_Q2_DEPTH < 1U || UCN_V6_CONFIG_QOS_Q2_DEPTH > 255U
+#error "UCN_V6_CONFIG_QOS_Q2_DEPTH must be 1..255"
+#endif
+#if UCN_V6_CONFIG_QOS_Q3_DEPTH < 1U || UCN_V6_CONFIG_QOS_Q3_DEPTH > 255U
+#error "UCN_V6_CONFIG_QOS_Q3_DEPTH must be 1..255"
+#endif
+#if UCN_V6_CONFIG_QOS_FLOW_SLOTS < 1U || UCN_V6_CONFIG_QOS_FLOW_SLOTS > 255U
+#error "UCN_V6_CONFIG_QOS_FLOW_SLOTS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_QOS_INFLIGHT < 1U || UCN_V6_CONFIG_QOS_INFLIGHT > 255U
+#error "UCN_V6_CONFIG_QOS_INFLIGHT must be 1..255"
+#endif
 
 #include "ucn/v6/ucn_v6_identity.h"
 
@@ -221,7 +263,21 @@ enum {
      ((uint64_t)UCN_V6_CONFIG_ROUTE_CANDIDATES *                            \
       UINT64_C(0x589965CC75374CC3)) ^                                      \
      ((uint64_t)UCN_V6_CONFIG_ROUTE_FLOW_PINS *                             \
-      UINT64_C(0x1D8E4E27C47D124F)))
+      UINT64_C(0x1D8E4E27C47D124F)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_METRIC_PATHS *                                \
+      UINT64_C(0xEB44ACCAB455D165)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_QOS_Q0_DEPTH *                                \
+      UINT64_C(0xF1357AEA2E62A9C5)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_QOS_Q1_DEPTH *                                \
+      UINT64_C(0xC6BC279692B5CC83)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_QOS_Q2_DEPTH *                                \
+      UINT64_C(0xD6E8FEB86659FD93)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_QOS_Q3_DEPTH *                                \
+      UINT64_C(0xA5A3564E27F8862B)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_QOS_FLOW_SLOTS *                              \
+      UINT64_C(0x8D58AC26AFE12E47)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_QOS_INFLIGHT *                                \
+      UINT64_C(0x9C06FAF4D023E3AB)))
 
 #define UCN_V6_OPERATION_ID_ALLOCATOR_STORAGE_BYTES ((size_t)256U)
 #define UCN_V6_PROTOCOL_OWNER_STORAGE_BYTES ((size_t)1024U)
@@ -243,6 +299,15 @@ enum {
               UCN_V6_CONFIG_ROUTE_CANDIDATES *                            \
                   (384U + UCN_V6_CONFIG_ROUTE_PATHS_PER_SET * 384U) +     \
               UCN_V6_CONFIG_ROUTE_FLOW_PINS * 128U))
+#define UCN_V6_METRIC_OWNER_STORAGE_BYTES                                 \
+    ((size_t)(1024U + UCN_V6_CONFIG_METRIC_PATHS * 256U))
+#define UCN_V6_QOS_OWNER_STORAGE_BYTES                                    \
+    ((size_t)(2048U +                                                    \
+              (UCN_V6_CONFIG_QOS_Q0_DEPTH + UCN_V6_CONFIG_QOS_Q1_DEPTH + \
+               UCN_V6_CONFIG_QOS_Q2_DEPTH + UCN_V6_CONFIG_QOS_Q3_DEPTH) * \
+                  256U +                                                  \
+              UCN_V6_CONFIG_QOS_FLOW_SLOTS * 256U +                      \
+              UCN_V6_CONFIG_QOS_INFLIGHT * 64U))
 
 #define UCN_V6_DECLARE_STORAGE_TYPE(name_, bytes_) \
     typedef union name_ {                         \
@@ -277,6 +342,13 @@ typedef struct ucn_v6_feature_manifest {
     uint16_t route_paths_per_set;
     uint16_t route_candidates;
     uint16_t route_flow_pins;
+    uint16_t metric_paths;
+    uint16_t qos_q0_depth;
+    uint16_t qos_q1_depth;
+    uint16_t qos_q2_depth;
+    uint16_t qos_q3_depth;
+    uint16_t qos_flow_slots;
+    uint16_t qos_inflight;
 } ucn_v6_feature_manifest_t;
 
 /* EN: Returns the one build-time feature and storage manifest.

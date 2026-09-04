@@ -2265,6 +2265,10 @@ ucn_v6_result_t ucn_v6_security_open_frame(
         hop_session->hop_replay_current = replay_next;
     }
     opened.authenticated_principal = hop_session->peer_principal;
+    opened.ingress_peer_session.binding = hop_session->peer_binding;
+    opened.ingress_peer_session.principal = hop_session->peer_principal;
+    opened.ingress_peer_session.session_generation =
+        hop_session->session_generation;
     opened.hop_authenticated = true;
     local_target = candidate.local_binding_valid &&
                    candidate.local_binding.realm_id == opened.frame.realm_id &&

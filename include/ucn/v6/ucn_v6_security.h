@@ -277,6 +277,7 @@ typedef struct ucn_v6_security_view {
 typedef struct ucn_v6_security_open_result {
     ucn_v6_frame_t frame;
     ucn_v6_principal_t authenticated_principal;
+    ucn_v6_session_key_t ingress_peer_session;
     bool hop_authenticated;
     bool endpoint_authorized;
     bool group_discovery_only;

@@ -220,6 +220,24 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
         $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
     )
 
+    add_library(ucn_v6_qos STATIC
+        src/v6/qos/ucn_v6_metric.c
+        src/v6/qos/ucn_v6_qos.c
+    )
+    target_include_directories(ucn_v6_qos PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(ucn_v6_qos PUBLIC
+        ucn_v6_config
+        ucn_v6_message
+        ucn_v6_security
+        ucn_v6_route
+    )
+    target_compile_options(ucn_v6_qos PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+        $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+    )
+
     if(UCN_BUILD_TESTS)
         add_executable(ucn_v6_config_contract_tests
             tests/v6/test_v6_config_contract.c
@@ -319,6 +337,16 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
             $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
         )
         add_test(NAME ucn_v6_route_tests COMMAND ucn_v6_route_tests)
+
+        add_executable(ucn_v6_qos_tests
+            tests/v6/test_v6_qos.c
+        )
+        target_link_libraries(ucn_v6_qos_tests PRIVATE ucn_v6_qos)
+        target_compile_options(ucn_v6_qos_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+            $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+        )
+        add_test(NAME ucn_v6_qos_tests COMMAND ucn_v6_qos_tests)
     endif()
 endif()
 

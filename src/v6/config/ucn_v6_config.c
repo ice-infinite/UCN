@@ -27,7 +27,14 @@ static const ucn_v6_feature_manifest_t compiled_manifest = {
     UCN_V6_CONFIG_ROUTE_SETS,
     UCN_V6_CONFIG_ROUTE_PATHS_PER_SET,
     UCN_V6_CONFIG_ROUTE_CANDIDATES,
-    UCN_V6_CONFIG_ROUTE_FLOW_PINS
+    UCN_V6_CONFIG_ROUTE_FLOW_PINS,
+    UCN_V6_CONFIG_METRIC_PATHS,
+    UCN_V6_CONFIG_QOS_Q0_DEPTH,
+    UCN_V6_CONFIG_QOS_Q1_DEPTH,
+    UCN_V6_CONFIG_QOS_Q2_DEPTH,
+    UCN_V6_CONFIG_QOS_Q3_DEPTH,
+    UCN_V6_CONFIG_QOS_FLOW_SLOTS,
+    UCN_V6_CONFIG_QOS_INFLIGHT
 };
 
 const ucn_v6_feature_manifest_t *ucn_v6_compiled_manifest(void)
@@ -71,7 +78,14 @@ ucn_v6_result_t ucn_v6_manifest_validate_exact(
            manifest->route_sets == expected->route_sets &&
            manifest->route_paths_per_set == expected->route_paths_per_set &&
            manifest->route_candidates == expected->route_candidates &&
-           manifest->route_flow_pins == expected->route_flow_pins ?
+           manifest->route_flow_pins == expected->route_flow_pins &&
+           manifest->metric_paths == expected->metric_paths &&
+           manifest->qos_q0_depth == expected->qos_q0_depth &&
+           manifest->qos_q1_depth == expected->qos_q1_depth &&
+           manifest->qos_q2_depth == expected->qos_q2_depth &&
+           manifest->qos_q3_depth == expected->qos_q3_depth &&
+           manifest->qos_flow_slots == expected->qos_flow_slots &&
+           manifest->qos_inflight == expected->qos_inflight ?
                UCN_V6_OK : UCN_V6_ERR_CONFIG;
 }
 

@@ -41,6 +41,13 @@ static ucn_v6_feature_manifest_t header_manifest(void)
     value.route_paths_per_set = UCN_V6_CONFIG_ROUTE_PATHS_PER_SET;
     value.route_candidates = UCN_V6_CONFIG_ROUTE_CANDIDATES;
     value.route_flow_pins = UCN_V6_CONFIG_ROUTE_FLOW_PINS;
+    value.metric_paths = UCN_V6_CONFIG_METRIC_PATHS;
+    value.qos_q0_depth = UCN_V6_CONFIG_QOS_Q0_DEPTH;
+    value.qos_q1_depth = UCN_V6_CONFIG_QOS_Q1_DEPTH;
+    value.qos_q2_depth = UCN_V6_CONFIG_QOS_Q2_DEPTH;
+    value.qos_q3_depth = UCN_V6_CONFIG_QOS_Q3_DEPTH;
+    value.qos_flow_slots = UCN_V6_CONFIG_QOS_FLOW_SLOTS;
+    value.qos_inflight = UCN_V6_CONFIG_QOS_INFLIGHT;
     return value;
 }
 
