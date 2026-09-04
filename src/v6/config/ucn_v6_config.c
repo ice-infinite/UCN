@@ -41,7 +41,9 @@ static const ucn_v6_feature_manifest_t compiled_manifest = {
     UCN_V6_CONFIG_TRANSFER_RECENT,
     UCN_V6_CONFIG_TRANSFER_WINDOW,
     UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS,
-    UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS
+    UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS,
+    UCN_V6_CONFIG_REALTIME_ENDPOINTS,
+    UCN_V6_CONFIG_TIME_DOMAINS
 };
 
 const ucn_v6_feature_manifest_t *ucn_v6_compiled_manifest(void)
@@ -101,7 +103,9 @@ ucn_v6_result_t ucn_v6_manifest_validate_exact(
            manifest->transfer_credit_links ==
                expected->transfer_credit_links &&
            manifest->transfer_credit_reservations ==
-               expected->transfer_credit_reservations ?
+               expected->transfer_credit_reservations &&
+           manifest->realtime_endpoints == expected->realtime_endpoints &&
+           manifest->time_domains == expected->time_domains ?
                UCN_V6_OK : UCN_V6_ERR_CONFIG;
 }
 

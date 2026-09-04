@@ -87,6 +87,7 @@ static bool path_capability_equal(const ucn_v6_path_capability_t *left,
 {
     return left != NULL && right != NULL &&
            left->valid == right->valid &&
+           left->immutable_for_realtime == right->immutable_for_realtime &&
            principal_equal(&left->destination_principal,
                            &right->destination_principal) &&
            ucn_v6_binding_key_equal(&left->destination_binding,
@@ -399,6 +400,7 @@ static void proposal_digest(const ucn_v6_route_proposal_t *proposal,
         digest_u32(state, capability->session_generation);
         digest_bytes(state, capability->destination_capability_digest,
                      UCN_V6_CAPABILITY_DIGEST_BYTES);
+        digest_byte(state, capability->immutable_for_realtime ? 1U : 0U);
         digest_u32(state, capability->path_frame_mtu);
         digest_u32(state, capability->payload_budget);
         digest_u32(state, capability->fragment_data_budget);

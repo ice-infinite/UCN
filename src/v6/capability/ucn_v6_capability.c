@@ -14,6 +14,7 @@
 #define UCN_V6_CAPABILITY_KNOWN_TIMESTAMP_BITS UINT16_C(0x000F)
 #define UCN_V6_CAPABILITY_HOP_SUITE_BITS UINT32_C(0x00000002)
 #define UCN_V6_CAPABILITY_E2E_SUITE_BITS UINT32_C(0x0000000E)
+#define UCN_V6_CAPABILITY_REALTIME_MODE_BITS UINT16_C(0x0007)
 
 typedef char ucn_v6_capability_owner_storage_must_fit[
     sizeof(struct ucn_v6_capability_owner) <=
@@ -115,7 +116,23 @@ static bool record_is_valid(const ucn_v6_capability_record_t *record)
         (uint32_t)record->peer.max_message_class >
             (uint32_t)UCN_V6_MESSAGE_T8K ||
         record->peer.max_rx_window == 0U ||
-        record->peer.max_concurrent_transfers == 0U) {
+        record->peer.max_concurrent_transfers == 0U ||
+        (record->peer.realtime_mode_bits &
+         (uint16_t)~UCN_V6_CAPABILITY_REALTIME_MODE_BITS) != 0U ||
+        (((record->peer.feature_bits & UCN_V6_FEATURE_REALTIME) == 0U) !=
+         (record->peer.realtime_mode_bits == 0U)) ||
+        ((record->peer.realtime_mode_bits &
+          (UCN_V6_REALTIME_MODE_SYNCED | UCN_V6_REALTIME_MODE_DEADLINE)) !=
+             0U &&
+         (record->peer.clock_domain_id == 0U ||
+          record->peer.clock_domain_generation == 0U ||
+          record->peer.clock_domain_generation >
+              UCN_V6_SERIAL_ROTATION_THRESHOLD)) ||
+        ((record->peer.realtime_mode_bits &
+          (UCN_V6_REALTIME_MODE_SYNCED | UCN_V6_REALTIME_MODE_DEADLINE)) ==
+             0U &&
+         (record->peer.clock_domain_id != 0U ||
+          record->peer.clock_domain_generation != 0U))) {
         return false;
     }
     carrier_overhead = (uint32_t)record->link.carrier_header_bytes +
@@ -175,6 +192,9 @@ ucn_v6_result_t ucn_v6_capability_record_encode(
     encoded[56] = (uint8_t)record->peer.max_message_class;
     encoded[57] = record->link.hardware_priority_count;
     write_u16(&encoded[58], record->link.timestamp_capability_bits);
+    write_u16(&encoded[60], record->peer.realtime_mode_bits);
+    write_u16(&encoded[62], record->peer.clock_domain_id);
+    write_u32(&encoded[64], record->peer.clock_domain_generation);
     memcpy(output, encoded, sizeof(encoded));
     return UCN_V6_OK;
 }
@@ -186,8 +206,7 @@ ucn_v6_result_t ucn_v6_capability_record_decode(
 {
     ucn_v6_capability_record_t decoded;
     if (input == NULL || record == NULL ||
-        input_length != UCN_V6_CAPABILITY_RECORD_BYTES ||
-        !bytes_are_zero(&input[60], 4U)) {
+        input_length != UCN_V6_CAPABILITY_RECORD_BYTES) {
         return UCN_V6_ERR_MALFORMED;
     }
     memset(&decoded, 0, sizeof(decoded));
@@ -212,6 +231,9 @@ ucn_v6_result_t ucn_v6_capability_record_decode(
     decoded.peer.max_message_class = (ucn_v6_message_class_t)input[56];
     decoded.link.hardware_priority_count = input[57];
     decoded.link.timestamp_capability_bits = read_u16(&input[58]);
+    decoded.peer.realtime_mode_bits = read_u16(&input[60]);
+    decoded.peer.clock_domain_id = read_u16(&input[62]);
+    decoded.peer.clock_domain_generation = read_u32(&input[64]);
     if (!record_is_valid(&decoded)) {
         return UCN_V6_ERR_MALFORMED;
     }
@@ -807,6 +829,7 @@ ucn_v6_result_t ucn_v6_capability_derive_path(
     }
     memset(&derived, 0, sizeof(derived));
     derived.valid = true;
+    derived.immutable_for_realtime = request->fixed_path;
     derived.destination_principal = request->destination_principal;
     derived.destination_binding = request->destination_binding;
     derived.session_generation = request->session_generation;
@@ -901,6 +924,7 @@ static bool path_semantically_equal(const ucn_v6_path_capability_t *left,
                                     const ucn_v6_path_capability_t *right)
 {
     return left->valid == right->valid &&
+           left->immutable_for_realtime == right->immutable_for_realtime &&
            principal_equal(&left->destination_principal,
                            &right->destination_principal) &&
            ucn_v6_binding_key_equal(&left->destination_binding,

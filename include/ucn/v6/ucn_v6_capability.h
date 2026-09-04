@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 #define UCN_V6_CAPABILITY_DIGEST_BYTES ((size_t)16U)
-#define UCN_V6_CAPABILITY_RECORD_BYTES ((size_t)64U)
+#define UCN_V6_CAPABILITY_RECORD_BYTES ((size_t)68U)
 #define UCN_V6_CAPABILITY_HELLO_BYTES ((size_t)24U)
 #define UCN_V6_CAPABILITY_QUERY_BYTES ((size_t)20U)
 #define UCN_V6_GROUP_HINT_TIMEOUT_US UINT64_C(1000000)
@@ -20,6 +20,12 @@ enum {
     UCN_V6_LINK_BROADCAST = 1U << 2,
     UCN_V6_LINK_UNICAST = 1U << 3,
     UCN_V6_LINK_SECURITY = 1U << 4
+};
+
+enum {
+    UCN_V6_REALTIME_MODE_LOCAL = 1U << 0,
+    UCN_V6_REALTIME_MODE_SYNCED = 1U << 1,
+    UCN_V6_REALTIME_MODE_DEADLINE = 1U << 2
 };
 
 enum {
@@ -65,6 +71,9 @@ typedef struct ucn_v6_peer_capability {
     ucn_v6_message_class_t max_message_class;
     uint16_t max_rx_window;
     uint16_t max_concurrent_transfers;
+    uint16_t realtime_mode_bits;
+    uint16_t clock_domain_id;
+    uint32_t clock_domain_generation;
 } ucn_v6_peer_capability_t;
 
 typedef struct ucn_v6_capability_record {
@@ -103,6 +112,7 @@ typedef struct ucn_v6_cached_peer_capability {
 
 typedef struct ucn_v6_path_capability {
     bool valid;
+    bool immutable_for_realtime;
     ucn_v6_principal_t destination_principal;
     ucn_v6_binding_key_t destination_binding;
     uint32_t session_generation;
@@ -137,6 +147,7 @@ typedef struct ucn_v6_path_budget_request {
     uint16_t path_id;
     uint32_t path_generation;
     uint64_t deadline_us;
+    bool fixed_path;
     uint32_t path_policy_frame_mtu;
     uint32_t required_feature_bits;
     uint32_t required_hop_suite_bits;

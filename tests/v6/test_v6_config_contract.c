@@ -56,6 +56,8 @@ static ucn_v6_feature_manifest_t header_manifest(void)
     value.transfer_credit_links = UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS;
     value.transfer_credit_reservations =
         UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS;
+    value.realtime_endpoints = UCN_V6_CONFIG_REALTIME_ENDPOINTS;
+    value.time_domains = UCN_V6_CONFIG_TIME_DOMAINS;
     return value;
 }
 

@@ -71,6 +71,10 @@ static ucn_v6_capability_record_t capability_record(
     value.peer.max_message_class = UCN_V6_MESSAGE_T8K;
     value.peer.max_rx_window = 16U;
     value.peer.max_concurrent_transfers = 4U;
+    value.peer.realtime_mode_bits = UCN_V6_REALTIME_MODE_SYNCED |
+                                    UCN_V6_REALTIME_MODE_DEADLINE;
+    value.peer.clock_domain_id = 1U;
+    value.peer.clock_domain_generation = 1U;
     return value;
 }
 
@@ -213,6 +217,7 @@ static ucn_v6_route_path_t route_path(fixture_t *fixture,
     request.path_id = path_id;
     request.path_generation = path_generation;
     request.deadline_us = 50000U;
+    request.fixed_path = true;
     request.path_policy_frame_mtu = 200U;
     request.required_feature_bits = UCN_V6_FEATURE_ROUTE;
     request.required_hop_suite_bits =

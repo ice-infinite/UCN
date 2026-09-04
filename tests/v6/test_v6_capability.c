@@ -194,6 +194,33 @@ static int test_codec_and_authenticated_cache(void)
     return 0;
 }
 
+static int test_realtime_capability_contract(void)
+{
+    ucn_v6_capability_record_t value = record(1U, 2U, 256U);
+    ucn_v6_capability_record_t decoded;
+    uint8_t payload[UCN_V6_CAPABILITY_RECORD_BYTES];
+    value.peer.feature_bits |= UCN_V6_FEATURE_REALTIME;
+    value.peer.realtime_mode_bits = UCN_V6_REALTIME_MODE_SYNCED |
+                                    UCN_V6_REALTIME_MODE_DEADLINE;
+    value.peer.clock_domain_id = 0x1234U;
+    value.peer.clock_domain_generation = UINT32_C(0x01020304);
+    CHECK(ucn_v6_capability_record_encode(&value, payload) == UCN_V6_OK);
+    CHECK(payload[60] == 0U && payload[61] == 6U &&
+          payload[62] == 0x12U && payload[63] == 0x34U &&
+          payload[64] == 1U && payload[65] == 2U &&
+          payload[66] == 3U && payload[67] == 4U);
+    CHECK(ucn_v6_capability_record_decode(payload, sizeof(payload),
+                                          &decoded) == UCN_V6_OK);
+    CHECK(decoded.peer.realtime_mode_bits == value.peer.realtime_mode_bits &&
+          decoded.peer.clock_domain_id == value.peer.clock_domain_id &&
+          decoded.peer.clock_domain_generation ==
+              value.peer.clock_domain_generation);
+    value.peer.clock_domain_generation = 0U;
+    CHECK(ucn_v6_capability_record_encode(&value, payload) ==
+          UCN_V6_ERR_ARGUMENT);
+    return 0;
+}
+
 static ucn_v6_frame_t budget_frame(void)
 {
     ucn_v6_frame_t frame;
@@ -254,6 +281,14 @@ static int test_path_budget_and_invalidation(void)
     hops[1].peer.max_message_class = UCN_V6_MESSAGE_T2K;
     hops[1].peer.max_rx_window = 8U;
     hops[1].peer.max_concurrent_transfers = 2U;
+    hops[0].peer.feature_bits |= UCN_V6_FEATURE_REALTIME;
+    hops[0].peer.realtime_mode_bits = UCN_V6_REALTIME_MODE_SYNCED;
+    hops[0].peer.clock_domain_id = 7U;
+    hops[0].peer.clock_domain_generation = 1U;
+    hops[1].peer.feature_bits |= UCN_V6_FEATURE_REALTIME;
+    hops[1].peer.realtime_mode_bits = UCN_V6_REALTIME_MODE_SYNCED;
+    hops[1].peer.clock_domain_id = 7U;
+    hops[1].peer.clock_domain_generation = 1U;
     CHECK(ucn_v6_capability_owner_init_in_place(
               storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
               &local, 5000U, 5000U, &owner) == UCN_V6_OK);
@@ -276,8 +311,10 @@ static int test_path_budget_and_invalidation(void)
     request.path_id = 4U;
     request.path_generation = 6U;
     request.deadline_us = 1000U;
+    request.fixed_path = true;
     request.path_policy_frame_mtu = 200U;
-    request.required_feature_bits = UCN_V6_FEATURE_TRANSFER;
+    request.required_feature_bits = UCN_V6_FEATURE_TRANSFER |
+                                    UCN_V6_FEATURE_REALTIME;
     request.required_hop_suite_bits =
         UINT32_C(1) << UCN_V6_SUITE_HMAC_SHA256_128;
     request.required_e2e_suite_bits =
@@ -294,6 +331,7 @@ static int test_path_budget_and_invalidation(void)
     CHECK(path.fragment_data_budget == path.payload_budget - 12U);
     CHECK(path.max_message_class == UCN_V6_MESSAGE_T2K);
     CHECK(path.max_window == 8U && path.max_concurrency == 2U);
+    CHECK(path.immutable_for_realtime);
     CHECK(path.timestamp_uncertainty_us == 8U);
     CHECK(ucn_v6_capability_install_path(owner, 20U, &path) == UCN_V6_OK);
     CHECK(ucn_v6_capability_copy_path(
@@ -417,6 +455,7 @@ static int test_peer_table_full_never_evicts(void)
 int main(void)
 {
     CHECK(test_codec_and_authenticated_cache() == 0);
+    CHECK(test_realtime_capability_contract() == 0);
     CHECK(test_path_budget_and_invalidation() == 0);
     CHECK(test_group_hint_is_bounded() == 0);
     CHECK(test_peer_table_full_never_evicts() == 0);

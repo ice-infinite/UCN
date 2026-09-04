@@ -117,6 +117,12 @@ extern "C" {
 #ifndef UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS
 #define UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS 32U
 #endif
+#ifndef UCN_V6_CONFIG_REALTIME_ENDPOINTS
+#define UCN_V6_CONFIG_REALTIME_ENDPOINTS 8U
+#endif
+#ifndef UCN_V6_CONFIG_TIME_DOMAINS
+#define UCN_V6_CONFIG_TIME_DOMAINS 2U
+#endif
 
 #if UCN_V6_CONFIG_MAX_BINDINGS < 1U || UCN_V6_CONFIG_MAX_BINDINGS > 255U
 #error "UCN_V6_CONFIG_MAX_BINDINGS must be 1..255"
@@ -247,6 +253,13 @@ extern "C" {
     UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS > 255U
 #error "UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS must be 1..255"
 #endif
+#if UCN_V6_CONFIG_REALTIME_ENDPOINTS < 1U || \
+    UCN_V6_CONFIG_REALTIME_ENDPOINTS > 255U
+#error "UCN_V6_CONFIG_REALTIME_ENDPOINTS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_TIME_DOMAINS < 1U || UCN_V6_CONFIG_TIME_DOMAINS > 32U
+#error "UCN_V6_CONFIG_TIME_DOMAINS must be 1..32"
+#endif
 
 #include "ucn/v6/ucn_v6_identity.h"
 
@@ -268,7 +281,8 @@ enum {
      (uint32_t)UCN_V6_FEATURE_SECURITY |                                \
      (uint32_t)UCN_V6_FEATURE_CAPABILITY |                              \
      (uint32_t)UCN_V6_FEATURE_ROUTE |                                   \
-     (uint32_t)UCN_V6_FEATURE_TRANSFER)
+     (uint32_t)UCN_V6_FEATURE_TRANSFER |                                 \
+     (uint32_t)UCN_V6_FEATURE_REALTIME)
 
 #define UCN_V6_COMPILED_LAYOUT_HASH                                        \
     (UINT64_C(0xD65A000100000000) ^                                       \
@@ -340,7 +354,11 @@ enum {
      ((uint64_t)UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS *                       \
       UINT64_C(0xEB44ACCAB455D165)) ^                                      \
      ((uint64_t)UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS *                \
-      UINT64_C(0xF1357AEA2E62A9C5)))
+      UINT64_C(0xF1357AEA2E62A9C5)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_REALTIME_ENDPOINTS *                          \
+      UINT64_C(0xC6BC279692B5CC83)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_TIME_DOMAINS *                                \
+      UINT64_C(0xD6E8FEB86659FD93)))
 
 #if UCN_V6_CONFIG_TRANSFER_MAX_CLASS == 0U
 #define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 32U
@@ -399,6 +417,9 @@ enum {
               UCN_V6_CONFIG_TRANSFER_RECENT * 256U +                     \
               UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS * 512U +               \
               UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS * 128U))
+#define UCN_V6_REALTIME_OWNER_STORAGE_BYTES                               \
+    ((size_t)(2048U + UCN_V6_CONFIG_REALTIME_ENDPOINTS * 96U +            \
+              UCN_V6_CONFIG_TIME_DOMAINS * 512U))
 
 #define UCN_V6_DECLARE_STORAGE_TYPE(name_, bytes_) \
     typedef union name_ {                         \
@@ -447,6 +468,8 @@ typedef struct ucn_v6_feature_manifest {
     uint16_t transfer_window;
     uint16_t transfer_credit_links;
     uint16_t transfer_credit_reservations;
+    uint16_t realtime_endpoints;
+    uint16_t time_domains;
 } ucn_v6_feature_manifest_t;
 
 /* EN: Returns the one build-time feature and storage manifest.
