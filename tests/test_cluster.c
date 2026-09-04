@@ -23,10 +23,11 @@
 #define CLUSTER_TEST_NODES ((size_t)4U)
 #define CLUSTER_TEST_QUEUE ((size_t)512U)
 
-/* CMake paths are UTF-8.  The Windows narrow CRT API interprets them through
- * the active ANSI code page, so a non-ASCII source/build directory can make a
- * valid golden file appear missing.  Keep the production library independent
- * of platform APIs and use wide paths only in this Host test. */
+/* Golden filenames are ASCII and relative to CTest's explicit build working
+ * directory.  Workspace components may still be non-ASCII on Windows, so
+ * retain a UTF-8-to-wide Host-only open helper.
+ * Golden 文件名为 ASCII 且相对 CTest 指定的构建工作目录；Windows 工作区目录
+ * 仍可能含非 ASCII，因此保留仅供 Host 测试使用的 UTF-8 转宽字符封装。 */
 static FILE *cluster_test_fopen_utf8(const char *path, const char *mode)
 {
 #ifdef _WIN32
@@ -45,31 +46,6 @@ static FILE *cluster_test_fopen_utf8(const char *path, const char *mode)
     return _wfopen(wide_path, wide_mode);
 #else
     return fopen(path, mode);
-#endif
-}
-
-static int cluster_test_replace_utf8(const char *source, const char *destination)
-{
-#ifdef _WIN32
-    wchar_t wide_source[512];
-    wchar_t wide_destination[512];
-
-    if (source == NULL || destination == NULL ||
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, source, -1,
-                            wide_source,
-                            (int)(sizeof(wide_source) /
-                                  sizeof(wide_source[0]))) == 0 ||
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, destination, -1,
-                            wide_destination,
-                            (int)(sizeof(wide_destination) /
-                                  sizeof(wide_destination[0]))) == 0) {
-        return -1;
-    }
-    return MoveFileExW(wide_source, wide_destination,
-                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ?
-               0 : -1;
-#else
-    return rename(source, destination);
 #endif
 }
 
@@ -2801,20 +2777,10 @@ static int cluster_test_golden_trace(void)
     char expected[512];
     char actual[512];
 
-#ifdef UCN_CLUSTER_GOLDEN_REFERENCE_DIR
     (void)snprintf(golden_path, sizeof(golden_path),
-                   UCN_CLUSTER_GOLDEN_REFERENCE_DIR "/cluster_golden_trace.txt");
-#else
-    (void)snprintf(golden_path, sizeof(golden_path),
-                   "/tmp/cluster_golden_trace.txt");
-#endif
-#ifdef UCN_CLUSTER_GOLDEN_ACTUAL_DIR
+                   "cluster_golden_reference.txt");
     (void)snprintf(trace_path, sizeof(trace_path),
-                   UCN_CLUSTER_GOLDEN_ACTUAL_DIR "/cluster_golden_trace.txt");
-#else
-    (void)snprintf(trace_path, sizeof(trace_path),
-                   "/tmp/cluster_golden_trace_actual.txt");
-#endif
+                   "cluster_golden_actual.txt");
     /* Fail closed: without the explicit maintenance flag a MISSING
      * committed reference is a test failure, not an invitation to
      * silently mint a new golden from current behaviour.  WITH the flag
@@ -2849,15 +2815,10 @@ static int cluster_test_golden_trace(void)
     (void)fclose(trace);
 
     if (first_run) {
-        if (cluster_test_replace_utf8(trace_path, golden_path) != 0) {
-            fprintf(stderr,
-                    "CLV2-M00-03: failed to install golden at %s\n",
-                    golden_path);
-            return -1;
-        }
         fprintf(stderr,
-                "CLV2-M00-03: golden trace generated at %s; commit it.\n",
-                golden_path);
+                "CLV2-M00-03: candidate golden generated at %s; review it "
+                "and copy it to tests/golden/cluster_golden_trace.txt.\n",
+                trace_path);
         return 0;
     }
     /* Byte-wise comparison of the actual trace against the golden file. */

@@ -87,6 +87,7 @@ int test_time(void)
     config.default_hop_limit = 4U;
     TEST_ASSERT(ucn_node_init(&node, &config) == UCN_OK);
     node.routes[0].valid = true;
+    node.routes[0].route_origin = node.config.node_id;
     node.routes[0].destination = UINT32_C(2);
     node.routes[0].expires_at_ms = ucn_deadline_from_now(base_ms, 10U);
 #if UCN_FEATURE_DIAGNOSTICS

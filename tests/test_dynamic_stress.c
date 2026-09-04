@@ -620,6 +620,8 @@ static const ucn_route_entry_t *dynamic_find_route(const ucn_node_t *node,
 
     for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
         if (node->routes[index].valid &&
+            (node->routes[index].is_static ||
+             node->routes[index].route_origin == node->config.node_id) &&
             node->routes[index].destination == destination) {
             return &node->routes[index];
         }
@@ -641,6 +643,7 @@ static ucn_link_t *dynamic_find_direct_link(const ucn_node_t *node,
 }
 
 static ucn_link_t *dynamic_find_epoch_link(const ucn_node_t *node,
+                                           ucn_node_id_t route_origin,
                                            ucn_node_id_t destination,
                                            uint16_t route_epoch)
 {
@@ -650,6 +653,7 @@ static ucn_link_t *dynamic_find_epoch_link(const ucn_node_t *node,
         const ucn_route_entry_t *route = &node->routes[index];
 
         if (!route->valid || route->destination != destination ||
+            (!route->is_static && route->route_origin != route_origin) ||
             (!route->is_static &&
              ucn_deadline_expired(node->now_ms, route->expires_at_ms))) {
             continue;
@@ -677,6 +681,7 @@ static bool dynamic_routes_have_no_loop(const dynamic_network_t *network)
             const ucn_route_entry_t *origin_route =
                 &network->nodes[source_index].routes[route_index];
             ucn_node_id_t destination;
+            ucn_node_id_t route_origin;
             uint16_t route_epoch;
             size_t current_index = source_index;
             uint32_t visited = 0U;
@@ -687,6 +692,9 @@ static bool dynamic_routes_have_no_loop(const dynamic_network_t *network)
                 continue;
             }
             destination = origin_route->destination;
+            route_origin = origin_route->is_static ?
+                               network->nodes[source_index].config.node_id :
+                               origin_route->route_origin;
             route_epoch = origin_route->route_epoch;
             for (hop = 0U; hop < DYNAMIC_NODE_COUNT; ++hop) {
                 ucn_link_t *egress_link;
@@ -713,7 +721,8 @@ static bool dynamic_routes_have_no_loop(const dynamic_network_t *network)
                     break;
                 }
                 egress_link = dynamic_find_epoch_link(
-                    &network->nodes[current_index], destination, route_epoch);
+                    &network->nodes[current_index], route_origin, destination,
+                    route_epoch);
                 if (egress_link == NULL) {
                     break;
                 }

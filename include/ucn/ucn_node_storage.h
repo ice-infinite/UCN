@@ -13,7 +13,7 @@
  * mutate them outside the Core/Port owner and always compile every translation
  * unit with the same UCN_PROFILE and UCN_FEATURE_SERVICE definitions.
  */
-#define UCN_NODE_STORAGE_LAYOUT_VERSION UINT32_C(8)
+#define UCN_NODE_STORAGE_LAYOUT_VERSION UINT32_C(11)
 
 typedef struct ucn_endpoint_handler_entry {
     bool occupied;
@@ -151,6 +151,10 @@ typedef struct ucn_route_entry {
     ucn_node_id_t destination;
     ucn_link_t *egress_link;
 #if UCN_FEATURE_DYNAMIC_MESH
+    /* Dynamic Route Epochs are meaningful only inside one directional
+     * traffic domain.  A static Route leaves route_origin at zero and acts as
+     * an operator-provisioned wildcard for every Source. */
+    ucn_node_id_t route_origin;
     uint32_t expires_at_ms;
     uint32_t last_used_at_ms;
     uint32_t last_refresh_started_ms;
@@ -184,17 +188,25 @@ typedef struct ucn_route_discovery {
 typedef struct ucn_candidate_route {
     bool valid;
     bool originated_here;
+    /* EN: Once true, this transaction's egress/cost/hop snapshot is immutable.
+     * 中文：一旦置位，本事务的出口、Cost 与 Hop 快照不可再修改。 */
+    bool path_snapshot_frozen;
     bool activation_sent;
+    bool activation_acknowledged;
     ucn_wire_profile_t wire_profile;
+    ucn_node_id_t route_origin;
     ucn_node_id_t destination;
     uint32_t candidate_id;
     ucn_link_t *egress_link;
     uint32_t expires_at_ms;
     uint32_t next_probe_at_ms;
+    uint32_t activation_ack_deadline_ms;
+    uint32_t next_activation_retry_at_ms;
     ucn_route_cost_t route_cost;
     uint8_t hop_count;
     uint8_t probes_sent;
     uint8_t probes_acked;
+    uint8_t activation_attempts;
     bool verified_rtt_valid;
     uint16_t verified_rtt_ms;
     uint16_t route_epoch;

@@ -392,7 +392,7 @@ v4 保留 32 B 基础头，并实现受标志位控制的 4 B 路由扩展：
 
 1. RREQ/RREP 创建候选时，以 `candidate_id` 在所有候选中继中建立 `(destination, candidate_id) → candidate_egress_link`。
 2. Probe 使用 `candidate_id`，使每个中继明确从候选出口转发。
-3. Probe 达标后，`PATH_ACTIVATE` 把该候选转换为 `(destination, route_epoch) → new_egress_link`。
+3. Probe 达标后，`PATH_ACTIVATE` 经双向零写入预检，把该候选转换为 `(traffic_origin, destination, route_epoch) → new_egress_link`；容量或发送失败不得留下半提交。
 4. 源节点收到 `PATH_ACTIVATE_ACK` 后，新的业务帧带新 `route_epoch`；旧 Epoch 继续保留一个很短的 grace window。
 5. grace 到期后所有节点释放旧 Epoch 表项；候选失败则直接清 Candidate，不影响 Active 业务。
 

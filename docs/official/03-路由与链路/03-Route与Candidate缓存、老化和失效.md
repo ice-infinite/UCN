@@ -2,7 +2,7 @@
 
 > 文档级别：`NORMATIVE`
 > 实现状态：`CURRENT`
-> 最近核对：`a093862`，2026-08-25
+> 最近核对：当前工作区，2026-09-04
 
 ## 为什么缓存
 
@@ -10,7 +10,7 @@
 
 ## Route 内容
 
-Route 至少绑定目标、下一跳/Link、Hop、累计基础 Cost、Route Epoch/Sequence 和生命周期信息。具体内部结构不是应用 ABI，应用通过 API/诊断 View 读取。
+动态 Route 至少绑定 Traffic Origin、目标、下一跳/Link、Hop、累计基础 Cost、Route Epoch/Sequence 和生命周期信息。其固定键为 `(route_origin,destination)`；Route Epoch 只能在这个域内解释。静态 Route 是人工配置的 Destination 通配项，诊断中以 `route_origin=0` 表示。具体内部结构不是应用 ABI，应用通过 API/诊断 View 读取。
 
 ## Candidate
 
@@ -76,6 +76,23 @@ Candidate 只存在于“已经观察到其他合法下一跳”的有界工作�
 
 切换更新的是本地下一跳选择，不会暂停整个网络，也不会让所有节点同时重新计算全局路径。
 
+### Candidate 激活与 ACK
+
+Candidate 通过 Probe 后，发起端为它分配唯一非零 Route Epoch，并发送
+`PATH_ACTIVATE(candidate_id,route_epoch)`。ACK 不是“只要 Candidate ID 相同就成功”：
+它必须匹配本地发起、Probe 完成、已发送状态、Source/Destination、Wire Profile 和该
+Candidate 已绑定的 Route Epoch。中继/目标收到首个合法 Activate 后也把 Candidate 绑定
+到该 Epoch，同 Candidate ID 的换 Epoch帧必须在写状态前拒绝。
+
+默认总 ACK Deadline 为 1000 ms，每 250 ms 可重发一次，初次发送之外最多重试 3 次。
+每次重发保持 Candidate ID/Epoch，使用新的外层 Sequence。ACKED 后停止；耗尽时只清除
+Candidate 并保留旧 Active Route，不能因为新路径验证失败而破坏仍工作的旧路。
+
+首次 Probe 发送之后，Candidate 的 Link、Cost、Hop 和 Profile 是本次事务的冻结路径
+快照。同 ID RREP 不能把更优的新路径覆盖到该槽并继承旧 Probe/RTT/Epoch；新路径必须以
+新的 Candidate ID 重新进入完整证明流程。若 Neighbor 主 Bearer 在事务中变化，旧
+Candidate 直接失效，迟到 ACK 不能把旧证明应用到新 Bearer。
+
 ## 缓存失效不等于定时切路
 
 Route Deadline 到期的作用是“旧证据不再足以证明下一跳可信”。如果活动流量或合法维护已经刷新该证据，Route 可以继续使用。反之，即使 30 秒还没到，只要 Link Down 或收到 RERR，也必须立即失效。
@@ -84,7 +101,7 @@ Route Deadline 到期的作用是“旧证据不再足以证明下一跳可信�
 
 ## 容量满时如何处理
 
-所有表为固定容量。新 Route/Candidate 到来时，实现在可回收范围内选择空闲、过期或较低价值槽；没有安全可回收项时返回 `NO_SPACE`/拒绝，而不是覆盖仍被显式 Path/Policy 依赖的状态。
+所有表为固定容量。新 Route/Candidate 到来时只使用空闲或已经到期的槽；没有安全可回收项时返回 `NO_SPACE`/拒绝，并增加 Route Instance 满载统计，而不是用另一个 Origin 的同 Destination 项或仍被显式 Path/Policy 依赖的状态顶替。
 
 产品配置 Route 数量时，应统计本节点的并发目标工作集，而不是照全网 Node 总数一比一配置。边缘传感器可能只需少量上行 Route；网关/中继需要更大的邻居和路由工作集。
 
@@ -98,7 +115,7 @@ Policy 引用本地 Path handle。Path 被 revoke 后，Policy 不得继续解�
 
 应用应通过受限 View/诊断查看：
 
-- Destination、Next Hop、Link/Path handle；
+- Route Origin、Destination、Next Hop、Link/Path handle；
 - Hop、基础/有效 Cost；
 - 当前状态和剩余生命周期；
 - 失效原因；
@@ -116,3 +133,6 @@ Policy 引用本地 Path handle。Path 被 revoke 后，Policy 不得继续解�
 - [ ] Candidate 满载不覆盖不可回收项；
 - [ ] 在途帧与尚未提交帧的切换边界有明确测试；
 - [ ] Route TTL、质量探测周期和 Flow Lease 没有混成一个定时器。
+- [ ] Activate ACK 精确绑定已发送 Candidate/Epoch，提前、错 Epoch 和越序 ACK 零写拒绝；
+- [ ] ACK 丢失只触发有界重发，耗尽后旧 Active Route 仍可用。
+- [ ] Probe 开始后的同 ID RREP/Bearer 变化不能迁移冻结路径或继承旧证明。

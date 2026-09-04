@@ -181,6 +181,21 @@ typedef char ucn_tx_queue_depths_must_be_nonzero[
 #define UCN_PATH_PROBE_INTERVAL_MS UINT32_C(100)
 #endif
 
+/* PATH_ACTIVATE is a bounded request/ACK transaction.  The first scheduled
+ * attempt arms one overall ACK deadline; retries preserve Candidate ID/Epoch
+ * while send_control_on_link_profile() allocates a fresh outer Sequence. */
+#ifndef UCN_PATH_ACTIVATE_ACK_TIMEOUT_MS
+#define UCN_PATH_ACTIVATE_ACK_TIMEOUT_MS UINT32_C(1000)
+#endif
+
+#ifndef UCN_PATH_ACTIVATE_RETRY_INTERVAL_MS
+#define UCN_PATH_ACTIVATE_RETRY_INTERVAL_MS UINT32_C(250)
+#endif
+
+#ifndef UCN_PATH_ACTIVATE_MAX_RETRIES
+#define UCN_PATH_ACTIVATE_MAX_RETRIES ((uint8_t)3U)
+#endif
+
 #ifndef UCN_ROUTE_SWITCH_IMPROVEMENT_PERCENT
 #define UCN_ROUTE_SWITCH_IMPROVEMENT_PERCENT ((uint8_t)20U)
 #endif
@@ -192,6 +207,18 @@ typedef char ucn_tx_queue_depths_must_be_nonzero[
 #if UCN_FEATURE_CANDIDATE_ROUTING
 typedef char ucn_path_probe_required_acks_must_be_positive[
     UCN_PATH_PROBE_REQUIRED_ACKS > 0U ? 1 : -1];
+typedef char ucn_path_activate_retry_interval_must_be_positive[
+    UCN_PATH_ACTIVATE_RETRY_INTERVAL_MS > 0U ? 1 : -1];
+typedef char ucn_path_activate_ack_timeout_must_cover_retries[
+    UINT64_C(1) * UCN_PATH_ACTIVATE_ACK_TIMEOUT_MS >=
+            UINT64_C(1) * UCN_PATH_ACTIVATE_RETRY_INTERVAL_MS *
+                ((uint64_t)UCN_PATH_ACTIVATE_MAX_RETRIES + UINT64_C(1)) ?
+        1 : -1];
+typedef char ucn_path_activate_ack_timeout_must_fit_candidate_lifetime[
+    UCN_PATH_ACTIVATE_ACK_TIMEOUT_MS < UCN_ROUTE_CANDIDATE_TIMEOUT_MS ?
+        1 : -1];
+typedef char ucn_path_activate_retry_count_must_fit_storage[
+    UCN_PATH_ACTIVATE_MAX_RETRIES < UINT8_MAX ? 1 : -1];
 #endif
 typedef char ucn_business_tx_burst_before_maintenance_must_be_positive[
     UCN_BUSINESS_TX_BURST_BEFORE_MAINTENANCE > 0U ? 1 : -1];
@@ -628,6 +655,8 @@ typedef char ucn_node_relative_durations_must_be_wrap_safe[
 #if UCN_FEATURE_CANDIDATE_ROUTING
     UCN_ROUTE_CANDIDATE_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
     UCN_PATH_PROBE_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_PATH_ACTIVATE_ACK_TIMEOUT_MS <= UCN_MAX_SAFE_DURATION_MS &&
+    UCN_PATH_ACTIVATE_RETRY_INTERVAL_MS <= UCN_MAX_SAFE_DURATION_MS &&
 #endif
 #if UCN_FEATURE_DIAGNOSTICS
     UCN_PATH_TRACE_RX_TOKEN_REFILL_MS <= UCN_MAX_SAFE_DURATION_MS &&
@@ -671,6 +700,21 @@ typedef struct ucn_neighbor_summary {
     uint8_t primary_bearer_index;
     uint32_t last_seen_ms;
 } ucn_neighbor_summary_t;
+
+/* Owner-context diagnostic view of one bounded Route slot.  Dynamic entries
+ * use the directional key (route_origin, destination); static entries report
+ * route_origin == 0 because they are explicit wildcard routes. */
+typedef struct ucn_route_summary {
+    bool is_static;
+    ucn_node_id_t route_origin;
+    ucn_node_id_t destination;
+    uint8_t egress_link_id;
+    uint8_t hop_count;
+    ucn_route_cost_t route_cost;
+    uint16_t route_epoch;
+    bool previous_valid;
+    uint16_t previous_route_epoch;
+} ucn_route_summary_t;
 
 typedef struct ucn_send_request {
     ucn_node_id_t destination;
@@ -898,11 +942,16 @@ typedef struct ucn_node_stats {
     uint32_t neighbor_suspected;
     uint32_t neighbor_removed;
     uint32_t route_refreshes_started;
+    uint32_t route_instance_table_full;
 #endif
 #if UCN_FEATURE_CANDIDATE_ROUTING
     uint32_t candidate_routes_learned;
     uint32_t path_probes_sent;
     uint32_t path_probe_acks_received;
+    uint32_t path_activates_sent;
+    uint32_t path_activate_retries_sent;
+    uint32_t path_activate_acks_received;
+    uint32_t path_activate_retry_exhausted;
     uint32_t route_switches;
     uint32_t candidate_rejected;
 #endif
@@ -1076,6 +1125,11 @@ size_t ucn_node_copy_neighbor_summaries(
     const ucn_node_t *node,
     ucn_neighbor_summary_t *output,
     size_t capacity);
+/* With output == NULL and capacity == 0 this returns the number of valid
+ * Route slots. Otherwise it copies at most capacity entries. */
+size_t ucn_node_copy_route_summaries(const ucn_node_t *node,
+                                     ucn_route_summary_t *output,
+                                     size_t capacity);
 ucn_result_t ucn_node_register_link(ucn_node_t *node, ucn_link_t *link);
 ucn_result_t ucn_node_add_route(ucn_node_t *node,
                                 ucn_node_id_t destination,

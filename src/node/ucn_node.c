@@ -133,6 +133,8 @@ static ucn_result_t send_endpoint_internal(
     bool allow_pending_queue);
 #if UCN_FEATURE_CANDIDATE_ROUTING
 static void expire_candidate_routes(ucn_node_t *node);
+static bool candidate_route_transaction_is_frozen(
+    const ucn_candidate_route_t *candidate);
 #endif
 #if UCN_FEATURE_PATH
 static ucn_result_t send_path_route_error(ucn_node_t *node,
@@ -969,24 +971,68 @@ static ucn_link_t *find_direct_link(ucn_node_t *node,
  * EN: Searches bounded Lite/Full Node state for `link`.
  * 中文：在固定容量的 Lite/Full Node 状态中查找 `link`。
  */
-static ucn_link_t *find_link(ucn_node_t *node, ucn_node_id_t destination)
+static ucn_route_entry_t *find_active_route_for_origin(
+    ucn_node_t *node,
+    ucn_node_id_t route_origin,
+    ucn_node_id_t destination)
 {
     size_t index;
+    ucn_route_entry_t *static_route = NULL;
+
+    if (node == NULL || route_origin == 0U ||
+        route_origin == UCN_NODE_BROADCAST || destination == 0U ||
+        destination == UCN_NODE_BROADCAST) {
+        return NULL;
+    }
+    for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
+        ucn_route_entry_t *route = &node->routes[index];
+
+        if (!route->valid || route_is_expired(node, route) ||
+            route->destination != destination) {
+            continue;
+        }
+        if (route->is_static) {
+            if (static_route == NULL) {
+                static_route = route;
+            }
+        } else if (route->route_origin == route_origin) {
+            return route;
+        }
+    }
+    return static_route;
+}
+
+/*
+ * EN: Searches one Source-owned Route domain while preserving direct and
+ *     static-route behavior.
+ * 中文：在单个源节点拥有的路由域内查找，同时保留直连和静态路由行为。
+ */
+static ucn_link_t *find_link_for_origin(ucn_node_t *node,
+                                        ucn_node_id_t route_origin,
+                                        ucn_node_id_t destination)
+{
     ucn_link_t *direct = find_direct_link(node, destination);
+    ucn_route_entry_t *route;
 
     if (direct != NULL) {
         return direct;
     }
+    route = find_active_route_for_origin(node, route_origin, destination);
+    return route == NULL ? NULL :
+           resolve_egress_link(node, route->egress_link);
+}
 
-    for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
-        if (node->routes[index].valid &&
-            !route_is_expired(node, &node->routes[index]) &&
-            node->routes[index].destination == destination) {
-            return resolve_egress_link(node, node->routes[index].egress_link);
-        }
+/*
+ * EN: Searches the local Node's Source-owned Route domain.
+ * 中文：查找本节点作为源节点所拥有的路由域。
+ */
+static ucn_link_t *find_link(ucn_node_t *node, ucn_node_id_t destination)
+{
+    if (node == NULL) {
+        return NULL;
     }
 
-    return NULL;
+    return find_link_for_origin(node, node->config.node_id, destination);
 }
 
 /*
@@ -994,12 +1040,14 @@ static ucn_link_t *find_link(ucn_node_t *node, ucn_node_id_t destination)
  * 中文：在固定容量的 Lite/Full Node 状态中查找 `link_for_route_epoch`。
  */
 static ucn_link_t *find_link_for_route_epoch(ucn_node_t *node,
+                                             ucn_node_id_t route_origin,
                                              ucn_node_id_t destination,
                                              bool has_route_extension,
                                              uint16_t route_epoch)
 {
     size_t index;
     ucn_link_t *direct = find_direct_link(node, destination);
+    const ucn_route_entry_t *static_route = NULL;
 
     if (direct != NULL) {
         return direct;
@@ -1009,6 +1057,13 @@ static ucn_link_t *find_link_for_route_epoch(ucn_node_t *node,
 
         if (!route->valid || route_is_expired(node, route) ||
             route->destination != destination) {
+            continue;
+        }
+        if (route->is_static) {
+            static_route = route;
+            continue;
+        }
+        if (route->route_origin != route_origin) {
             continue;
         }
         if (has_route_extension) {
@@ -1027,7 +1082,13 @@ static ucn_link_t *find_link_for_route_epoch(ucn_node_t *node,
             return resolve_egress_link(node, route->previous_egress_link);
         }
     }
-    return NULL;
+    /* Static Routes are an explicit administrator-owned wildcard.  They do
+     * not own or validate a dynamic Route Epoch carried by an upstream node;
+     * use them only after no matching dynamic instance was accepted.
+     * 静态路由是管理员显式配置的通配项，不拥有也不校验上游动态路由携带的
+     * Route Epoch；只有没有动态实例匹配时才作为回退。 */
+    return static_route == NULL ? NULL :
+           resolve_egress_link(node, static_route->egress_link);
 }
 
 /*
@@ -1041,7 +1102,8 @@ static bool route_epoch_is_accepted(ucn_node_t *node,
     if (find_direct_link(node, source) != NULL) {
         return true;
     }
-    return find_link_for_route_epoch(node, source, frame->has_route_extension,
+    return find_link_for_route_epoch(node, node->config.node_id, source,
+                                     frame->has_route_extension,
                                      frame->route_epoch) != NULL;
 }
 
@@ -1230,6 +1292,15 @@ static void remap_neighbor_egress_references(ucn_node_t *node,
 
         if (candidate->valid && candidate->egress_link != new_link &&
             find_neighbor_bearer(entry, candidate->egress_link) != NULL) {
+            /* Probe/Activate evidence belongs to the exact path snapshot.
+             * A Bearer remap after that point starts a new discovery instead
+             * of moving old evidence to a different carrier.
+             * Probe/Activate 证明属于精确路径快照；开始证明后若 Bearer
+             * 改变，必须重新发现，不能把旧证明迁移到另一载波。 */
+            if (candidate_route_transaction_is_frozen(candidate)) {
+                (void)memset(candidate, 0, sizeof(*candidate));
+                continue;
+            }
             adjust_route_cost_for_bearer_switch(&candidate->route_cost,
                                                 candidate->egress_link,
                                                 new_link);
@@ -2342,6 +2413,7 @@ static void expire_dynamic_state(ucn_node_t *node, uint32_t now_ms)
  * 中文：更新固定容量 Lite/Full Node 状态中的 `learn_route`。
  */
 static ucn_result_t learn_route(ucn_node_t *node,
+                                ucn_node_id_t route_origin,
                                 ucn_node_id_t destination,
                                 ucn_link_t *egress_link,
                                 ucn_route_cost_t route_cost,
@@ -2354,14 +2426,17 @@ static ucn_result_t learn_route(ucn_node_t *node,
     if (hop_count == 0U || hop_count > node->config.default_hop_limit) {
         return UCN_ERR_TTL;
     }
-    if (destination == 0U || destination == UCN_NODE_BROADCAST || route_epoch == 0U ||
+    if (route_origin == 0U || route_origin == UCN_NODE_BROADCAST ||
+        destination == 0U || destination == UCN_NODE_BROADCAST || route_epoch == 0U ||
         egress_link == NULL || !link_is_registered(node, egress_link)) {
         return UCN_ERR_ARGUMENT;
     }
 
     for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
         if (node->routes[index].valid &&
-            node->routes[index].destination == destination) {
+            node->routes[index].destination == destination &&
+            (node->routes[index].is_static ||
+             node->routes[index].route_origin == route_origin)) {
             if (!node->routes[index].is_static) {
                 ucn_route_entry_t *route = &node->routes[index];
                 const bool lower_cost = route_cost < route->route_cost;
@@ -2413,11 +2488,13 @@ static ucn_result_t learn_route(ucn_node_t *node,
     }
 
     if (free_slot == NULL) {
+        node->stats.route_instance_table_full++;
         return UCN_ERR_NO_SPACE;
     }
 
     free_slot->valid = true;
     free_slot->is_static = false;
+    free_slot->route_origin = route_origin;
     free_slot->destination = destination;
     free_slot->egress_link = egress_link;
     free_slot->expires_at_ms =
@@ -2443,16 +2520,9 @@ static ucn_result_t learn_route(ucn_node_t *node,
 static ucn_route_entry_t *find_active_route(ucn_node_t *node,
                                             ucn_node_id_t destination)
 {
-    size_t index;
-
-    for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
-        if (node->routes[index].valid &&
-            node->routes[index].destination == destination &&
-            !route_is_expired(node, &node->routes[index])) {
-            return &node->routes[index];
-        }
-    }
-    return NULL;
+    return node == NULL ? NULL :
+           find_active_route_for_origin(node, node->config.node_id,
+                                        destination);
 }
 
 #if UCN_FEATURE_CANDIDATE_ROUTING
@@ -2461,6 +2531,7 @@ static ucn_route_entry_t *find_active_route(ucn_node_t *node,
  * 中文：在固定容量的 Lite/Full Node 状态中查找 `candidate_route`。
  */
 static ucn_candidate_route_t *find_candidate_route(ucn_node_t *node,
+                                                    ucn_node_id_t route_origin,
                                                     ucn_node_id_t destination,
                                                     uint32_t candidate_id)
 {
@@ -2468,6 +2539,7 @@ static ucn_candidate_route_t *find_candidate_route(ucn_node_t *node,
 
     for (index = 0U; index < UCN_MAX_CANDIDATE_ROUTES; ++index) {
         if (node->candidates[index].valid &&
+            node->candidates[index].route_origin == route_origin &&
             node->candidates[index].destination == destination &&
             node->candidates[index].candidate_id == candidate_id &&
             !candidate_is_expired(node, &node->candidates[index])) {
@@ -2478,10 +2550,31 @@ static ucn_candidate_route_t *find_candidate_route(ucn_node_t *node,
 }
 
 /*
+ * EN: Returns whether Probe/RTT/Activate evidence has frozen this Candidate's
+ *     path fields for the lifetime of its transaction identity.
+ * 中文：返回 Probe/RTT/Activate 证明是否已冻结该 Candidate 事务的路径字段。
+ */
+static bool candidate_route_transaction_is_frozen(
+    const ucn_candidate_route_t *candidate)
+{
+    return candidate != NULL &&
+           (candidate->path_snapshot_frozen ||
+            candidate->next_probe_at_ms != 0U ||
+            candidate->probes_sent != 0U || candidate->probes_acked != 0U ||
+            candidate->verified_rtt_valid || candidate->verified_rtt_ms != 0U ||
+            candidate->route_epoch != 0U ||
+            candidate->activation_attempts != 0U ||
+            candidate->activation_sent || candidate->activation_acknowledged ||
+            candidate->activation_ack_deadline_ms != 0U ||
+            candidate->next_activation_retry_at_ms != 0U);
+}
+
+/*
  * EN: Updates `learn_candidate_route` in bounded Lite/Full Node state.
  * 中文：更新固定容量 Lite/Full Node 状态中的 `learn_candidate_route`。
  */
 static ucn_result_t learn_candidate_route(ucn_node_t *node,
+                                          ucn_node_id_t route_origin,
                                           ucn_node_id_t destination,
                                           uint32_t candidate_id,
                                           ucn_link_t *egress_link,
@@ -2496,16 +2589,29 @@ static ucn_result_t learn_candidate_route(ucn_node_t *node,
     if (hop_count == 0U || hop_count > node->config.default_hop_limit) {
         return UCN_ERR_TTL;
     }
-    if (destination == 0U || destination == UCN_NODE_BROADCAST ||
+    if (route_origin == 0U || route_origin == UCN_NODE_BROADCAST ||
+        destination == 0U || destination == UCN_NODE_BROADCAST ||
         candidate_id == 0U || egress_link == NULL ||
         !link_is_registered(node, egress_link) ||
         ucn_wire_profile_get_descriptor(wire_profile) == NULL) {
         return UCN_ERR_ARGUMENT;
     }
-    slot = find_candidate_route(node, destination, candidate_id);
+    slot = find_candidate_route(node, route_origin, destination, candidate_id);
     if (slot != NULL) {
         if (slot->wire_profile != wire_profile) {
             return UCN_ERR_MALFORMED;
+        }
+        if (candidate_route_transaction_is_frozen(slot)) {
+            /* The Candidate is the frozen path snapshot consumed by the
+             * Activate ACK.  A different RREP requires a new Candidate ID;
+             * an exact duplicate is idempotent and cannot extend expiry.
+             * Candidate 就是 Activate ACK 使用的冻结路径快照。不同路径
+             * 的 RREP 必须使用新 ID；精确重复保持幂等且不能续期。 */
+            return slot->egress_link == egress_link &&
+                           slot->route_cost == route_cost &&
+                           slot->hop_count == hop_count &&
+                           (!originated_here || slot->originated_here) ?
+                       UCN_OK : UCN_ERR_STATE;
         }
         if (route_cost < slot->route_cost) {
             slot->egress_link = egress_link;
@@ -2535,6 +2641,7 @@ static ucn_result_t learn_candidate_route(ucn_node_t *node,
     slot->valid = true;
     slot->originated_here = originated_here;
     slot->wire_profile = wire_profile;
+    slot->route_origin = route_origin;
     slot->destination = destination;
     slot->candidate_id = candidate_id;
     slot->egress_link = egress_link;
@@ -2547,38 +2654,94 @@ static ucn_result_t learn_candidate_route(ucn_node_t *node,
 }
 
 /*
- * EN: Applies `activate_candidate_route` after validating the current Lite/Full Node state.
- * 中文：验证当前 Lite/Full Node 状态后应用 `activate_candidate_route`。
+ * EN: Describes one fully preflighted Candidate-to-Route state change.
+ * 中文：描述一个已经完成全部预检的 Candidate 到 Route 状态变更。
  */
-static ucn_result_t activate_candidate_route(ucn_node_t *node,
-                                             ucn_node_id_t destination,
-                                             uint32_t candidate_id,
-                                             uint16_t route_epoch,
-                                             ucn_wire_profile_t wire_profile)
+typedef struct candidate_activation_plan {
+    ucn_candidate_route_t *candidate;
+    ucn_route_entry_t *route;
+    ucn_link_t *resolved_egress;
+    bool replacing_active_route;
+    bool already_active;
+} candidate_activation_plan_t;
+
+/*
+ * EN: Preflights one Candidate activation without mutating Route/Candidate
+ *     state; `reserved_route` prevents a two-direction transaction from
+ *     selecting the same free slot twice.
+ * 中文：在不修改 Route/Candidate 状态的前提下预检一个候选激活；
+ *       `reserved_route` 防止双向事务重复选择同一个空闲槽。
+ */
+static ucn_result_t prepare_candidate_activation(
+    ucn_node_t *node,
+    ucn_node_id_t route_origin,
+    ucn_node_id_t destination,
+    uint32_t candidate_id,
+    uint16_t route_epoch,
+    ucn_wire_profile_t wire_profile,
+    const ucn_route_entry_t *reserved_route,
+    candidate_activation_plan_t *plan)
 {
     ucn_candidate_route_t *candidate;
     const ucn_wire_profile_descriptor_t *descriptor;
     uint16_t maximum_epoch;
     ucn_route_entry_t *route;
+    ucn_link_t *resolved_egress;
     size_t index;
 
-    candidate = find_candidate_route(node, destination, candidate_id);
+    if (plan == NULL) {
+        return UCN_ERR_ARGUMENT;
+    }
+    (void)memset(plan, 0, sizeof(*plan));
+    candidate = find_candidate_route(node, route_origin, destination,
+                                     candidate_id);
     descriptor = ucn_wire_profile_get_descriptor(wire_profile);
     maximum_epoch = descriptor != NULL && descriptor->route_epoch_bytes == 1U ?
         UINT16_C(0x00FF) : UINT16_MAX;
     if (candidate == NULL || descriptor == NULL || route_epoch == 0U ||
+        !candidate->path_snapshot_frozen ||
         candidate->wire_profile != wire_profile ||
         route_epoch >= maximum_epoch) {
         return UCN_ERR_NOT_FOUND;
     }
-    route = find_active_route(node, destination);
+    /* The first valid Activate binds an intermediate/target Candidate to one
+     * Route Epoch.  Later frames with the same Candidate ID may only replay
+     * that exact transaction; they cannot retarget the Candidate to another
+     * Epoch.
+     * 首个合法 Activate 会把中继/目标 Candidate 绑定到唯一 Route Epoch；
+     * 后续同 Candidate ID 只能重放同一事务，不能改绑其他 Epoch。 */
+    if (candidate->route_epoch != 0U &&
+        candidate->route_epoch != route_epoch) {
+        return UCN_ERR_STATE;
+    }
+    resolved_egress = resolve_egress_link(node, candidate->egress_link);
+    if (resolved_egress == NULL ||
+        !link_is_candidate_eligible(node, resolved_egress)) {
+        return UCN_ERR_LINK_DOWN;
+    }
+    route = find_active_route_for_origin(node, route_origin, destination);
     if (route != NULL && route->is_static) {
         return UCN_ERR_UNSUPPORTED;
     }
+    if (route != NULL && route->route_epoch == route_epoch) {
+        if (route->egress_link != candidate->egress_link ||
+            route->route_cost != candidate->route_cost ||
+            route->hop_count != candidate->hop_count) {
+            return UCN_ERR_STATE;
+        }
+        plan->candidate = candidate;
+        plan->route = route;
+        plan->resolved_egress = resolved_egress;
+        plan->replacing_active_route = true;
+        plan->already_active = true;
+        return UCN_OK;
+    }
+    plan->replacing_active_route = route != NULL;
     if (route == NULL) {
         for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
-            if (!node->routes[index].valid ||
-                route_is_expired(node, &node->routes[index])) {
+            if (&node->routes[index] != reserved_route &&
+                (!node->routes[index].valid ||
+                 route_is_expired(node, &node->routes[index]))) {
                 route = &node->routes[index];
                 break;
             }
@@ -2588,7 +2751,33 @@ static ucn_result_t activate_candidate_route(ucn_node_t *node,
         return UCN_ERR_NO_SPACE;
     }
 
-    if (route->valid) {
+    plan->candidate = candidate;
+    plan->route = route;
+    plan->resolved_egress = resolved_egress;
+    return UCN_OK;
+}
+
+/*
+ * EN: Commits a previously validated Candidate activation with no remaining
+ *     failure path. Candidate evidence is retained until bounded expiry so a
+ *     lost Activate/ACK can be retried idempotently.
+ * 中文：提交已完成预检且后续不会失败的候选激活；候选证据保留到有界过期，
+ *       使丢失的 Activate/ACK 可以幂等重试。
+ */
+static void commit_candidate_activation(ucn_node_t *node,
+                                        candidate_activation_plan_t *plan,
+                                        uint16_t route_epoch)
+{
+    ucn_route_entry_t *route;
+    const ucn_candidate_route_t *candidate;
+
+    if (plan->already_active) {
+        return;
+    }
+    route = plan->route;
+    candidate = plan->candidate;
+
+    if (plan->replacing_active_route) {
         route->previous_valid = true;
         route->previous_egress_link = route->egress_link;
         route->previous_route_epoch = route->route_epoch;
@@ -2602,7 +2791,8 @@ static ucn_result_t activate_candidate_route(ucn_node_t *node,
     }
     route->valid = true;
     route->is_static = false;
-    route->destination = destination;
+    route->route_origin = candidate->route_origin;
+    route->destination = candidate->destination;
     route->egress_link = candidate->egress_link;
     route->expires_at_ms =
         ucn_deadline_from_now(node->now_ms, UCN_ROUTE_ENTRY_LIFETIME_MS);
@@ -2613,8 +2803,7 @@ static ucn_result_t activate_candidate_route(ucn_node_t *node,
     route->verified_rtt_valid = candidate->verified_rtt_valid;
     route->verified_rtt_ms = candidate->verified_rtt_ms;
     route->route_epoch = route_epoch;
-    candidate->valid = false;
-    return UCN_OK;
+    plan->candidate->route_epoch = route_epoch;
 }
 
 /*
@@ -2638,12 +2827,26 @@ static void expire_candidate_routes(ucn_node_t *node)
  * EN: Updates `mark_route_used` in bounded Lite/Full Node state.
  * 中文：更新固定容量 Lite/Full Node 状态中的 `mark_route_used`。
  */
-static void mark_route_used(ucn_node_t *node, ucn_node_id_t destination)
+static void mark_route_used_for_origin(ucn_node_t *node,
+                                       ucn_node_id_t route_origin,
+                                       ucn_node_id_t destination)
 {
-    ucn_route_entry_t *route = find_active_route(node, destination);
+    ucn_route_entry_t *route = find_active_route_for_origin(
+        node, route_origin, destination);
 
     if (route != NULL && !route->is_static) {
         route->last_used_at_ms = node->now_ms;
+    }
+}
+
+/*
+ * EN: Marks a Route owned by the local Node as recently used.
+ * 中文：把本节点拥有的路由标记为最近已使用。
+ */
+static void mark_route_used(ucn_node_t *node, ucn_node_id_t destination)
+{
+    if (node != NULL) {
+        mark_route_used_for_origin(node, node->config.node_id, destination);
     }
 }
 
@@ -2659,7 +2862,9 @@ static ucn_result_t start_due_route_refresh(ucn_node_t *node, uint32_t now_ms)
     for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
         ucn_route_entry_t *route = &node->routes[index];
 
-        if (!route->valid || route->is_static || route_is_expired(node, route) ||
+        if (!route->valid || route->is_static ||
+            route->route_origin != node->config.node_id ||
+            route_is_expired(node, route) ||
             (uint32_t)(now_ms - route->last_used_at_ms) >
             UCN_ROUTE_ENTRY_LIFETIME_MS ||
             (uint32_t)(now_ms - route->last_refresh_started_ms) <
@@ -4352,7 +4557,8 @@ static ucn_result_t handle_path_trace_request(ucn_node_t *node,
                                              payload, payload_length,
                                              frame->wire_profile);
     }
-    egress_link = find_link(node, frame->destination);
+    egress_link = find_link_for_origin(node, frame->source,
+                                       frame->destination);
     if (egress_link == NULL || egress_link == ingress_link) {
         payload[UCN_PATH_TRACE_STATUS_OFFSET] =
             (uint8_t)UCN_PATH_TRACE_STATUS_NO_ROUTE;
@@ -5821,11 +6027,12 @@ static ucn_result_t handle_heartbeat(ucn_node_t *node,
  * 中文：在固定容量的 Lite/Full Node 状态中查找 `candidate_link`。
  */
 static ucn_link_t *find_candidate_link(ucn_node_t *node,
+                                       ucn_node_id_t route_origin,
                                        ucn_node_id_t destination,
                                        uint32_t candidate_id)
 {
     ucn_candidate_route_t *candidate =
-        find_candidate_route(node, destination, candidate_id);
+        find_candidate_route(node, route_origin, destination, candidate_id);
     ucn_link_t *egress_link;
 
     if (candidate == NULL) {
@@ -5868,6 +6075,65 @@ static uint16_t allocate_route_epoch(ucn_node_t *node,
 }
 
 /*
+ * EN: Sends one bounded PATH_ACTIVATE attempt.  Transaction identity is
+ *     armed before the external Link callback so a synchronous ACK can be
+ *     admitted; every attempt receives a fresh outer Sequence.
+ * 中文：发送一次有界 PATH_ACTIVATE 尝试。外部 Link 回调前先建立事务身份，
+ *       使同步返回的 ACK 可以通过准入；每次尝试都会获得新的外层 Sequence。
+ */
+static ucn_result_t send_path_activate_attempt(
+    ucn_node_t *node,
+    ucn_candidate_route_t *candidate,
+    ucn_link_t *egress_link,
+    uint32_t now_ms)
+{
+    uint8_t payload[UCN_PATH_ACTIVATE_PAYLOAD_BYTES];
+    const bool was_sent = candidate->activation_sent;
+    const bool is_retry = candidate->activation_attempts != 0U;
+    ucn_result_t result;
+
+    if (!take_control_token(node)) {
+        return UCN_ERR_NO_SPACE;
+    }
+    if (candidate->route_epoch == 0U) {
+        candidate->route_epoch = allocate_route_epoch(
+            node, candidate->destination, candidate->wire_profile);
+    }
+    if (candidate->activation_attempts == 0U) {
+        candidate->activation_ack_deadline_ms =
+            ucn_deadline_from_now(now_ms,
+                                  UCN_PATH_ACTIVATE_ACK_TIMEOUT_MS);
+    }
+
+    candidate->activation_attempts++;
+    candidate->next_activation_retry_at_ms =
+        ucn_deadline_from_now(now_ms,
+                              UCN_PATH_ACTIVATE_RETRY_INTERVAL_MS);
+    /* Arm before send: a synchronous in-memory/test Link may deliver the ACK
+     * recursively from inside send_frame().  Roll back only this boolean on
+     * an initial local submission failure; attempt/deadline remain bounded.
+     * 发送前置位：同步 Link 可能在 send_frame() 内递归交付 ACK。首次本地提交
+     * 失败时只回滚该布尔值，尝试次数和截止期仍保持有界。 */
+    candidate->path_snapshot_frozen = true;
+    candidate->activation_sent = true;
+
+    write_u32_be(payload, candidate->candidate_id);
+    write_u16_be(payload + 4U, candidate->route_epoch);
+    result = send_control_on_link_profile(
+        node, egress_link, candidate->destination, UCN_MSG_PATH_ACTIVATE,
+        payload, UCN_PATH_ACTIVATE_PAYLOAD_BYTES, candidate->wire_profile);
+    if (result != UCN_OK) {
+        candidate->activation_sent = was_sent;
+        return result;
+    }
+    node->stats.path_activates_sent++;
+    if (is_retry) {
+        node->stats.path_activate_retries_sent++;
+    }
+    return UCN_OK;
+}
+
+/*
  * EN: Validates and submits `send_due_path_probe` through the bounded Lite/Full Node transmit path.
  * 中文：验证 `send_due_path_probe` 并将其提交到有界的 Lite/Full Node 发送路径。
  */
@@ -5882,36 +6148,44 @@ static ucn_result_t send_due_path_probe(ucn_node_t *node, uint32_t now_ms)
         uint32_t service_delay_ms;
         ucn_result_t result;
 
-        if (!candidate->valid || !candidate->originated_here) {
+        if (!candidate->valid || !candidate->originated_here ||
+            candidate->route_origin != node->config.node_id) {
             continue;
         }
-        egress_link = find_candidate_link(node, candidate->destination,
+        egress_link = find_candidate_link(node, candidate->route_origin,
+                                          candidate->destination,
                                           candidate->candidate_id);
         if (egress_link == NULL) {
             continue;
         }
-        if (candidate->probes_acked >= UCN_PATH_PROBE_REQUIRED_ACKS) {
-            if (candidate->activation_sent) {
+        if (candidate->probes_sent >= UCN_PATH_PROBE_REQUIRED_ACKS &&
+            candidate->probes_acked >= UCN_PATH_PROBE_REQUIRED_ACKS) {
+            const uint32_t maximum_attempts =
+                (uint32_t)UCN_PATH_ACTIVATE_MAX_RETRIES + UINT32_C(1);
+
+            if (candidate->activation_acknowledged) {
                 continue;
             }
-            if (candidate->route_epoch == 0U) {
-                candidate->route_epoch = allocate_route_epoch(node,
-                                                               candidate->destination,
-                                                               candidate->wire_profile);
+            if (candidate->activation_attempts != 0U) {
+                if (ucn_deadline_expired(
+                        now_ms, candidate->activation_ack_deadline_ms) ||
+                    ((uint32_t)candidate->activation_attempts >=
+                         maximum_attempts &&
+                     ucn_deadline_expired(
+                         now_ms,
+                         candidate->next_activation_retry_at_ms))) {
+                    candidate->valid = false;
+                    node->stats.path_activate_retry_exhausted++;
+                    return UCN_ERR_EXHAUSTED;
+                }
+                if (!ucn_deadline_expired(
+                        now_ms,
+                        candidate->next_activation_retry_at_ms)) {
+                    continue;
+                }
             }
-            if (!take_control_token(node)) {
-                return UCN_ERR_NO_SPACE;
-            }
-            write_u32_be(payload, candidate->candidate_id);
-            write_u16_be(payload + 4U, candidate->route_epoch);
-            result = send_control_on_link_profile(
-                node, egress_link, candidate->destination,
-                UCN_MSG_PATH_ACTIVATE, payload,
-                UCN_PATH_ACTIVATE_PAYLOAD_BYTES, candidate->wire_profile);
-            if (result == UCN_OK) {
-                candidate->activation_sent = true;
-            }
-            return result;
+            return send_path_activate_attempt(node, candidate, egress_link,
+                                              now_ms);
         }
         if (candidate->probes_sent >= UCN_PATH_PROBE_REQUIRED_ACKS ||
             (candidate->next_probe_at_ms != 0U &&
@@ -5929,6 +6203,12 @@ static ucn_result_t send_due_path_probe(ucn_node_t *node, uint32_t now_ms)
         write_u32_be(payload, candidate->candidate_id);
         write_u32_be(payload + 4U, (uint32_t)candidate->probes_sent + 1U);
         write_u32_be(payload + 8U, now_ms);
+        /* Freeze before entering the Link callback.  Even a failed local
+         * submission keeps the transaction bound to this path; a different
+         * path must use a new Candidate ID.
+         * 在进入 Link 回调前冻结。即使本地提交失败，事务仍绑定当前路径；
+         * 其他路径必须使用新的 Candidate ID。 */
+        candidate->path_snapshot_frozen = true;
         result = send_control_on_link_profile(
             node, egress_link, candidate->destination, UCN_MSG_PATH_PROBE,
             payload, (uint16_t)sizeof(payload), candidate->wire_profile);
@@ -5953,6 +6233,7 @@ static ucn_result_t handle_path_probe(ucn_node_t *node,
                                       const ucn_frame_t *frame)
 {
     uint32_t candidate_id;
+    ucn_candidate_route_t *candidate;
     ucn_link_t *egress_link;
 
     if (frame->payload_length != UCN_PATH_PROBE_PAYLOAD_BYTES) {
@@ -5965,18 +6246,22 @@ static ucn_result_t handle_path_probe(ucn_node_t *node,
     if (frame->destination != node->config.node_id) {
         return UCN_OK;
     }
-    {
-        const ucn_candidate_route_t *candidate =
-            find_candidate_route(node, frame->source, candidate_id);
-
-        if (candidate == NULL || candidate->wire_profile != frame->wire_profile) {
-            return UCN_ERR_NOT_FOUND;
-        }
+    candidate = find_candidate_route(node, node->config.node_id, frame->source,
+                                     candidate_id);
+    if (candidate == NULL || candidate->wire_profile != frame->wire_profile) {
+        return UCN_ERR_NOT_FOUND;
     }
-    egress_link = find_candidate_link(node, frame->source, candidate_id);
+    egress_link = find_candidate_link(node, node->config.node_id,
+                                      frame->source, candidate_id);
     if (egress_link == NULL) {
         return UCN_ERR_NOT_FOUND;
     }
+    /* The target owns the reverse Candidate used by the Probe ACK.  Freeze it
+     * before the external send so the subsequent Activate cannot consume a
+     * different reverse path.
+     * 目标节点拥有 Probe ACK 使用的反向 Candidate；在外部发送前冻结，避免
+     * 后续 Activate 消费不同的反向路径。 */
+    candidate->path_snapshot_frozen = true;
     return send_control_on_link_profile(
         node, egress_link, frame->source, UCN_MSG_PATH_PROBE_ACK,
         frame->payload, frame->payload_length, frame->wire_profile);
@@ -6002,7 +6287,8 @@ static ucn_result_t handle_path_probe_ack(ucn_node_t *node,
     if (frame->destination != node->config.node_id) {
         return UCN_OK;
     }
-    candidate = find_candidate_route(node, frame->source, candidate_id);
+    candidate = find_candidate_route(node, node->config.node_id,
+                                     frame->source, candidate_id);
     if (candidate == NULL || !candidate->originated_here ||
         candidate->wire_profile != frame->wire_profile) {
         return UCN_ERR_NOT_FOUND;
@@ -6043,6 +6329,12 @@ static ucn_result_t handle_path_activate(ucn_node_t *node,
     uint32_t candidate_id;
     uint16_t route_epoch;
     ucn_link_t *egress_link;
+    candidate_activation_plan_t forward_plan;
+    candidate_activation_plan_t reverse_plan;
+    ucn_route_entry_t forward_before;
+    ucn_route_entry_t reverse_before;
+    ucn_candidate_route_t forward_candidate_before;
+    ucn_candidate_route_t reverse_candidate_before;
     ucn_result_t result;
 
     if (frame->payload_length != UCN_PATH_ACTIVATE_PAYLOAD_BYTES) {
@@ -6054,29 +6346,62 @@ static ucn_result_t handle_path_activate(ucn_node_t *node,
         return UCN_ERR_MALFORMED;
     }
     if (frame->destination == node->config.node_id) {
-        result = activate_candidate_route(node, frame->source, candidate_id,
-                                          route_epoch, frame->wire_profile);
+        result = prepare_candidate_activation(
+            node, node->config.node_id, frame->source, candidate_id,
+            route_epoch, frame->wire_profile, NULL, &reverse_plan);
         if (result != UCN_OK) {
+            if (result == UCN_ERR_NO_SPACE) {
+                node->stats.route_instance_table_full++;
+            }
             return result;
         }
-        egress_link = find_link(node, frame->source);
-        if (egress_link == NULL) {
-            return UCN_ERR_NOT_FOUND;
-        }
-        return send_control_on_link_profile(
+        egress_link = reverse_plan.resolved_egress;
+        reverse_before = *reverse_plan.route;
+        reverse_candidate_before = *reverse_plan.candidate;
+        commit_candidate_activation(node, &reverse_plan, route_epoch);
+        result = send_control_on_link_profile(
             node, egress_link, frame->source, UCN_MSG_PATH_ACTIVATE_ACK,
             frame->payload, frame->payload_length, frame->wire_profile);
-    }
-
-    egress_link = find_candidate_link(node, frame->destination, candidate_id);
-    if (egress_link == NULL || frame->hop_limit <= 1U) {
-        return egress_link == NULL ? UCN_ERR_NOT_FOUND : UCN_ERR_TTL;
-    }
-    result = activate_candidate_route(node, frame->source, candidate_id,
-                                      route_epoch, frame->wire_profile);
-    if (result != UCN_OK) {
+        if (result != UCN_OK) {
+            *reverse_plan.route = reverse_before;
+            *reverse_plan.candidate = reverse_candidate_before;
+        }
         return result;
     }
+
+    if (frame->hop_limit <= 1U) {
+        return UCN_ERR_TTL;
+    }
+    result = prepare_candidate_activation(
+        node, frame->source, frame->destination, candidate_id, route_epoch,
+        frame->wire_profile, NULL, &forward_plan);
+    if (result != UCN_OK) {
+        if (result == UCN_ERR_NO_SPACE) {
+            node->stats.route_instance_table_full++;
+        }
+        return result;
+    }
+    result = prepare_candidate_activation(
+        node, frame->destination, frame->source, candidate_id, route_epoch,
+        frame->wire_profile, forward_plan.route, &reverse_plan);
+    if (result != UCN_OK) {
+        if (result == UCN_ERR_NO_SPACE) {
+            node->stats.route_instance_table_full++;
+        }
+        return result;
+    }
+    egress_link = forward_plan.resolved_egress;
+    forward_before = *forward_plan.route;
+    reverse_before = *reverse_plan.route;
+    forward_candidate_before = *forward_plan.candidate;
+    reverse_candidate_before = *reverse_plan.candidate;
+    /* Both directions become visible together before the external send.  A
+     * synchronous peer may return the ACK recursively, so installing only
+     * one side here would reopen the half-commit race.
+     * 外部发送前同时安装两个方向；同步 Peer 可能递归返回 ACK，因此这里不能
+     * 只提交单向状态。 */
+    commit_candidate_activation(node, &reverse_plan, route_epoch);
+    commit_candidate_activation(node, &forward_plan, route_epoch);
     {
         ucn_frame_t forwarded = *frame;
 
@@ -6084,10 +6409,13 @@ static ucn_result_t handle_path_activate(ucn_node_t *node,
         result = send_frame_on_link(node, egress_link, &forwarded);
     }
     if (result != UCN_OK) {
+        *forward_plan.route = forward_before;
+        *reverse_plan.route = reverse_before;
+        *forward_plan.candidate = forward_candidate_before;
+        *reverse_plan.candidate = reverse_candidate_before;
         return result;
     }
-    return activate_candidate_route(node, frame->destination, candidate_id,
-                                    route_epoch, frame->wire_profile);
+    return UCN_OK;
 }
 
 /*
@@ -6099,6 +6427,9 @@ static ucn_result_t handle_path_activate_ack(ucn_node_t *node,
 {
     uint32_t candidate_id;
     uint16_t route_epoch;
+    ucn_candidate_route_t *candidate;
+    candidate_activation_plan_t plan;
+    bool first_ack;
     ucn_result_t result;
 
     if (frame->payload_length != UCN_PATH_ACTIVATE_PAYLOAD_BYTES) {
@@ -6110,10 +6441,51 @@ static ucn_result_t handle_path_activate_ack(ucn_node_t *node,
         frame->destination != node->config.node_id) {
         return UCN_ERR_MALFORMED;
     }
-    result = activate_candidate_route(node, frame->source, candidate_id,
-                                      route_epoch, frame->wire_profile);
+    candidate = find_candidate_route(node, node->config.node_id,
+                                     frame->source, candidate_id);
+    if (candidate == NULL || !candidate->originated_here ||
+        candidate->wire_profile != frame->wire_profile ||
+        candidate->probes_sent < UCN_PATH_PROBE_REQUIRED_ACKS ||
+        candidate->probes_acked < UCN_PATH_PROBE_REQUIRED_ACKS ||
+        !candidate->activation_sent || candidate->route_epoch == 0U ||
+        candidate->route_epoch != route_epoch) {
+        return UCN_ERR_STATE;
+    }
+    first_ack = !candidate->activation_acknowledged;
+    if (first_ack &&
+        (candidate->activation_attempts == 0U ||
+         candidate->activation_ack_deadline_ms == 0U ||
+         ucn_deadline_expired(node->now_ms,
+                              candidate->activation_ack_deadline_ms))) {
+        return UCN_ERR_STATE;
+    }
+    if (!first_ack) {
+        result = prepare_candidate_activation(
+            node, node->config.node_id, frame->source, candidate_id,
+            route_epoch, frame->wire_profile, NULL, &plan);
+        return result == UCN_OK && plan.already_active ?
+            UCN_OK : UCN_ERR_STATE;
+    }
+    result = prepare_candidate_activation(
+        node, node->config.node_id, frame->source, candidate_id, route_epoch,
+        frame->wire_profile, NULL, &plan);
+    if (result == UCN_ERR_NO_SPACE) {
+        node->stats.route_instance_table_full++;
+    }
     if (result == UCN_OK) {
-        node->stats.route_switches++;
+        /* An ACK already consumed by this Candidate is idempotent only while
+         * the exact activated Route still exists.  It cannot resurrect an
+         * expired/revoked Route later.
+         * 已消费的 ACK 只有在精确激活 Route 仍存在时才可幂等成功，不能在
+         * Route 过期或撤销后借旧 ACK 重新安装。 */
+        commit_candidate_activation(node, &plan, route_epoch);
+        candidate->activation_acknowledged = true;
+        candidate->activation_ack_deadline_ms = 0U;
+        candidate->next_activation_retry_at_ms = 0U;
+        node->stats.path_activate_acks_received++;
+        if (!plan.already_active) {
+            node->stats.route_switches++;
+        }
     }
     return result;
 }
@@ -6279,12 +6651,15 @@ static ucn_result_t send_path_route_error(ucn_node_t *node,
  * EN: Clears or releases `invalidate_route_to` from bounded Lite/Full Node state.
  * 中文：从固定容量的 Lite/Full Node 状态中清除或释放 `invalidate_route_to`。
  */
-static void invalidate_route_to(ucn_node_t *node, ucn_node_id_t destination)
+static void invalidate_route_to(ucn_node_t *node,
+                                ucn_node_id_t route_origin,
+                                ucn_node_id_t destination)
 {
     size_t index;
 
     for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
         if (node->routes[index].valid && !node->routes[index].is_static &&
+            node->routes[index].route_origin == route_origin &&
             node->routes[index].destination == destination) {
             node->routes[index].valid = false;
         }
@@ -6292,12 +6667,15 @@ static void invalidate_route_to(ucn_node_t *node, ucn_node_id_t destination)
 #if UCN_FEATURE_CANDIDATE_ROUTING
     for (index = 0U; index < UCN_MAX_CANDIDATE_ROUTES; ++index) {
         if (node->candidates[index].valid &&
+            node->candidates[index].route_origin == route_origin &&
             node->candidates[index].destination == destination) {
             node->candidates[index].valid = false;
         }
     }
 #endif
-    clear_discovery(node, destination);
+    if (route_origin == node->config.node_id) {
+        clear_discovery(node, destination);
+    }
 }
 
 /*
@@ -6424,14 +6802,14 @@ static ucn_result_t handle_route_request(ucn_node_t *node,
 
 #if UCN_FEATURE_CANDIDATE_ROUTING
     result = is_candidate ?
-             learn_candidate_route(node, origin, request_id, ingress_link,
-                                   route_cost, hop_count, frame->wire_profile,
-                                   false) :
-             learn_route(node, origin, ingress_link, route_cost, hop_count,
+             learn_candidate_route(node, target, origin, request_id,
+                                   ingress_link, route_cost, hop_count,
+                                   frame->wire_profile, false) :
+             learn_route(node, target, origin, ingress_link, route_cost, hop_count,
                          route_epoch_from_request_id(frame->wire_profile,
                                                      request_id));
 #else
-    result = learn_route(node, origin, ingress_link, route_cost, hop_count,
+    result = learn_route(node, target, origin, ingress_link, route_cost, hop_count,
                          route_epoch_from_request_id(frame->wire_profile,
                                                      request_id));
 #endif
@@ -6444,7 +6822,8 @@ static ucn_result_t handle_route_request(ucn_node_t *node,
             ucn_wire_profile_get_descriptor(frame->wire_profile);
         uint8_t reply[UCN_ROUTE_REPLY_MAX_PAYLOAD_BYTES];
         size_t reply_length = route_reply_payload_size(frame->wire_profile);
-        ucn_route_entry_t *reverse_route = find_active_route(node, origin);
+        ucn_route_entry_t *reverse_route = find_active_route_for_origin(
+            node, target, origin);
 
         if (!is_candidate && (reverse_route == NULL ||
                               reverse_route->route_epoch == 0U)) {
@@ -6588,8 +6967,8 @@ static ucn_result_t handle_route_reply(ucn_node_t *node,
             *consumed = true;
             return UCN_OK;
         }
-        result = learn_candidate_route(node, target, request_id, ingress_link,
-                                       route_cost, hop_count,
+        result = learn_candidate_route(node, origin, target, request_id,
+                                       ingress_link, route_cost, hop_count,
                                        frame->wire_profile, true);
         if (result != UCN_OK) {
             return result;
@@ -6610,13 +6989,13 @@ static ucn_result_t handle_route_reply(ucn_node_t *node,
 
 #if UCN_FEATURE_CANDIDATE_ROUTING
     result = is_candidate ?
-             learn_candidate_route(node, target, request_id, ingress_link,
-                                   route_cost, hop_count, frame->wire_profile,
-                                   false) :
-             learn_route(node, target, ingress_link, route_cost, hop_count,
+             learn_candidate_route(node, origin, target, request_id,
+                                   ingress_link, route_cost, hop_count,
+                                   frame->wire_profile, false) :
+             learn_route(node, origin, target, ingress_link, route_cost, hop_count,
                          route_epoch);
 #else
-    result = learn_route(node, target, ingress_link, route_cost, hop_count,
+    result = learn_route(node, origin, target, ingress_link, route_cost, hop_count,
                          route_epoch);
 #endif
     if (result != UCN_OK) {
@@ -6687,7 +7066,7 @@ static ucn_result_t handle_route_error(ucn_node_t *node,
         return UCN_ERR_CONFIG;
 #endif
     } else {
-        invalidate_route_to(node, unreachable);
+        invalidate_route_to(node, frame->destination, unreachable);
     }
     if (frame->destination == node->config.node_id) {
         *consumed = true;
@@ -7825,6 +8204,49 @@ size_t ucn_node_copy_neighbor_summaries(
 }
 
 /*
+ * EN: Copies bounded Route-instance diagnostics into caller-owned storage.
+ * 中文：把有界路由实例诊断信息复制到调用方存储。
+ */
+size_t ucn_node_copy_route_summaries(const ucn_node_t *node,
+                                     ucn_route_summary_t *output,
+                                     size_t capacity)
+{
+    size_t index;
+    size_t count = 0U;
+
+    if (node == NULL || (output == NULL && capacity != 0U)) {
+        return 0U;
+    }
+    for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
+        const ucn_route_entry_t *route = &node->routes[index];
+
+        if (!route->valid || route_is_expired(node, route)) {
+            continue;
+        }
+        if (output == NULL) {
+            ++count;
+            continue;
+        }
+        if (count >= capacity) {
+            break;
+        }
+        output[count].is_static = route->is_static;
+        output[count].route_origin =
+            route->is_static ? 0U : route->route_origin;
+        output[count].destination = route->destination;
+        output[count].egress_link_id = route->egress_link == NULL ?
+                                           0U : route->egress_link->link_id;
+        output[count].hop_count = route->hop_count;
+        output[count].route_cost = route->route_cost;
+        output[count].route_epoch = route->route_epoch;
+        output[count].previous_valid = route->previous_valid;
+        output[count].previous_route_epoch = route->previous_route_epoch;
+        ++count;
+    }
+    return count;
+}
+
+/*
  * EN: Validates and installs `register_link` into bounded Lite/Full Node state.
  * 中文：验证 `register_link` 并将其安装到固定容量的 Lite/Full Node 状态中。
  */
@@ -7885,6 +8307,8 @@ ucn_result_t ucn_node_add_route(ucn_node_t *node,
                                 ucn_link_t *egress_link)
 {
     size_t index;
+    ucn_route_entry_t *slot = NULL;
+    ucn_route_entry_t *free_slot = NULL;
 
     if (node == NULL || destination == 0U || destination == UCN_NODE_BROADCAST ||
         egress_link == NULL || !link_is_registered(node, egress_link)) {
@@ -7892,35 +8316,42 @@ ucn_result_t ucn_node_add_route(ucn_node_t *node,
     }
 
     for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
-        if (node->routes[index].valid &&
-            node->routes[index].destination == destination) {
-            node->routes[index].is_static = true;
-            node->routes[index].egress_link = egress_link;
-            node->routes[index].expires_at_ms = 0U;
-            node->routes[index].route_cost = link_route_cost(egress_link);
-            node->routes[index].hop_count = 1U;
-            node->routes[index].verified_rtt_valid = false;
-            node->routes[index].verified_rtt_ms = 0U;
-            return UCN_OK;
+        ucn_route_entry_t *route = &node->routes[index];
+
+        if (route->valid && route->destination == destination &&
+            (route->is_static || slot == NULL)) {
+            slot = route;
+            if (route->is_static) {
+                break;
+            }
+        } else if (!route->valid && free_slot == NULL) {
+            free_slot = route;
         }
     }
-
+    if (slot == NULL) {
+        slot = free_slot;
+    }
+    if (slot == NULL) {
+        return UCN_ERR_NO_SPACE;
+    }
+    /* A static Route is an explicit wildcard override.  Remove every dynamic
+     * instance for the same Destination so lookup order cannot change the
+     * administrator's decision. */
     for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
-        if (!node->routes[index].valid) {
-            node->routes[index].valid = true;
-            node->routes[index].is_static = true;
-            node->routes[index].destination = destination;
-            node->routes[index].egress_link = egress_link;
-            node->routes[index].expires_at_ms = 0U;
-            node->routes[index].route_cost = link_route_cost(egress_link);
-            node->routes[index].hop_count = 1U;
-            node->routes[index].verified_rtt_valid = false;
-            node->routes[index].verified_rtt_ms = 0U;
-            return UCN_OK;
+        if (&node->routes[index] != slot && node->routes[index].valid &&
+            node->routes[index].destination == destination) {
+            (void)memset(&node->routes[index], 0,
+                         sizeof(node->routes[index]));
         }
     }
-
-    return UCN_ERR_NO_SPACE;
+    (void)memset(slot, 0, sizeof(*slot));
+    slot->valid = true;
+    slot->is_static = true;
+    slot->destination = destination;
+    slot->egress_link = egress_link;
+    slot->route_cost = link_route_cost(egress_link);
+    slot->hop_count = 1U;
+    return UCN_OK;
 }
 
 /*
@@ -8024,9 +8455,22 @@ ucn_result_t ucn_node_get_route_quality(const ucn_node_t *node,
     for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
         if (node->routes[index].valid &&
             node->routes[index].destination == destination &&
+            !node->routes[index].is_static &&
+            node->routes[index].route_origin == node->config.node_id &&
             !route_is_expired(node, &node->routes[index])) {
             route = &node->routes[index];
             break;
+        }
+    }
+    if (route == NULL) {
+        for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
+            if (node->routes[index].valid &&
+                node->routes[index].is_static &&
+                node->routes[index].destination == destination &&
+                !route_is_expired(node, &node->routes[index])) {
+                route = &node->routes[index];
+                break;
+            }
         }
     }
     if (route == NULL) {
@@ -10616,6 +11060,10 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
     if (frame.destination != node->config.node_id &&
         frame.destination != UCN_NODE_BROADCAST) {
         ucn_link_t *egress_link;
+#if UCN_FEATURE_CANDIDATE_ROUTING
+        ucn_candidate_route_t *proof_candidate = NULL;
+#endif
+        ucn_node_id_t forwarding_route_origin = frame.source;
 #if UCN_FEATURE_PATH
         const ucn_path_forward_entry_t *path = NULL;
 #endif
@@ -10625,13 +11073,30 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
             return UCN_ERR_TTL;
         }
 
+        if (frame.message_type == UCN_MSG_ROUTE_ERROR) {
+            const ucn_wire_profile_descriptor_t *descriptor =
+                ucn_wire_profile_get_descriptor(frame.wire_profile);
+
+            if (descriptor == NULL ||
+                frame.payload_length < descriptor->address_bytes) {
+                return UCN_ERR_MALFORMED;
+            }
+            /* A RERR is emitted by the relay that observed the failure, so its
+             * outer Source is not the owner of the reverse Route Instance.
+             * The unreachable traffic target owns the target->origin reverse
+             * domain learned during RREQ and is carried in payload word zero. */
+            forwarding_route_origin = read_uint_be(
+                frame.payload, descriptor->address_bytes);
+        }
+
 #if UCN_FEATURE_CANDIDATE_ROUTING
         if (frame.message_type == UCN_MSG_ROUTE_REPLY &&
             frame.payload_length == route_reply_payload_size(
                                         frame.wire_profile) &&
             (frame.payload[route_reply_flags_offset(&frame)] &
              UCN_ROUTE_REQ_FLAG_CANDIDATE) != 0U) {
-            egress_link = find_candidate_link(node, frame.destination,
+            egress_link = find_candidate_link(node, frame.source,
+                                              frame.destination,
                                               read_u32_be(frame.payload));
         } else if (frame.message_type == UCN_MSG_PATH_PROBE ||
                    frame.message_type == UCN_MSG_PATH_PROBE_ACK) {
@@ -10639,7 +11104,12 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
                 read_u32_be(frame.payload) == 0U) {
                 return UCN_ERR_MALFORMED;
             }
-            egress_link = find_candidate_link(node, frame.destination,
+            proof_candidate = find_candidate_route(
+                node, frame.source, frame.destination,
+                read_u32_be(frame.payload));
+            egress_link = proof_candidate == NULL ? NULL :
+                          find_candidate_link(node, frame.source,
+                                              frame.destination,
                                               read_u32_be(frame.payload));
 #if UCN_FEATURE_PATH
         } else if (!ucn_message_type_is_control(frame.message_type) &&
@@ -10665,11 +11135,13 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
 #endif
         if (!ucn_message_type_is_control(frame.message_type)) {
 #endif
-            egress_link = find_link_for_route_epoch(node, frame.destination,
+            egress_link = find_link_for_route_epoch(node, frame.source,
+                                                     frame.destination,
                                                      frame.has_route_extension,
                                                      frame.route_epoch);
         } else {
-            egress_link = find_link(node, frame.destination);
+            egress_link = find_link_for_origin(node, forwarding_route_origin,
+                                               frame.destination);
         }
         if (egress_link == NULL || egress_link == ingress_link) {
 #if UCN_FEATURE_PATH
@@ -10731,6 +11203,16 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
         }
 
         --frame.hop_limit;
+#if UCN_FEATURE_CANDIDATE_ROUTING
+        if (proof_candidate != NULL) {
+            /* PATH_PROBE and PATH_PROBE_ACK prove one direction each.  Freeze
+             * the exact per-hop Candidate before invoking the Link callback;
+             * the paired Activate may only consume these snapshots.
+             * PATH_PROBE 与 ACK 分别证明一个方向。在调用 Link 回调前冻结精确
+             * 的逐跳 Candidate；配对 Activate 只能消费这些快照。 */
+            proof_candidate->path_snapshot_frozen = true;
+        }
+#endif
 #if UCN_FEATURE_PATH
         result = frame.has_path_id ?
                  send_frame_on_path_egress(node, path, &frame, &egress_link) :
@@ -10741,7 +11223,8 @@ ucn_result_t ucn_node_receive(ucn_node_t *node,
                                               &egress_link);
 #endif
         if (result == UCN_OK) {
-            mark_route_used(node, frame.destination);
+            mark_route_used_for_origin(node, forwarding_route_origin,
+                                       frame.destination);
 #if UCN_FEATURE_PATH
             if (frame.has_path_id) {
                 node->stats.path_forwards++;

@@ -88,7 +88,11 @@ ucn_node_step(&node, now_ms);
 
 Node storage 与容量宏强相关。公共 storage helper/版本门禁用于阻止旧布局与新 API 混用；应用不要读取私有数组来“省一次 API”。需要状态时调用 `get_stats()`、Route quality、Neighbor summary、snapshot/diagnostic API。
 
-当前 Layout Version 为 8。`tx_enqueued_by_class[] → tx_scheduled_by_class[] → tx_queue_sent_by_class[]` 是 Node 四级 Queue 的同口径漏斗；`tx_sent_by_class[]` 则统计所有成功 Link 提交，包含即时发送与转发，不能直接和 Queue-only 计数相减。
+当前 Layout Version 为 9。该版本为动态 Route 与 Candidate 增加 `route_origin`，使 Route Epoch 由 `(route_origin,destination)` 所有。旧 Layout 不能与新库混用，必须重新编译调用方并重新初始化易失 Node storage。
+
+`ucn_node_copy_route_summaries()` 将有效 Route 复制到调用者数组；先传 `output=NULL, capacity=0` 可查询当前有效项数。动态项返回真实 `route_origin`，静态通配项返回 0。该快照必须由 Owner 上下文读取，不能作为永久拓扑数据库。
+
+`tx_enqueued_by_class[] → tx_scheduled_by_class[] → tx_queue_sent_by_class[]` 是 Node 四级 Queue 的同口径漏斗；`tx_sent_by_class[]` 则统计所有成功 Link 提交，包含即时发送与转发，不能直接和 Queue-only 计数相减。
 
 ## 错误与恢复
 

@@ -7,6 +7,7 @@
 /* Default group size; smaller topologies select 2/4 via --group. */
 #define CLUSTER_SIM_DEFAULT_GROUP_SIZE ((size_t)8U)
 #define CLUSTER_SIM_MAX_GROUP_SIZE ((size_t)8U)
+#define CLUSTER_SIM_SKIP_EXIT_CODE 77
 #define CLUSTER_SIM_STEP_MS UINT32_C(10)
 #define CLUSTER_SIM_CLEAN_DURATION_MS UINT32_C(15000)
 #define CLUSTER_SIM_IMPAIRED_DURATION_MS UINT32_C(60000)
@@ -849,6 +850,21 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "--nodes must be a multiple of --group (2/4/8)\n");
         return 2;
+    }
+    /* EN: A product profile may intentionally provision fewer peer/member
+     * slots than the generic eight-node simulation topology needs. Report a
+     * CTest skip instead of misclassifying that capacity contract as a
+     * protocol failure.
+     * 中文：产品配置可能有意缩小 Peer/Member 固定表；此时八节点拓扑不受
+     * 支持，应向 CTest 报告跳过，而不是把容量合同误报为协议失败。 */
+    if (group_size - 1U > UCN_CLUSTER_MAX_PEERS ||
+        group_size - 1U > UCN_CLUSTER_MAX_MEMBERS) {
+        fprintf(stderr,
+                "CLUSTER_SIM skipped=capacity group=%zu max_peers=%zu "
+                "max_members=%zu\n",
+                group_size, (size_t)UCN_CLUSTER_MAX_PEERS,
+                (size_t)UCN_CLUSTER_MAX_MEMBERS);
+        return CLUSTER_SIM_SKIP_EXIT_CODE;
     }
     if (expect_m03_isolation && scenario != CLUSTER_SIM_SCENARIO_IMPAIRED) {
         fprintf(stderr,

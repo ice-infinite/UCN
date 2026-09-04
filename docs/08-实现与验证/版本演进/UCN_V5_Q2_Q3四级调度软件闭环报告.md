@@ -166,15 +166,17 @@ Q3 只是 Fragment 的调度级别。当前 `ucn_transfer_step()` 通过立即�
 
 ### 7.3 Storage ABI
 
-Q2/Q3 初次实现时 Node Storage Layout 从 6 升到 7，因为 `ucn_node_t` 增加 Q2/Q3 数组与调度 cursor。本轮 QOS-A04 又增加 Queue-only 成功发送统计，因此当前 Layout 从 7 升到 8。库和应用必须使用同一配置头并全量重编，不能把旧 Layout 对象与新库混用。
+Q2/Q3 初次实现时 Node Storage Layout 从 6 升到 7，因为 `ucn_node_t` 增加 Q2/Q3 数组与调度 cursor。本轮 QOS-A04 又增加 Queue-only 成功发送统计，因此本报告阶段 Layout 从 7 升到 8。后续 V5-64 增加多 Origin Route/Candidate 所有权形成 Layout 9，Activate/ACK 有界事务形成 Layout 10，每跳 Candidate 路径证明冻结形成当前 Layout 11；库和应用始终必须使用同一配置头并全量重编，不能把旧 Layout 对象与新库混用。
 
-Host x64 Debug 当前绝对值为：
+Host x64 Debug 在本报告 QOS-A04 阶段的绝对值为：
 
 | Profile | `sizeof(ucn_node_t)` |
 | --- | ---: |
 | Nano | 3496 B |
 | Lite | 6888 B |
 | Full | 10936 B |
+
+V5-64 当前 Layout 11 绝对值为 Nano/Lite/Full `3496/6952/11152 B`；Layout 11 使用既有对齐空隙，因此绝对值未增加。本表保留用于解释 Q2/Q3 自身的历史增量。
 
 这些数值只用于版本趋势。真实 ESP32/STM32 RAM、对齐、Flash、Task Stack 与 CPU 必须由目标工具链和固件 Map/高水位实测。
 

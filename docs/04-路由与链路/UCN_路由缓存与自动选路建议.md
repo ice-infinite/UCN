@@ -109,7 +109,7 @@
 
 这里的“测试数据”必须是 Core 控制面的 `PATH_PROBE/PATH_PROBE_ACK`，而不是重复发送真实电机命令、参数写入或普通业务包。探测帧应包含 `candidate_id`、探测序号、时间戳/nonce 和目的地身份校验；目标只回 ACK，不交给业务回调，避免副作用与重复执行。
 
-候选路径使用 `candidate_id`，普通动态业务使用 `route_epoch`。v4 以 `ROUTE_EXTENSION=0x01` 选择 36 B 头：中继按 `(destination, route_epoch)` 选 Current 或 Previous 出口，Previous 到期即释放；RREP 也携带初始 Epoch，使首次动态路径不依赖“无标识”的业务帧。v3 帧会被显式拒绝，不能静默混用。
+候选路径使用 `candidate_id`，普通动态业务使用 `route_epoch`。当前 v5 以 `ROUTE_EXTENSION=0x01` 选择扩展头：中继按 `(traffic_origin, destination, route_epoch)` 选 Current 或 Previous 出口，Previous 到期即释放；RREP 也携带初始 Epoch，使首次动态路径不依赖“无标识”的业务帧。旧版本帧会按版本合同显式拒绝，不能静默混用。
 
 无环检查也必须按这条实际转发规则执行：从源端活动 Route 的 Epoch 出发，后续节点只能使用同 Epoch 的 Current 或未过期 Previous；直接邻居终止路径。不能把不同 Epoch 的缓存项简单拼成一条链后误判为转发环。
 

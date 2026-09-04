@@ -48,6 +48,12 @@ CONFIG_ASSERT(config_override_links, UCN_MAX_LINKS == 3U);
 CONFIG_ASSERT(config_override_q0, UCN_TX_Q0_DEPTH == 2U);
 CONFIG_ASSERT(config_override_neighbors, UCN_MAX_NEIGHBORS == 4U);
 CONFIG_ASSERT(config_override_bearers, UCN_MAX_BEARERS_PER_NEIGHBOR == 1U);
+CONFIG_ASSERT(config_override_activate_ack_timeout,
+              UCN_PATH_ACTIVATE_ACK_TIMEOUT_MS == 800U);
+CONFIG_ASSERT(config_override_activate_retry_interval,
+              UCN_PATH_ACTIVATE_RETRY_INTERVAL_MS == 200U);
+CONFIG_ASSERT(config_override_activate_max_retries,
+              UCN_PATH_ACTIVATE_MAX_RETRIES == 3U);
 CONFIG_ASSERT(config_override_cluster_peers, UCN_CLUSTER_MAX_PEERS == 4U);
 CONFIG_ASSERT(config_override_cluster_candidates,
               UCN_CLUSTER_MAX_CANDIDATES == 3U);
@@ -128,6 +134,12 @@ CONFIG_ASSERT(config_default_duplicate_bits, UCN_DUPLICATE_WINDOW_BITS == 64U);
 CONFIG_ASSERT(config_default_rreq_cache, UCN_RREQ_CACHE_SIZE == 16U);
 CONFIG_ASSERT(config_default_discoveries, UCN_MAX_ROUTE_DISCOVERIES == 4U);
 CONFIG_ASSERT(config_default_candidates, UCN_MAX_CANDIDATE_ROUTES == 8U);
+CONFIG_ASSERT(config_default_activate_ack_timeout,
+              UCN_PATH_ACTIVATE_ACK_TIMEOUT_MS == 1000U);
+CONFIG_ASSERT(config_default_activate_retry_interval,
+              UCN_PATH_ACTIVATE_RETRY_INTERVAL_MS == 250U);
+CONFIG_ASSERT(config_default_activate_max_retries,
+              UCN_PATH_ACTIVATE_MAX_RETRIES == 3U);
 CONFIG_ASSERT(config_default_route_lifetime,
               UCN_ROUTE_ENTRY_LIFETIME_MS == 30000U);
 CONFIG_ASSERT(config_default_control_tokens, UCN_CONTROL_TOKEN_BURST == 4U);

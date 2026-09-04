@@ -101,6 +101,7 @@ static void contract_install_route(ucn_node_t *node,
 
             (void)memset(route, 0, sizeof(*route));
             route->valid = true;
+            route->route_origin = node->config.node_id;
             route->destination = destination;
             route->egress_link = link;
             route->expires_at_ms =

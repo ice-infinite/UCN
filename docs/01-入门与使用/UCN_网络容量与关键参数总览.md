@@ -1,6 +1,6 @@
 # UCN 网络容量与关键参数总览
 
-> 版本口径：UCN v5 V5-33 软件工作树，分支 `codex/v5-adaptive-wire`；`f941ae9` 是本轮修复前审计基线，2026-08-11。
+> 版本口径：UCN v5 当前 `main` 工作树；V5-64 多 Origin Route Instance 软件自审状态，2026-09-04。
 > 目的：集中说明当前网络规模、直连能力、跳数、寻址范围、寻路效率、帧效率、资源占用和关键默认参数。
 > 边界：源码与 Host 模拟是当前事实；ESP32 两板结果只代表对应测试镜像，不能外推为多板、多跳或其他介质性能。
 
@@ -10,12 +10,12 @@
 
 1. **地址空间**：API 保持 32 bit；实际可表示范围由 W0/W1/W2/W3 决定，分别适合 8/16/24/32 bit 域。
 2. **单节点直接连接**：默认最多注册 4 个逻辑 Link；最多保存 8 个 Neighbor 状态，每个 Neighbor 最多 2 个 Bearer，但所有已注册 Link 仍受总数 4 限制。
-3. **单节点远端工作集**：默认同时缓存 8 个远端 Route，最多并发发现 4 个未知目的地。
+3. **单节点远端工作集**：默认同时缓存 8 个 Route Instance；动态项按 `(traffic_origin,destination)` 计数，最多并发发现 4 个未知目的地。
 4. **已验证规模**：Host 稀疏 Tree 的直连业务中，W0/mixed 在单域上限 254 Node、W1/W2/W3 在 Harness 上限 4096 Node 均为 100%；远端高并发工作集会出现固定表/建路工作集饱和。实机已有三板 UART/ESP-NOW 两跳历史证据，以及四块 ESP32-S3-N16R8 的 UART-only 单源三跳九档 9/9；它们仍不能外推为大规模、多源或任意 Bearer 性能。
 
 因此当前最准确的产品口径是：
 
-> UCN API 使用 32 位 Node ID，默认固定 Wire W3，也可显式配置固定域或自动选最小官方档位。当前默认每节点支持 4 个逻辑 Link、8 个 Neighbor 状态、每 Neighbor 2 个 Bearer、8 条远端 Route、4 个并发寻路和 Build 上限 16 跳；总网节点数由 Wire 域、拓扑、活跃目的地、共享介质与负载共同决定。
+> UCN API 使用 32 位 Node ID，默认固定 Wire W3，也可显式配置固定域或自动选最小官方档位。当前默认每节点支持 4 个逻辑 Link、8 个 Neighbor 状态、每 Neighbor 2 个 Bearer、8 个 Route Instance、4 个并发寻路和 Build 上限 16 跳；总网节点数由 Wire 域、拓扑、活跃 `(Origin,Destination)` 工作集、共享介质与负载共同决定。
 
 ## 2. 节点数量上限
 
@@ -234,7 +234,7 @@ Windows x64、GCC 14.2、Release、Service OFF的当前静态证据：
 | Lite | 6,024 B | 73,735 B |
 | Full | 10,080 B | 139,017 B |
 
-这是 V5-33 阶段的 Host x64 GCC 14.2 Release/Service OFF 历史结果；当前 `ucn_link_t=40 B`，QOS-A04 后 Storage Layout Version=8。表中对象/Archive 数字没有在本节冒充当前资源值；当前 Host x64 Debug Nano/Lite/Full Node 为 `3496/6888/10936 B`，Transfer 对象为 8,840 B。这些数据只证明固定对象与代码裁剪，不等于目标 MCU ELF/栈/功耗；历史基线见[V5-07 报告](../08-实现与验证/版本演进/UCN_V5_07_发布门禁与软件验证报告.md)。
+这是 V5-33 阶段的 Host x64 GCC 14.2 Release/Service OFF 历史结果；表中对象/Archive 数字没有在本节冒充当前资源值。QOS-A04 后曾为 Storage Layout 8；V5-64 的 Origin 所有权形成 Layout 9，Activate/ACK 有界事务形成 Layout 10，每一跳 Candidate 路径证明的显式冻结形成当前 Layout 11。Host x64 Debug Nano/Lite/Full Node 仍为 `3496/6952/11152 B`，Transfer 对象仍为 8,840 B；Layout 11 的布尔字段落入现有对齐空隙，大小未变不表示 ABI 可混用。这些数据只证明固定对象与代码裁剪，不等于目标 MCU ELF/栈/功耗；历史基线见[V5-07 报告](../08-实现与验证/版本演进/UCN_V5_07_发布门禁与软件验证报告.md)。
 
 特性：
 

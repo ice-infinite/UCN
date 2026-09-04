@@ -2,7 +2,7 @@
 
 > 核对日期：2026-08-11
 > 初次核对基线：`codex/v5-adaptive-wire@f941ae9`
-> 后续状态：V5-27～V5-33 已完成并纳入当前 `codex/v5-adaptive-wire` 分支；本文“当前代码权威事实”和资源表已同步到该实现，初次发现/文档计数仍保留为 `f941ae9` 阶段记录。增量见 [异构 Bearer、动态 MTU 与 Policy 修复报告](../08-实现与验证/版本演进/UCN_V5_27_异构Bearer与动态MTU修复报告.md)及 [PATH_INSTALL 兼容与 API 符号修复报告](../08-实现与验证/版本演进/UCN_V5_31_PATH_INSTALL兼容与API符号修复报告.md)。
+> 后续状态：本文主体保留 2026-08-11 的历史审计过程；2026-09-04 的当前增量是 V5-64 将动态 Route/Epoch/Candidate 按 `(traffic_origin,destination)` 分域，Node Storage Layout 升为 9。最新事实见 [V5-64 实现文档](../08-实现与验证/版本演进/UCN_V5_64_多Origin路由实例与Route-Epoch所有权.md)和 [V5-64 全量自审](UCN_V5_64_多Origin路由实例全量自审报告_2026-09-04.md)。
 > 核对原则：源码、公共头与正式测试是当前事实；历史实现报告保留当时证据，但必须明确指出后续替代项。
 
 ## 1. 结论
@@ -37,7 +37,7 @@
 | 自动发现 | Auto 模式默认 2→4→8→16 Ring，250 ms/轮、1000 ms 总预算，每轮新 Request ID/重新选档 | Discovery 状态与 `test_aodv_lite.c` |
 | Candidate | 保存实际 Wire Profile；Probe/ACK/Activate/Epoch 保持同一 Profile | `ucn_candidate_route_t`、Candidate handlers |
 | Q1 Pending | 深度默认 4、绝对 Deadline 默认 1000 ms；内部重试不续期，新应用 Latest 才刷新 | Pending Q1 helpers、`test_endpoint.c` |
-| Storage ABI | `UCN_NODE_STORAGE_LAYOUT_VERSION=8` | `ucn_node_storage.h`；Layout 7 加入 Q2/Q3 队列，Layout 8 加入 Queue-only 四级成功发送统计 |
+| Storage ABI | `UCN_NODE_STORAGE_LAYOUT_VERSION=11` | `ucn_node_storage.h`；Layout 8 加入 Queue-only 四级成功发送统计，Layout 9 增加多 Origin Route/Candidate 所有权，Layout 10 增加 Full Candidate Activate/ACK 有界事务状态，Layout 11 增加每跳 Candidate 路径证明冻结状态 |
 | 安全 | AAD/透明密文与 Provider 门禁存在；生产身份、AEAD、逐跳认证、Authorized Class 执行层未完成 | Security Provider API、S02/V5-21 |
 | Gateway | 只有 V5-06 设计，没有 `ucn_gateway_ext` 代码 | V5-06 设计评审 |
 

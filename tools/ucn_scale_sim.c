@@ -1397,6 +1397,7 @@ static void scale_network_free(scale_network_t *network)
 
 static bool scale_find_current_route_link(const scale_network_t *network,
                                           size_t node_index,
+                                          ucn_node_id_t route_origin,
                                           ucn_node_id_t destination,
                                           uint16_t epoch,
                                           ucn_link_t **output)
@@ -1408,6 +1409,7 @@ static bool scale_find_current_route_link(const scale_network_t *network,
         const ucn_route_entry_t *route = &node->routes[index];
 
         if (route->valid && route->destination == destination &&
+            (route->is_static || route->route_origin == route_origin) &&
             route->route_epoch == epoch) {
             *output = route->egress_link;
             return true;
@@ -1455,7 +1457,11 @@ static bool scale_routes_have_no_loop(scale_network_t *network)
                     break;
                 }
                 if (!scale_find_current_route_link(
-                        network, current, origin->destination,
+                        network, current,
+                        origin->is_static ?
+                            network->nodes[source].config.node_id :
+                            origin->route_origin,
+                        origin->destination,
                         origin->route_epoch, &egress) || egress == NULL ||
                     egress->peer_node_id == 0U ||
                     egress->peer_node_id > network->options.node_count) {

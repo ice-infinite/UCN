@@ -13,7 +13,7 @@ Cost API 接受 Link 指标并计算饱和总 Cost。动态质量变化更新缓
 
 Nano/Lite 中被裁剪的高级 API 必须明确返回 `UCN_ERR_CONFIG`，不能假成功。安装 Path 或策略前要验证目标、next hop、Bearer capability、MTU 和固定表容量。
 
-## Route：按目的地自动寻路
+## Route：按 Origin 与目的地自动寻路
 
 应用通常只需要：
 
@@ -26,9 +26,9 @@ if (rc == UCN_ERR_NOT_FOUND) {
 }
 ```
 
-发现完成后，Route cache 只保存该节点的下一跳/Link/Cost/expiry，不保存完整全网路径。`ucn_node_route_pending()` 可判断是否已有发现事务；`refresh_route()` 用于在缓存接近失效时后台刷新，而不是每个包重寻路。
+发现完成后，Route cache 只保存该节点的下一跳/Link/Cost/expiry，不保存完整全网路径。动态键为 `(route_origin,destination)`：本机新发流量使用本机 Node ID，转发流量使用业务帧 Source；静态 Route 以 Origin 0 显式通配。`ucn_node_route_pending()` 可判断本机是否已有发现事务；`refresh_route()` 用于在缓存接近失效时后台刷新，而不是每个包重寻路。
 
-`ucn_node_get_route_quality()` 返回 availability、hop、Cost 和可选 verified RTT；它是当前快照，不是远端送达保证。
+`ucn_node_get_route_quality()` 返回本机作为 Origin 时的 availability、hop、Cost 和可选 verified RTT；它是当前快照，不是远端送达保证。诊断多个转发域时使用 `ucn_node_copy_route_summaries()`，不要直接读取 `node.routes[]`。
 
 ## Route constraints
 
@@ -78,7 +78,7 @@ if (rc == UCN_OK && result.selectable && result.base_cost_known) {
 
 ## 失败与诊断
 
-- Route `NO_SPACE`：缓存/发现容量不足，保留现有项；
+- Route `NO_SPACE`：缓存/发现容量不足，保留现有项；`route_instance_table_full` 用于区分 Route Instance 表满；
 - Path `ACCESS`：控制帧未授权；
 - Path `CONFIG`：当前 Profile 不支持；
 - Policy 无候选：不得退回违反 Pinned/安全/MTU 的 Link；

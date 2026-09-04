@@ -1,7 +1,7 @@
 # UCN 整体架构设计：MCU 自组网优先
 
-> 状态：**UCN v5 的协议/软件闭环、V5-46 独立 Platform Port、V5-47 工程模块分层、V5-62 API V2 和 V5-63 扩展环 Epoch 修复已完成（2026-08-14）**；W0～W3、Profile-aware 控制面、32 bit Cost、Q1 Deadline、Candidate、业务路由约束、有界 Expanding Ring、Ingress 早拒绝和 Host 软件门禁已完成。v4 已独立冻结；四板 UART-only 单源三跳已实测，生产密码库、Authorized Class、ESP-NOW 四节点、多 Origin、其他 BSP/介质和产品资源仍待验证。
-> 日期：2026-08-14
+> 状态：**UCN v5 的协议/软件闭环、V5-46 独立 Platform Port、V5-47 工程模块分层、V5-62 API V2、V5-63 扩展环 Epoch 和 V5-64 多 Origin Route Instance 已完成 Host 软件自审（2026-09-04）**；W0～W3、Profile-aware 控制面、32 bit Cost、Q1 Deadline、Candidate、业务路由约束、有界 Expanding Ring、Ingress 早拒绝和 Host 软件门禁已完成。v4 已独立冻结；四板 UART-only 单源三跳已实测，V5-64 多源仍待外审与多板/ESP-NOW 验证；生产密码库、Authorized Class、其他 BSP/介质和产品资源也仍待验证。
+> 日期：2026-09-04
 > 目标：以 MCU 为主体完成安全自组网；Linux 仅作为兼容接入端；协议小而可裁剪；资源占用由目标硬件配置决定。
 
 ## 1. 架构结论
@@ -10,7 +10,7 @@ UCN 是一个可移植的 C 通信协议栈。它的最小运行形态不是 Lin
 
 Linux、ROS2、PX4/MAVLink、地面站与 AI 系统可以通过 `UCN-Host` 接入同一网络，但它们不拥有路由中心、入网中心或控制中心的地位，更不替代 Linux 自己已有的网络体系。
 
-当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 与 per-Link 接收上限、1 B RX Ceiling HELLO、Ingress Profile/真实长度 Peek、Profile-aware 控制载荷、32 bit Cost、Hop-Cost-RTT 门禁、Profile 绑定 AAD、透明密文中继、路由感知最小档、受限 AODV-Lite、Candidate Probe/Activate、LC-1 本地动态 Cost、Endpoint Q1 首包寻路、固定邻居/Path/Policy、公共多 Source Event Runtime、UART/RS-485/USB CDC Stream Source、CAN/CAN-FD Frame Source、经典 CAN 有界 Carrier，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、Authorized Class 执行层、真实 BSP/DMA/USB/CAN 控制器/RTOS、多源实机仍是后续任务，不能由软件测试替代。
+当前代码已实现 **v5 W0/W1/W2/W3 官方 Codec、17/21/26/30 B 基础头、Profile 派生 Route/Path 扩展、Nano/Lite/Full 统一四档 Decoder、Node 与 per-Link 接收上限、1 B RX Ceiling HELLO、Ingress Profile/真实长度 Peek、Profile-aware 控制载荷、32 bit Cost、Hop-Cost-RTT 门禁、Profile 绑定 AAD、透明密文中继、路由感知最小档、受限 AODV-Lite、按 `(traffic_origin,destination)` 分域的 Route Instance/Epoch、Candidate Probe/Activate、LC-1 本地动态 Cost、Endpoint Q1 首包寻路、固定邻居/Path/Policy、公共多 Source Event Runtime、UART/RS-485/USB CDC Stream Source、CAN/CAN-FD Frame Source、经典 CAN 有界 Carrier，以及按需诊断**。编译期公开默认值统一列在 `ucn_config.h`，原头文件默认继续兜底；运行期 Node ID、密钥和板级配置仍归产品。默认仍是固定 W3，收窄 TX 时推荐 RX 保持 W3；HELLO 分别表达 TX 线上档和最大 RX 档，自动档必须由产品明确开启。真实 `JOIN_*`、经审计 AEAD/身份库、Authorized Class 执行层、真实 BSP/DMA/USB/CAN 控制器/RTOS、多源实机仍是后续任务，不能由软件测试替代。
 
 V5-47 进一步将仓库内部实现明确归入 `src/core`、`src/node`、`src/transport`、`src/routing`、`src/service`、`src/ports`；公开 `include/ucn/...` 路径与 Wire 行为不变。目录依赖和未来 Adapter/RTOS 扩展规则见 [工程架构索引](项目结构/README.md)。
 
@@ -86,7 +86,7 @@ flowchart TB
 | Packet | v5 W0～W3 基础头 17/21/26/30 B；Nano/Lite/Full 都解析四档。固定域和最大接收档可配置，推荐最低够用 TX/W3 RX；自动模式按字段、路由 Hop、Path 共同 Profile/MTU、对端上限及 Tag 选择最小可用档。Ingress 先用 3 B Prefix 按 per-Link RX Ceiling 早拒绝，再执行完整长度/CRC/Network/Hop/Flag/字段校验。可选 `ucn_transfer` 已提供 T32～T8K 有界逻辑消息。 | Transfer 的真实 Bearer 性能、完整 Path MTU 主动协商和生产安全实测。 |
 | Identity & Join | 最小 `HELLO`、Candidate/Admitted/Suspect/Removed/Rejected/Expired 邻居表、`Manual`/`Open`/`Provider` 准入。 | `JOIN_REQ`/挑战/接受状态机、出厂身份格式。 |
 | Session & Replay | 可注入 Provider 的会话 ID、发送序号持久化、TX/RX 授权、固定 `seal/open`、30 B 不可变 AAD（Path 帧含 Path ID）、明文/受保护策略和入站去重缓存。 | 生产 AEAD、密钥轮换、完整重放窗口与产品 ACL 表。 |
-| Route / Forwarding | 固定 Active/Candidate 表、2→4→8→16 有界 AODV-Lite、RREQ/RREP/RERR、`PATH_PROBE/ACK` 的端到端 RTT EWMA、携带 Candidate ID + Epoch 的 `PATH_ACTIVATE/ACK`、TTL、断链清表、32 bit Route Cost；Node/Policy 可按 Hop/Cost/已验证 RTT 门禁业务路线，按 `(destination, route_epoch)` 区分 Current/Previous，默认 1 s grace。 | 自动业务重发、全网拓扑。 |
+| Route / Forwarding | 固定 Active/Candidate 表、2→4→8→16 有界 AODV-Lite、RREQ/RREP/RERR、`PATH_PROBE/ACK` 的端到端 RTT EWMA、携带 Candidate ID + Epoch 的 `PATH_ACTIVATE/ACK`、TTL、断链清表、32 bit Route Cost；Node/Policy 可按 Hop/Cost/已验证 RTT 门禁业务路线，按 `(traffic_origin, destination, route_epoch)` 区分 Current/Previous，默认 1 s grace；静态 Route 是不参与动态 Epoch 校验的 Destination 通配回退。 | 自动业务重发、全网拓扑。 |
 | Core QoS | Q0 Critical FIFO、Q1 Realtime Latest、Q2 Normal FIFO、Q3 Bulk FIFO；四级使用独立固定队列和有界 `6:3:2:1` 调度。Endpoint Q1 首包固定 4 槽/1 s 等待并合并同 `(destination, Endpoint)`。Extended Transfer 以独立固定槽提供默认 Fragment 窗口 1、显式窗口 2～8、默认 Peer 消息并发 1、静态显式 Peer 并发、累计 ACK 和有界 Go-Back-N，不改变 Core 队列或 v5 Wire。 | 文件级续传、动态并发能力协商和高吞吐流。 |
 | Node 内任务通信 | Core 外已有固定 Router、本机 Inbox、Remote TX、Bridge、FreeRTOS 静态事件通知；高风险远端 Q0 可在入队前强制产品 Validator，并使用固定 Replay 表。 | 产品执行器、真实 Task 时延/失联安全与板级验收；详见[节点内任务通信建议](../05-传输与服务/UCN_节点内任务通信建议.md)。 |
 | Health | 8 B 一跳 `HEARTBEAT` 请求/ACK、业务帧刷新存活、`ADMITTED → SUSPECT → REMOVED`、路由/Link 槽回收。 | `LINK_STATE` 线协议消息、对应用的统一失联事件、介质专用 Profile 实机标定。 |

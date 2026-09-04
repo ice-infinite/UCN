@@ -2,15 +2,15 @@
 
 > 文档级别：`NORMATIVE`
 > 实现状态：`CURRENT`
-> 最近核对：`a093862`，2026-08-25
+> 最近核对：当前工作区，2026-09-04
 
 | 对象 | 回答的问题 | 生命周期 |
 | --- | --- | --- |
 | Link | 通过哪个本地接口发送？ | 产品注册；有 open/up/down/MTU/metrics |
 | Bearer | 同一邻居经哪条物理通道直连？ | HELLO/Heartbeat 独立维护 |
 | Neighbor | 哪个 Node 与本节点一跳可达？ | 多 Bearer 合并为一个逻辑身份 |
-| Route | 去目标 Node 的下一跳/Link 是什么？ | 自动发现或直连生成，有时效 |
-| Candidate | 同一目标还有哪些可替换路线？ | Full 有界缓存，按质量更新 |
+| Route | 某个 Traffic Origin 去目标 Node 的下一跳/Link 是什么？ | 自动发现或静态配置生成，有时效 |
+| Candidate | 某个 Origin→目标还有哪些可替换路线？ | Full 有界缓存，按质量更新 |
 | Path | 一个显式端到端转发身份和每跳表项 | 受授权安装/撤销，独立于 Route Cache |
 | Policy | 某目标+Endpoint+Traffic Class 应如何选 Path？ | Full 固定表配置 |
 
@@ -22,7 +22,7 @@
 
 ## Route 与完整路径
 
-普通 Route 只需要保存“目标→下一跳/Link”，中间节点逐跳做相同判断，因此不要求每个节点知道完整 A→B→C→D 列表。
+普通动态 Route 保存“Traffic Origin + 目标→下一跳/Link”。中间节点逐跳做相同判断，因此不要求每个节点知道完整 A→B→C→D 列表。之所以必须包含 Origin，是因为 Route Epoch/Request ID 由各 Origin 独立生成；A→C 和 B→C 即使共享中继，也属于两个不能互相比较 Epoch 的 Route Instance。人工安装的静态 Route 以 `route_origin=0` 表示显式通配，继续对所有 Source 生效。
 
 Full 的 Path Trace 是按需诊断，显式 Path 是受控转发机制。它们不是每次普通数据发送前都执行一次全路径查询。
 
@@ -80,7 +80,7 @@ Route 是自动网络可达性的缓存，适合大多数普通发送；Path 是
 
 - Route 可以因 AODV 发现和质量变化自动替换；
 - Pinned Path 需要按产品意图保持固定，直到硬失败或显式撤销；
-- Route key 主要围绕 Destination；Policy key 还包含 Endpoint 和 Traffic Class；
+- 动态 Route key 是 `(route_origin,destination)`；静态 Route 是 Destination 通配；Policy key 还包含 Endpoint 和 Traffic Class；
 - Path ID 可进入安全 AAD，而普通 Route 的本地下一个 Link 不应变成端到端业务身份。
 
 ## 常见误解
@@ -88,6 +88,7 @@ Route 是自动网络可达性的缓存，适合大多数普通发送；Path 是
 - **Link 等于 UART/CAN 类型**：错误。Link 是一个实例；UART1 和 UART2 是两条 Link。
 - **Neighbor 等于当前首选 Link**：错误。Neighbor 是逻辑 Node，可同时拥有多 Bearer。
 - **Route 保存完整路径**：错误。普通 Route 主要保存本地下一跳；完整路径只在按需 Trace 中返回。
+- **同一 Destination 只能有一条动态 Route**：错误。共享中继必须分别保留 A→C、B→C 等 Source-owned Route Instance，不能跨 Origin 比较或覆盖 Route Epoch。
 - **Path 是更优 Route**：错误。Path 是显式转发身份，可因业务约束选择一个并非最低 Cost 的介质。
 - **多 Link 自动等于并行协议线程**：错误。物理可并行，Core 状态仍由唯一 Owner 推进。
 

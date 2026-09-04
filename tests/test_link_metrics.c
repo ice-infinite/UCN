@@ -381,10 +381,12 @@ int test_link_metrics(void)
     TEST_ASSERT(!ucn_node_route_pending(&a, UINT32_C(3)));
     for (route_index = 0U; route_index < UCN_MAX_ROUTES; ++route_index) {
         if (a.routes[route_index].valid &&
+            a.routes[route_index].route_origin == UINT32_C(1) &&
             a.routes[route_index].destination == UINT32_C(3)) {
             a_to_c = &a.routes[route_index];
         }
         if (d.routes[route_index].valid &&
+            d.routes[route_index].route_origin == UINT32_C(1) &&
             d.routes[route_index].destination == UINT32_C(3)) {
             d_to_c = &d.routes[route_index];
         }

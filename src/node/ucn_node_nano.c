@@ -692,6 +692,45 @@ size_t ucn_node_copy_neighbor_summaries(
 }
 
 /*
+ * EN: Copies Nano's static Route diagnostics into caller-owned storage.
+ * 中文：把 Nano 的静态路由诊断信息复制到调用方存储。
+ */
+size_t ucn_node_copy_route_summaries(const ucn_node_t *node,
+                                     ucn_route_summary_t *output,
+                                     size_t capacity)
+{
+    size_t index;
+    size_t count = 0U;
+
+    if (node == NULL || (output == NULL && capacity != 0U)) {
+        return 0U;
+    }
+    for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
+        const ucn_route_entry_t *route = &node->routes[index];
+
+        if (!route->valid) {
+            continue;
+        }
+        if (output == NULL) {
+            ++count;
+            continue;
+        }
+        if (count >= capacity) {
+            break;
+        }
+        (void)memset(&output[count], 0, sizeof(output[count]));
+        output[count].is_static = true;
+        output[count].destination = route->destination;
+        output[count].egress_link_id = route->egress_link == NULL ?
+                                           0U : route->egress_link->link_id;
+        output[count].hop_count = 1U;
+        output[count].route_cost = UCN_ROUTE_COST_UNKNOWN;
+        ++count;
+    }
+    return count;
+}
+
+/*
  * EN: Validates and installs `register_link` into bounded Nano Node state.
  * 中文：验证 `register_link` 并将其安装到固定容量的 Nano Node 状态中。
  */

@@ -15,7 +15,7 @@ Neighbor 表只表示直连节点及 Bearer；Route 表记录到目标的 next h
 
 ```text
 Neighbor:  本节点 --直连Link/Bearer--> Peer
-Route:     Destination -> NextHop + EgressLink + Cost + Expiry
+Route:     TrafficOrigin + Destination -> NextHop + EgressLink + Cost + Expiry
 Path:      Owner/Session/PathID/Destination -> NextHop + Lease
 ```
 
@@ -36,17 +36,17 @@ Neighbor回答“一跳能否直接通信”；Route回答“下一站给谁”�
 
 ## Route排查
 
-发送返回`NOT_FOUND`时查看是否已有pending discovery、RREQ是否被rate limit、邻居是否admitted、缓存/发现槽是否满。沿路径逐节点看：
+发送返回`NOT_FOUND`时查看是否已有pending discovery、RREQ是否被rate limit、邻居是否admitted、缓存/发现槽是否满。诊断必须同时打印 Route Origin；只打印 Destination 会把共享中继上的不同实例误认为同一条。沿路径逐节点看：
 
 ```text
-A route(C) = next B
-B route(C) = next C
+A route(origin=A,dst=C) = next B
+B route(origin=A,dst=C) = next C
 C is destination
 ```
 
 B不需要知道“A最终想要C的哪种数据”，只看Destination/Endpoint并转发。A同时要C的IMU/温度时Route相同，Endpoint不同。
 
-断链后检查依赖该Link/next hop的Route是否失效、RERR是否沿前驱返回、源节点是否重新发现。缓存30s只是未刷新上限，不应阻止显式Link Down立即撤销。
+断链后检查依赖该Link/next hop的Route是否失效、RERR是否沿前驱返回、源节点是否重新发现。多 Origin 情况还要确认 RERR 只清理对应 `(origin,destination)`，`route_instance_table_full` 是否增长，以及另一 Origin 的业务是否连续。缓存30s只是未刷新上限，不应阻止显式Link Down立即撤销。
 
 ## Path Trace
 
@@ -66,7 +66,7 @@ Path/Node/Policy诊断Endpoint必须配置ACL和E2E策略；中继只转发。�
 
 ```text
 neighbor 0x22 ADMITTED via link=1 cost=12 age=80ms
-route    0x44 next=0x22 link=1 hops=2 cost=28 expires=+9200ms
+route    origin=0x11 dst=0x44 next=0x22 link=1 epoch=7 hops=2 cost=28 expires=+9200ms
 path     owner=0x11/session=7 id=3 dst=0x44 next=0x33 lease=+5000ms
 trace    0x11 -> 0x22 -> 0x33 -> 0x44 (4/limit8)
 ```

@@ -3,7 +3,7 @@
 > 文档级别：`NORMATIVE`
 > 实现状态：Lite/Full `CURRENT`；Nano 不含动态 Mesh
 > 事实源：Node route control、AODV/route tests
-> 最近核对：`a093862`，2026-08-25
+> 最近核对：当前工作区，2026-09-04
 
 ## 发现流程
 
@@ -19,7 +19,21 @@ A 安装到 C 的下一跳 Route
 后续数据直接查缓存发送，不每帧重新寻路
 ```
 
-RREQ 使用 transaction/origin/sequence 与独立 Best-Cost 状态抑制重复，同时允许同一事务中成本更低的路径继续传播。
+RREQ 使用 transaction/origin/sequence 与独立 Best-Cost 状态抑制重复，同时允许同一事务中成本更低的路径继续传播。动态 Route 与 Candidate 不只按 Destination 建键，而是按 `(traffic_origin,destination)` 分域；不同 Origin 的 Request ID/Route Epoch 永不直接比较。
+
+## 多 Origin Route Instance
+
+设 A、B 同时经中继 R 访问目标 C。R 必须同时持有 `(A,C)` 与 `(B,C)` 两个正向 Route Instance。A 的新发现、刷新、旧 Epoch Grace 或 RERR 只能改变 `(A,C)`，不能覆盖或撤销 `(B,C)`。
+
+RREQ 与 RREP 会建立方向相反但所有权明确的实例：
+
+```text
+A --RREQ--> R --RREQ--> C
+RREQ沿途反向实例：route_origin=C, destination=A
+RREP沿途正向实例：route_origin=A, destination=C
+```
+
+因此 C 返回的 RREP 可以使用 `(C,A)` 回到 A，A 发出的业务可以使用 `(A,C)` 前往 C。Route Epoch 只在同一个二元键内匹配 Current/Previous；相同数值出现在另一个 Origin 域既不更新也不证明新鲜。
 
 ## 下一跳为什么正确
 
@@ -74,7 +88,7 @@ A --RREQ--> B --RREQ--> C
 A <--RREP-- B <--RREP-- C
 ```
 
-C 的 RREP 到达 B 时，B 知道“去 C 的下一跳是收到 RREP 的那条 Bearer”；B 再把 RREP 发给 A。A 最终只需保存去 C 应交给 B。之后 A 的普通数据交给 B，B 查自己的 Route 再交给 C。
+C 的 RREP 到达 B 时，B 知道“对于源 A 的流量，去 C 的下一跳是收到 RREP 的那条 Bearer”；B 再把 RREP 发给 A。A 最终只需保存去 C 应交给 B。之后 A 的普通数据交给 B，B 按 `(A,C)` 查 Route 再交给 C。
 
 这个过程回答了“B 怎么知道给 C 而不是 D”：不是从 Payload 猜，而是查目标 C 对应的 Route/下一跳。
 
@@ -84,14 +98,18 @@ C 的 RREP 到达 B 时，B 知道“去 C 的下一跳是收到 RREP 的那条 
 
 当两个候选数值完全相同，必须有稳定 tie-break，避免不同 step 中随机来回切换。具体内部字段以源码为准，应用不应依赖表内排列顺序。
 
+Candidate 路径的 Activate/ACK 是独立的有界事务：发起端只有在完成 Probe 后才能发送，
+ACK 必须精确回显已发送的 Candidate ID 与 Route Epoch。ACK 丢失时保持该事务身份并使用
+新的外层 Sequence 重发；超时或重试耗尽只放弃 Candidate，不替换仍有效的旧 Route。
+
 ## RERR 的依赖方向
 
 RERR 不是全网广播“某节点坏了”。中继只应通知实际依赖该失效下一跳/Path 的上游：
 
 1. Driver/Heartbeat 判定 B→C 失效；
 2. B 撤销以 C 为下一跳的相关 Route/Path；
-3. B 向使用 B 作为该目标下一跳的上游发送 RERR；
-4. A 收到后撤销旧 Route；
+3. B 向使用 B 作为该目标下一跳的上游发送 RERR；RERR 外层 Source 是发现故障的 B，但反向选路域由 Payload 中的不可达目标 C 决定；
+4. A 收到后只撤销 `(A,C)`，其他 Origin 到 C 的独立实例不受影响；
 5. 后续业务按 Policy 选择备 Path、Candidate 或新 Discovery。
 
 能力/MTU 失配同样必须走确定性失效，而不能保留一个“有路但永远发不出去”的表项。
@@ -122,3 +140,6 @@ RERR 不是全网广播“某节点坏了”。中继只应通知实际依赖该
 - [ ] Link/MTU/capability 失效产生撤销和依赖方向 RERR；
 - [ ] Route 有效时发送不重复 RREQ；
 - [ ] Q0 缺路不会自动变成无界等待或迟到命令。
+- [ ] 两个 Origin 并发访问同一目标时具有独立 Route/Candidate/Epoch；一方 RERR、刷新或 Grace 不改变另一方。
+- [ ] Route Instance 表满返回 `NO_SPACE` 并保留全部既有有效实例，不按 Destination 偷换其他 Origin 的槽。
+- [ ] Activate/ACK 绑定相同 Candidate ID/Epoch，ACK 丢失有界重试且耗尽不破坏旧 Route。

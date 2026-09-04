@@ -163,6 +163,7 @@ static ucn_route_entry_t *bearer_find_dynamic_route(ucn_node_t *node,
 
     for (index = 0U; index < UCN_MAX_ROUTES; ++index) {
         if (node->routes[index].valid && !node->routes[index].is_static &&
+            node->routes[index].route_origin == node->config.node_id &&
             node->routes[index].destination == destination) {
             return &node->routes[index];
         }
@@ -179,6 +180,7 @@ static ucn_candidate_route_t *bearer_find_candidate_route(
 
     for (index = 0U; index < UCN_MAX_CANDIDATE_ROUTES; ++index) {
         if (node->candidates[index].valid &&
+            node->candidates[index].route_origin == node->config.node_id &&
             node->candidates[index].destination == destination) {
             return &node->candidates[index];
         }
@@ -270,6 +272,25 @@ int test_neighbor_bearer(void)
     TEST_ASSERT(cab_backup.send_count == 1U);
     TEST_ASSERT(received.count == 1U && received.last_payload == first_payload);
 
+#if UCN_FEATURE_CANDIDATE_ROUTING
+    /* Probe evidence is tied to the current physical Bearer.  A hard failover
+     * must invalidate that Candidate instead of carrying the old proof onto
+     * the admitted backup Bearer.
+     * Probe 证明绑定当前物理 Bearer；硬切换必须使 Candidate 失效，不能把旧证明
+     * 迁移到已经准入的备用 Bearer。 */
+    a.candidates[0].valid = true;
+    a.candidates[0].originated_here = true;
+    a.candidates[0].wire_profile = UCN_WIRE_PROFILE_W0_LOCAL;
+    a.candidates[0].route_origin = UINT32_C(1);
+    a.candidates[0].destination = UINT32_C(2);
+    a.candidates[0].candidate_id = UINT32_C(0x10203040);
+    a.candidates[0].egress_link = &ab_primary;
+    a.candidates[0].expires_at_ms = 1000U;
+    a.candidates[0].route_cost = 10U;
+    a.candidates[0].hop_count = 1U;
+    a.candidates[0].probes_sent = 1U;
+#endif
+
     /* The primary Driver is down.  The Neighbor and its logical routes stay
      * valid; the following application frame uses the admitted backup. */
     cab_primary.is_up = false;
@@ -278,6 +299,9 @@ int test_neighbor_bearer(void)
     TEST_ASSERT(a.link_count == 2U);
     TEST_ASSERT(a.neighbors[0].bearers[a.neighbors[0].primary_bearer_index].link ==
                 &ab_backup);
+#if UCN_FEATURE_CANDIDATE_ROUTING
+    TEST_ASSERT(!a.candidates[0].valid);
+#endif
     TEST_ASSERT(ucn_node_send(&a, UINT32_C(2), UCN_MSG_DATA_Q1,
                               UCN_TRAFFIC_Q1_REALTIME, &second_payload, 1U) == UCN_OK);
     TEST_ASSERT(cab_primary.send_count == 2U);

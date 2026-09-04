@@ -580,12 +580,16 @@ add_test(NAME ucn_cluster_docs_contract_gate
         )
     endif()
 
-    # CLV2-M00.1: the golden REFERENCE lives in the source tree (read-only
-    # in tests) while the ACTUAL trace is written to each build directory, so
-    # parallel matrix routes never race on one shared file.
+    # CLV2-M00.1 / QA-A03: copy the committed reference into the build tree at
+    # configure time. The test then uses ASCII relative names from an explicit
+    # working directory, so neither GCC nor MSVC must carry a non-ASCII source
+    # or build path through a command-line string macro.
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/cluster_golden_trace.txt
+        ${CMAKE_CURRENT_BINARY_DIR}/cluster_golden_reference.txt
+        COPYONLY
+    )
     target_compile_definitions(ucn_tests PRIVATE
-        UCN_CLUSTER_GOLDEN_REFERENCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden"
-        UCN_CLUSTER_GOLDEN_ACTUAL_DIR="${CMAKE_CURRENT_BINARY_DIR}"
         # CLV2-01-04a: expose the test-only cluster_transition() hooks.
         UCN_CLUSTER_ENABLE_TEST_HOOKS=1
     )
@@ -615,6 +619,8 @@ add_test(NAME ucn_cluster_docs_contract_gate
     )
 
     add_test(NAME ucn_tests COMMAND ucn_tests)
+    set_tests_properties(ucn_tests PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
     # RT-01: frozen 16-byte Realtime Metadata v1 codec.  This focused target
     # links the optional archive directly; the production ucn_core/ucn_node
@@ -1032,7 +1038,8 @@ add_test(NAME ucn_cluster_docs_contract_gate
                 COMMAND ucn_cluster_sim --nodes ${UCN_CLUSTER_SIM_NODES}
                     --scenario clean)
             set_tests_properties(ucn_cluster_${UCN_CLUSTER_SIM_NODES}_convergence
-                PROPERTIES PASS_REGULAR_EXPRESSION
+                PROPERTIES SKIP_RETURN_CODE 77
+                    PASS_REGULAR_EXPRESSION
                     "CLUSTER_SIM nodes=${UCN_CLUSTER_SIM_NODES} scenario=clean.*converged_ms=[1-9]")
 
             add_test(NAME ucn_cluster_${UCN_CLUSTER_SIM_NODES}_impaired
@@ -1040,7 +1047,8 @@ add_test(NAME ucn_cluster_docs_contract_gate
                     --scenario impaired --seed 1592594996
                     --expect-m03-isolation)
             set_tests_properties(ucn_cluster_${UCN_CLUSTER_SIM_NODES}_impaired
-                PROPERTIES PASS_REGULAR_EXPRESSION
+                PROPERTIES SKIP_RETURN_CODE 77
+                    PASS_REGULAR_EXPRESSION
                     "CLUSTER_SIM nodes=${UCN_CLUSTER_SIM_NODES} scenario=impaired.*dropped=[1-9].*delayed=[1-9].*duplicated=[1-9].*asymmetric=[1-9].*m03_isolation=passed")
         endforeach()
 
@@ -1056,7 +1064,8 @@ add_test(NAME ucn_cluster_docs_contract_gate
                         --scenario ${UCN_CLUSTER_SIM_SCENARIO})
                 set_tests_properties(
                     ucn_cluster_${UCN_CLUSTER_SIM_NODES}_${UCN_CLUSTER_SIM_SCENARIO}
-                    PROPERTIES PASS_REGULAR_EXPRESSION
+                    PROPERTIES SKIP_RETURN_CODE 77
+                        PASS_REGULAR_EXPRESSION
                         "CLUSTER_SIM nodes=${UCN_CLUSTER_SIM_NODES} scenario=${UCN_CLUSTER_SIM_SCENARIO}.*converged_ms=[1-9]")
             endforeach()
 
@@ -1065,7 +1074,8 @@ add_test(NAME ucn_cluster_docs_contract_gate
                     --scenario head-failover --expect-v3-authority-fence)
             set_tests_properties(
                 ucn_cluster_${UCN_CLUSTER_SIM_NODES}_v3_authority_fence
-                PROPERTIES PASS_REGULAR_EXPRESSION
+                PROPERTIES SKIP_RETURN_CODE 77
+                    PASS_REGULAR_EXPRESSION
                     "CLUSTER_SIM nodes=${UCN_CLUSTER_SIM_NODES} scenario=head-failover.*v3_authority_fence=passed")
         endforeach()
 
@@ -1077,7 +1087,8 @@ add_test(NAME ucn_cluster_docs_contract_gate
                     --expect-m03-isolation)
             set_tests_properties(
                 ucn_cluster_64_fast_impaired_group_${UCN_CLUSTER_SIM_GROUP}
-                PROPERTIES PASS_REGULAR_EXPRESSION
+                PROPERTIES SKIP_RETURN_CODE 77
+                    PASS_REGULAR_EXPRESSION
                     "CLUSTER_SIM nodes=64 scenario=impaired profile=fast-fixed.*dropped=[1-9].*delayed=[1-9].*duplicated=[1-9].*asymmetric=[1-9].*m03_isolation=passed")
         endforeach()
     endif()

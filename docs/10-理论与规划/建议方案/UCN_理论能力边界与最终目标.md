@@ -52,7 +52,7 @@ UCN 最终应让网络具备以下性质：
 
 ## 3. 最终能力全景
 
-下表中的“当前状态”以 2026-08-14 工作树为准；软件测试不自动等于真实硬件与生产安全已通过。
+下表中的“当前状态”以 2026-09-04 工作树为准；软件测试不自动等于真实硬件与生产安全已通过。
 
 | 能力域 | 最终应具备的能力 | 当前状态 | 仍需完成的关键项 |
 | --- | --- | --- | --- |
@@ -60,10 +60,10 @@ UCN 最终应让网络具备以下性质：
 | 统一身份 | 物理 MAC/CAN ID 与逻辑 Node ID 解耦；默认生成并允许产品配置 | 32 bit Node ID、Network ID、手动/Provider 准入边界已存在 | 正式出厂身份、地址分配/冲突处理和域间 Alias |
 | 多介质统一 | UART/CAN/Wi-Fi 等都映射为 Link，Core 不感知 SDK | Link、Adapter、Event Runtime、Stream Source、CAN Source 已有公共接口 | 各平台真实 BSP、USB/Wi-Fi/BLE/LoRa 等参考 Adapter |
 | 多 Bearer | 同一邻居可通过多条物理链路连接，支持主备和动态选择 | Neighbor/Bearer、动态指标、LC-1 本地有效 Cost 已实现 | 各介质默认 Cost 的目标板标定和长期切换实测 |
-| 自动寻路 | 未知目的地按需扩圈，沿途只保存下一跳 | 2→4→8→16 AODV-Lite、Route Cache、RREQ/RREP/RERR 已实现 | 多 Origin Route Epoch 所有权、广播风暴实机 |
+| 自动寻路 | 未知目的地按需扩圈，沿途只保存下一跳 | 2→4→8→16 AODV-Lite、RREQ/RREP/RERR 与 `(traffic_origin,destination)` Route Instance 已实现并完成 Host 软件矩阵 | 多 Origin 多板/ESP-NOW、广播风暴和故障压力实机 |
 | 指定路径 | 业务可固定走指定路径，可严格固定或断路后回退 | Full 的 Path 安装/撤销、`PINNED_STRICT`/`PINNED_FAILOVER` 已实现 | 管理工具、跨 Bearer 安装和真实断链验收 |
 | 自动负载分担 | 在满足业务约束的候选中分散 Q1 Flow，而不是逐帧乱跳 | Full 的 `AUTO_BALANCE`、Flow 亲和和动态本地评分已实现 | 多流、多介质、共享空口压力与公平性标定 |
-| 无缝换路 | 先验证候选，再切换；旧 Epoch 在短暂 Grace 内继续可用 | Probe/ACK、Activate/ACK、Current/Previous Epoch 已实现 | 多源并发、真实丢包/乱序和切换中 Transfer 验收 |
+| 无缝换路 | 先验证候选，再切换；旧 Epoch 在短暂 Grace 内继续可用 | Probe/ACK、Activate/ACK、Current/Previous Epoch 已按 Origin 分域实现；同 candidate ID 多域软件回归已覆盖 | 真实丢包/乱序、多 Bearer 和切换中 Transfer 验收 |
 | 实时 QoS | 关键控制优先、实时状态保留最新值、过期数据主动丢弃 | Q0 FIFO、Q1 Latest、Deadline、维护公平和有界背压重试已实现 | Q0 端到端时延预算、产品 WCET 与失联安全实测 |
 | 大消息 | 小消息直发；大消息按 MTU 分片、重组、校验、ACK 与有界重试 | T32～T8K、CRC32、窗口 1～8、累计 ACK 已实现 | 自动能力协商、多源并发、切换中传输、其他 Bearer |
 | 节点内任务通信 | 一个 MCU 通常只有一个 Node；多个任务挂载为 Endpoint/Service | 固定 Router、Inbox、Remote TX、Bridge 和本机 Fast Path 已实现 | 各 RTOS 完整参考接入、任务重启与实时性实机 |
@@ -342,9 +342,9 @@ UCN 只有同时满足以下条件，才适合从“预发布协议”进入“�
 
 ## 9. 从当前 v5 到最终目标的优先顺序
 
-1. **先关闭正确性和发布阻塞项**：多 Origin Route Epoch、表/回绕/并发边界和现有审计问题。
+1. **先关闭剩余正确性和发布阻塞项**：V5-64 外审、HELLO Capability/Path MTU、表/回绕/并发边界和现有审计问题。
 2. **完成生产安全闭环**：Join、身份、受审计 AEAD、Replay、密钥轮换和安全实机。
-3. **扩大真实 Bearer 证据**：CAN/CAN-FD、Wi-Fi/ESP-NOW、UART/RS-485、USB。
+3. **扩大真实 Bearer 证据**：CAN/CAN-FD、Wi-Fi/ESP-NOW、UART/RS-485、USB，并补 V5-64 多源实机。
 4. **完成多源与故障压力**：双向/多源 Transfer、Q0/Q1 并发、Path 切换、负载均衡和长稳。
 5. **补齐平台封装**：FreeRTOS、Zephyr、NuttX、RT-Thread 和裸机参考工程。
 6. **再增加可选能力**：服务发现、组播、通用 Q2、Q3 流/文件、时间同步和 Host Bridge。
