@@ -151,6 +151,80 @@ target_compile_options(ucn_transfer PRIVATE
     $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
 )
 
+# RT-01: Realtime Metadata v1 is an opt-in UCN-Extended component.  Keeping
+# the stateless 16-byte codec in its own archive prevents Core/Node products
+# from paying code or RAM cost until they explicitly link ucn_realtime.
+add_library(ucn_realtime STATIC EXCLUDE_FROM_ALL
+    src/extended/time/ucn_realtime.c
+)
+target_link_libraries(ucn_realtime PUBLIC ucn_core)
+target_compile_options(ucn_realtime PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+
+# RT-02: Endpoint policy and dual freshness gates remain a second optional
+# archive.  Merely linking the Metadata codec therefore does not pull Service
+# policy or command-guard code into a small MCU image.
+add_library(ucn_realtime_policy STATIC EXCLUDE_FROM_ALL
+    src/extended/time/ucn_realtime_policy.c
+)
+target_link_libraries(ucn_realtime_policy PUBLIC ucn_realtime ucn_core)
+target_compile_options(ucn_realtime_policy PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+
+# RT-03: caller-owned Time Domain state is independent from Node storage and
+# is pulled only by products that opt into synchronized time.
+add_library(ucn_time_domain STATIC EXCLUDE_FROM_ALL
+    src/extended/time/ucn_time_domain.c
+)
+target_link_libraries(ucn_time_domain PUBLIC ucn_realtime_policy)
+target_compile_options(ucn_time_domain PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+
+# RT-04: hardware/Driver timestamps use an independent extension and atomic
+# queues.  Ordinary Adapter RX items and ucn_link_ops_t remain unchanged.
+add_library(ucn_timed_link STATIC EXCLUDE_FROM_ALL
+    src/extended/time/ucn_timed_link.c
+)
+target_link_libraries(ucn_timed_link PUBLIC ucn_core)
+target_compile_options(ucn_timed_link PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+
+# RT-05: the four-message semantic transaction and compact payload codec stay
+# isolated from production Service RX/TX until final external review.
+add_library(ucn_time_sync STATIC EXCLUDE_FROM_ALL
+    src/extended/time/ucn_time_sync.c
+)
+target_link_libraries(ucn_time_sync PUBLIC ucn_time_domain ucn_timed_link)
+target_compile_options(ucn_time_sync PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+
+# RT-06A: negotiated Endpoint/Session/Path capabilities use a separate fixed
+# cache so products that need timestamps but not cross-Node negotiation pay no
+# storage cost.
+add_library(ucn_time_capability STATIC EXCLUDE_FROM_ALL
+    src/extended/time/ucn_time_capability.c
+)
+target_link_libraries(ucn_time_capability PUBLIC ucn_time_sync)
+target_compile_options(ucn_time_capability PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+
+# RT-06B: STATIC_MASTER authority is published only after an independent
+# issued-generation witness and the current state have both committed and
+# passed exact reload proof.  Storage Providers remain product supplied.
+add_library(ucn_time_authority STATIC EXCLUDE_FROM_ALL
+    src/extended/time/ucn_time_authority.c
+)
+target_link_libraries(ucn_time_authority PUBLIC ucn_time_domain)
+target_compile_options(ucn_time_authority PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+)
+
 # CLV2-14-03: frozen wire codecs are physically independent archives.  A
 # strict-v4 product links ucn_cluster_wire_v4 only; Current-FSM compatibility
 # explicitly keeps UCN_CLUSTER_ENABLE_V3_COMPAT enabled.
@@ -541,6 +615,116 @@ add_test(NAME ucn_cluster_docs_contract_gate
     )
 
     add_test(NAME ucn_tests COMMAND ucn_tests)
+
+    # RT-01: frozen 16-byte Realtime Metadata v1 codec.  This focused target
+    # links the optional archive directly; the production ucn_core/ucn_node
+    # targets retain no realtime dependency or state.
+    add_executable(ucn_realtime_codec_tests
+        tests/test_realtime_codec.c
+    )
+    target_link_libraries(ucn_realtime_codec_tests PRIVATE ucn_realtime)
+    target_compile_options(ucn_realtime_codec_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_realtime_codec_tests
+        COMMAND ucn_realtime_codec_tests)
+
+    add_executable(ucn_realtime_policy_tests
+        tests/test_realtime_policy.c
+    )
+    target_link_libraries(ucn_realtime_policy_tests PRIVATE
+        ucn_realtime_policy)
+    target_compile_options(ucn_realtime_policy_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_realtime_policy_tests
+        COMMAND ucn_realtime_policy_tests)
+
+    add_executable(ucn_time_domain_tests
+        tests/test_time_domain.c
+    )
+    target_link_libraries(ucn_time_domain_tests PRIVATE ucn_time_domain)
+    target_compile_options(ucn_time_domain_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_time_domain_tests COMMAND ucn_time_domain_tests)
+
+    add_executable(ucn_timed_link_tests
+        tests/test_timed_link.c
+    )
+    target_link_libraries(ucn_timed_link_tests PRIVATE ucn_timed_link)
+    target_compile_options(ucn_timed_link_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_timed_link_tests COMMAND ucn_timed_link_tests)
+
+    if(UNIX)
+        find_package(Threads REQUIRED)
+        add_executable(ucn_timed_link_concurrency_tests
+            tests/test_timed_link_concurrency.c
+        )
+        target_link_libraries(ucn_timed_link_concurrency_tests PRIVATE
+            ucn_timed_link Threads::Threads)
+        target_compile_options(ucn_timed_link_concurrency_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+        )
+        add_test(NAME ucn_timed_link_concurrency_tests
+            COMMAND ucn_timed_link_concurrency_tests)
+
+        add_executable(ucn_time_authority_concurrency_tests
+            tests/test_time_authority_concurrency.c
+        )
+        target_link_libraries(ucn_time_authority_concurrency_tests PRIVATE
+            ucn_time_authority Threads::Threads)
+        target_compile_options(ucn_time_authority_concurrency_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+        )
+        add_test(NAME ucn_time_authority_concurrency_tests
+            COMMAND ucn_time_authority_concurrency_tests)
+    endif()
+
+    add_executable(ucn_time_sync_tests
+        tests/test_time_sync.c
+    )
+    target_link_libraries(ucn_time_sync_tests PRIVATE ucn_time_sync)
+    target_compile_options(ucn_time_sync_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_time_sync_tests COMMAND ucn_time_sync_tests)
+
+    add_executable(ucn_time_capability_tests
+        tests/test_time_capability.c
+    )
+    target_link_libraries(ucn_time_capability_tests PRIVATE
+        ucn_time_capability)
+    target_compile_options(ucn_time_capability_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_time_capability_tests
+        COMMAND ucn_time_capability_tests)
+
+    add_executable(ucn_time_authority_tests
+        tests/test_time_authority.c
+    )
+    target_link_libraries(ucn_time_authority_tests PRIVATE
+        ucn_time_authority)
+    target_compile_options(ucn_time_authority_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_time_authority_tests COMMAND ucn_time_authority_tests)
+
+    # RT-07 deterministic Host integration.  It links every optional realtime
+    # archive explicitly and remains absent from production library targets.
+    add_executable(ucn_realtime_simulation_tests
+        tests/test_realtime_simulation.c
+    )
+    target_link_libraries(ucn_realtime_simulation_tests PRIVATE
+        ucn_time_capability ucn_time_authority)
+    target_compile_options(ucn_realtime_simulation_tests PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Werror>
+    )
+    add_test(NAME ucn_realtime_simulation_tests
+        COMMAND ucn_realtime_simulation_tests)
 
     # RFC4 byte-level codec gate.  This executable compiles the isolated v4
     # codec with its test-only encoder switch enabled so its output can be
