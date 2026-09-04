@@ -123,6 +123,21 @@ extern "C" {
 #ifndef UCN_V6_CONFIG_TIME_DOMAINS
 #define UCN_V6_CONFIG_TIME_DOMAINS 2U
 #endif
+#ifndef UCN_V6_CONFIG_CLUSTER_MEMBERS
+#define UCN_V6_CONFIG_CLUSTER_MEMBERS 16U
+#endif
+#ifndef UCN_V6_CONFIG_CLUSTER_VOTERS
+#define UCN_V6_CONFIG_CLUSTER_VOTERS 16U
+#endif
+#ifndef UCN_V6_CONFIG_CLUSTER_TOMBSTONES
+#define UCN_V6_CONFIG_CLUSTER_TOMBSTONES 8U
+#endif
+#ifndef UCN_V6_CONFIG_CLUSTER_DIRECTORY
+#define UCN_V6_CONFIG_CLUSTER_DIRECTORY 16U
+#endif
+#ifndef UCN_V6_CONFIG_CLUSTER_TUNNELS
+#define UCN_V6_CONFIG_CLUSTER_TUNNELS 8U
+#endif
 
 #if UCN_V6_CONFIG_MAX_BINDINGS < 1U || UCN_V6_CONFIG_MAX_BINDINGS > 255U
 #error "UCN_V6_CONFIG_MAX_BINDINGS must be 1..255"
@@ -260,6 +275,26 @@ extern "C" {
 #if UCN_V6_CONFIG_TIME_DOMAINS < 1U || UCN_V6_CONFIG_TIME_DOMAINS > 32U
 #error "UCN_V6_CONFIG_TIME_DOMAINS must be 1..32"
 #endif
+#if UCN_V6_CONFIG_CLUSTER_MEMBERS < 3U || \
+    UCN_V6_CONFIG_CLUSTER_MEMBERS > 32U
+#error "UCN_V6_CONFIG_CLUSTER_MEMBERS must be 3..32"
+#endif
+#if UCN_V6_CONFIG_CLUSTER_VOTERS < 3U || \
+    UCN_V6_CONFIG_CLUSTER_VOTERS > UCN_V6_CONFIG_CLUSTER_MEMBERS
+#error "UCN_V6_CONFIG_CLUSTER_VOTERS must be 3..CLUSTER_MEMBERS"
+#endif
+#if UCN_V6_CONFIG_CLUSTER_TOMBSTONES < 1U || \
+    UCN_V6_CONFIG_CLUSTER_TOMBSTONES > 32U
+#error "UCN_V6_CONFIG_CLUSTER_TOMBSTONES must be 1..32"
+#endif
+#if UCN_V6_CONFIG_CLUSTER_DIRECTORY < 1U || \
+    UCN_V6_CONFIG_CLUSTER_DIRECTORY > 255U
+#error "UCN_V6_CONFIG_CLUSTER_DIRECTORY must be 1..255"
+#endif
+#if UCN_V6_CONFIG_CLUSTER_TUNNELS < 1U || \
+    UCN_V6_CONFIG_CLUSTER_TUNNELS > 255U
+#error "UCN_V6_CONFIG_CLUSTER_TUNNELS must be 1..255"
+#endif
 
 #include "ucn/v6/ucn_v6_identity.h"
 
@@ -282,7 +317,8 @@ enum {
      (uint32_t)UCN_V6_FEATURE_CAPABILITY |                              \
      (uint32_t)UCN_V6_FEATURE_ROUTE |                                   \
      (uint32_t)UCN_V6_FEATURE_TRANSFER |                                 \
-     (uint32_t)UCN_V6_FEATURE_REALTIME)
+     (uint32_t)UCN_V6_FEATURE_REALTIME |                                 \
+     (uint32_t)UCN_V6_FEATURE_CLUSTER)
 
 #define UCN_V6_COMPILED_LAYOUT_HASH                                        \
     (UINT64_C(0xD65A000100000000) ^                                       \
@@ -358,7 +394,17 @@ enum {
      ((uint64_t)UCN_V6_CONFIG_REALTIME_ENDPOINTS *                          \
       UINT64_C(0xC6BC279692B5CC83)) ^                                      \
      ((uint64_t)UCN_V6_CONFIG_TIME_DOMAINS *                                \
-      UINT64_C(0xD6E8FEB86659FD93)))
+      UINT64_C(0xD6E8FEB86659FD93)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_CLUSTER_MEMBERS *                             \
+      UINT64_C(0xA24BAED4963EE407)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_CLUSTER_VOTERS *                              \
+      UINT64_C(0x9FB21C651E98DF25)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_CLUSTER_TOMBSTONES *                          \
+      UINT64_C(0xC13FA9A902A6328F)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_CLUSTER_DIRECTORY *                           \
+      UINT64_C(0x91E10DA5C79E7B1D)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_CLUSTER_TUNNELS *                             \
+      UINT64_C(0xDB4F0B9175AE2165)))
 
 #if UCN_V6_CONFIG_TRANSFER_MAX_CLASS == 0U
 #define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 32U
@@ -420,6 +466,12 @@ enum {
 #define UCN_V6_REALTIME_OWNER_STORAGE_BYTES                               \
     ((size_t)(2048U + UCN_V6_CONFIG_REALTIME_ENDPOINTS * 96U +            \
               UCN_V6_CONFIG_TIME_DOMAINS * 512U))
+#define UCN_V6_CLUSTER_OWNER_STORAGE_BYTES                                \
+    ((size_t)(8192U + UCN_V6_CONFIG_CLUSTER_MEMBERS * 192U +              \
+              UCN_V6_CONFIG_CLUSTER_VOTERS * 160U * 2U +                 \
+              UCN_V6_CONFIG_CLUSTER_TOMBSTONES * 96U +                   \
+              UCN_V6_CONFIG_CLUSTER_DIRECTORY * 192U +                   \
+              UCN_V6_CONFIG_CLUSTER_TUNNELS * 256U))
 
 #define UCN_V6_DECLARE_STORAGE_TYPE(name_, bytes_) \
     typedef union name_ {                         \
@@ -470,6 +522,11 @@ typedef struct ucn_v6_feature_manifest {
     uint16_t transfer_credit_reservations;
     uint16_t realtime_endpoints;
     uint16_t time_domains;
+    uint16_t cluster_members;
+    uint16_t cluster_voters;
+    uint16_t cluster_tombstones;
+    uint16_t cluster_directory;
+    uint16_t cluster_tunnels;
 } ucn_v6_feature_manifest_t;
 
 /* EN: Returns the one build-time feature and storage manifest.

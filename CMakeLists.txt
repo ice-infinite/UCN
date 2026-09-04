@@ -275,6 +275,25 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
         $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
     )
 
+    add_library(ucn_v6_cluster STATIC
+        src/v6/cluster/ucn_v6_cluster.c
+    )
+    target_include_directories(ucn_v6_cluster PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(ucn_v6_cluster PUBLIC
+        ucn_v6_config
+        ucn_v6_wire
+        ucn_v6_security
+        ucn_v6_capability
+        ucn_v6_route
+        ucn_v6_transfer
+    )
+    target_compile_options(ucn_v6_cluster PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+        $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+    )
+
     if(UCN_BUILD_TESTS)
         add_executable(ucn_v6_config_contract_tests
             tests/v6/test_v6_config_contract.c
@@ -404,6 +423,16 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
             $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
         )
         add_test(NAME ucn_v6_realtime_tests COMMAND ucn_v6_realtime_tests)
+
+        add_executable(ucn_v6_cluster_tests
+            tests/v6/test_v6_cluster.c
+        )
+        target_link_libraries(ucn_v6_cluster_tests PRIVATE ucn_v6_cluster)
+        target_compile_options(ucn_v6_cluster_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+            $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+        )
+        add_test(NAME ucn_v6_cluster_tests COMMAND ucn_v6_cluster_tests)
     endif()
 endif()
 

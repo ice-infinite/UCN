@@ -43,7 +43,12 @@ static const ucn_v6_feature_manifest_t compiled_manifest = {
     UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS,
     UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS,
     UCN_V6_CONFIG_REALTIME_ENDPOINTS,
-    UCN_V6_CONFIG_TIME_DOMAINS
+    UCN_V6_CONFIG_TIME_DOMAINS,
+    UCN_V6_CONFIG_CLUSTER_MEMBERS,
+    UCN_V6_CONFIG_CLUSTER_VOTERS,
+    UCN_V6_CONFIG_CLUSTER_TOMBSTONES,
+    UCN_V6_CONFIG_CLUSTER_DIRECTORY,
+    UCN_V6_CONFIG_CLUSTER_TUNNELS
 };
 
 const ucn_v6_feature_manifest_t *ucn_v6_compiled_manifest(void)
@@ -105,7 +110,12 @@ ucn_v6_result_t ucn_v6_manifest_validate_exact(
            manifest->transfer_credit_reservations ==
                expected->transfer_credit_reservations &&
            manifest->realtime_endpoints == expected->realtime_endpoints &&
-           manifest->time_domains == expected->time_domains ?
+           manifest->time_domains == expected->time_domains &&
+           manifest->cluster_members == expected->cluster_members &&
+           manifest->cluster_voters == expected->cluster_voters &&
+           manifest->cluster_tombstones == expected->cluster_tombstones &&
+           manifest->cluster_directory == expected->cluster_directory &&
+           manifest->cluster_tunnels == expected->cluster_tunnels ?
                UCN_V6_OK : UCN_V6_ERR_CONFIG;
 }
 

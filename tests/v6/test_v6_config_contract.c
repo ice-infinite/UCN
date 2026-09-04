@@ -58,6 +58,11 @@ static ucn_v6_feature_manifest_t header_manifest(void)
         UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS;
     value.realtime_endpoints = UCN_V6_CONFIG_REALTIME_ENDPOINTS;
     value.time_domains = UCN_V6_CONFIG_TIME_DOMAINS;
+    value.cluster_members = UCN_V6_CONFIG_CLUSTER_MEMBERS;
+    value.cluster_voters = UCN_V6_CONFIG_CLUSTER_VOTERS;
+    value.cluster_tombstones = UCN_V6_CONFIG_CLUSTER_TOMBSTONES;
+    value.cluster_directory = UCN_V6_CONFIG_CLUSTER_DIRECTORY;
+    value.cluster_tunnels = UCN_V6_CONFIG_CLUSTER_TUNNELS;
     return value;
 }
 
