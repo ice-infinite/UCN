@@ -2,6 +2,7 @@
 /build/
 /build-*/
 /build_*/
+/.v6-matrix/
 /cmake-build-*/
 /.h743cmp/
 CMakeCache.txt

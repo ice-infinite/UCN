@@ -317,6 +317,12 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
     )
 
     if(UCN_BUILD_TESTS)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME v6_source_boundary_gate
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_boundaries.py
+                --root ${CMAKE_CURRENT_SOURCE_DIR})
+
         add_executable(ucn_v6_config_contract_tests
             tests/v6/test_v6_config_contract.c
         )
@@ -465,6 +471,45 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
             $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
         )
         add_test(NAME ucn_v6_adapter_tests COMMAND ucn_v6_adapter_tests)
+
+        add_executable(ucn_v6_scale_sim
+            tools/v6/ucn_v6_scale_sim.c
+        )
+        target_link_libraries(ucn_v6_scale_sim PRIVATE ucn_v6_cluster)
+        target_compile_options(ucn_v6_scale_sim PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+            $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+        )
+        add_test(NAME v6_scale_1000 COMMAND ucn_v6_scale_sim 1000)
+        add_test(NAME v6_scale_10000 COMMAND ucn_v6_scale_sim 10000)
+
+        add_executable(ucn_v6_resource_report
+            tools/v6/ucn_v6_resource_report.c
+        )
+        target_link_libraries(ucn_v6_resource_report PRIVATE
+            ucn_v6_identity
+            ucn_v6_message
+            ucn_v6_owner
+            ucn_v6_security
+            ucn_v6_capability
+            ucn_v6_route
+            ucn_v6_qos
+            ucn_v6_transfer
+            ucn_v6_realtime
+            ucn_v6_cluster
+            ucn_v6_adapter
+        )
+        target_compile_options(ucn_v6_resource_report PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+            $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+        )
+        add_test(NAME v6_resource_report COMMAND ucn_v6_resource_report)
+
+        add_test(NAME v6_evidence_validator_selftest
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/test_validate_v6_evidence.py
+                --validator
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/validate_v6_evidence.py)
 
         if(UNIX)
             find_package(Threads REQUIRED)
