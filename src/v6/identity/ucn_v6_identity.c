@@ -38,7 +38,9 @@ static bool authority_epoch_is_valid(const ucn_v6_authority_epoch_t *epoch)
            epoch->authority_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            bytes_are_nontrivial(epoch->durable_fence_token,
                                 sizeof(epoch->durable_fence_token)) &&
-           epoch->lease_sequence != 0U && epoch->lease_duration_us != 0U &&
+           epoch->lease_sequence != 0U &&
+           epoch->lease_sequence <= UCN_V6_SERIAL64_ROTATION_THRESHOLD &&
+           epoch->lease_duration_us != 0U &&
            bytes_are_nontrivial(epoch->allocation_high_water_digest,
                                 sizeof(epoch->allocation_high_water_digest)) &&
            epoch->quorum_proven && epoch->durable;

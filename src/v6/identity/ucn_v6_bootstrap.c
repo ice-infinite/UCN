@@ -61,6 +61,7 @@ static bool transcript_is_valid(
            transcript->device_nonce != 0U &&
            transcript->authority_nonce != 0U &&
            transcript->transaction_id != 0U &&
+           transcript->transaction_id <= UCN_V6_SERIAL64_ROTATION_THRESHOLD &&
            transcript->lease_freshness_challenge_nonce != 0U &&
            transcript->realm_id != 0U && transcript->realm_id != UINT32_MAX &&
            transcript->proposed_address != 0U &&
@@ -72,6 +73,8 @@ static bool transcript_is_valid(
                          sizeof(transcript->binding_lease_id)) &&
            transcript->binding_lease_duration_us != 0U &&
            transcript->authority_lease_sequence != 0U &&
+           transcript->authority_lease_sequence <=
+               UCN_V6_SERIAL64_ROTATION_THRESHOLD &&
            transcript->selected_hop_suite != 0U &&
            transcript->selected_hop_key_context != 0U &&
            transcript->selected_e2e_suite != 0U &&

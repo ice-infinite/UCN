@@ -123,6 +123,18 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
         $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
     )
 
+    add_library(ucn_v6_wire STATIC
+        src/v6/wire/ucn_v6_wire.c
+    )
+    target_include_directories(ucn_v6_wire PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(ucn_v6_wire PUBLIC ucn_v6_identity)
+    target_compile_options(ucn_v6_wire PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+        $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+    )
+
     if(UCN_BUILD_TESTS)
         add_executable(ucn_v6_identity_tests
             tests/v6/test_v6_identity.c
@@ -133,6 +145,16 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
             $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
         )
         add_test(NAME ucn_v6_identity_tests COMMAND ucn_v6_identity_tests)
+
+        add_executable(ucn_v6_wire_tests
+            tests/v6/test_v6_wire.c
+        )
+        target_link_libraries(ucn_v6_wire_tests PRIVATE ucn_v6_wire)
+        target_compile_options(ucn_v6_wire_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+            $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+        )
+        add_test(NAME ucn_v6_wire_tests COMMAND ucn_v6_wire_tests)
     endif()
 endif()
 

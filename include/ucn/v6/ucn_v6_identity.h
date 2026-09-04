@@ -11,6 +11,7 @@ extern "C" {
 
 #define UCN_V6_PROTOCOL_VERSION ((uint8_t)6U)
 #define UCN_V6_SERIAL_ROTATION_THRESHOLD UINT32_C(0xFFFFFFFE)
+#define UCN_V6_SERIAL64_ROTATION_THRESHOLD UINT64_C(0xFFFFFFFFFFFFFFFE)
 #define UCN_V6_MAX_BINDING_SLOTS ((size_t)16U)
 #define UCN_V6_MAX_ACTIVE_GROUPS ((size_t)8U)
 
@@ -128,14 +129,20 @@ typedef struct ucn_v6_identity_authority {
     bool faulted;
 } ucn_v6_identity_authority_t;
 
+/* EN: Validates canonical identity and binding keys.
+ * 中文：校验规范的身份与地址绑定键。 */
 bool ucn_v6_principal_is_valid(const ucn_v6_principal_t *principal);
 bool ucn_v6_binding_key_is_valid(const ucn_v6_binding_key_t *binding);
 bool ucn_v6_binding_key_equal(
     const ucn_v6_binding_key_t *left,
     const ucn_v6_binding_key_t *right);
+/* EN: Advances a no-wrap ownership serial or reports exhaustion.
+ * 中文：推进不可回绕的所有权序列，耗尽时明确报错。 */
 ucn_v6_result_t ucn_v6_serial_checked_next(
     uint32_t current,
     uint32_t *next);
+/* EN: Builds and checks one conservative local half-open lease deadline.
+ * 中文：建立并检查保守的本地半开租约截止期。 */
 ucn_v6_result_t ucn_v6_lease_deadline_build(
     uint64_t challenge_started_local_us,
     uint64_t max_remaining_lease_us,
@@ -143,21 +150,29 @@ ucn_v6_result_t ucn_v6_lease_deadline_build(
     uint64_t *local_deadline_us);
 bool ucn_v6_lease_deadline_is_live(uint64_t now_us, uint64_t deadline_us);
 
+/* EN: Initializes a caller-owned, shared Provider callback fence.
+ * 中文：初始化由调用方持有、跨对象共享的 Provider 回调围栏。 */
 ucn_v6_result_t ucn_v6_callback_gate_init(
     ucn_v6_callback_gate_t *gate,
     void *context,
     void (*lock)(void *context),
     void (*unlock)(void *context));
 
+/* EN: Initializes the isolated Realm Address Authority model.
+ * 中文：初始化隔离的 Realm 地址权威模型。 */
 ucn_v6_result_t ucn_v6_identity_authority_init(
     ucn_v6_identity_authority_t *authority,
     uint32_t realm_id,
     const ucn_v6_identity_store_ops_t *store,
     ucn_v6_callback_gate_t *callback_gate);
+/* EN: Persists and publishes an exact next Authority Epoch.
+ * 中文：持久化并发布精确后继的地址权威 Epoch。 */
 ucn_v6_result_t ucn_v6_identity_authority_install_epoch(
     ucn_v6_identity_authority_t *authority,
     const ucn_v6_authority_epoch_t *epoch,
     uint64_t local_lease_deadline_us);
+/* EN: Allocates or retires Binding ownership with persist-before-publish.
+ * 中文：按先持久化后发布原则分配或退休 Binding 所有权。 */
 ucn_v6_result_t ucn_v6_identity_authority_allocate_binding(
     ucn_v6_identity_authority_t *authority,
     uint64_t now_us,
@@ -172,6 +187,8 @@ ucn_v6_result_t ucn_v6_identity_authority_retire_binding(
     uint64_t now_us,
     uint32_t node_address,
     uint32_t binding_generation);
+/* EN: Allocates or retires dynamic Group IDs without reusing holes.
+ * 中文：不复用历史空洞地分配或退休动态 Group ID。 */
 ucn_v6_result_t ucn_v6_identity_authority_allocate_dynamic_group(
     ucn_v6_identity_authority_t *authority,
     uint64_t now_us,
