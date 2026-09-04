@@ -641,7 +641,8 @@ static int test_join_acl_aead_replay(void)
     CHECK(ucn_v6_security_open_frame(
               authority_manager, 200U, 6U, &device, encoded, encoded_length,
               plaintext, sizeof(plaintext), &opened) == UCN_V6_OK);
-    CHECK(opened.endpoint_authorized && !opened.group_discovery_only);
+    CHECK(opened.hop_authenticated && opened.endpoint_authorized &&
+          !opened.group_discovery_only);
     CHECK(memcmp(plaintext, payload, sizeof(payload)) == 0);
     memset(&sentinel, 0xA5, sizeof(sentinel));
     opened = sentinel;
@@ -721,6 +722,57 @@ static int test_join_acl_aead_replay(void)
                   encoded_length, one_byte_work, sizeof(one_byte_work),
                   &opened) == UCN_V6_ERR_ACCESS);
         CHECK(memcmp(&opened, &sentinel, sizeof(opened)) == 0);
+    }
+    {
+        uint8_t hello_payload[24U];
+        ucn_v6_frame_t hello;
+        ucn_v6_frame_t before;
+        uint8_t output_before[sizeof(encoded)];
+        size_t length_before = 91U;
+        fill_bytes(hello_payload, sizeof(hello_payload), 0xC0U);
+        memset(&hello, 0, sizeof(hello));
+        hello.address_class = UCN_V6_ADDRESS_CLASS_A0;
+        hello.frame_type = UCN_V6_FRAME_CONTROL;
+        hello.flags = UCN_V6_FLAG_PEER_HOP_CONTEXT |
+                      UCN_V6_FLAG_PROTOCOL_CONTEXT;
+        hello.traffic_class = UCN_V6_TRAFFIC_Q1;
+        hello.delivery_guarantee = UCN_V6_DELIVERY_LATEST;
+        hello.hop_limit = 1U;
+        hello.header_contract = UCN_V6_HEADER_CONTRACT_1;
+        hello.realm_id = 1U;
+        hello.source_address = 7U;
+        hello.destination_address = 8U;
+        hello.source_binding_generation = 3U;
+        hello.destination_binding_generation = 4U;
+        hello.session_generation = 1U;
+        hello.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_PEER_HELLO;
+        hello.payload = hello_payload;
+        hello.payload_length = sizeof(hello_payload);
+        before = hello;
+        memset(encoded, 0x93, sizeof(encoded));
+        memcpy(output_before, encoded, sizeof(encoded));
+        CHECK(ucn_v6_security_protect_peer_discovery(
+                  device_manager, 260U, &authority, &hello, frame_work,
+                  sizeof(frame_work), encoded, 1U, &length_before) ==
+              UCN_V6_ERR_NO_SPACE);
+        CHECK(memcmp(&hello, &before, sizeof(hello)) == 0);
+        CHECK(memcmp(encoded, output_before, sizeof(encoded)) == 0);
+        CHECK(length_before == 91U);
+        CHECK(ucn_v6_security_protect_peer_discovery(
+                  device_manager, 260U, &authority, &hello, frame_work,
+                  sizeof(frame_work), encoded, sizeof(encoded),
+                  &encoded_length) == UCN_V6_OK);
+        CHECK(hello.packet_sequence == 4U);
+        CHECK(ucn_v6_security_open_frame(
+                  authority_manager, 261U, 6U, &device, encoded,
+                  encoded_length, NULL, 0U, &opened) == UCN_V6_OK);
+        CHECK(opened.hop_authenticated && !opened.endpoint_authorized &&
+              !opened.group_discovery_only);
+        CHECK(memcmp(opened.authenticated_principal.bytes, device.bytes,
+                     sizeof(device.bytes)) == 0);
+        CHECK(opened.frame.payload_length == sizeof(hello_payload));
+        CHECK(memcmp(opened.frame.payload, hello_payload,
+                     sizeof(hello_payload)) == 0);
     }
 
     /* A reboot never treats a persisted local monotonic deadline as live. */

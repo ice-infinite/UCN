@@ -2095,6 +2095,38 @@ static ucn_v6_group_replay_source_t *find_group_replay_source(
     return allow_empty ? empty : NULL;
 }
 
+static bool peer_discovery_contract_is_valid(const ucn_v6_frame_t *frame)
+{
+    if (frame == NULL || frame->frame_type != UCN_V6_FRAME_CONTROL ||
+        frame->flags != (UCN_V6_FLAG_PEER_HOP_CONTEXT |
+                         UCN_V6_FLAG_PROTOCOL_CONTEXT) ||
+        frame->source_address == 0U || frame->destination_address == 0U ||
+        frame->source_binding_generation == 0U ||
+        frame->destination_binding_generation == 0U ||
+        frame->session_generation == 0U || frame->hop_limit != 1U) {
+        return false;
+    }
+    if (frame->protocol_opcode == UCN_V6_PROTOCOL_OPCODE_PEER_HELLO) {
+        return frame->traffic_class == UCN_V6_TRAFFIC_Q1 &&
+               frame->delivery_guarantee == UCN_V6_DELIVERY_LATEST;
+    }
+    if (frame->protocol_opcode == UCN_V6_PROTOCOL_OPCODE_CAPABILITY_QUERY) {
+        return frame->traffic_class == UCN_V6_TRAFFIC_Q1 &&
+               frame->delivery_guarantee == UCN_V6_DELIVERY_RELIABLE;
+    }
+    if (frame->protocol_opcode ==
+        UCN_V6_PROTOCOL_OPCODE_CAPABILITY_ADVERTISE) {
+        return frame->traffic_class == UCN_V6_TRAFFIC_Q2 &&
+               frame->delivery_guarantee == UCN_V6_DELIVERY_RELIABLE;
+    }
+    return false;
+}
+
+static ucn_v6_result_t reserve_tx_sequence(
+    ucn_v6_security_manager_t *manager,
+    const ucn_v6_principal_t *e2e_peer,
+    uint32_t *sequence);
+
 ucn_v6_result_t ucn_v6_security_open_frame(
     ucn_v6_security_manager_t *manager,
     uint64_t now_us,
@@ -2232,6 +2264,8 @@ ucn_v6_result_t ucn_v6_security_open_frame(
     } else {
         hop_session->hop_replay_current = replay_next;
     }
+    opened.authenticated_principal = hop_session->peer_principal;
+    opened.hop_authenticated = true;
     local_target = candidate.local_binding_valid &&
                    candidate.local_binding.realm_id == opened.frame.realm_id &&
                    candidate.local_binding.node_address ==
@@ -2241,6 +2275,15 @@ ucn_v6_result_t ucn_v6_security_open_frame(
     e2e_session = local_target ?
         find_e2e_inbound_session(&candidate, &opened.frame) : NULL;
     if (local_target) {
+        if ((opened.frame.flags & UCN_V6_FLAG_E2E_CONTEXT) == 0U &&
+            peer_discovery_contract_is_valid(&opened.frame)) {
+            rc = persist_candidate(manager, &candidate);
+            if (rc != UCN_V6_OK) {
+                return rc;
+            }
+            *result_out = opened;
+            return UCN_V6_OK;
+        }
         if (e2e_session == NULL) {
             return UCN_V6_ERR_SECURITY;
         }
@@ -2309,6 +2352,90 @@ ucn_v6_result_t ucn_v6_security_open_frame(
         return rc;
     }
     *result_out = opened;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_security_protect_peer_discovery(
+    ucn_v6_security_manager_t *manager,
+    uint64_t now_us,
+    const ucn_v6_principal_t *peer_principal,
+    ucn_v6_frame_t *frame,
+    uint8_t *frame_work,
+    size_t frame_work_capacity,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_length)
+{
+    ucn_v6_frame_t protected_frame;
+    ucn_v6_security_session_record_t *session;
+    size_t encoded_length = 0U;
+    size_t link_tag_offset;
+    uint32_t sequence;
+    ucn_v6_result_t rc;
+
+    if (!manager_storage_is_valid(manager) || manager->faulted ||
+        !ucn_v6_principal_is_valid(peer_principal) || frame == NULL ||
+        frame_work == NULL || output == NULL || output_length == NULL ||
+        frame_work == output) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    protected_frame = *frame;
+    session = find_session_by_principal(&manager->committed, peer_principal);
+    if (session == NULL || !session->admitted || session->revoked ||
+        session->requires_reauth || now_us >= session->local_lease_deadline_us ||
+        !manager->committed.local_binding_valid ||
+        !ucn_v6_binding_key_equal(&manager->committed.local_binding,
+                                  &session->local_binding) ||
+        protected_frame.realm_id != session->local_binding.realm_id ||
+        protected_frame.source_address != session->local_binding.node_address ||
+        protected_frame.source_binding_generation !=
+            session->local_binding.binding_generation ||
+        protected_frame.destination_address != session->peer_binding.node_address ||
+        protected_frame.destination_binding_generation !=
+            session->peer_binding.binding_generation ||
+        protected_frame.session_generation != session->session_generation ||
+        !peer_discovery_contract_is_valid(&protected_frame)) {
+        return UCN_V6_ERR_SECURITY;
+    }
+    protected_frame.packet_sequence = 1U;
+    protected_frame.peer_hop.suite_id = session->hop_current.suite_id;
+    protected_frame.peer_hop.key_id = session->hop_current.key_id;
+    protected_frame.peer_hop.key_generation =
+        session->hop_current.key_generation;
+    memset(protected_frame.link_tag, 0, sizeof(protected_frame.link_tag));
+    rc = ucn_v6_wire_encoded_size(&protected_frame, &encoded_length);
+    if (rc != UCN_V6_OK) {
+        return rc;
+    }
+    if (frame_work_capacity < encoded_length ||
+        output_capacity < encoded_length) {
+        return UCN_V6_ERR_NO_SPACE;
+    }
+    rc = reserve_tx_sequence(manager, peer_principal, &sequence);
+    if (rc != UCN_V6_OK) {
+        return rc;
+    }
+    protected_frame.packet_sequence = sequence;
+    rc = ucn_v6_wire_encode(&protected_frame, frame_work,
+                            frame_work_capacity, &encoded_length);
+    if (rc != UCN_V6_OK || encoded_length < 20U) {
+        return rc != UCN_V6_OK ? rc : UCN_V6_ERR_STATE;
+    }
+    link_tag_offset = encoded_length - UCN_V6_SECURITY_TAG_BYTES - 4U;
+    rc = crypto_compute_tag(manager, &session->hop_current, frame_work,
+                            link_tag_offset, NULL, 0U,
+                            protected_frame.link_tag);
+    if (rc != UCN_V6_OK) {
+        return rc;
+    }
+    rc = ucn_v6_wire_encode(&protected_frame, frame_work,
+                            frame_work_capacity, &encoded_length);
+    if (rc != UCN_V6_OK) {
+        return rc;
+    }
+    memcpy(output, frame_work, encoded_length);
+    *frame = protected_frame;
+    *output_length = encoded_length;
     return UCN_V6_OK;
 }
 

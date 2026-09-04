@@ -277,6 +277,7 @@ typedef struct ucn_v6_security_view {
 typedef struct ucn_v6_security_open_result {
     ucn_v6_frame_t frame;
     ucn_v6_principal_t authenticated_principal;
+    bool hop_authenticated;
     bool endpoint_authorized;
     bool group_discovery_only;
 } ucn_v6_security_open_result_t;
@@ -401,6 +402,21 @@ ucn_v6_result_t ucn_v6_security_protect_frame(
     ucn_v6_frame_t *frame,
     uint8_t *payload_work,
     size_t payload_work_capacity,
+    uint8_t *frame_work,
+    size_t frame_work_capacity,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_length);
+
+/* EN: Protects one exact hop-authenticated HELLO/Capability control frame.
+ * This path never grants Endpoint ACL or admission authority.
+ * 中文：保护一帧精确定义的逐跳认证 HELLO/Capability 控制帧；该路径绝不
+ * 授予 Endpoint ACL 或准入权。 */
+ucn_v6_result_t ucn_v6_security_protect_peer_discovery(
+    ucn_v6_security_manager_t *manager,
+    uint64_t now_us,
+    const ucn_v6_principal_t *peer_principal,
+    ucn_v6_frame_t *frame,
     uint8_t *frame_work,
     size_t frame_work_capacity,
     uint8_t *output,

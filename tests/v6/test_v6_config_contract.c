@@ -33,6 +33,10 @@ static ucn_v6_feature_manifest_t header_manifest(void)
     value.security_sessions = UCN_V6_CONFIG_SECURITY_SESSIONS;
     value.acl_entries = UCN_V6_CONFIG_ACL_ENTRIES;
     value.group_replay_sources = UCN_V6_CONFIG_GROUP_REPLAY_SOURCES;
+    value.capability_peers = UCN_V6_CONFIG_CAPABILITY_PEERS;
+    value.capability_paths = UCN_V6_CONFIG_CAPABILITY_PATHS;
+    value.group_discovery_hints = UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS;
+    value.group_discovery_links = UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS;
     return value;
 }
 

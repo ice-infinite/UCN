@@ -19,7 +19,11 @@ static const ucn_v6_feature_manifest_t compiled_manifest = {
     UCN_V6_CONFIG_OWNER_EVENT_DEPTH,
     UCN_V6_CONFIG_SECURITY_SESSIONS,
     UCN_V6_CONFIG_ACL_ENTRIES,
-    UCN_V6_CONFIG_GROUP_REPLAY_SOURCES
+    UCN_V6_CONFIG_GROUP_REPLAY_SOURCES,
+    UCN_V6_CONFIG_CAPABILITY_PEERS,
+    UCN_V6_CONFIG_CAPABILITY_PATHS,
+    UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS,
+    UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS
 };
 
 const ucn_v6_feature_manifest_t *ucn_v6_compiled_manifest(void)
@@ -53,7 +57,13 @@ ucn_v6_result_t ucn_v6_manifest_validate_exact(
            manifest->security_sessions == expected->security_sessions &&
            manifest->acl_entries == expected->acl_entries &&
            manifest->group_replay_sources ==
-               expected->group_replay_sources ?
+               expected->group_replay_sources &&
+           manifest->capability_peers == expected->capability_peers &&
+           manifest->capability_paths == expected->capability_paths &&
+           manifest->group_discovery_hints ==
+               expected->group_discovery_hints &&
+           manifest->group_discovery_links ==
+               expected->group_discovery_links ?
                UCN_V6_OK : UCN_V6_ERR_CONFIG;
 }
 

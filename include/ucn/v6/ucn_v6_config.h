@@ -51,6 +51,18 @@ extern "C" {
 #ifndef UCN_V6_CONFIG_GROUP_REPLAY_SOURCES
 #define UCN_V6_CONFIG_GROUP_REPLAY_SOURCES 16U
 #endif
+#ifndef UCN_V6_CONFIG_CAPABILITY_PEERS
+#define UCN_V6_CONFIG_CAPABILITY_PEERS 16U
+#endif
+#ifndef UCN_V6_CONFIG_CAPABILITY_PATHS
+#define UCN_V6_CONFIG_CAPABILITY_PATHS 16U
+#endif
+#ifndef UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS
+#define UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS 8U
+#endif
+#ifndef UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS
+#define UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS 8U
+#endif
 
 #if UCN_V6_CONFIG_MAX_BINDINGS < 1U || UCN_V6_CONFIG_MAX_BINDINGS > 255U
 #error "UCN_V6_CONFIG_MAX_BINDINGS must be 1..255"
@@ -102,6 +114,22 @@ extern "C" {
     UCN_V6_CONFIG_GROUP_REPLAY_SOURCES > 255U
 #error "UCN_V6_CONFIG_GROUP_REPLAY_SOURCES must be 1..255"
 #endif
+#if UCN_V6_CONFIG_CAPABILITY_PEERS < 1U || \
+    UCN_V6_CONFIG_CAPABILITY_PEERS > 255U
+#error "UCN_V6_CONFIG_CAPABILITY_PEERS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_CAPABILITY_PATHS < 1U || \
+    UCN_V6_CONFIG_CAPABILITY_PATHS > 255U
+#error "UCN_V6_CONFIG_CAPABILITY_PATHS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS < 1U || \
+    UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS > 255U
+#error "UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS < 1U || \
+    UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS > 255U
+#error "UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS must be 1..255"
+#endif
 
 #include "ucn/v6/ucn_v6_identity.h"
 
@@ -113,13 +141,15 @@ enum {
     UCN_V6_FEATURE_ROUTE = 1U << 4,
     UCN_V6_FEATURE_TRANSFER = 1U << 5,
     UCN_V6_FEATURE_REALTIME = 1U << 6,
-    UCN_V6_FEATURE_CLUSTER = 1U << 7
+    UCN_V6_FEATURE_CLUSTER = 1U << 7,
+    UCN_V6_FEATURE_CAPABILITY = 1U << 8
 };
 
 #define UCN_V6_COMPILED_FEATURE_BITS                                      \
     ((uint32_t)UCN_V6_FEATURE_IDENTITY | (uint32_t)UCN_V6_FEATURE_WIRE |  \
      (uint32_t)UCN_V6_FEATURE_MESSAGE |                                  \
-     (uint32_t)UCN_V6_FEATURE_SECURITY)
+     (uint32_t)UCN_V6_FEATURE_SECURITY |                                \
+     (uint32_t)UCN_V6_FEATURE_CAPABILITY)
 
 #define UCN_V6_COMPILED_LAYOUT_HASH                                        \
     (UINT64_C(0xD65A000100000000) ^                                       \
@@ -147,7 +177,15 @@ enum {
      ((uint64_t)UCN_V6_CONFIG_ACL_ENTRIES *                                \
       UINT64_C(0xC13FA9A902A6328F)) ^                                      \
      ((uint64_t)UCN_V6_CONFIG_GROUP_REPLAY_SOURCES *                        \
-      UINT64_C(0x91E10DA5C79E7B1D)))
+      UINT64_C(0x91E10DA5C79E7B1D)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_CAPABILITY_PEERS *                            \
+      UINT64_C(0xDB4F0B9175AE2165)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_CAPABILITY_PATHS *                            \
+      UINT64_C(0xBBE0563303A4615F)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS *                       \
+      UINT64_C(0xA0F2EC75A1FE1575)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS *                       \
+      UINT64_C(0x89E182857D9ED689)))
 
 #define UCN_V6_OPERATION_ID_ALLOCATOR_STORAGE_BYTES ((size_t)256U)
 #define UCN_V6_PROTOCOL_OWNER_STORAGE_BYTES ((size_t)1024U)
@@ -157,6 +195,11 @@ enum {
               UCN_V6_CONFIG_STATIC_GROUP_SLOTS *                         \
                   UCN_V6_CONFIG_GROUP_KEY_SLOTS * 192U +                  \
               UCN_V6_CONFIG_GROUP_REPLAY_SOURCES * 128U))
+#define UCN_V6_CAPABILITY_OWNER_STORAGE_BYTES                             \
+    ((size_t)(1024U + UCN_V6_CONFIG_CAPABILITY_PEERS * 256U +            \
+              UCN_V6_CONFIG_CAPABILITY_PATHS * 160U +                    \
+              UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS * 136U +               \
+              UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS * 32U))
 
 #define UCN_V6_DECLARE_STORAGE_TYPE(name_, bytes_) \
     typedef union name_ {                         \
@@ -183,6 +226,10 @@ typedef struct ucn_v6_feature_manifest {
     uint16_t security_sessions;
     uint16_t acl_entries;
     uint16_t group_replay_sources;
+    uint16_t capability_peers;
+    uint16_t capability_paths;
+    uint16_t group_discovery_hints;
+    uint16_t group_discovery_links;
 } ucn_v6_feature_manifest_t;
 
 /* EN: Returns the one build-time feature and storage manifest.
