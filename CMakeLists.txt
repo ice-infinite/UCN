@@ -238,6 +238,26 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
         $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
     )
 
+    add_library(ucn_v6_transfer STATIC
+        src/v6/transfer/ucn_v6_transfer_codec.c
+        src/v6/transfer/ucn_v6_transfer.c
+    )
+    target_include_directories(ucn_v6_transfer PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(ucn_v6_transfer PUBLIC
+        ucn_v6_config
+        ucn_v6_message
+        ucn_v6_security
+        ucn_v6_capability
+        ucn_v6_route
+        ucn_v6_qos
+    )
+    target_compile_options(ucn_v6_transfer PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+        $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+    )
+
     if(UCN_BUILD_TESTS)
         add_executable(ucn_v6_config_contract_tests
             tests/v6/test_v6_config_contract.c
@@ -347,6 +367,16 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
             $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
         )
         add_test(NAME ucn_v6_qos_tests COMMAND ucn_v6_qos_tests)
+
+        add_executable(ucn_v6_transfer_tests
+            tests/v6/test_v6_transfer.c
+        )
+        target_link_libraries(ucn_v6_transfer_tests PRIVATE ucn_v6_transfer)
+        target_compile_options(ucn_v6_transfer_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+            $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+        )
+        add_test(NAME ucn_v6_transfer_tests COMMAND ucn_v6_transfer_tests)
     endif()
 endif()
 

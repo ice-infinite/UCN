@@ -96,6 +96,27 @@ extern "C" {
 #ifndef UCN_V6_CONFIG_QOS_INFLIGHT
 #define UCN_V6_CONFIG_QOS_INFLIGHT 32U
 #endif
+#ifndef UCN_V6_CONFIG_TRANSFER_MAX_CLASS
+#define UCN_V6_CONFIG_TRANSFER_MAX_CLASS 8U
+#endif
+#ifndef UCN_V6_CONFIG_TRANSFER_TX_SLOTS
+#define UCN_V6_CONFIG_TRANSFER_TX_SLOTS 4U
+#endif
+#ifndef UCN_V6_CONFIG_TRANSFER_RX_SLOTS
+#define UCN_V6_CONFIG_TRANSFER_RX_SLOTS 4U
+#endif
+#ifndef UCN_V6_CONFIG_TRANSFER_RECENT
+#define UCN_V6_CONFIG_TRANSFER_RECENT 8U
+#endif
+#ifndef UCN_V6_CONFIG_TRANSFER_WINDOW
+#define UCN_V6_CONFIG_TRANSFER_WINDOW 16U
+#endif
+#ifndef UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS
+#define UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS 8U
+#endif
+#ifndef UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS
+#define UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS 32U
+#endif
 
 #if UCN_V6_CONFIG_MAX_BINDINGS < 1U || UCN_V6_CONFIG_MAX_BINDINGS > 255U
 #error "UCN_V6_CONFIG_MAX_BINDINGS must be 1..255"
@@ -199,6 +220,33 @@ extern "C" {
 #if UCN_V6_CONFIG_QOS_INFLIGHT < 1U || UCN_V6_CONFIG_QOS_INFLIGHT > 255U
 #error "UCN_V6_CONFIG_QOS_INFLIGHT must be 1..255"
 #endif
+#if UCN_V6_CONFIG_TRANSFER_MAX_CLASS > 8U
+#error "UCN_V6_CONFIG_TRANSFER_MAX_CLASS must be 0..8"
+#endif
+#if UCN_V6_CONFIG_TRANSFER_TX_SLOTS < 1U || \
+    UCN_V6_CONFIG_TRANSFER_TX_SLOTS > 255U
+#error "UCN_V6_CONFIG_TRANSFER_TX_SLOTS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_TRANSFER_RX_SLOTS < 1U || \
+    UCN_V6_CONFIG_TRANSFER_RX_SLOTS > 255U
+#error "UCN_V6_CONFIG_TRANSFER_RX_SLOTS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_TRANSFER_RECENT < 1U || \
+    UCN_V6_CONFIG_TRANSFER_RECENT > 255U
+#error "UCN_V6_CONFIG_TRANSFER_RECENT must be 1..255"
+#endif
+#if UCN_V6_CONFIG_TRANSFER_WINDOW < 1U || \
+    UCN_V6_CONFIG_TRANSFER_WINDOW > 32U
+#error "UCN_V6_CONFIG_TRANSFER_WINDOW must be 1..32"
+#endif
+#if UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS < 1U || \
+    UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS > 255U
+#error "UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS < 1U || \
+    UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS > 255U
+#error "UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS must be 1..255"
+#endif
 
 #include "ucn/v6/ucn_v6_identity.h"
 
@@ -219,7 +267,8 @@ enum {
      (uint32_t)UCN_V6_FEATURE_MESSAGE |                                  \
      (uint32_t)UCN_V6_FEATURE_SECURITY |                                \
      (uint32_t)UCN_V6_FEATURE_CAPABILITY |                              \
-     (uint32_t)UCN_V6_FEATURE_ROUTE)
+     (uint32_t)UCN_V6_FEATURE_ROUTE |                                   \
+     (uint32_t)UCN_V6_FEATURE_TRANSFER)
 
 #define UCN_V6_COMPILED_LAYOUT_HASH                                        \
     (UINT64_C(0xD65A000100000000) ^                                       \
@@ -277,7 +326,41 @@ enum {
      ((uint64_t)UCN_V6_CONFIG_QOS_FLOW_SLOTS *                              \
       UINT64_C(0x8D58AC26AFE12E47)) ^                                      \
      ((uint64_t)UCN_V6_CONFIG_QOS_INFLIGHT *                                \
-      UINT64_C(0x9C06FAF4D023E3AB)))
+      UINT64_C(0x9C06FAF4D023E3AB)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_TRANSFER_MAX_CLASS *                          \
+      UINT64_C(0xA0761D6478BD642F)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_TRANSFER_TX_SLOTS *                           \
+      UINT64_C(0xE7037ED1A0B428DB)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_TRANSFER_RX_SLOTS *                           \
+      UINT64_C(0x8EBC6AF09C88C6E3)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_TRANSFER_RECENT *                             \
+      UINT64_C(0x589965CC75374CC3)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_TRANSFER_WINDOW *                             \
+      UINT64_C(0x1D8E4E27C47D124F)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS *                       \
+      UINT64_C(0xEB44ACCAB455D165)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS *                \
+      UINT64_C(0xF1357AEA2E62A9C5)))
+
+#if UCN_V6_CONFIG_TRANSFER_MAX_CLASS == 0U
+#define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 32U
+#elif UCN_V6_CONFIG_TRANSFER_MAX_CLASS == 1U
+#define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 64U
+#elif UCN_V6_CONFIG_TRANSFER_MAX_CLASS == 2U
+#define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 128U
+#elif UCN_V6_CONFIG_TRANSFER_MAX_CLASS == 3U
+#define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 256U
+#elif UCN_V6_CONFIG_TRANSFER_MAX_CLASS == 4U
+#define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 512U
+#elif UCN_V6_CONFIG_TRANSFER_MAX_CLASS == 5U
+#define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 1024U
+#elif UCN_V6_CONFIG_TRANSFER_MAX_CLASS == 6U
+#define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 2048U
+#elif UCN_V6_CONFIG_TRANSFER_MAX_CLASS == 7U
+#define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 4096U
+#else
+#define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 8192U
+#endif
 
 #define UCN_V6_OPERATION_ID_ALLOCATOR_STORAGE_BYTES ((size_t)256U)
 #define UCN_V6_PROTOCOL_OWNER_STORAGE_BYTES ((size_t)1024U)
@@ -308,6 +391,14 @@ enum {
                   256U +                                                  \
               UCN_V6_CONFIG_QOS_FLOW_SLOTS * 256U +                      \
               UCN_V6_CONFIG_QOS_INFLIGHT * 64U))
+#define UCN_V6_TRANSFER_OWNER_STORAGE_BYTES                               \
+    ((size_t)(4096U +                                                     \
+              UCN_V6_CONFIG_TRANSFER_TX_SLOTS * 4096U +                  \
+              UCN_V6_CONFIG_TRANSFER_RX_SLOTS *                          \
+                  (UCN_V6_TRANSFER_MAX_MESSAGE_BYTES + 4096U) +          \
+              UCN_V6_CONFIG_TRANSFER_RECENT * 256U +                     \
+              UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS * 512U +               \
+              UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS * 128U))
 
 #define UCN_V6_DECLARE_STORAGE_TYPE(name_, bytes_) \
     typedef union name_ {                         \
@@ -349,6 +440,13 @@ typedef struct ucn_v6_feature_manifest {
     uint16_t qos_q3_depth;
     uint16_t qos_flow_slots;
     uint16_t qos_inflight;
+    uint16_t transfer_max_class;
+    uint16_t transfer_tx_slots;
+    uint16_t transfer_rx_slots;
+    uint16_t transfer_recent;
+    uint16_t transfer_window;
+    uint16_t transfer_credit_links;
+    uint16_t transfer_credit_reservations;
 } ucn_v6_feature_manifest_t;
 
 /* EN: Returns the one build-time feature and storage manifest.

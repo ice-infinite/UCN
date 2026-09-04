@@ -48,6 +48,14 @@ static ucn_v6_feature_manifest_t header_manifest(void)
     value.qos_q3_depth = UCN_V6_CONFIG_QOS_Q3_DEPTH;
     value.qos_flow_slots = UCN_V6_CONFIG_QOS_FLOW_SLOTS;
     value.qos_inflight = UCN_V6_CONFIG_QOS_INFLIGHT;
+    value.transfer_max_class = UCN_V6_CONFIG_TRANSFER_MAX_CLASS;
+    value.transfer_tx_slots = UCN_V6_CONFIG_TRANSFER_TX_SLOTS;
+    value.transfer_rx_slots = UCN_V6_CONFIG_TRANSFER_RX_SLOTS;
+    value.transfer_recent = UCN_V6_CONFIG_TRANSFER_RECENT;
+    value.transfer_window = UCN_V6_CONFIG_TRANSFER_WINDOW;
+    value.transfer_credit_links = UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS;
+    value.transfer_credit_reservations =
+        UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS;
     return value;
 }
 

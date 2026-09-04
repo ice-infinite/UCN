@@ -34,7 +34,14 @@ static const ucn_v6_feature_manifest_t compiled_manifest = {
     UCN_V6_CONFIG_QOS_Q2_DEPTH,
     UCN_V6_CONFIG_QOS_Q3_DEPTH,
     UCN_V6_CONFIG_QOS_FLOW_SLOTS,
-    UCN_V6_CONFIG_QOS_INFLIGHT
+    UCN_V6_CONFIG_QOS_INFLIGHT,
+    UCN_V6_CONFIG_TRANSFER_MAX_CLASS,
+    UCN_V6_CONFIG_TRANSFER_TX_SLOTS,
+    UCN_V6_CONFIG_TRANSFER_RX_SLOTS,
+    UCN_V6_CONFIG_TRANSFER_RECENT,
+    UCN_V6_CONFIG_TRANSFER_WINDOW,
+    UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS,
+    UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS
 };
 
 const ucn_v6_feature_manifest_t *ucn_v6_compiled_manifest(void)
@@ -85,7 +92,16 @@ ucn_v6_result_t ucn_v6_manifest_validate_exact(
            manifest->qos_q2_depth == expected->qos_q2_depth &&
            manifest->qos_q3_depth == expected->qos_q3_depth &&
            manifest->qos_flow_slots == expected->qos_flow_slots &&
-           manifest->qos_inflight == expected->qos_inflight ?
+           manifest->qos_inflight == expected->qos_inflight &&
+           manifest->transfer_max_class == expected->transfer_max_class &&
+           manifest->transfer_tx_slots == expected->transfer_tx_slots &&
+           manifest->transfer_rx_slots == expected->transfer_rx_slots &&
+           manifest->transfer_recent == expected->transfer_recent &&
+           manifest->transfer_window == expected->transfer_window &&
+           manifest->transfer_credit_links ==
+               expected->transfer_credit_links &&
+           manifest->transfer_credit_reservations ==
+               expected->transfer_credit_reservations ?
                UCN_V6_OK : UCN_V6_ERR_CONFIG;
 }
 
