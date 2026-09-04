@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "ucn/v6/ucn_v6_bootstrap.h"
+#include "ucn/v6/ucn_v6_config.h"
 
 #define CHECK(condition)                                                        \
     do {                                                                        \
@@ -19,7 +20,8 @@ typedef struct fake_store {
     bool fail_next;
     bool reenter_init;
     ucn_v6_result_t reenter_result;
-    ucn_v6_identity_authority_t *reenter_authority;
+    void *reenter_storage;
+    size_t reenter_storage_bytes;
     const ucn_v6_identity_store_ops_t *reenter_ops;
     ucn_v6_callback_gate_t *reenter_gate;
 } fake_store_t;
@@ -51,10 +53,12 @@ static ucn_v6_result_t persist_epoch(
     CHECK(epoch != NULL);
     ++store->epoch_calls;
     if (store->reenter_init) {
+        ucn_v6_identity_authority_t *reentered = NULL;
         store->reenter_init = false;
-        store->reenter_result = ucn_v6_identity_authority_init(
-            store->reenter_authority, 7U, store->reenter_ops,
-            store->reenter_gate);
+        store->reenter_result = ucn_v6_identity_authority_init_in_place(
+            store->reenter_storage, store->reenter_storage_bytes,
+            ucn_v6_compiled_manifest(), 7U, store->reenter_ops,
+            store->reenter_gate, &reentered);
     }
     return fake_result(store);
 }
@@ -194,7 +198,9 @@ static int test_authority_persist_before_publish(void)
 {
     fake_store_t store;
     ucn_v6_identity_store_ops_t ops;
-    ucn_v6_identity_authority_t authority;
+    ucn_v6_identity_authority_storage_t authority_storage;
+    ucn_v6_identity_authority_t *authority = NULL;
+    ucn_v6_identity_authority_view_t authority_view;
     ucn_v6_callback_gate_t gate;
     ucn_v6_authority_epoch_t epoch;
     ucn_v6_binding_certificate_t certificate;
@@ -211,16 +217,21 @@ static int test_authority_persist_before_publish(void)
     ops.persist_group_high_water = persist_group;
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, fake_gate_lock,
                                     fake_gate_unlock) == UCN_V6_OK);
-    CHECK(ucn_v6_identity_authority_init(&authority, 7U, &ops, &gate) ==
-          UCN_V6_OK);
+    CHECK(ucn_v6_identity_authority_init_in_place(
+              authority_storage.bytes, sizeof(authority_storage),
+              ucn_v6_compiled_manifest(), 7U, &ops, &gate,
+              &authority) == UCN_V6_OK);
     epoch = authority_epoch(1U);
     store.reenter_init = true;
-    store.reenter_authority = &authority;
+    store.reenter_storage = authority_storage.bytes;
+    store.reenter_storage_bytes = sizeof(authority_storage);
     store.reenter_ops = &ops;
     store.reenter_gate = &gate;
     CHECK(ucn_v6_identity_authority_install_epoch(
-              &authority, &epoch, UINT64_C(1000000)) == UCN_V6_OK);
-    CHECK(store.epoch_calls == 1U && authority.epoch_valid);
+              authority, &epoch, UINT64_C(1000000)) == UCN_V6_OK);
+    CHECK(ucn_v6_identity_authority_copy_view(
+              authority, &authority_view) == UCN_V6_OK);
+    CHECK(store.epoch_calls == 1U && authority_view.epoch_valid);
     CHECK(store.reenter_result == UCN_V6_ERR_STATE);
 
     fill_bytes(lease_id, sizeof(lease_id), 0xC0U);
@@ -228,48 +239,117 @@ static int test_authority_persist_before_publish(void)
     certificate_before = certificate;
     store.fail_next = true;
     CHECK(ucn_v6_identity_authority_allocate_binding(
-              &authority, 10U, 9U, &device, UCN_V6_ADDRESS_LEASED,
+              authority, 10U, 9U, &device, UCN_V6_ADDRESS_LEASED,
               lease_id, UINT64_C(500000), &certificate) == UCN_V6_ERR_STATE);
     CHECK(memcmp(&certificate, &certificate_before, sizeof(certificate)) == 0);
-    CHECK(authority.faulted);
-    CHECK(!authority.bindings[0].occupied);
+    CHECK(ucn_v6_identity_authority_copy_view(
+              authority, &authority_view) == UCN_V6_OK);
+    CHECK(authority_view.faulted);
+    CHECK(authority_view.occupied_bindings == 0U);
 
     memset(&store, 0, sizeof(store));
     ops.context = &store;
-    CHECK(ucn_v6_identity_authority_init(&authority, 7U, &ops, &gate) ==
-          UCN_V6_OK);
+    CHECK(ucn_v6_identity_authority_init_in_place(
+              authority_storage.bytes, sizeof(authority_storage),
+              ucn_v6_compiled_manifest(), 7U, &ops, &gate,
+              &authority) == UCN_V6_OK);
     CHECK(ucn_v6_identity_authority_install_epoch(
-              &authority, &epoch, UINT64_C(1000000)) == UCN_V6_OK);
+              authority, &epoch, UINT64_C(1000000)) == UCN_V6_OK);
     CHECK(ucn_v6_identity_authority_allocate_binding(
-              &authority, 10U, 9U, &device, UCN_V6_ADDRESS_SELF_PROPOSED,
+              authority, 10U, 9U, &device, UCN_V6_ADDRESS_SELF_PROPOSED,
               lease_id, UINT64_C(500000), &certificate) == UCN_V6_OK);
     CHECK(certificate.binding.realm_id == 7U);
     CHECK(certificate.binding.binding_generation == 1U);
     CHECK(ucn_v6_identity_authority_allocate_binding(
-              &authority, 11U, 9U, &device, UCN_V6_ADDRESS_LEASED,
+              authority, 11U, 9U, &device, UCN_V6_ADDRESS_LEASED,
               lease_id, UINT64_C(500000), &certificate) == UCN_V6_ERR_STATE);
     CHECK(ucn_v6_identity_authority_retire_binding(
-              &authority, 12U, 9U, 1U) == UCN_V6_OK);
+              authority, 12U, 9U, 1U) == UCN_V6_OK);
     lease_id[0] ^= 0x55U;
     CHECK(ucn_v6_identity_authority_allocate_binding(
-              &authority, 13U, 9U, &device, UCN_V6_ADDRESS_LEASED,
+              authority, 13U, 9U, &device, UCN_V6_ADDRESS_LEASED,
               lease_id, UINT64_C(500000), &certificate) == UCN_V6_OK);
     CHECK(certificate.binding.binding_generation == 2U);
 
     CHECK(ucn_v6_identity_authority_allocate_dynamic_group(
-              &authority, 14U, &group_id) == UCN_V6_OK);
+              authority, 14U, &group_id) == UCN_V6_OK);
     CHECK(group_id == 1U);
     CHECK(ucn_v6_identity_authority_retire_dynamic_group(
-              &authority, group_id) == UCN_V6_OK);
+              authority, group_id) == UCN_V6_OK);
     CHECK(ucn_v6_identity_authority_allocate_dynamic_group(
-              &authority, 15U, &group_id) == UCN_V6_OK);
+              authority, 15U, &group_id) == UCN_V6_OK);
     CHECK(group_id == 2U);
+    return 0;
+}
+
+static int test_opaque_storage_preflight_and_corruption(void)
+{
+    fake_store_t store;
+    ucn_v6_identity_store_ops_t ops;
+    ucn_v6_callback_gate_t gate;
+    ucn_v6_identity_authority_storage_t authority_storage;
+    ucn_v6_identity_authority_storage_t authority_before;
+    ucn_v6_bootstrap_owner_storage_t bootstrap_storage;
+    ucn_v6_bootstrap_owner_storage_t bootstrap_before;
+    ucn_v6_feature_manifest_t bad_manifest = *ucn_v6_compiled_manifest();
+    ucn_v6_identity_authority_t *authority = NULL;
+    ucn_v6_bootstrap_owner_t *owner = NULL;
+    ucn_v6_identity_authority_view_t view;
+    ucn_v6_identity_authority_view_t view_before;
+    ucn_v6_bootstrap_config_t config = {
+        4U, 2U, 4U, 2U, UINT64_C(3000000)
+    };
+
+    memset(&store, 0, sizeof(store));
+    memset(&ops, 0, sizeof(ops));
+    ops.context = &store;
+    ops.persist_authority_epoch = persist_epoch;
+    ops.persist_binding_slot = persist_binding;
+    ops.persist_group_high_water = persist_group;
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, fake_gate_lock,
+                                    fake_gate_unlock) == UCN_V6_OK);
+    bad_manifest.layout_hash ^= UINT64_C(1);
+    memset(&authority_storage, 0xA5, sizeof(authority_storage));
+    authority_before = authority_storage;
+    CHECK(ucn_v6_identity_authority_init_in_place(
+              authority_storage.bytes, sizeof(authority_storage),
+              &bad_manifest, 7U, &ops, &gate,
+              &authority) == UCN_V6_ERR_CONFIG);
+    CHECK(authority == NULL);
+    CHECK(memcmp(&authority_storage, &authority_before,
+                 sizeof(authority_storage)) == 0);
+    CHECK(ucn_v6_identity_authority_init_in_place(
+              authority_storage.bytes + 1U, sizeof(authority_storage) - 1U,
+              ucn_v6_compiled_manifest(), 7U, &ops, &gate,
+              &authority) == UCN_V6_ERR_CONFIG);
+    CHECK(memcmp(&authority_storage, &authority_before,
+                 sizeof(authority_storage)) == 0);
+    CHECK(ucn_v6_identity_authority_init_in_place(
+              authority_storage.bytes, sizeof(authority_storage),
+              ucn_v6_compiled_manifest(), 7U, &ops, &gate,
+              &authority) == UCN_V6_OK);
+    memset(&view, 0x3C, sizeof(view));
+    view_before = view;
+    authority_storage.bytes[0] ^= 1U;
+    CHECK(ucn_v6_identity_authority_copy_view(
+              authority, &view) == UCN_V6_ERR_ARGUMENT);
+    CHECK(memcmp(&view, &view_before, sizeof(view)) == 0);
+
+    memset(&bootstrap_storage, 0x5A, sizeof(bootstrap_storage));
+    bootstrap_before = bootstrap_storage;
+    CHECK(ucn_v6_bootstrap_owner_init_in_place(
+              bootstrap_storage.bytes, sizeof(bootstrap_storage),
+              &bad_manifest, &config, &owner) == UCN_V6_ERR_CONFIG);
+    CHECK(owner == NULL);
+    CHECK(memcmp(&bootstrap_storage, &bootstrap_before,
+                 sizeof(bootstrap_storage)) == 0);
     return 0;
 }
 
 static int test_bootstrap_resource_and_state_contract(void)
 {
-    ucn_v6_bootstrap_owner_t owner;
+    ucn_v6_bootstrap_owner_storage_t owner_storage;
+    ucn_v6_bootstrap_owner_t *owner = NULL;
     ucn_v6_bootstrap_config_t config = {
         4U, 2U, 4U, 2U, UINT64_C(3000000)
     };
@@ -280,107 +360,110 @@ static int test_bootstrap_resource_and_state_contract(void)
     ucn_v6_bootstrap_pending_t before;
     ucn_v6_binding_key_t binding = { UINT32_C(0x10203040), 7U, 3U };
 
-    CHECK(ucn_v6_bootstrap_owner_init(&owner, &config) == UCN_V6_OK);
+    CHECK(ucn_v6_bootstrap_owner_init_in_place(
+              owner_storage.bytes, sizeof(owner_storage),
+              ucn_v6_compiled_manifest(), &config, &owner) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              &owner, 1U, 0U, 32U, 33U) == UCN_V6_ERR_ARGUMENT);
+              owner, 1U, 0U, 32U, 33U) == UCN_V6_ERR_ARGUMENT);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              &owner, 1U, 0U, 32U, 32U) == UCN_V6_OK);
+              owner, 1U, 0U, 32U, 32U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              &owner, 1U, 1U, 32U, 32U) == UCN_V6_OK);
+              owner, 1U, 1U, 32U, 32U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              &owner, 1U, 2U, 32U, 32U) == UCN_V6_OK);
+              owner, 1U, 2U, 32U, 32U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              &owner, 1U, 3U, 32U, 32U) == UCN_V6_OK);
+              owner, 1U, 3U, 32U, 32U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              &owner, 1U, 4U, 32U, 32U) == UCN_V6_ERR_ACCESS);
+              owner, 1U, 4U, 32U, 32U) == UCN_V6_ERR_ACCESS);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              &owner, 1U, UINT64_C(1000000), 32U, 32U) == UCN_V6_OK);
+              owner, 1U, UINT64_C(1000000), 32U, 32U) == UCN_V6_OK);
 
     CHECK(ucn_v6_bootstrap_open_after_cookie(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
               NULL, false, 10U) == UCN_V6_ERR_SECURITY);
     CHECK(ucn_v6_bootstrap_copy_pending(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key,
               &pending) == UCN_V6_ERR_NOT_FOUND);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
               NULL, true, 10U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_copy_pending(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key,
               &pending) == UCN_V6_OK);
     CHECK(pending.deadline_us == UINT64_C(3000010));
     before = pending;
     CHECK(ucn_v6_bootstrap_open_after_cookie(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
               NULL, true, 1000U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_copy_pending(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key,
               &pending) == UCN_V6_OK);
     CHECK(memcmp(&pending, &before, sizeof(pending)) == 0);
 
     conflict = value;
     conflict.proposed_address = 8U;
     CHECK(ucn_v6_bootstrap_open_after_cookie(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &conflict,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &conflict,
               NULL, true, before.deadline_us) == UCN_V6_ERR_REPLAY);
     CHECK(ucn_v6_bootstrap_copy_pending(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key,
               &pending) == UCN_V6_OK);
     CHECK(memcmp(&pending, &before, sizeof(pending)) == 0);
 
     CHECK(ucn_v6_bootstrap_advance(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
               UCN_V6_BOOTSTRAP_EVENT_DEVICE_PROOF, true,
               20U) == UCN_V6_ERR_STATE);
     CHECK(ucn_v6_bootstrap_advance(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
               UCN_V6_BOOTSTRAP_EVENT_AUTHORITY_PROOF, false,
               20U) == UCN_V6_ERR_SECURITY);
     CHECK(ucn_v6_bootstrap_advance(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
               UCN_V6_BOOTSTRAP_EVENT_AUTHORITY_PROOF, true, 20U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_advance(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
               UCN_V6_BOOTSTRAP_EVENT_DEVICE_PROOF, true, 21U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_advance(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
               UCN_V6_BOOTSTRAP_EVENT_ADDRESS_OFFER, true, 22U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_advance(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
               UCN_V6_BOOTSTRAP_EVENT_DEVICE_COMMIT, true, 23U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_advance(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
               UCN_V6_BOOTSTRAP_EVENT_FINAL_DURABLE, true, 24U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_copy_pending(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key,
               &pending) == UCN_V6_OK);
     CHECK(pending.phase == UCN_V6_BOOTSTRAP_FINAL_DURABLE);
-    CHECK(ucn_v6_bootstrap_expire(&owner, pending.deadline_us - 1U) == 0U);
-    CHECK(ucn_v6_bootstrap_expire(&owner, pending.deadline_us) == 1U);
+    CHECK(ucn_v6_bootstrap_expire(owner, pending.deadline_us - 1U) == 0U);
+    CHECK(ucn_v6_bootstrap_expire(owner, pending.deadline_us) == 1U);
 
     value = transcript(UINT64_C(200));
     key = bootstrap_key(&value, 2U, 1U);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &value,
+              owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &value,
               NULL, true, 30U) == UCN_V6_ERR_STATE);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &value,
+              owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &value,
               &binding, true, 30U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_copy_pending(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key,
+              owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key,
               &pending) == UCN_V6_OK);
     CHECK(pending.existing_binding.binding_generation == 3U);
-    CHECK(ucn_v6_bootstrap_expire(&owner, pending.deadline_us - 1U) == 0U);
-    CHECK(ucn_v6_bootstrap_expire(&owner, pending.deadline_us) == 1U);
+    CHECK(ucn_v6_bootstrap_expire(owner, pending.deadline_us - 1U) == 0U);
+    CHECK(ucn_v6_bootstrap_expire(owner, pending.deadline_us) == 1U);
     CHECK(ucn_v6_bootstrap_copy_pending(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key,
+              owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key,
               &pending) == UCN_V6_ERR_NOT_FOUND);
     return 0;
 }
 
 static int test_bootstrap_cross_flow_capacity_contract(void)
 {
-    ucn_v6_bootstrap_owner_t owner;
+    ucn_v6_bootstrap_owner_storage_t owner_storage;
+    ucn_v6_bootstrap_owner_t *owner = NULL;
     ucn_v6_bootstrap_config_t config = {
         4U, 2U, 4U, 2U, UINT64_C(3000000)
     };
@@ -394,39 +477,41 @@ static int test_bootstrap_cross_flow_capacity_contract(void)
     ucn_v6_bootstrap_key_t key;
     ucn_v6_binding_key_t binding = { UINT32_C(0x10203040), 7U, 3U };
 
-    CHECK(ucn_v6_bootstrap_owner_init(&owner, &config) == UCN_V6_OK);
+    CHECK(ucn_v6_bootstrap_owner_init_in_place(
+              owner_storage.bytes, sizeof(owner_storage),
+              ucn_v6_compiled_manifest(), &config, &owner) == UCN_V6_OK);
     key = bootstrap_key(&join_a, 1U, 1U);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &join_a,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &join_a,
               NULL, true, 0U) == UCN_V6_OK);
 
     /* JOIN and REAUTH use separate tables but share the unauthenticated-peer
      * quota. / JOIN 与 REAUTH 分表，但共享未认证 Peer 配额。 */
     key = bootstrap_key(&reauth_a, 1U, 1U);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &reauth_a,
+              owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &reauth_a,
               &binding, true, 1U) == UCN_V6_ERR_NO_SPACE);
 
     key = bootstrap_key(&reauth_b, 1U, 2U);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &reauth_b,
+              owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &reauth_b,
               &binding, true, 2U) == UCN_V6_OK);
     key = bootstrap_key(&join_b, 1U, 3U);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &join_b,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &join_b,
               NULL, true, 3U) == UCN_V6_ERR_NO_SPACE);
 
     key = bootstrap_key(&join_c, 2U, 3U);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &join_c,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &join_c,
               NULL, true, 4U) == UCN_V6_OK);
     key = bootstrap_key(&join_d, 3U, 4U);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &join_d,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &join_d,
               NULL, true, 5U) == UCN_V6_OK);
     key = bootstrap_key(&join_e, 4U, 5U);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
-              &owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &join_e,
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &join_e,
               NULL, true, 6U) == UCN_V6_ERR_NO_SPACE);
     return 0;
 }
@@ -435,6 +520,7 @@ int main(void)
 {
     CHECK(test_identity_and_deadline_contract() == 0);
     CHECK(test_authority_persist_before_publish() == 0);
+    CHECK(test_opaque_storage_preflight_and_corruption() == 0);
     CHECK(test_bootstrap_resource_and_state_contract() == 0);
     CHECK(test_bootstrap_cross_flow_capacity_contract() == 0);
     puts("ucn v6 identity/bootstrap tests passed");

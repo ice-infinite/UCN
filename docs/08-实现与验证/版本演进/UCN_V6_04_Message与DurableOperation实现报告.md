@@ -102,7 +102,8 @@ submit 失败、reload 失败、全零/坏 Schema、字段冲突或不一致回�
 
 ## 7. 尚未声称完成的范围
 
-- V6-05 才冻结最终 opaque storage、Record 字节布局、双槽 Flash 和 Layout/Manifest Hash；
+- V6-05 冻结 opaque storage 与 Layout/Manifest；Record 字节布局、双槽 Flash 和真实恢复
+  仍由 V6-07/V6-13 完成；
 - V6-07 才提供真实 32 B 密码 Digest、E2E Principal、ACL、认证 ACK 与 Replay 证明；
 - 本阶段不执行外部业务副作用，也不声称任意执行器具有 exactly-once 能力；
 - 本阶段未接生产 RX/TX，不代表真实 Flash、掉电、磨损或 MCU 资源已经验证。

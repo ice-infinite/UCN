@@ -1,6 +1,21 @@
-#include "ucn/v6/ucn_v6_bootstrap.h"
+#include "../internal/ucn_v6_bootstrap_private.h"
+
+#include "ucn/v6/ucn_v6_config.h"
 
 #include <string.h>
+
+typedef char ucn_v6_bootstrap_storage_size_check[
+    sizeof(ucn_v6_bootstrap_owner_t) <= UCN_V6_BOOTSTRAP_OWNER_STORAGE_BYTES ?
+        1 : -1];
+
+static bool owner_is_valid(const ucn_v6_bootstrap_owner_t *owner)
+{
+    return owner != NULL && owner->initialized &&
+           owner->magic == UCN_V6_BOOTSTRAP_OWNER_MAGIC &&
+           owner->schema == UCN_V6_STORAGE_LAYOUT &&
+           owner->layout_hash == UCN_V6_COMPILED_LAYOUT_HASH &&
+           owner->canary == UCN_V6_BOOTSTRAP_OWNER_CANARY;
+}
 
 static bool principal_equal(
     const ucn_v6_principal_t *left,
@@ -213,11 +228,17 @@ static void pending_resource_usage(
     }
 }
 
-ucn_v6_result_t ucn_v6_bootstrap_owner_init(
-    ucn_v6_bootstrap_owner_t *owner,
-    const ucn_v6_bootstrap_config_t *config)
+ucn_v6_result_t ucn_v6_bootstrap_owner_init_in_place(
+    void *storage,
+    size_t storage_bytes,
+    const struct ucn_v6_feature_manifest *manifest,
+    const ucn_v6_bootstrap_config_t *config,
+    ucn_v6_bootstrap_owner_t **owner_out)
 {
-    if (owner == NULL || config == NULL || config->max_pending == 0U ||
+    ucn_v6_bootstrap_owner_t *owner;
+    ucn_v6_result_t result;
+
+    if (owner_out == NULL || config == NULL || config->max_pending == 0U ||
         config->max_pending > UCN_V6_BOOTSTRAP_MAX_PENDING ||
         config->max_pending_per_link == 0U ||
         config->max_pending_per_link > config->max_pending ||
@@ -225,9 +246,26 @@ ucn_v6_result_t ucn_v6_bootstrap_owner_init(
         config->pending_timeout_us == 0U) {
         return UCN_V6_ERR_CONFIG;
     }
+    result = ucn_v6_manifest_validate_exact(
+        (const ucn_v6_feature_manifest_t *)manifest);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    result = ucn_v6_storage_validate(storage, storage_bytes,
+                                     sizeof(*owner),
+                                     UCN_V6_STORAGE_ALIGNMENT);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    owner = (ucn_v6_bootstrap_owner_t *)storage;
     memset(owner, 0, sizeof(*owner));
+    owner->magic = UCN_V6_BOOTSTRAP_OWNER_MAGIC;
+    owner->schema = UCN_V6_STORAGE_LAYOUT;
+    owner->layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
     owner->config = *config;
     owner->initialized = true;
+    owner->canary = UCN_V6_BOOTSTRAP_OWNER_CANARY;
+    *owner_out = owner;
     return UCN_V6_OK;
 }
 
@@ -243,7 +281,7 @@ ucn_v6_result_t ucn_v6_bootstrap_admit_initial_hello(
     uint64_t missing_tokens;
     uint64_t seconds_to_full;
 
-    if (owner == NULL || !owner->initialized ||
+    if (!owner_is_valid(owner) ||
         ingress_link_generation == 0U || request_bytes == 0U ||
         response_bytes > request_bytes) {
         return UCN_V6_ERR_ARGUMENT;
@@ -309,7 +347,7 @@ ucn_v6_result_t ucn_v6_bootstrap_open_after_cookie(
     ucn_v6_bootstrap_pending_t *empty = NULL;
     uint64_t deadline;
 
-    if (owner == NULL || !owner->initialized || !flow_is_valid(flow) ||
+    if (!owner_is_valid(owner) || !flow_is_valid(flow) ||
         !key_is_valid(key) || !transcript_is_valid(transcript) ||
         !cookie_verified ||
         !principal_equal(&key->identity_digest,
@@ -388,7 +426,7 @@ ucn_v6_result_t ucn_v6_bootstrap_advance(
     ucn_v6_bootstrap_pending_t *pending;
     ucn_v6_bootstrap_phase_t next_phase;
 
-    if (owner == NULL || !owner->initialized || !flow_is_valid(flow) ||
+    if (!owner_is_valid(owner) || !flow_is_valid(flow) ||
         !key_is_valid(key) || !transcript_is_valid(transcript)) {
         return UCN_V6_ERR_ARGUMENT;
     }
@@ -464,7 +502,7 @@ ucn_v6_result_t ucn_v6_bootstrap_copy_pending(
     const ucn_v6_bootstrap_pending_t *slots;
     size_t index;
 
-    if (owner == NULL || !owner->initialized || !flow_is_valid(flow) ||
+    if (!owner_is_valid(owner) || !flow_is_valid(flow) ||
         !key_is_valid(key) || pending == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
@@ -487,7 +525,7 @@ size_t ucn_v6_bootstrap_expire(
     size_t slot_index;
     size_t expired = 0U;
 
-    if (owner == NULL || !owner->initialized) {
+    if (!owner_is_valid(owner)) {
         return 0U;
     }
     arrays[0] = owner->join_pending;

@@ -7,8 +7,16 @@
 extern "C" {
 #endif
 
-#define UCN_V6_BOOTSTRAP_MAX_PENDING ((size_t)8U)
-#define UCN_V6_BOOTSTRAP_MAX_BUDGET_LINKS ((size_t)8U)
+#ifndef UCN_V6_CONFIG_BOOTSTRAP_PENDING
+#define UCN_V6_CONFIG_BOOTSTRAP_PENDING 8U
+#endif
+#ifndef UCN_V6_CONFIG_BOOTSTRAP_LINKS
+#define UCN_V6_CONFIG_BOOTSTRAP_LINKS 8U
+#endif
+#define UCN_V6_BOOTSTRAP_MAX_PENDING \
+    ((size_t)UCN_V6_CONFIG_BOOTSTRAP_PENDING)
+#define UCN_V6_BOOTSTRAP_MAX_BUDGET_LINKS \
+    ((size_t)UCN_V6_CONFIG_BOOTSTRAP_LINKS)
 
 typedef enum ucn_v6_bootstrap_flow {
     UCN_V6_BOOTSTRAP_FLOW_JOIN = 1,
@@ -82,13 +90,19 @@ typedef struct ucn_v6_bootstrap_config {
     uint64_t pending_timeout_us;
 } ucn_v6_bootstrap_config_t;
 
-typedef struct ucn_v6_bootstrap_owner {
-    ucn_v6_bootstrap_config_t config;
-    ucn_v6_bootstrap_pending_t join_pending[UCN_V6_BOOTSTRAP_MAX_PENDING];
-    ucn_v6_bootstrap_pending_t reauth_pending[UCN_V6_BOOTSTRAP_MAX_PENDING];
-    ucn_v6_bootstrap_link_budget_t budgets[UCN_V6_BOOTSTRAP_MAX_BUDGET_LINKS];
-    bool initialized;
-} ucn_v6_bootstrap_owner_t;
+typedef struct ucn_v6_bootstrap_owner ucn_v6_bootstrap_owner_t;
+#ifndef UCN_V6_BOOTSTRAP_OWNER_STORAGE_BYTES
+#define UCN_V6_BOOTSTRAP_OWNER_STORAGE_BYTES                           \
+    ((size_t)(512U + UCN_V6_CONFIG_BOOTSTRAP_PENDING * 2U * 256U +   \
+              UCN_V6_CONFIG_BOOTSTRAP_LINKS * 32U))
+#endif
+typedef union ucn_v6_bootstrap_owner_storage {
+    uint64_t alignment_u64;
+    void *alignment_pointer;
+    uint8_t bytes[UCN_V6_BOOTSTRAP_OWNER_STORAGE_BYTES];
+} ucn_v6_bootstrap_owner_storage_t;
+
+struct ucn_v6_feature_manifest;
 
 typedef enum ucn_v6_bootstrap_event {
     UCN_V6_BOOTSTRAP_EVENT_AUTHORITY_PROOF = 1,
@@ -101,9 +115,12 @@ typedef enum ucn_v6_bootstrap_event {
 
 /* EN: Initializes bounded JOIN and REAUTH state owned by one protocol task.
  * 中文：初始化由单一协议任务持有的有界 JOIN/REAUTH 状态。 */
-ucn_v6_result_t ucn_v6_bootstrap_owner_init(
-    ucn_v6_bootstrap_owner_t *owner,
-    const ucn_v6_bootstrap_config_t *config);
+ucn_v6_result_t ucn_v6_bootstrap_owner_init_in_place(
+    void *storage,
+    size_t storage_bytes,
+    const struct ucn_v6_feature_manifest *manifest,
+    const ucn_v6_bootstrap_config_t *config,
+    ucn_v6_bootstrap_owner_t **owner);
 /* EN: Applies the no-amplification and per-Link pre-auth token budget.
  * 中文：执行无放大与每 Link 认证前令牌预算。 */
 ucn_v6_result_t ucn_v6_bootstrap_admit_initial_hello(

@@ -1,4 +1,5 @@
 #include "ucn/v6/ucn_v6_message.h"
+#include "ucn/v6/ucn_v6_config.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -195,28 +196,92 @@ static int test_operation_id_reservation_survives_restart(void)
     fake_store_t store;
     ucn_v6_message_store_ops_t ops;
     ucn_v6_callback_gate_t gate;
-    ucn_v6_operation_id_allocator_t allocator;
-    ucn_v6_operation_id_allocator_t restarted;
+    ucn_v6_operation_id_allocator_storage_t allocator_storage;
+    ucn_v6_operation_id_allocator_storage_t restarted_storage;
+    ucn_v6_operation_id_allocator_t *allocator = NULL;
+    ucn_v6_operation_id_allocator_t *restarted = NULL;
     uint64_t id = 0U;
 
     memset(&store, 0, sizeof(store));
     ops = fake_ops(&store);
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
           UCN_V6_OK);
-    CHECK(ucn_v6_operation_id_allocator_init(&allocator, &ops, &gate, 4U) ==
-          UCN_V6_OK);
-    CHECK(ucn_v6_operation_id_take(&allocator, &id) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_id_allocator_init_in_place(
+              allocator_storage.bytes, sizeof(allocator_storage),
+              ucn_v6_compiled_manifest(), &ops, &gate, 4U,
+              &allocator) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_id_take(allocator, &id) == UCN_V6_OK);
     CHECK(id == 1U && store.operation_id_high_water == 4U);
-    CHECK(ucn_v6_operation_id_take(&allocator, &id) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_id_take(allocator, &id) == UCN_V6_OK);
     CHECK(id == 2U && store.high_water_submits == 1U);
-    CHECK(ucn_v6_operation_id_allocator_init(&restarted, &ops, &gate, 4U) ==
-          UCN_V6_OK);
-    CHECK(ucn_v6_operation_id_take(&restarted, &id) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_id_allocator_init_in_place(
+              restarted_storage.bytes, sizeof(restarted_storage),
+              ucn_v6_compiled_manifest(), &ops, &gate, 4U,
+              &restarted) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_id_take(restarted, &id) == UCN_V6_OK);
     CHECK(id == 5U && store.operation_id_high_water == 8U);
-    store.reenter_allocator = &restarted;
-    restarted.next_id = restarted.reserved_through + 1U;
-    CHECK(ucn_v6_operation_id_take(&restarted, &id) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_id_take(restarted, &id) == UCN_V6_OK && id == 6U);
+    CHECK(ucn_v6_operation_id_take(restarted, &id) == UCN_V6_OK && id == 7U);
+    CHECK(ucn_v6_operation_id_take(restarted, &id) == UCN_V6_OK && id == 8U);
+    store.reenter_allocator = restarted;
+    CHECK(ucn_v6_operation_id_take(restarted, &id) == UCN_V6_OK && id == 9U);
     CHECK(store.reenter_result == UCN_V6_ERR_STATE);
+    return 0;
+}
+
+static int test_message_opaque_storage_preflight(void)
+{
+    fake_store_t store;
+    ucn_v6_message_store_ops_t ops;
+    ucn_v6_callback_gate_t gate;
+    ucn_v6_feature_manifest_t bad_manifest = *ucn_v6_compiled_manifest();
+    ucn_v6_operation_id_allocator_storage_t allocator_storage;
+    ucn_v6_operation_id_allocator_storage_t allocator_before;
+    ucn_v6_operation_journal_storage_t journal_storage;
+    ucn_v6_operation_journal_storage_t journal_before;
+    ucn_v6_operation_id_allocator_t *allocator = NULL;
+    ucn_v6_operation_journal_t *journal = NULL;
+    uint64_t operation_id = UINT64_MAX;
+
+    memset(&store, 0, sizeof(store));
+    ops = fake_ops(&store);
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
+          UCN_V6_OK);
+    bad_manifest.layout_hash ^= UINT64_C(1);
+    memset(&allocator_storage, 0xA5, sizeof(allocator_storage));
+    allocator_before = allocator_storage;
+    CHECK(ucn_v6_operation_id_allocator_init_in_place(
+              allocator_storage.bytes, sizeof(allocator_storage),
+              &bad_manifest, &ops, &gate, 4U,
+              &allocator) == UCN_V6_ERR_CONFIG);
+    CHECK(allocator == NULL && store.high_water_loads == 0U);
+    CHECK(memcmp(&allocator_storage, &allocator_before,
+                 sizeof(allocator_storage)) == 0);
+    CHECK(ucn_v6_operation_id_allocator_init_in_place(
+              allocator_storage.bytes, 1U,
+              ucn_v6_compiled_manifest(), &ops, &gate, 4U,
+              &allocator) == UCN_V6_ERR_CONFIG);
+    CHECK(memcmp(&allocator_storage, &allocator_before,
+                 sizeof(allocator_storage)) == 0);
+
+    memset(&journal_storage, 0x5A, sizeof(journal_storage));
+    journal_before = journal_storage;
+    CHECK(ucn_v6_operation_journal_init_in_place(
+              journal_storage.bytes, sizeof(journal_storage),
+              &bad_manifest, &ops, &gate,
+              &journal) == UCN_V6_ERR_CONFIG);
+    CHECK(journal == NULL && store.loads == 0U);
+    CHECK(memcmp(&journal_storage, &journal_before,
+                 sizeof(journal_storage)) == 0);
+
+    CHECK(ucn_v6_operation_id_allocator_init_in_place(
+              allocator_storage.bytes, sizeof(allocator_storage),
+              ucn_v6_compiled_manifest(), &ops, &gate, 4U,
+              &allocator) == UCN_V6_OK);
+    allocator_storage.bytes[0] ^= 1U;
+    CHECK(ucn_v6_operation_id_take(
+              allocator, &operation_id) == UCN_V6_ERR_STATE);
+    CHECK(operation_id == UINT64_MAX);
     return 0;
 }
 
@@ -226,7 +291,8 @@ static int test_durable_journal_lifecycle_and_gc(void)
     fake_store_t store;
     ucn_v6_message_store_ops_t ops;
     ucn_v6_callback_gate_t gate;
-    ucn_v6_operation_journal_t journal;
+    ucn_v6_operation_journal_storage_t journal_storage;
+    ucn_v6_operation_journal_t *journal = NULL;
     ucn_v6_operation_key_t key = make_key(0x10U, 7U);
     ucn_v6_operation_slot_t slot;
     ucn_v6_operation_admission_t admission =
@@ -242,41 +308,44 @@ static int test_durable_journal_lifecycle_and_gc(void)
     ops = fake_ops(&store);
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
           UCN_V6_OK);
-    CHECK(ucn_v6_operation_journal_init(&journal, &ops, &gate) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_journal_init_in_place(
+              journal_storage.bytes, sizeof(journal_storage),
+              ucn_v6_compiled_manifest(), &ops, &gate,
+              &journal) == UCN_V6_OK);
     CHECK(ucn_v6_operation_prepare(
-              &journal, &key, 42U,
+              journal, &key, 42U,
               UCN_V6_ENDPOINT_DURABLE_AT_MOST_ONCE,
               request_digest, &admission) == UCN_V6_OK);
     CHECK(admission == UCN_V6_OPERATION_ADMISSION_NEW);
     CHECK(ucn_v6_operation_prepare(
-              &journal, &key, 42U,
+              journal, &key, 42U,
               UCN_V6_ENDPOINT_DURABLE_AT_MOST_ONCE,
               request_digest, &admission) == UCN_V6_OK);
     CHECK(admission == UCN_V6_OPERATION_ADMISSION_PREPARED);
     CHECK(ucn_v6_operation_prepare(
-              &journal, &key, 42U,
+              journal, &key, 42U,
               UCN_V6_ENDPOINT_DURABLE_AT_MOST_ONCE,
               other_digest, &admission) == UCN_V6_ERR_REPLAY);
-    CHECK(ucn_v6_operation_mark_executing(&journal, &key) == UCN_V6_OK);
-    CHECK(ucn_v6_operation_mark_executing(&journal, &key) ==
+    CHECK(ucn_v6_operation_mark_executing(journal, &key) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_mark_executing(journal, &key) ==
           UCN_V6_ERR_STATE);
     CHECK(ucn_v6_operation_commit_result(
-              &journal, &key, 0, result_bytes,
+              journal, &key, 0, result_bytes,
               (uint16_t)sizeof(result_bytes), result_digest) == UCN_V6_OK);
-    CHECK(ucn_v6_operation_copy_slot(&journal, &key, &slot) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_copy_slot(journal, &key, &slot) == UCN_V6_OK);
     CHECK(slot.phase == UCN_V6_OPERATION_PHASE_COMMITTED_RESULT);
     CHECK(memcmp(slot.result, result_bytes, sizeof(result_bytes)) == 0);
-    CHECK(ucn_v6_operation_tombstone_result(&journal, &key, false, true) ==
+    CHECK(ucn_v6_operation_tombstone_result(journal, &key, false, true) ==
           UCN_V6_ERR_ACCESS);
-    CHECK(ucn_v6_operation_tombstone_result(&journal, &key, true, true) ==
+    CHECK(ucn_v6_operation_tombstone_result(journal, &key, true, true) ==
           UCN_V6_OK);
-    CHECK(ucn_v6_operation_reclaim_tombstone(&journal, &key, 8U, false) ==
+    CHECK(ucn_v6_operation_reclaim_tombstone(journal, &key, 8U, false) ==
           UCN_V6_ERR_ACCESS);
-    CHECK(ucn_v6_operation_reclaim_tombstone(&journal, &key, 8U, true) ==
+    CHECK(ucn_v6_operation_reclaim_tombstone(journal, &key, 8U, true) ==
           UCN_V6_OK);
     admission = (ucn_v6_operation_admission_t)0;
     CHECK(ucn_v6_operation_prepare(
-              &journal, &key, 42U,
+              journal, &key, 42U,
               UCN_V6_ENDPOINT_DURABLE_AT_MOST_ONCE,
               request_digest, &admission) == UCN_V6_ERR_REPLAY);
     CHECK(admission == (ucn_v6_operation_admission_t)0);
@@ -288,8 +357,10 @@ static int test_reboot_moves_executing_to_in_doubt(void)
     fake_store_t store;
     ucn_v6_message_store_ops_t ops;
     ucn_v6_callback_gate_t gate;
-    ucn_v6_operation_journal_t journal;
-    ucn_v6_operation_journal_t restarted;
+    ucn_v6_operation_journal_storage_t journal_storage;
+    ucn_v6_operation_journal_storage_t restarted_storage;
+    ucn_v6_operation_journal_t *journal = NULL;
+    ucn_v6_operation_journal_t *restarted = NULL;
     ucn_v6_operation_key_t key = make_key(0x51U, 99U);
     ucn_v6_operation_slot_t slot;
     ucn_v6_operation_admission_t admission;
@@ -303,27 +374,32 @@ static int test_reboot_moves_executing_to_in_doubt(void)
     ops = fake_ops(&store);
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
           UCN_V6_OK);
-    CHECK(ucn_v6_operation_journal_init(&journal, &ops, &gate) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_journal_init_in_place(
+              journal_storage.bytes, sizeof(journal_storage),
+              ucn_v6_compiled_manifest(), &ops, &gate,
+              &journal) == UCN_V6_OK);
     CHECK(ucn_v6_operation_prepare(
-              &journal, &key, 8U,
+              journal, &key, 8U,
               UCN_V6_ENDPOINT_DURABLE_AT_MOST_ONCE,
               request_digest, &admission) == UCN_V6_OK);
-    CHECK(ucn_v6_operation_mark_executing(&journal, &key) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_mark_executing(journal, &key) == UCN_V6_OK);
     submits_before_restart = store.submits;
-    CHECK(ucn_v6_operation_journal_init(&restarted, &ops, &gate) ==
-          UCN_V6_OK);
+    CHECK(ucn_v6_operation_journal_init_in_place(
+              restarted_storage.bytes, sizeof(restarted_storage),
+              ucn_v6_compiled_manifest(), &ops, &gate,
+              &restarted) == UCN_V6_OK);
     CHECK(store.submits == submits_before_restart + 1U);
-    CHECK(ucn_v6_operation_copy_slot(&restarted, &key, &slot) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_copy_slot(restarted, &key, &slot) == UCN_V6_OK);
     CHECK(slot.phase == UCN_V6_OPERATION_PHASE_IN_DOUBT);
     CHECK(ucn_v6_operation_resolve_in_doubt(
-              &restarted, &key, false, false, -1, NULL, 0U,
+              restarted, &key, false, false, -1, NULL, 0U,
               terminal_digest) == UCN_V6_ERR_ACCESS);
-    CHECK(ucn_v6_operation_copy_slot(&restarted, &key, &slot) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_copy_slot(restarted, &key, &slot) == UCN_V6_OK);
     CHECK(slot.phase == UCN_V6_OPERATION_PHASE_IN_DOUBT);
     CHECK(ucn_v6_operation_resolve_in_doubt(
-              &restarted, &key, true, false, -1, NULL, 0U,
+              restarted, &key, true, false, -1, NULL, 0U,
               terminal_digest) == UCN_V6_OK);
-    CHECK(ucn_v6_operation_copy_slot(&restarted, &key, &slot) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_copy_slot(restarted, &key, &slot) == UCN_V6_OK);
     CHECK(slot.phase == UCN_V6_OPERATION_PHASE_TOMBSTONED);
     return 0;
 }
@@ -333,7 +409,8 @@ static int test_fixed_capacity_and_provider_reentrancy(void)
     fake_store_t store;
     ucn_v6_message_store_ops_t ops;
     ucn_v6_callback_gate_t gate;
-    ucn_v6_operation_journal_t journal;
+    ucn_v6_operation_journal_storage_t journal_storage;
+    ucn_v6_operation_journal_t *journal = NULL;
     ucn_v6_operation_key_t key;
     ucn_v6_operation_admission_t admission;
     uint8_t digest[UCN_V6_OPERATION_DIGEST_BYTES];
@@ -345,27 +422,30 @@ static int test_fixed_capacity_and_provider_reentrancy(void)
     ops = fake_ops(&store);
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
           UCN_V6_OK);
-    CHECK(ucn_v6_operation_journal_init(&journal, &ops, &gate) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_journal_init_in_place(
+              journal_storage.bytes, sizeof(journal_storage),
+              ucn_v6_compiled_manifest(), &ops, &gate,
+              &journal) == UCN_V6_OK);
     for (index = 0U; index < UCN_V6_OPERATION_JOURNAL_SLOTS; ++index) {
         key = make_key((uint8_t)(0x11U + index), index + 1U);
         CHECK(ucn_v6_operation_prepare(
-                  &journal, &key, 9U,
+                  journal, &key, 9U,
                   UCN_V6_ENDPOINT_DURABLE_AT_MOST_ONCE,
                   digest, &admission) == UCN_V6_OK);
     }
     key = make_key(0xE0U, 99U);
     submits_before = store.submits;
     CHECK(ucn_v6_operation_prepare(
-              &journal, &key, 9U,
+              journal, &key, 9U,
               UCN_V6_ENDPOINT_DURABLE_AT_MOST_ONCE,
               digest, &admission) == UCN_V6_ERR_NO_SPACE);
     CHECK(store.submits == submits_before);
 
-    store.reenter_journal = &journal;
+    store.reenter_journal = journal;
     store.reenter_key = make_key(0xF0U, 100U);
     memcpy(store.reenter_digest, digest, sizeof(digest));
     key = make_key(0x11U, 1U);
-    CHECK(ucn_v6_operation_abort_prepared(&journal, &key, -2, digest) ==
+    CHECK(ucn_v6_operation_abort_prepared(journal, &key, -2, digest) ==
           UCN_V6_OK);
     CHECK(store.reenter_result == UCN_V6_ERR_STATE);
     return 0;
@@ -376,37 +456,49 @@ static int test_invalid_record_and_store_failure_fail_closed(void)
     fake_store_t store;
     ucn_v6_message_store_ops_t ops;
     ucn_v6_callback_gate_t gate;
-    ucn_v6_operation_journal_t journal;
-    ucn_v6_operation_journal_t before;
+    ucn_v6_operation_journal_storage_t journal_storage;
+    ucn_v6_operation_journal_storage_t before_storage;
+    ucn_v6_operation_journal_t *journal = NULL;
+    ucn_v6_operation_journal_view_t before_view;
+    ucn_v6_operation_journal_view_t after_view;
     ucn_v6_operation_key_t key = make_key(0x91U, 1U);
     ucn_v6_operation_admission_t admission =
         (ucn_v6_operation_admission_t)0;
     uint8_t digest[UCN_V6_OPERATION_DIGEST_BYTES];
 
     memset(&store, 0, sizeof(store));
-    memset(&journal, 0xA5, sizeof(journal));
-    before = journal;
+    memset(&journal_storage, 0xA5, sizeof(journal_storage));
+    before_storage = journal_storage;
     fill_digest(digest, 0xA1U);
     ops = fake_ops(&store);
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
           UCN_V6_OK);
     store.has_journal = true;
-    CHECK(ucn_v6_operation_journal_init(&journal, &ops, &gate) ==
-          UCN_V6_ERR_STATE);
-    CHECK(memcmp(&journal, &before, sizeof(journal)) == 0);
+    CHECK(ucn_v6_operation_journal_init_in_place(
+              journal_storage.bytes, sizeof(journal_storage),
+              ucn_v6_compiled_manifest(), &ops, &gate,
+              &journal) == UCN_V6_ERR_STATE);
+    CHECK(memcmp(&journal_storage, &before_storage,
+                 sizeof(journal_storage)) == 0);
 
     memset(&store, 0, sizeof(store));
     ops = fake_ops(&store);
-    CHECK(ucn_v6_operation_journal_init(&journal, &ops, &gate) == UCN_V6_OK);
-    before = journal;
+    CHECK(ucn_v6_operation_journal_init_in_place(
+              journal_storage.bytes, sizeof(journal_storage),
+              ucn_v6_compiled_manifest(), &ops, &gate,
+              &journal) == UCN_V6_OK);
+    CHECK(ucn_v6_operation_journal_copy_view(
+              journal, &before_view) == UCN_V6_OK);
     store.fail_submit = true;
     CHECK(ucn_v6_operation_prepare(
-              &journal, &key, 12U,
+              journal, &key, 12U,
               UCN_V6_ENDPOINT_DURABLE_AT_MOST_ONCE,
               digest, &admission) == UCN_V6_ERR_STATE);
-    CHECK(journal.faulted);
-    CHECK(memcmp(&journal.committed, &before.committed,
-                 sizeof(journal.committed)) == 0);
+    CHECK(ucn_v6_operation_journal_copy_view(
+              journal, &after_view) == UCN_V6_OK);
+    CHECK(after_view.faulted);
+    CHECK(after_view.committed_generation == before_view.committed_generation);
+    CHECK(after_view.occupied_slots == before_view.occupied_slots);
     CHECK(!store.has_journal);
     CHECK(admission == (ucn_v6_operation_admission_t)0);
     return 0;
@@ -416,6 +508,7 @@ int main(void)
 {
     CHECK(test_message_axes_are_orthogonal() == 0);
     CHECK(test_operation_id_reservation_survives_restart() == 0);
+    CHECK(test_message_opaque_storage_preflight() == 0);
     CHECK(test_durable_journal_lifecycle_and_gc() == 0);
     CHECK(test_reboot_moves_executing_to_in_doubt() == 0);
     CHECK(test_fixed_capacity_and_provider_reentrancy() == 0);

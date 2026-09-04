@@ -1,4 +1,6 @@
-#include "ucn/v6/ucn_v6_identity.h"
+#include "../internal/ucn_v6_identity_private.h"
+
+#include "ucn/v6/ucn_v6_config.h"
 
 #include <limits.h>
 #include <string.h>
@@ -46,6 +48,20 @@ static bool authority_epoch_is_valid(const ucn_v6_authority_epoch_t *epoch)
            epoch->quorum_proven && epoch->durable;
 }
 
+typedef char ucn_v6_identity_storage_size_check[
+    sizeof(ucn_v6_identity_authority_t) <=
+            UCN_V6_IDENTITY_AUTHORITY_STORAGE_BYTES ? 1 : -1];
+
+static bool authority_storage_is_valid(
+    const ucn_v6_identity_authority_t *authority)
+{
+    return authority != NULL &&
+           authority->magic == UCN_V6_IDENTITY_AUTHORITY_MAGIC &&
+           authority->schema == UCN_V6_STORAGE_LAYOUT &&
+           authority->layout_hash == UCN_V6_COMPILED_LAYOUT_HASH &&
+           authority->canary == UCN_V6_IDENTITY_AUTHORITY_CANARY;
+}
+
 static bool authority_epoch_identity_equal(
     const ucn_v6_authority_epoch_t *left,
     const ucn_v6_authority_epoch_t *right)
@@ -85,7 +101,8 @@ static bool authority_can_write(
     const ucn_v6_identity_authority_t *authority,
     uint64_t now_us)
 {
-    return authority != NULL && authority->epoch_valid && !authority->faulted &&
+    return authority_storage_is_valid(authority) && authority->epoch_valid &&
+           !authority->faulted &&
            callback_gate_is_valid(authority->callback_gate) &&
            !ucn_v6_callback_gate_is_active(authority->callback_gate) &&
            authority->epoch.quorum_proven &&
@@ -285,28 +302,51 @@ ucn_v6_result_t ucn_v6_callback_gate_leave(
     return UCN_V6_OK;
 }
 
-ucn_v6_result_t ucn_v6_identity_authority_init(
-    ucn_v6_identity_authority_t *authority,
+ucn_v6_result_t ucn_v6_identity_authority_init_in_place(
+    void *storage,
+    size_t storage_bytes,
+    const struct ucn_v6_feature_manifest *manifest,
     uint32_t realm_id,
     const ucn_v6_identity_store_ops_t *store,
-    ucn_v6_callback_gate_t *callback_gate)
+    ucn_v6_callback_gate_t *callback_gate,
+    ucn_v6_identity_authority_t **authority_out)
 {
-    if (authority == NULL || realm_id == 0U || realm_id == UINT32_MAX ||
+    ucn_v6_identity_authority_t *authority;
+    ucn_v6_result_t result;
+
+    if (authority_out == NULL || realm_id == 0U || realm_id == UINT32_MAX ||
         store == NULL || store->persist_authority_epoch == NULL ||
         store->persist_binding_slot == NULL ||
         store->persist_group_high_water == NULL ||
         !callback_gate_is_valid(callback_gate)) {
         return UCN_V6_ERR_CONFIG;
     }
+    result = ucn_v6_manifest_validate_exact(
+        (const ucn_v6_feature_manifest_t *)manifest);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    result = ucn_v6_storage_validate(storage, storage_bytes,
+                                     sizeof(*authority),
+                                     UCN_V6_STORAGE_ALIGNMENT);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
     callback_gate->lock(callback_gate->context);
     if (callback_gate->active) {
         callback_gate->unlock(callback_gate->context);
         return UCN_V6_ERR_STATE;
     }
+    authority = (ucn_v6_identity_authority_t *)storage;
     memset(authority, 0, sizeof(*authority));
+    authority->magic = UCN_V6_IDENTITY_AUTHORITY_MAGIC;
+    authority->schema = UCN_V6_STORAGE_LAYOUT;
+    authority->layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
     authority->realm_id = realm_id;
     authority->store = *store;
     authority->callback_gate = callback_gate;
+    authority->canary = UCN_V6_IDENTITY_AUTHORITY_CANARY;
+    *authority_out = authority;
     callback_gate->unlock(callback_gate->context);
     return UCN_V6_OK;
 }
@@ -319,7 +359,7 @@ ucn_v6_result_t ucn_v6_identity_authority_install_epoch(
     uint32_t expected_generation;
     ucn_v6_result_t result;
 
-    if (authority == NULL || authority->realm_id == 0U ||
+    if (!authority_storage_is_valid(authority) || authority->realm_id == 0U ||
         authority->faulted || !callback_gate_is_valid(authority->callback_gate) ||
         ucn_v6_callback_gate_is_active(authority->callback_gate) ||
         !authority_epoch_is_valid(epoch) || local_lease_deadline_us == 0U) {
@@ -524,7 +564,7 @@ ucn_v6_result_t ucn_v6_identity_authority_retire_dynamic_group(
 {
     size_t index;
 
-    if (authority == NULL || group_id == 0U) {
+    if (!authority_storage_is_valid(authority) || group_id == 0U) {
         return UCN_V6_ERR_ARGUMENT;
     }
     for (index = 0U; index < UCN_V6_MAX_ACTIVE_GROUPS; ++index) {
@@ -534,4 +574,31 @@ ucn_v6_result_t ucn_v6_identity_authority_retire_dynamic_group(
         }
     }
     return UCN_V6_ERR_NOT_FOUND;
+}
+
+ucn_v6_result_t ucn_v6_identity_authority_copy_view(
+    const ucn_v6_identity_authority_t *authority,
+    ucn_v6_identity_authority_view_t *view)
+{
+    ucn_v6_identity_authority_view_t next;
+    size_t index;
+
+    if (!authority_storage_is_valid(authority) || view == NULL) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(&next, 0, sizeof(next));
+    next.realm_id = authority->realm_id;
+    next.epoch = authority->epoch;
+    next.local_lease_deadline_us = authority->local_lease_deadline_us;
+    next.dynamic_group_id_high_water =
+        authority->groups.dynamic_group_id_high_water;
+    next.epoch_valid = authority->epoch_valid;
+    next.faulted = authority->faulted;
+    for (index = 0U; index < UCN_V6_MAX_BINDING_SLOTS; ++index) {
+        if (authority->bindings[index].occupied) {
+            ++next.occupied_bindings;
+        }
+    }
+    *view = next;
+    return UCN_V6_OK;
 }

@@ -1,6 +1,35 @@
-#include "ucn/v6/ucn_v6_message.h"
+#include "../internal/ucn_v6_message_private.h"
+
+#include "ucn/v6/ucn_v6_config.h"
 
 #include <string.h>
+
+typedef char ucn_v6_operation_allocator_storage_size_check[
+    sizeof(ucn_v6_operation_id_allocator_t) <=
+            UCN_V6_OPERATION_ID_ALLOCATOR_STORAGE_BYTES ? 1 : -1];
+typedef char ucn_v6_operation_journal_storage_size_check[
+    sizeof(ucn_v6_operation_journal_t) <=
+            UCN_V6_OPERATION_JOURNAL_STORAGE_BYTES ? 1 : -1];
+
+static bool allocator_storage_is_valid(
+    const ucn_v6_operation_id_allocator_t *allocator)
+{
+    return allocator != NULL && allocator->initialized &&
+           allocator->magic == UCN_V6_OPERATION_ALLOCATOR_MAGIC &&
+           allocator->schema == UCN_V6_STORAGE_LAYOUT &&
+           allocator->layout_hash == UCN_V6_COMPILED_LAYOUT_HASH &&
+           allocator->canary == UCN_V6_OPERATION_ALLOCATOR_CANARY;
+}
+
+static bool journal_storage_is_valid(
+    const ucn_v6_operation_journal_t *journal)
+{
+    return journal != NULL && journal->initialized &&
+           journal->magic == UCN_V6_OPERATION_JOURNAL_OBJECT_MAGIC &&
+           journal->schema == UCN_V6_STORAGE_LAYOUT &&
+           journal->layout_hash == UCN_V6_COMPILED_LAYOUT_HASH &&
+           journal->canary == UCN_V6_OPERATION_JOURNAL_CANARY;
+}
 
 static bool bytes_are_zero(const uint8_t *bytes, size_t length)
 {
@@ -315,7 +344,7 @@ static ucn_v6_result_t submit_and_verify_under_gate(
 
 static bool journal_is_ready(ucn_v6_operation_journal_t *journal)
 {
-    return journal != NULL && journal->initialized && !journal->faulted &&
+    return journal_storage_is_valid(journal) && !journal->faulted &&
            snapshot_is_valid(&journal->committed, true) &&
            !ucn_v6_callback_gate_is_active(journal->callback_gate);
 }
@@ -465,21 +494,37 @@ ucn_v6_result_t ucn_v6_message_validate(
     return UCN_V6_OK;
 }
 
-ucn_v6_result_t ucn_v6_operation_id_allocator_init(
-    ucn_v6_operation_id_allocator_t *allocator,
+ucn_v6_result_t ucn_v6_operation_id_allocator_init_in_place(
+    void *storage,
+    size_t storage_bytes,
+    const struct ucn_v6_feature_manifest *manifest,
     const ucn_v6_message_store_ops_t *store,
     ucn_v6_callback_gate_t *callback_gate,
-    uint32_t reservation_block_size)
+    uint32_t reservation_block_size,
+    ucn_v6_operation_id_allocator_t **allocator_out)
 {
     ucn_v6_operation_id_allocator_t initialized;
+    ucn_v6_operation_id_allocator_t *allocator;
     uint64_t high_water = 0U;
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
 
-    if (allocator == NULL || !store_is_valid(store) ||
+    if (allocator_out == NULL || !store_is_valid(store) ||
         callback_gate == NULL || reservation_block_size == 0U) {
         return UCN_V6_ERR_CONFIG;
     }
+    result = ucn_v6_manifest_validate_exact(
+        (const ucn_v6_feature_manifest_t *)manifest);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    result = ucn_v6_storage_validate(storage, storage_bytes,
+                                     sizeof(*allocator),
+                                     UCN_V6_STORAGE_ALIGNMENT);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    allocator = (ucn_v6_operation_id_allocator_t *)storage;
     if (ucn_v6_callback_gate_is_active(callback_gate)) {
         return UCN_V6_ERR_STATE;
     }
@@ -499,13 +544,18 @@ ucn_v6_result_t ucn_v6_operation_id_allocator_init(
         return UCN_V6_ERR_EXHAUSTED;
     }
     memset(&initialized, 0, sizeof(initialized));
+    initialized.magic = UCN_V6_OPERATION_ALLOCATOR_MAGIC;
+    initialized.schema = UCN_V6_STORAGE_LAYOUT;
+    initialized.layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
     initialized.store = *store;
     initialized.callback_gate = callback_gate;
     initialized.next_id = high_water + 1U;
     initialized.reserved_through = high_water;
     initialized.reservation_block_size = reservation_block_size;
     initialized.initialized = true;
+    initialized.canary = UCN_V6_OPERATION_ALLOCATOR_CANARY;
     *allocator = initialized;
+    *allocator_out = allocator;
     return UCN_V6_OK;
 }
 
@@ -518,8 +568,8 @@ ucn_v6_result_t ucn_v6_operation_id_take(
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
 
-    if (allocator == NULL || operation_id == NULL ||
-        !allocator->initialized || allocator->faulted ||
+    if (!allocator_storage_is_valid(allocator) || operation_id == NULL ||
+        allocator->faulted ||
         ucn_v6_callback_gate_is_active(allocator->callback_gate)) {
         return UCN_V6_ERR_STATE;
     }
@@ -565,12 +615,30 @@ ucn_v6_result_t ucn_v6_operation_id_take(
     return UCN_V6_OK;
 }
 
-ucn_v6_result_t ucn_v6_operation_journal_init(
-    ucn_v6_operation_journal_t *journal,
+ucn_v6_result_t ucn_v6_operation_id_allocator_copy_view(
+    const ucn_v6_operation_id_allocator_t *allocator,
+    ucn_v6_operation_id_allocator_view_t *view)
+{
+    if (!allocator_storage_is_valid(allocator) || view == NULL) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    view->next_id = allocator->next_id;
+    view->reserved_through = allocator->reserved_through;
+    view->reservation_block_size = allocator->reservation_block_size;
+    view->faulted = allocator->faulted;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
+    void *storage,
+    size_t storage_bytes,
+    const struct ucn_v6_feature_manifest *manifest,
     const ucn_v6_message_store_ops_t *store,
-    ucn_v6_callback_gate_t *callback_gate)
+    ucn_v6_callback_gate_t *callback_gate,
+    ucn_v6_operation_journal_t **journal_out)
 {
     ucn_v6_operation_journal_t initialized;
+    ucn_v6_operation_journal_t *journal;
     ucn_v6_operation_journal_snapshot_t loaded;
     ucn_v6_operation_journal_snapshot_t migrated;
     ucn_v6_operation_journal_snapshot_t verified;
@@ -580,9 +648,22 @@ ucn_v6_result_t ucn_v6_operation_journal_init(
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
 
-    if (journal == NULL || !store_is_valid(store) || callback_gate == NULL) {
+    if (journal_out == NULL || !store_is_valid(store) ||
+        callback_gate == NULL) {
         return UCN_V6_ERR_CONFIG;
     }
+    result = ucn_v6_manifest_validate_exact(
+        (const ucn_v6_feature_manifest_t *)manifest);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    result = ucn_v6_storage_validate(storage, storage_bytes,
+                                     sizeof(*journal),
+                                     UCN_V6_STORAGE_ALIGNMENT);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    journal = (ucn_v6_operation_journal_t *)storage;
     if (ucn_v6_callback_gate_is_active(callback_gate)) {
         return UCN_V6_ERR_STATE;
     }
@@ -627,11 +708,16 @@ ucn_v6_result_t ucn_v6_operation_journal_init(
         return result != UCN_V6_OK ? result : leave_result;
     }
     memset(&initialized, 0, sizeof(initialized));
+    initialized.magic = UCN_V6_OPERATION_JOURNAL_OBJECT_MAGIC;
+    initialized.schema = UCN_V6_STORAGE_LAYOUT;
+    initialized.layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
     initialized.committed = loaded;
     initialized.store = *store;
     initialized.callback_gate = callback_gate;
     initialized.initialized = true;
+    initialized.canary = UCN_V6_OPERATION_JOURNAL_CANARY;
     *journal = initialized;
+    *journal_out = journal;
     return UCN_V6_OK;
 }
 
@@ -976,7 +1062,7 @@ ucn_v6_result_t ucn_v6_operation_copy_slot(
 {
     size_t index;
 
-    if (journal == NULL || slot == NULL || !journal->initialized ||
+    if (!journal_storage_is_valid(journal) || slot == NULL ||
         journal->faulted || !operation_key_is_valid(key) ||
         !snapshot_is_valid(&journal->committed, true)) {
         return UCN_V6_ERR_ARGUMENT;
@@ -989,4 +1075,27 @@ ucn_v6_result_t ucn_v6_operation_copy_slot(
         }
     }
     return UCN_V6_ERR_NOT_FOUND;
+}
+
+ucn_v6_result_t ucn_v6_operation_journal_copy_view(
+    const ucn_v6_operation_journal_t *journal,
+    ucn_v6_operation_journal_view_t *view)
+{
+    ucn_v6_operation_journal_view_t next;
+    size_t index;
+
+    if (!journal_storage_is_valid(journal) || view == NULL ||
+        !snapshot_is_valid(&journal->committed, true)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(&next, 0, sizeof(next));
+    next.committed_generation = journal->committed.snapshot_generation;
+    next.faulted = journal->faulted;
+    for (index = 0U; index < UCN_V6_OPERATION_JOURNAL_SLOTS; ++index) {
+        if (journal->committed.slots[index].occupied) {
+            ++next.occupied_slots;
+        }
+    }
+    *view = next;
+    return UCN_V6_OK;
 }

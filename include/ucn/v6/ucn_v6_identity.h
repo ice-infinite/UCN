@@ -12,8 +12,14 @@ extern "C" {
 #define UCN_V6_PROTOCOL_VERSION ((uint8_t)6U)
 #define UCN_V6_SERIAL_ROTATION_THRESHOLD UINT32_C(0xFFFFFFFE)
 #define UCN_V6_SERIAL64_ROTATION_THRESHOLD UINT64_C(0xFFFFFFFFFFFFFFFE)
-#define UCN_V6_MAX_BINDING_SLOTS ((size_t)16U)
-#define UCN_V6_MAX_ACTIVE_GROUPS ((size_t)8U)
+#ifndef UCN_V6_CONFIG_MAX_BINDINGS
+#define UCN_V6_CONFIG_MAX_BINDINGS 16U
+#endif
+#ifndef UCN_V6_CONFIG_MAX_ACTIVE_GROUPS
+#define UCN_V6_CONFIG_MAX_ACTIVE_GROUPS 8U
+#endif
+#define UCN_V6_MAX_BINDING_SLOTS ((size_t)UCN_V6_CONFIG_MAX_BINDINGS)
+#define UCN_V6_MAX_ACTIVE_GROUPS ((size_t)UCN_V6_CONFIG_MAX_ACTIVE_GROUPS)
 
 typedef enum ucn_v6_result {
     UCN_V6_OK = 0,
@@ -117,17 +123,29 @@ typedef struct ucn_v6_identity_store_ops {
         uint32_t group_id_high_water);
 } ucn_v6_identity_store_ops_t;
 
-typedef struct ucn_v6_identity_authority {
+typedef struct ucn_v6_identity_authority ucn_v6_identity_authority_t;
+#ifndef UCN_V6_IDENTITY_AUTHORITY_STORAGE_BYTES
+#define UCN_V6_IDENTITY_AUTHORITY_STORAGE_BYTES                       \
+    ((size_t)(512U + UCN_V6_CONFIG_MAX_BINDINGS * 128U +             \
+              UCN_V6_CONFIG_MAX_ACTIVE_GROUPS * 8U))
+#endif
+typedef union ucn_v6_identity_authority_storage {
+    uint64_t alignment_u64;
+    void *alignment_pointer;
+    uint8_t bytes[UCN_V6_IDENTITY_AUTHORITY_STORAGE_BYTES];
+} ucn_v6_identity_authority_storage_t;
+
+typedef struct ucn_v6_identity_authority_view {
     uint32_t realm_id;
     ucn_v6_authority_epoch_t epoch;
     uint64_t local_lease_deadline_us;
-    ucn_v6_binding_slot_t bindings[UCN_V6_MAX_BINDING_SLOTS];
-    ucn_v6_group_allocator_t groups;
-    ucn_v6_identity_store_ops_t store;
-    ucn_v6_callback_gate_t *callback_gate;
+    uint32_t dynamic_group_id_high_water;
+    uint16_t occupied_bindings;
     bool epoch_valid;
     bool faulted;
-} ucn_v6_identity_authority_t;
+} ucn_v6_identity_authority_view_t;
+
+struct ucn_v6_feature_manifest;
 
 /* EN: Validates canonical identity and binding keys.
  * 中文：校验规范的身份与地址绑定键。 */
@@ -171,11 +189,14 @@ ucn_v6_result_t ucn_v6_callback_gate_leave(
 
 /* EN: Initializes the isolated Realm Address Authority model.
  * 中文：初始化隔离的 Realm 地址权威模型。 */
-ucn_v6_result_t ucn_v6_identity_authority_init(
-    ucn_v6_identity_authority_t *authority,
+ucn_v6_result_t ucn_v6_identity_authority_init_in_place(
+    void *storage,
+    size_t storage_bytes,
+    const struct ucn_v6_feature_manifest *manifest,
     uint32_t realm_id,
     const ucn_v6_identity_store_ops_t *store,
-    ucn_v6_callback_gate_t *callback_gate);
+    ucn_v6_callback_gate_t *callback_gate,
+    ucn_v6_identity_authority_t **authority);
 /* EN: Persists and publishes an exact next Authority Epoch.
  * 中文：持久化并发布精确后继的地址权威 Epoch。 */
 ucn_v6_result_t ucn_v6_identity_authority_install_epoch(
@@ -207,6 +228,11 @@ ucn_v6_result_t ucn_v6_identity_authority_allocate_dynamic_group(
 ucn_v6_result_t ucn_v6_identity_authority_retire_dynamic_group(
     ucn_v6_identity_authority_t *authority,
     uint32_t group_id);
+/* EN: Copies a read-only diagnostic view after validating opaque storage.
+ * 中文：校验 opaque storage 后复制只读诊断视图。 */
+ucn_v6_result_t ucn_v6_identity_authority_copy_view(
+    const ucn_v6_identity_authority_t *authority,
+    ucn_v6_identity_authority_view_t *view);
 
 #ifdef __cplusplus
 }

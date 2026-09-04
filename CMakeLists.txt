@@ -111,6 +111,17 @@ set(UCN_CORE_SOURCES
 add_library(ucn_core STATIC ${UCN_CORE_SOURCES})
 
 if(UCN_BUILD_V6_EXPERIMENTAL)
+    add_library(ucn_v6_config STATIC
+        src/v6/config/ucn_v6_config.c
+    )
+    target_include_directories(ucn_v6_config PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_compile_options(ucn_v6_config PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+        $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+    )
+
     add_library(ucn_v6_identity STATIC
         src/v6/identity/ucn_v6_identity.c
         src/v6/identity/ucn_v6_bootstrap.c
@@ -118,6 +129,7 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
     target_include_directories(ucn_v6_identity PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
+    target_link_libraries(ucn_v6_identity PUBLIC ucn_v6_config)
     target_compile_options(ucn_v6_identity PRIVATE
         $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
         $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
@@ -147,7 +159,47 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
         $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
     )
 
+    add_library(ucn_v6_owner STATIC
+        src/v6/owner/ucn_v6_owner.c
+    )
+    target_include_directories(ucn_v6_owner PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(ucn_v6_owner PUBLIC ucn_v6_config)
+    target_compile_options(ucn_v6_owner PRIVATE
+        $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+        $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+    )
+
     if(UCN_BUILD_TESTS)
+        add_executable(ucn_v6_config_contract_tests
+            tests/v6/test_v6_config_contract.c
+        )
+        target_link_libraries(ucn_v6_config_contract_tests
+            PRIVATE ucn_v6_config)
+        target_compile_options(ucn_v6_config_contract_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+            $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+        )
+        add_test(NAME ucn_v6_config_contract_tests
+            COMMAND ucn_v6_config_contract_tests)
+
+        add_executable(ucn_v6_config_mismatch_tests
+            tests/v6/test_v6_config_contract.c
+        )
+        target_link_libraries(ucn_v6_config_mismatch_tests
+            PRIVATE ucn_v6_config)
+        target_compile_definitions(ucn_v6_config_mismatch_tests PRIVATE
+            UCN_V6_CONFIG_MAX_BINDINGS=15
+            UCN_V6_EXPECT_MANIFEST_MISMATCH=1
+        )
+        target_compile_options(ucn_v6_config_mismatch_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+            $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+        )
+        add_test(NAME ucn_v6_config_mismatch_tests
+            COMMAND ucn_v6_config_mismatch_tests)
+
         add_executable(ucn_v6_identity_tests
             tests/v6/test_v6_identity.c
         )
@@ -177,6 +229,16 @@ if(UCN_BUILD_V6_EXPERIMENTAL)
             $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
         )
         add_test(NAME ucn_v6_message_tests COMMAND ucn_v6_message_tests)
+
+        add_executable(ucn_v6_owner_tests
+            tests/v6/test_v6_owner.c
+        )
+        target_link_libraries(ucn_v6_owner_tests PRIVATE ucn_v6_owner)
+        target_compile_options(ucn_v6_owner_tests PRIVATE
+            $<$<C_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
+            $<$<C_COMPILER_ID:MSVC>:/W4;/WX>
+        )
+        add_test(NAME ucn_v6_owner_tests COMMAND ucn_v6_owner_tests)
     endif()
 endif()
 

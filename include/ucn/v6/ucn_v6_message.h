@@ -9,8 +9,16 @@ extern "C" {
 
 #define UCN_V6_OPERATION_DIGEST_BYTES ((size_t)32U)
 #define UCN_V6_OPERATION_RESULT_MAX_BYTES ((size_t)64U)
-#define UCN_V6_OPERATION_JOURNAL_SLOTS ((size_t)8U)
-#define UCN_V6_OPERATION_HIGH_WATER_SLOTS ((size_t)8U)
+#ifndef UCN_V6_CONFIG_OPERATION_SLOTS
+#define UCN_V6_CONFIG_OPERATION_SLOTS 8U
+#endif
+#ifndef UCN_V6_CONFIG_OPERATION_HIGH_WATERS
+#define UCN_V6_CONFIG_OPERATION_HIGH_WATERS 8U
+#endif
+#define UCN_V6_OPERATION_JOURNAL_SLOTS \
+    ((size_t)UCN_V6_CONFIG_OPERATION_SLOTS)
+#define UCN_V6_OPERATION_HIGH_WATER_SLOTS \
+    ((size_t)UCN_V6_CONFIG_OPERATION_HIGH_WATERS)
 #define UCN_V6_OPERATION_JOURNAL_MAGIC UINT32_C(0x554F5036)
 #define UCN_V6_OPERATION_JOURNAL_SCHEMA UINT16_C(1)
 
@@ -116,23 +124,41 @@ typedef struct ucn_v6_message_store_ops {
         uint64_t high_water);
 } ucn_v6_message_store_ops_t;
 
-typedef struct ucn_v6_operation_id_allocator {
-    ucn_v6_message_store_ops_t store;
-    ucn_v6_callback_gate_t *callback_gate;
+typedef struct ucn_v6_operation_id_allocator ucn_v6_operation_id_allocator_t;
+typedef struct ucn_v6_operation_journal ucn_v6_operation_journal_t;
+#ifndef UCN_V6_OPERATION_ID_ALLOCATOR_STORAGE_BYTES
+#define UCN_V6_OPERATION_ID_ALLOCATOR_STORAGE_BYTES ((size_t)256U)
+#endif
+#ifndef UCN_V6_OPERATION_JOURNAL_STORAGE_BYTES
+#define UCN_V6_OPERATION_JOURNAL_STORAGE_BYTES                         \
+    ((size_t)(512U + UCN_V6_CONFIG_OPERATION_SLOTS * 256U +          \
+              UCN_V6_CONFIG_OPERATION_HIGH_WATERS * 64U))
+#endif
+typedef union ucn_v6_operation_id_allocator_storage {
+    uint64_t alignment_u64;
+    void *alignment_pointer;
+    uint8_t bytes[UCN_V6_OPERATION_ID_ALLOCATOR_STORAGE_BYTES];
+} ucn_v6_operation_id_allocator_storage_t;
+typedef union ucn_v6_operation_journal_storage {
+    uint64_t alignment_u64;
+    void *alignment_pointer;
+    uint8_t bytes[UCN_V6_OPERATION_JOURNAL_STORAGE_BYTES];
+} ucn_v6_operation_journal_storage_t;
+
+typedef struct ucn_v6_operation_id_allocator_view {
     uint64_t next_id;
     uint64_t reserved_through;
     uint32_t reservation_block_size;
-    bool initialized;
     bool faulted;
-} ucn_v6_operation_id_allocator_t;
+} ucn_v6_operation_id_allocator_view_t;
 
-typedef struct ucn_v6_operation_journal {
-    ucn_v6_operation_journal_snapshot_t committed;
-    ucn_v6_message_store_ops_t store;
-    ucn_v6_callback_gate_t *callback_gate;
-    bool initialized;
+typedef struct ucn_v6_operation_journal_view {
+    uint64_t committed_generation;
+    uint16_t occupied_slots;
     bool faulted;
-} ucn_v6_operation_journal_t;
+} ucn_v6_operation_journal_view_t;
+
+struct ucn_v6_feature_manifest;
 
 /* EN: Validates orthogonal Traffic, delivery and interaction fields against
  * one immutable Endpoint contract.
@@ -143,23 +169,32 @@ ucn_v6_result_t ucn_v6_message_validate(
 
 /* EN: Initializes a persistently reserved, non-wrapping Operation-ID source.
  * 中文：初始化持久区间预留且不可回绕的 Operation ID 分配器。 */
-ucn_v6_result_t ucn_v6_operation_id_allocator_init(
-    ucn_v6_operation_id_allocator_t *allocator,
+ucn_v6_result_t ucn_v6_operation_id_allocator_init_in_place(
+    void *storage,
+    size_t storage_bytes,
+    const struct ucn_v6_feature_manifest *manifest,
     const ucn_v6_message_store_ops_t *store,
     ucn_v6_callback_gate_t *callback_gate,
-    uint32_t reservation_block_size);
+    uint32_t reservation_block_size,
+    ucn_v6_operation_id_allocator_t **allocator);
 ucn_v6_result_t ucn_v6_operation_id_take(
     ucn_v6_operation_id_allocator_t *allocator,
     uint64_t *operation_id);
+ucn_v6_result_t ucn_v6_operation_id_allocator_copy_view(
+    const ucn_v6_operation_id_allocator_t *allocator,
+    ucn_v6_operation_id_allocator_view_t *view);
 
 /* EN: Loads the fixed journal and atomically migrates crash-time EXECUTING
  * entries to IN_DOUBT before accepting work.
  * 中文：加载固定 Journal，并在接收工作前原子地把掉电时 EXECUTING 项迁移为
  * IN_DOUBT。 */
-ucn_v6_result_t ucn_v6_operation_journal_init(
-    ucn_v6_operation_journal_t *journal,
+ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
+    void *storage,
+    size_t storage_bytes,
+    const struct ucn_v6_feature_manifest *manifest,
     const ucn_v6_message_store_ops_t *store,
-    ucn_v6_callback_gate_t *callback_gate);
+    ucn_v6_callback_gate_t *callback_gate,
+    ucn_v6_operation_journal_t **journal);
 ucn_v6_result_t ucn_v6_operation_prepare(
     ucn_v6_operation_journal_t *journal,
     const ucn_v6_operation_key_t *key,
@@ -205,6 +240,9 @@ ucn_v6_result_t ucn_v6_operation_copy_slot(
     const ucn_v6_operation_journal_t *journal,
     const ucn_v6_operation_key_t *key,
     ucn_v6_operation_slot_t *slot);
+ucn_v6_result_t ucn_v6_operation_journal_copy_view(
+    const ucn_v6_operation_journal_t *journal,
+    ucn_v6_operation_journal_view_t *view);
 
 #ifdef __cplusplus
 }
