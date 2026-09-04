@@ -70,41 +70,15 @@ static bool callback_gate_is_valid(const ucn_v6_callback_gate_t *gate)
            gate->unlock != NULL;
 }
 
-static bool callback_gate_is_active(ucn_v6_callback_gate_t *gate)
-{
-    bool active;
-
-    gate->lock(gate->context);
-    active = gate->active;
-    gate->unlock(gate->context);
-    return active;
-}
-
 static bool callback_enter(ucn_v6_identity_authority_t *authority)
 {
-    ucn_v6_callback_gate_t *gate = authority->callback_gate;
-
-    gate->lock(gate->context);
-    if (gate->active) {
-        gate->unlock(gate->context);
-        return false;
-    }
-    gate->active = true;
-    gate->active_owner = authority;
-    gate->unlock(gate->context);
-    return true;
+    return ucn_v6_callback_gate_try_enter(authority->callback_gate,
+                                           authority) == UCN_V6_OK;
 }
 
 static void callback_exit(ucn_v6_identity_authority_t *authority)
 {
-    ucn_v6_callback_gate_t *gate = authority->callback_gate;
-
-    gate->lock(gate->context);
-    if (gate->active && gate->active_owner == authority) {
-        gate->active = false;
-        gate->active_owner = NULL;
-    }
-    gate->unlock(gate->context);
+    (void)ucn_v6_callback_gate_leave(authority->callback_gate, authority);
 }
 
 static bool authority_can_write(
@@ -113,7 +87,7 @@ static bool authority_can_write(
 {
     return authority != NULL && authority->epoch_valid && !authority->faulted &&
            callback_gate_is_valid(authority->callback_gate) &&
-           !callback_gate_is_active(authority->callback_gate) &&
+           !ucn_v6_callback_gate_is_active(authority->callback_gate) &&
            authority->epoch.quorum_proven &&
            authority->epoch.durable &&
            ucn_v6_lease_deadline_is_live(now_us,
@@ -262,6 +236,55 @@ ucn_v6_result_t ucn_v6_callback_gate_init(
     return UCN_V6_OK;
 }
 
+bool ucn_v6_callback_gate_is_active(ucn_v6_callback_gate_t *gate)
+{
+    bool active;
+
+    if (!callback_gate_is_valid(gate)) {
+        return true;
+    }
+    gate->lock(gate->context);
+    active = gate->active;
+    gate->unlock(gate->context);
+    return active;
+}
+
+ucn_v6_result_t ucn_v6_callback_gate_try_enter(
+    ucn_v6_callback_gate_t *gate,
+    const void *owner)
+{
+    if (!callback_gate_is_valid(gate) || owner == NULL) {
+        return UCN_V6_ERR_CONFIG;
+    }
+    gate->lock(gate->context);
+    if (gate->active) {
+        gate->unlock(gate->context);
+        return UCN_V6_ERR_STATE;
+    }
+    gate->active = true;
+    gate->active_owner = owner;
+    gate->unlock(gate->context);
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_callback_gate_leave(
+    ucn_v6_callback_gate_t *gate,
+    const void *owner)
+{
+    if (!callback_gate_is_valid(gate) || owner == NULL) {
+        return UCN_V6_ERR_CONFIG;
+    }
+    gate->lock(gate->context);
+    if (!gate->active || gate->active_owner != owner) {
+        gate->unlock(gate->context);
+        return UCN_V6_ERR_STATE;
+    }
+    gate->active = false;
+    gate->active_owner = NULL;
+    gate->unlock(gate->context);
+    return UCN_V6_OK;
+}
+
 ucn_v6_result_t ucn_v6_identity_authority_init(
     ucn_v6_identity_authority_t *authority,
     uint32_t realm_id,
@@ -298,7 +321,7 @@ ucn_v6_result_t ucn_v6_identity_authority_install_epoch(
 
     if (authority == NULL || authority->realm_id == 0U ||
         authority->faulted || !callback_gate_is_valid(authority->callback_gate) ||
-        callback_gate_is_active(authority->callback_gate) ||
+        ucn_v6_callback_gate_is_active(authority->callback_gate) ||
         !authority_epoch_is_valid(epoch) || local_lease_deadline_us == 0U) {
         return UCN_V6_ERR_STATE;
     }

@@ -157,6 +157,17 @@ ucn_v6_result_t ucn_v6_callback_gate_init(
     void *context,
     void (*lock)(void *context),
     void (*unlock)(void *context));
+/* EN: Reads the shared callback fence under its caller-supplied lock.
+ * 中文：在调用方提供的锁保护下读取共享回调围栏。 */
+bool ucn_v6_callback_gate_is_active(ucn_v6_callback_gate_t *gate);
+/* EN: Enters or leaves the shared Provider callback dynamic extent.
+ * 中文：进入或退出共享 Provider 回调动态范围。 */
+ucn_v6_result_t ucn_v6_callback_gate_try_enter(
+    ucn_v6_callback_gate_t *gate,
+    const void *owner);
+ucn_v6_result_t ucn_v6_callback_gate_leave(
+    ucn_v6_callback_gate_t *gate,
+    const void *owner);
 
 /* EN: Initializes the isolated Realm Address Authority model.
  * 中文：初始化隔离的 Realm 地址权威模型。 */
