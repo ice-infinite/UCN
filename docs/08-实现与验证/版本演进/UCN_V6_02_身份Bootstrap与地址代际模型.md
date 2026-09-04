@@ -1,7 +1,7 @@
 # UCN V6-02 身份、Bootstrap 与地址代际模型实现报告
 
-> 状态：软件实现与分项自审完成；最终统一外审延期。  
-> 范围：隔离的 v6 Identity/Bootstrap 模型，不接入 v5 生产收发，不代替 V6-07 的密码实现与唯一 JOIN FSM。  
+> 状态：软件实现与分项自审完成；最终统一外审延期。
+> 范围：隔离的 v6 Identity/Bootstrap 模型，不接入 v5 生产收发，不代替 V6-07 的密码实现与唯一 JOIN FSM。
 > 分支：`v6-development`。
 
 ## 1. 本小节解决的问题
@@ -145,4 +145,3 @@ Binding 退休再分配、Group ID 不复用、Cookie 前零 pending、无放大
 - 没有 Flash 双槽、掉电、回滚或 MCU 实测；Host fake Provider 不是持久化证明。
 - 没有把 Bootstrap 结果写入 Neighbor、Route、Path、ACL 或 Cluster。
 - 本报告是内部自审证据，不是外部审计签字。
-
