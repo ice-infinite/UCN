@@ -60,13 +60,25 @@ static bool serial_is_valid(uint32_t value)
     return value != 0U && value <= UCN_V6_SERIAL_ROTATION_THRESHOLD;
 }
 
-static bool suite_selector_is_valid(
+static bool hop_suite_selector_is_valid(
     uint8_t suite_id,
     uint16_t key_id,
     uint32_t key_generation)
 {
     return suite_id == 1U && key_id != 0U &&
            serial_is_valid(key_generation);
+}
+
+static bool e2e_suite_selector_is_valid(
+    ucn_v6_e2e_mode_t mode,
+    uint8_t suite_id,
+    uint16_t key_id,
+    uint32_t key_generation)
+{
+    bool suite_matches =
+        (mode == UCN_V6_E2E_AUTH_ONLY && suite_id == 1U) ||
+        (mode == UCN_V6_E2E_AEAD && (suite_id == 2U || suite_id == 3U));
+    return suite_matches && key_id != 0U && serial_is_valid(key_generation);
 }
 
 static bool bytes_are_zero(const uint8_t *bytes, size_t length)
@@ -202,7 +214,7 @@ static bool frame_contract_is_valid(const ucn_v6_frame_t *frame)
     if (peer && group) {
         return false;
     }
-    if (peer && !suite_selector_is_valid(
+    if (peer && !hop_suite_selector_is_valid(
                     frame->peer_hop.suite_id, frame->peer_hop.key_id,
                     frame->peer_hop.key_generation)) {
         return false;
@@ -210,15 +222,18 @@ static bool frame_contract_is_valid(const ucn_v6_frame_t *frame)
     if (group &&
         (!serial_is_valid(frame->group.group_id) ||
          !serial_is_valid(frame->group.group_generation) ||
-         !suite_selector_is_valid(frame->group.suite_id, frame->group.key_id,
-                                  frame->group.key_generation))) {
+         !hop_suite_selector_is_valid(frame->group.suite_id,
+                                      frame->group.key_id,
+                                      frame->group.key_generation))) {
         return false;
     }
     if ((frame->flags & UCN_V6_FLAG_E2E_CONTEXT) != 0U &&
         (frame->e2e.mode < UCN_V6_E2E_AUTH_ONLY ||
          frame->e2e.mode > UCN_V6_E2E_AEAD ||
-         !suite_selector_is_valid(frame->e2e.suite_id, frame->e2e.key_id,
-                                  frame->e2e.key_generation))) {
+         !e2e_suite_selector_is_valid(frame->e2e.mode,
+                                      frame->e2e.suite_id,
+                                      frame->e2e.key_id,
+                                      frame->e2e.key_generation))) {
         return false;
     }
     if (frame->frame_type == UCN_V6_FRAME_DATA ? protocol : !protocol) {

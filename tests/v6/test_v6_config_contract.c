@@ -30,6 +30,9 @@ static ucn_v6_feature_manifest_t header_manifest(void)
     value.static_group_slots = UCN_V6_CONFIG_STATIC_GROUP_SLOTS;
     value.group_key_slots = UCN_V6_CONFIG_GROUP_KEY_SLOTS;
     value.owner_event_depth = UCN_V6_CONFIG_OWNER_EVENT_DEPTH;
+    value.security_sessions = UCN_V6_CONFIG_SECURITY_SESSIONS;
+    value.acl_entries = UCN_V6_CONFIG_ACL_ENTRIES;
+    value.group_replay_sources = UCN_V6_CONFIG_GROUP_REPLAY_SOURCES;
     return value;
 }
 

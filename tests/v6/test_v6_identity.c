@@ -124,6 +124,7 @@ static ucn_v6_bootstrap_transcript_t transcript(uint64_t txid)
     memset(&value, 0, sizeof(value));
     value.protocol_version = UCN_V6_PROTOCOL_VERSION;
     value.bootstrap_header_contract = 1U;
+    value.flow = UCN_V6_BOOTSTRAP_FLOW_JOIN;
     value.joining_device_principal = principal(0x10U);
     value.joining_device_identity_digest = principal(0x30U);
     value.authority_principal = principal(0x50U);
@@ -135,13 +136,20 @@ static ucn_v6_bootstrap_transcript_t transcript(uint64_t txid)
     value.realm_id = UINT32_C(0x10203040);
     value.proposed_address = UINT32_C(7);
     value.address_binding_generation = UINT32_C(3);
+    value.authority_address = UINT32_C(8);
+    value.authority_binding_generation = UINT32_C(4);
     fill_bytes(value.binding_lease_id, sizeof(value.binding_lease_id), 0x70U);
     value.binding_lease_duration_us = UINT64_C(500000);
     value.authority_lease_sequence = UINT64_C(9);
     value.selected_hop_suite = 1U;
-    value.selected_hop_key_context = UINT32_C(2);
+    value.selected_hop_key_id = 2U;
+    value.selected_hop_key_generation = UINT32_C(3);
+    value.selected_e2e_mode = UCN_V6_E2E_AEAD;
     value.selected_e2e_suite = 3U;
-    value.selected_e2e_key_context = UINT32_C(4);
+    value.selected_e2e_key_id = 4U;
+    value.selected_e2e_key_generation = UINT32_C(5);
+    value.selected_session_generation = UINT32_C(1);
+    value.selected_link_instance_generation = UINT32_C(6);
     fill_bytes(value.prior_messages_hash,
                sizeof(value.prior_messages_hash), 0x90U);
     return value;

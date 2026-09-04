@@ -1,7 +1,7 @@
 #ifndef UCN_V6_BOOTSTRAP_H
 #define UCN_V6_BOOTSTRAP_H
 
-#include "ucn/v6/ucn_v6_identity.h"
+#include "ucn/v6/ucn_v6_wire.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +44,7 @@ typedef struct ucn_v6_bootstrap_key {
 typedef struct ucn_v6_bootstrap_transcript {
     uint8_t protocol_version;
     uint16_t bootstrap_header_contract;
+    ucn_v6_bootstrap_flow_t flow;
     ucn_v6_principal_t joining_device_principal;
     ucn_v6_principal_t joining_device_identity_digest;
     ucn_v6_principal_t authority_principal;
@@ -55,13 +56,20 @@ typedef struct ucn_v6_bootstrap_transcript {
     uint32_t realm_id;
     uint32_t proposed_address;
     uint32_t address_binding_generation;
+    uint32_t authority_address;
+    uint32_t authority_binding_generation;
     uint8_t binding_lease_id[16];
     uint64_t binding_lease_duration_us;
     uint64_t authority_lease_sequence;
-    uint16_t selected_hop_suite;
-    uint32_t selected_hop_key_context;
-    uint16_t selected_e2e_suite;
-    uint32_t selected_e2e_key_context;
+    uint8_t selected_hop_suite;
+    uint16_t selected_hop_key_id;
+    uint32_t selected_hop_key_generation;
+    uint8_t selected_e2e_mode;
+    uint8_t selected_e2e_suite;
+    uint16_t selected_e2e_key_id;
+    uint32_t selected_e2e_key_generation;
+    uint32_t selected_session_generation;
+    uint32_t selected_link_instance_generation;
     uint8_t prior_messages_hash[32];
 } ucn_v6_bootstrap_transcript_t;
 
@@ -156,6 +164,16 @@ ucn_v6_result_t ucn_v6_bootstrap_copy_pending(
     ucn_v6_bootstrap_flow_t flow,
     const ucn_v6_bootstrap_key_t *key,
     ucn_v6_bootstrap_pending_t *pending);
+/* EN: Proves that the unique bounded FSM reached its exact durable final
+ * state before Security may install ADMITTED state.
+ * 中文：证明唯一有界 FSM 已到达精确的持久终态，Security 才可安装
+ * ADMITTED 状态。 */
+ucn_v6_result_t ucn_v6_bootstrap_validate_final(
+    const ucn_v6_bootstrap_owner_t *owner,
+    ucn_v6_bootstrap_flow_t flow,
+    const ucn_v6_bootstrap_key_t *key,
+    const ucn_v6_bootstrap_transcript_t *transcript,
+    uint64_t now_us);
 /* EN: Explicitly expires half-open deadlines; hostile input never evicts.
  * 中文：显式清理半开截止期；恶意输入不能借机驱逐槽位。 */
 size_t ucn_v6_bootstrap_expire(

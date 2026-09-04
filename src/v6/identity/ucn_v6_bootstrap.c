@@ -65,6 +65,7 @@ static bool transcript_is_valid(
     return transcript != NULL &&
            transcript->protocol_version == UCN_V6_PROTOCOL_VERSION &&
            transcript->bootstrap_header_contract != 0U &&
+           flow_is_valid(transcript->flow) &&
            ucn_v6_principal_is_valid(
                &transcript->joining_device_principal) &&
            ucn_v6_principal_is_valid(
@@ -84,6 +85,11 @@ static bool transcript_is_valid(
            transcript->address_binding_generation != 0U &&
            transcript->address_binding_generation <=
                UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           transcript->authority_address != 0U &&
+           transcript->authority_address != UINT32_MAX &&
+           transcript->authority_binding_generation != 0U &&
+           transcript->authority_binding_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            bytes_nonzero(transcript->binding_lease_id,
                          sizeof(transcript->binding_lease_id)) &&
            transcript->binding_lease_duration_us != 0U &&
@@ -91,9 +97,23 @@ static bool transcript_is_valid(
            transcript->authority_lease_sequence <=
                UCN_V6_SERIAL64_ROTATION_THRESHOLD &&
            transcript->selected_hop_suite != 0U &&
-           transcript->selected_hop_key_context != 0U &&
+           transcript->selected_hop_key_id != 0U &&
+           transcript->selected_hop_key_generation != 0U &&
+           transcript->selected_hop_key_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           (transcript->selected_e2e_mode == UCN_V6_E2E_AUTH_ONLY ||
+            transcript->selected_e2e_mode == UCN_V6_E2E_AEAD) &&
            transcript->selected_e2e_suite != 0U &&
-           transcript->selected_e2e_key_context != 0U &&
+           transcript->selected_e2e_key_id != 0U &&
+           transcript->selected_e2e_key_generation != 0U &&
+           transcript->selected_e2e_key_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           transcript->selected_session_generation != 0U &&
+           transcript->selected_session_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           transcript->selected_link_instance_generation != 0U &&
+           transcript->selected_link_instance_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            bytes_nonzero(transcript->prior_messages_hash,
                          sizeof(transcript->prior_messages_hash));
 }
@@ -105,6 +125,7 @@ static bool transcript_equal(
     return left->protocol_version == right->protocol_version &&
            left->bootstrap_header_contract ==
                right->bootstrap_header_contract &&
+           left->flow == right->flow &&
            principal_equal(&left->joining_device_principal,
                            &right->joining_device_principal) &&
            principal_equal(&left->joining_device_identity_digest,
@@ -121,6 +142,9 @@ static bool transcript_equal(
            left->proposed_address == right->proposed_address &&
            left->address_binding_generation ==
                right->address_binding_generation &&
+           left->authority_address == right->authority_address &&
+           left->authority_binding_generation ==
+               right->authority_binding_generation &&
            memcmp(left->binding_lease_id, right->binding_lease_id,
                   sizeof(left->binding_lease_id)) == 0 &&
            left->binding_lease_duration_us ==
@@ -128,11 +152,18 @@ static bool transcript_equal(
            left->authority_lease_sequence ==
                right->authority_lease_sequence &&
            left->selected_hop_suite == right->selected_hop_suite &&
-           left->selected_hop_key_context ==
-               right->selected_hop_key_context &&
+           left->selected_hop_key_id == right->selected_hop_key_id &&
+           left->selected_hop_key_generation ==
+               right->selected_hop_key_generation &&
+           left->selected_e2e_mode == right->selected_e2e_mode &&
            left->selected_e2e_suite == right->selected_e2e_suite &&
-           left->selected_e2e_key_context ==
-               right->selected_e2e_key_context &&
+           left->selected_e2e_key_id == right->selected_e2e_key_id &&
+           left->selected_e2e_key_generation ==
+               right->selected_e2e_key_generation &&
+           left->selected_session_generation ==
+               right->selected_session_generation &&
+           left->selected_link_instance_generation ==
+               right->selected_link_instance_generation &&
            memcmp(left->prior_messages_hash, right->prior_messages_hash,
                   sizeof(left->prior_messages_hash)) == 0;
 }
@@ -512,6 +543,38 @@ ucn_v6_result_t ucn_v6_bootstrap_copy_pending(
             *pending = slots[index];
             return UCN_V6_OK;
         }
+    }
+    return UCN_V6_ERR_NOT_FOUND;
+}
+
+ucn_v6_result_t ucn_v6_bootstrap_validate_final(
+    const ucn_v6_bootstrap_owner_t *owner,
+    ucn_v6_bootstrap_flow_t flow,
+    const ucn_v6_bootstrap_key_t *key,
+    const ucn_v6_bootstrap_transcript_t *transcript,
+    uint64_t now_us)
+{
+    const ucn_v6_bootstrap_pending_t *slots;
+    size_t index;
+
+    if (!owner_is_valid(owner) || !flow_is_valid(flow) ||
+        !key_is_valid(key) || !transcript_is_valid(transcript) ||
+        transcript->flow != flow) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    slots = pending_array_const(owner, flow);
+    for (index = 0U; index < owner->config.max_pending; ++index) {
+        if (!slots[index].occupied || !key_equal(&slots[index].key, key)) {
+            continue;
+        }
+        if (!transcript_equal(&slots[index].transcript, transcript)) {
+            return UCN_V6_ERR_REPLAY;
+        }
+        if (now_us >= slots[index].deadline_us) {
+            return UCN_V6_ERR_TIMEOUT;
+        }
+        return slots[index].phase == UCN_V6_BOOTSTRAP_FINAL_DURABLE ?
+                   UCN_V6_OK : UCN_V6_ERR_STATE;
     }
     return UCN_V6_ERR_NOT_FOUND;
 }

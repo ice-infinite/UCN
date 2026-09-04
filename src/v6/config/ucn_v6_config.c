@@ -16,7 +16,10 @@ static const ucn_v6_feature_manifest_t compiled_manifest = {
     UCN_V6_CONFIG_ACTIVE_GROUP_SLOTS,
     UCN_V6_CONFIG_STATIC_GROUP_SLOTS,
     UCN_V6_CONFIG_GROUP_KEY_SLOTS,
-    UCN_V6_CONFIG_OWNER_EVENT_DEPTH
+    UCN_V6_CONFIG_OWNER_EVENT_DEPTH,
+    UCN_V6_CONFIG_SECURITY_SESSIONS,
+    UCN_V6_CONFIG_ACL_ENTRIES,
+    UCN_V6_CONFIG_GROUP_REPLAY_SOURCES
 };
 
 const ucn_v6_feature_manifest_t *ucn_v6_compiled_manifest(void)
@@ -46,7 +49,11 @@ ucn_v6_result_t ucn_v6_manifest_validate_exact(
            manifest->active_group_slots == expected->active_group_slots &&
            manifest->static_group_slots == expected->static_group_slots &&
            manifest->group_key_slots == expected->group_key_slots &&
-           manifest->owner_event_depth == expected->owner_event_depth ?
+           manifest->owner_event_depth == expected->owner_event_depth &&
+           manifest->security_sessions == expected->security_sessions &&
+           manifest->acl_entries == expected->acl_entries &&
+           manifest->group_replay_sources ==
+               expected->group_replay_sources ?
                UCN_V6_OK : UCN_V6_ERR_CONFIG;
 }
 

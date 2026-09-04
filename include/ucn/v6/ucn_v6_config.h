@@ -42,6 +42,15 @@ extern "C" {
 #ifndef UCN_V6_CONFIG_OWNER_EVENT_DEPTH
 #define UCN_V6_CONFIG_OWNER_EVENT_DEPTH 255U
 #endif
+#ifndef UCN_V6_CONFIG_SECURITY_SESSIONS
+#define UCN_V6_CONFIG_SECURITY_SESSIONS 8U
+#endif
+#ifndef UCN_V6_CONFIG_ACL_ENTRIES
+#define UCN_V6_CONFIG_ACL_ENTRIES 16U
+#endif
+#ifndef UCN_V6_CONFIG_GROUP_REPLAY_SOURCES
+#define UCN_V6_CONFIG_GROUP_REPLAY_SOURCES 16U
+#endif
 
 #if UCN_V6_CONFIG_MAX_BINDINGS < 1U || UCN_V6_CONFIG_MAX_BINDINGS > 255U
 #error "UCN_V6_CONFIG_MAX_BINDINGS must be 1..255"
@@ -82,6 +91,17 @@ extern "C" {
     UCN_V6_CONFIG_OWNER_EVENT_DEPTH > 65535U
 #error "UCN_V6_CONFIG_OWNER_EVENT_DEPTH must be 1..65535"
 #endif
+#if UCN_V6_CONFIG_SECURITY_SESSIONS < 1U || \
+    UCN_V6_CONFIG_SECURITY_SESSIONS > 255U
+#error "UCN_V6_CONFIG_SECURITY_SESSIONS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_ACL_ENTRIES < 1U || UCN_V6_CONFIG_ACL_ENTRIES > 255U
+#error "UCN_V6_CONFIG_ACL_ENTRIES must be 1..255"
+#endif
+#if UCN_V6_CONFIG_GROUP_REPLAY_SOURCES < 1U || \
+    UCN_V6_CONFIG_GROUP_REPLAY_SOURCES > 255U
+#error "UCN_V6_CONFIG_GROUP_REPLAY_SOURCES must be 1..255"
+#endif
 
 #include "ucn/v6/ucn_v6_identity.h"
 
@@ -98,7 +118,8 @@ enum {
 
 #define UCN_V6_COMPILED_FEATURE_BITS                                      \
     ((uint32_t)UCN_V6_FEATURE_IDENTITY | (uint32_t)UCN_V6_FEATURE_WIRE |  \
-     (uint32_t)UCN_V6_FEATURE_MESSAGE)
+     (uint32_t)UCN_V6_FEATURE_MESSAGE |                                  \
+     (uint32_t)UCN_V6_FEATURE_SECURITY)
 
 #define UCN_V6_COMPILED_LAYOUT_HASH                                        \
     (UINT64_C(0xD65A000100000000) ^                                       \
@@ -120,10 +141,22 @@ enum {
      ((uint64_t)UCN_V6_CONFIG_GROUP_KEY_SLOTS *                            \
       UINT64_C(0xD6E8FEB86659FD93)) ^                                      \
      ((uint64_t)UCN_V6_CONFIG_OWNER_EVENT_DEPTH *                          \
-      UINT64_C(0xA24BAED4963EE407)))
+      UINT64_C(0xA24BAED4963EE407)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_SECURITY_SESSIONS *                          \
+      UINT64_C(0x9FB21C651E98DF25)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_ACL_ENTRIES *                                \
+      UINT64_C(0xC13FA9A902A6328F)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_GROUP_REPLAY_SOURCES *                        \
+      UINT64_C(0x91E10DA5C79E7B1D)))
 
 #define UCN_V6_OPERATION_ID_ALLOCATOR_STORAGE_BYTES ((size_t)256U)
 #define UCN_V6_PROTOCOL_OWNER_STORAGE_BYTES ((size_t)1024U)
+#define UCN_V6_SECURITY_MANAGER_STORAGE_BYTES                             \
+    ((size_t)(2048U + UCN_V6_CONFIG_SECURITY_SESSIONS * 512U +           \
+              UCN_V6_CONFIG_ACL_ENTRIES * 128U +                         \
+              UCN_V6_CONFIG_STATIC_GROUP_SLOTS *                         \
+                  UCN_V6_CONFIG_GROUP_KEY_SLOTS * 192U +                  \
+              UCN_V6_CONFIG_GROUP_REPLAY_SOURCES * 128U))
 
 #define UCN_V6_DECLARE_STORAGE_TYPE(name_, bytes_) \
     typedef union name_ {                         \
@@ -147,6 +180,9 @@ typedef struct ucn_v6_feature_manifest {
     uint16_t static_group_slots;
     uint16_t group_key_slots;
     uint16_t owner_event_depth;
+    uint16_t security_sessions;
+    uint16_t acl_entries;
+    uint16_t group_replay_sources;
 } ucn_v6_feature_manifest_t;
 
 /* EN: Returns the one build-time feature and storage manifest.
