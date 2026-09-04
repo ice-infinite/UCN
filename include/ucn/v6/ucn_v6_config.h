@@ -63,6 +63,18 @@ extern "C" {
 #ifndef UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS
 #define UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS 8U
 #endif
+#ifndef UCN_V6_CONFIG_ROUTE_SETS
+#define UCN_V6_CONFIG_ROUTE_SETS 16U
+#endif
+#ifndef UCN_V6_CONFIG_ROUTE_PATHS_PER_SET
+#define UCN_V6_CONFIG_ROUTE_PATHS_PER_SET 4U
+#endif
+#ifndef UCN_V6_CONFIG_ROUTE_CANDIDATES
+#define UCN_V6_CONFIG_ROUTE_CANDIDATES 16U
+#endif
+#ifndef UCN_V6_CONFIG_ROUTE_FLOW_PINS
+#define UCN_V6_CONFIG_ROUTE_FLOW_PINS 32U
+#endif
 
 #if UCN_V6_CONFIG_MAX_BINDINGS < 1U || UCN_V6_CONFIG_MAX_BINDINGS > 255U
 #error "UCN_V6_CONFIG_MAX_BINDINGS must be 1..255"
@@ -130,6 +142,21 @@ extern "C" {
     UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS > 255U
 #error "UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS must be 1..255"
 #endif
+#if UCN_V6_CONFIG_ROUTE_SETS < 1U || UCN_V6_CONFIG_ROUTE_SETS > 255U
+#error "UCN_V6_CONFIG_ROUTE_SETS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_ROUTE_PATHS_PER_SET < 1U || \
+    UCN_V6_CONFIG_ROUTE_PATHS_PER_SET > 16U
+#error "UCN_V6_CONFIG_ROUTE_PATHS_PER_SET must be 1..16"
+#endif
+#if UCN_V6_CONFIG_ROUTE_CANDIDATES < 1U || \
+    UCN_V6_CONFIG_ROUTE_CANDIDATES > 255U
+#error "UCN_V6_CONFIG_ROUTE_CANDIDATES must be 1..255"
+#endif
+#if UCN_V6_CONFIG_ROUTE_FLOW_PINS < 1U || \
+    UCN_V6_CONFIG_ROUTE_FLOW_PINS > 255U
+#error "UCN_V6_CONFIG_ROUTE_FLOW_PINS must be 1..255"
+#endif
 
 #include "ucn/v6/ucn_v6_identity.h"
 
@@ -149,7 +176,8 @@ enum {
     ((uint32_t)UCN_V6_FEATURE_IDENTITY | (uint32_t)UCN_V6_FEATURE_WIRE |  \
      (uint32_t)UCN_V6_FEATURE_MESSAGE |                                  \
      (uint32_t)UCN_V6_FEATURE_SECURITY |                                \
-     (uint32_t)UCN_V6_FEATURE_CAPABILITY)
+     (uint32_t)UCN_V6_FEATURE_CAPABILITY |                              \
+     (uint32_t)UCN_V6_FEATURE_ROUTE)
 
 #define UCN_V6_COMPILED_LAYOUT_HASH                                        \
     (UINT64_C(0xD65A000100000000) ^                                       \
@@ -185,7 +213,15 @@ enum {
      ((uint64_t)UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS *                       \
       UINT64_C(0xA0F2EC75A1FE1575)) ^                                      \
      ((uint64_t)UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS *                       \
-      UINT64_C(0x89E182857D9ED689)))
+      UINT64_C(0x89E182857D9ED689)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_ROUTE_SETS *                                  \
+      UINT64_C(0xE7037ED1A0B428DB)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_ROUTE_PATHS_PER_SET *                         \
+      UINT64_C(0x8EBC6AF09C88C6E3)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_ROUTE_CANDIDATES *                            \
+      UINT64_C(0x589965CC75374CC3)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_ROUTE_FLOW_PINS *                             \
+      UINT64_C(0x1D8E4E27C47D124F)))
 
 #define UCN_V6_OPERATION_ID_ALLOCATOR_STORAGE_BYTES ((size_t)256U)
 #define UCN_V6_PROTOCOL_OWNER_STORAGE_BYTES ((size_t)1024U)
@@ -200,6 +236,13 @@ enum {
               UCN_V6_CONFIG_CAPABILITY_PATHS * 160U +                    \
               UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS * 136U +               \
               UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS * 32U))
+#define UCN_V6_ROUTE_OWNER_STORAGE_BYTES                                  \
+    ((size_t)(1024U + UCN_V6_CONFIG_ROUTE_SETS * 128U +                   \
+              UCN_V6_CONFIG_ROUTE_SETS *                                  \
+                  (512U + UCN_V6_CONFIG_ROUTE_PATHS_PER_SET * 384U) +     \
+              UCN_V6_CONFIG_ROUTE_CANDIDATES *                            \
+                  (384U + UCN_V6_CONFIG_ROUTE_PATHS_PER_SET * 384U) +     \
+              UCN_V6_CONFIG_ROUTE_FLOW_PINS * 128U))
 
 #define UCN_V6_DECLARE_STORAGE_TYPE(name_, bytes_) \
     typedef union name_ {                         \
@@ -230,6 +273,10 @@ typedef struct ucn_v6_feature_manifest {
     uint16_t capability_paths;
     uint16_t group_discovery_hints;
     uint16_t group_discovery_links;
+    uint16_t route_sets;
+    uint16_t route_paths_per_set;
+    uint16_t route_candidates;
+    uint16_t route_flow_pins;
 } ucn_v6_feature_manifest_t;
 
 /* EN: Returns the one build-time feature and storage manifest.

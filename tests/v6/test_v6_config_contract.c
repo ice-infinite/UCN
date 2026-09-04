@@ -37,6 +37,10 @@ static ucn_v6_feature_manifest_t header_manifest(void)
     value.capability_paths = UCN_V6_CONFIG_CAPABILITY_PATHS;
     value.group_discovery_hints = UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS;
     value.group_discovery_links = UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS;
+    value.route_sets = UCN_V6_CONFIG_ROUTE_SETS;
+    value.route_paths_per_set = UCN_V6_CONFIG_ROUTE_PATHS_PER_SET;
+    value.route_candidates = UCN_V6_CONFIG_ROUTE_CANDIDATES;
+    value.route_flow_pins = UCN_V6_CONFIG_ROUTE_FLOW_PINS;
     return value;
 }
 

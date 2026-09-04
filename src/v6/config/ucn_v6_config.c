@@ -23,7 +23,11 @@ static const ucn_v6_feature_manifest_t compiled_manifest = {
     UCN_V6_CONFIG_CAPABILITY_PEERS,
     UCN_V6_CONFIG_CAPABILITY_PATHS,
     UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS,
-    UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS
+    UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS,
+    UCN_V6_CONFIG_ROUTE_SETS,
+    UCN_V6_CONFIG_ROUTE_PATHS_PER_SET,
+    UCN_V6_CONFIG_ROUTE_CANDIDATES,
+    UCN_V6_CONFIG_ROUTE_FLOW_PINS
 };
 
 const ucn_v6_feature_manifest_t *ucn_v6_compiled_manifest(void)
@@ -63,7 +67,11 @@ ucn_v6_result_t ucn_v6_manifest_validate_exact(
            manifest->group_discovery_hints ==
                expected->group_discovery_hints &&
            manifest->group_discovery_links ==
-               expected->group_discovery_links ?
+               expected->group_discovery_links &&
+           manifest->route_sets == expected->route_sets &&
+           manifest->route_paths_per_set == expected->route_paths_per_set &&
+           manifest->route_candidates == expected->route_candidates &&
+           manifest->route_flow_pins == expected->route_flow_pins ?
                UCN_V6_OK : UCN_V6_ERR_CONFIG;
 }
 
