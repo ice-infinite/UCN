@@ -145,6 +145,7 @@ typedef struct ucn_v6_qos_stats {
     uint32_t application_result[4];
     uint32_t dropped_expired[4];
     uint32_t rejected_quota[4];
+    uint32_t reclaimed_idle_flows;
     uint16_t queued[4];
     uint16_t flow_slots;
     uint16_t inflight;
@@ -238,6 +239,17 @@ ucn_v6_result_t ucn_v6_qos_record_completion(
 ucn_v6_result_t ucn_v6_qos_retire_completion(
     ucn_v6_qos_owner_t *owner,
     uint64_t buffer_token);
+/* EN: Reclaims only idle flows whose token buckets have naturally refilled to
+ * their configured burst.  Reopening such a slot cannot reset admission
+ * credit; active, selected, queued, inflight, or partially refilled flows are
+ * never reclaimed.
+ * 中文：仅回收已空闲且令牌桶已自然恢复到配置突发上限的 Flow。重新使用该槽
+ * 不会重置准入额度；活动、已选择、排队、飞行中或尚未完全恢复的 Flow 永不回收。 */
+ucn_v6_result_t ucn_v6_qos_reclaim_idle_flows(
+    ucn_v6_qos_owner_t *owner,
+    uint64_t now_us,
+    uint16_t max_to_reclaim,
+    uint16_t *reclaimed);
 /* EN: Decrements a Hop-authenticated budget or returns DROP_EXPIRED.
  * 中文：扣减已逐跳认证预算；耗尽时返回固定 DROP_EXPIRED。 */
 ucn_v6_result_t ucn_v6_qos_forward_budget(
@@ -249,9 +261,17 @@ ucn_v6_result_t ucn_v6_qos_forward_budget(
 uint8_t ucn_v6_qos_hardware_priority(
     ucn_v6_traffic_class_t traffic_class,
     uint8_t hardware_priority_count);
-ucn_v6_result_t ucn_v6_qos_invalidate_session(
+/* EN: Atomically retires queued/inflight work owned by one canonical Link or
+ * Session invalidation.  Capability/Path invalidations are canonical no-ops:
+ * queued ingress work is re-routed at send time and is not owned by one
+ * mutable route choice.  Every retired buffer token is returned to the
+ * caller; insufficient output capacity causes zero writes.
+ * 中文：按规范 Link 或 Session 失效事件原子回收排队/飞行中工作。Capability/
+ * Path 事件是规范空操作：排队的入口工作会在发送时重新选路，并不归属于某个
+ * 可变 Route 选择。全部被回收 Buffer Token 都返还调用方；输出容量不足零写入。 */
+ucn_v6_result_t ucn_v6_qos_apply_invalidation(
     ucn_v6_qos_owner_t *owner,
-    const ucn_v6_session_key_t *session,
+    const ucn_v6_stack_invalidation_t *invalidation,
     uint64_t *retired_tokens,
     size_t retired_capacity,
     size_t *retired_count);

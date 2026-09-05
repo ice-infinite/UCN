@@ -57,8 +57,12 @@ typedef struct ucn_v6_transfer_result {
 } ucn_v6_transfer_result_t;
 
 typedef struct ucn_v6_transfer_send_request {
-    ucn_v6_route_domain_t route_domain;
-    ucn_v6_path_capability_t path;
+    /* EN: Stable identity only. Transfer resolves and freezes the exact live
+     * Route path from its init-bound Route Owner; callers cannot inject an
+     * egress, next-hop or Capability claim.
+     * 中文：这里只携带稳定身份。Transfer 从初始化时绑定的 Route Owner
+     * 解析并冻结精确活跃路径，调用方不能注入出口、下一跳或能力声明。 */
+    ucn_v6_route_path_ref_t route_ref;
     ucn_v6_message_descriptor_t message;
     ucn_v6_message_class_t message_class;
     uint64_t message_id;
@@ -104,6 +108,14 @@ typedef struct ucn_v6_transfer_rx_result {
 
 typedef struct ucn_v6_transfer_completed {
     ucn_v6_session_key_t origin;
+    /* EN: Exact end-to-end business semantics frozen by the first accepted
+     * fragment.  The receiver uses this descriptor to dispatch the
+     * reassembled bytes; later fragments cannot change its endpoints, role,
+     * traffic class, delivery guarantee or operation identity.
+     * 中文：首个已接受分片冻结的完整端到端业务语义。接收端使用该描述符
+     * 分发重组后的字节；后续分片不得改变端点、角色、流量等级、交付保证
+     * 或操作身份。 */
+    ucn_v6_message_descriptor_t message;
     uint64_t operation_id;
     uint64_t message_id;
     ucn_v6_message_class_t message_class;
@@ -186,10 +198,23 @@ ucn_v6_result_t ucn_v6_transfer_result_decode(
     size_t input_length,
     ucn_v6_transfer_result_t *result);
 
+/* EN: A non-NULL Route Owner is permanently bound and must outlive Transfer.
+ * It is required for TX but may be NULL for an RX-only owner. Every TX
+ * selection, submit, SACK, expiry and proactive rebind resolves the exact
+ * frozen Route path again.  The one canonical dependency chain includes the
+ * local egress Link/Session/Capability and Path identity; the destination
+ * capability claim is revalidated by Route Owner. Cleanup remains possible
+ * after revocation so a caller-owned buffer token cannot be stranded.
+ * 中文：非空 Route Owner 在初始化时永久绑定，且生命周期必须长于 Transfer；
+ * TX 必须提供，纯 RX Owner 可传 NULL。每次 TX 选择、提交、SACK、过期检查和
+ * 主动换路都会重新解析完全一致的 Route Path。唯一规范依赖链包含本机出口
+ * Link/Session/Capability 与 Path 身份，目标能力声明由 Route Owner 重验；
+ * 撤权后仍允许清理，避免调用方 Buffer Token 被永久滞留。 */
 ucn_v6_result_t ucn_v6_transfer_owner_init_in_place(
     void *storage,
     size_t storage_bytes,
     const ucn_v6_feature_manifest_t *manifest,
+    const ucn_v6_route_owner_t *route_owner,
     uint64_t retry_interval_us,
     uint8_t fragment_max_attempts,
     uint64_t receive_timeout_us,
@@ -212,6 +237,7 @@ ucn_v6_result_t ucn_v6_transfer_record_fragment_submit(
     bool submitted);
 ucn_v6_result_t ucn_v6_transfer_apply_sack(
     ucn_v6_transfer_owner_t *owner,
+    uint64_t now_us,
     const ucn_v6_security_open_result_t *opened);
 ucn_v6_result_t ucn_v6_transfer_copy_tx(
     const ucn_v6_transfer_owner_t *owner,
@@ -225,7 +251,7 @@ ucn_v6_result_t ucn_v6_transfer_rebind_path(
     ucn_v6_transfer_owner_t *owner,
     uint64_t now_us,
     uint64_t message_id,
-    const ucn_v6_path_capability_t *path);
+    const ucn_v6_route_path_ref_t *route_ref);
 
 ucn_v6_result_t ucn_v6_transfer_receive_fragment(
     ucn_v6_transfer_owner_t *owner,
@@ -267,13 +293,13 @@ ucn_v6_result_t ucn_v6_transfer_finish_credit(
 ucn_v6_result_t ucn_v6_transfer_expire(
     ucn_v6_transfer_owner_t *owner,
     uint64_t now_us);
-/* EN: Atomically fences every resource owned by one revoked Peer Session.
- * Caller receives all local TX buffer tokens or the operation writes nothing.
- * 中文：原子撤销一个已失效 Peer Session 拥有的全部资源；调用方须有足够
- * 空间接收全部本地 TX Buffer Token，否则本操作不写入。 */
-ucn_v6_result_t ucn_v6_transfer_invalidate_session(
+/* EN: Atomically applies one canonical parent invalidation.  Every matching
+ * local TX buffer token is returned, or the operation writes nothing.
+ * 中文：原子应用一个规范父代际失效事件；调用方要么收到全部匹配的本地
+ * TX Buffer Token，要么本操作完全不写入。 */
+ucn_v6_result_t ucn_v6_transfer_apply_invalidation(
     ucn_v6_transfer_owner_t *owner,
-    const ucn_v6_session_key_t *session,
+    const ucn_v6_stack_invalidation_t *invalidation,
     uint64_t *retired_tx_buffer_tokens,
     size_t retired_capacity,
     size_t *retired_count,

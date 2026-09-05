@@ -39,6 +39,7 @@ struct ucn_v6_route_owner {
     uint16_t schema;
     uint16_t reserved;
     uint64_t layout_hash;
+    const ucn_v6_capability_owner_t *capability_owner;
     uint64_t candidate_timeout_us;
     uint64_t activation_retry_us;
     uint64_t previous_generation_grace_us;

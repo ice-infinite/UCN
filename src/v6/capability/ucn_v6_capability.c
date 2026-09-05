@@ -72,6 +72,24 @@ static bool principal_equal(const ucn_v6_principal_t *left,
            memcmp(left->bytes, right->bytes, sizeof(left->bytes)) == 0;
 }
 
+static bool session_key_is_valid(const ucn_v6_session_key_t *session)
+{
+    return session != NULL &&
+           ucn_v6_principal_is_valid(&session->principal) &&
+           ucn_v6_binding_key_is_valid(&session->binding) &&
+           session->session_generation != 0U &&
+           session->session_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD;
+}
+
+static bool session_key_equal(const ucn_v6_session_key_t *left,
+                              const ucn_v6_session_key_t *right)
+{
+    return session_key_is_valid(left) && session_key_is_valid(right) &&
+           principal_equal(&left->principal, &right->principal) &&
+           ucn_v6_binding_key_equal(&left->binding, &right->binding) &&
+           left->session_generation == right->session_generation;
+}
+
 static void increment_saturated(uint32_t *value)
 {
     if (*value != UINT32_MAX) {
@@ -148,7 +166,268 @@ static bool owner_is_valid(const ucn_v6_capability_owner_t *owner)
     return owner != NULL && owner->magic == UCN_V6_CAPABILITY_OWNER_MAGIC &&
            owner->schema == UCN_V6_CAPABILITY_SCHEMA && owner->initialized &&
            owner->canary == UCN_V6_CAPABILITY_OWNER_CANARY &&
-           owner->layout_hash == UCN_V6_COMPILED_LAYOUT_HASH;
+           owner->layout_hash == UCN_V6_COMPILED_LAYOUT_HASH &&
+           owner->invalidation_head <
+               UCN_V6_CAPABILITY_INVALIDATION_DEPTH &&
+           owner->invalidation_count <=
+               UCN_V6_CAPABILITY_INVALIDATION_DEPTH;
+}
+
+static bool invalidation_equal(
+    const ucn_v6_stack_invalidation_t *left,
+    const ucn_v6_stack_invalidation_t *right)
+{
+    return left->type == right->type && left->link_id == right->link_id &&
+           left->link_generation == right->link_generation &&
+           ucn_v6_binding_key_equal(&left->session.binding,
+                                    &right->session.binding) &&
+           principal_equal(&left->session.principal,
+                           &right->session.principal) &&
+           left->session.session_generation ==
+               right->session.session_generation &&
+           left->capability_generation == right->capability_generation &&
+           left->path_id == right->path_id &&
+           left->path_generation == right->path_generation;
+}
+
+static bool invalidation_queue_has_space(
+    const ucn_v6_capability_owner_t *owner,
+    size_t required)
+{
+    return required <= UCN_V6_CAPABILITY_INVALIDATION_DEPTH &&
+           (size_t)owner->invalidation_count <=
+               UCN_V6_CAPABILITY_INVALIDATION_DEPTH - required;
+}
+
+static void invalidation_push(
+    ucn_v6_capability_owner_t *owner,
+    const ucn_v6_stack_invalidation_t *invalidation)
+{
+    size_t tail = ((size_t)owner->invalidation_head +
+                   owner->invalidation_count) %
+                  UCN_V6_CAPABILITY_INVALIDATION_DEPTH;
+    owner->invalidations[tail] = *invalidation;
+    ++owner->invalidation_count;
+}
+
+static const ucn_v6_stack_invalidation_t *invalidation_at(
+    const ucn_v6_capability_owner_t *owner,
+    size_t offset)
+{
+    size_t index = ((size_t)owner->invalidation_head + offset) %
+                   UCN_V6_CAPABILITY_INVALIDATION_DEPTH;
+    return &owner->invalidations[index];
+}
+
+static bool invalidation_covers(
+    const ucn_v6_stack_invalidation_t *parent,
+    const ucn_v6_stack_invalidation_t *child)
+{
+    if (parent == NULL || child == NULL || parent->type > child->type ||
+        parent->link_id != child->link_id ||
+        parent->link_generation != child->link_generation) {
+        return false;
+    }
+    if (parent->type == UCN_V6_STACK_INVALIDATE_LINK) {
+        return true;
+    }
+    if (!ucn_v6_binding_key_equal(&parent->session.binding,
+                                  &child->session.binding) ||
+        !principal_equal(&parent->session.principal,
+                         &child->session.principal) ||
+        parent->session.session_generation !=
+            child->session.session_generation) {
+        return false;
+    }
+    if (parent->type == UCN_V6_STACK_INVALIDATE_SESSION) {
+        return true;
+    }
+    if (parent->capability_generation != child->capability_generation) {
+        return false;
+    }
+    if (parent->type == UCN_V6_STACK_INVALIDATE_CAPABILITY) {
+        return true;
+    }
+    return parent->path_id == child->path_id &&
+           parent->path_generation == child->path_generation;
+}
+
+static void invalidation_remove_at(
+    ucn_v6_capability_owner_t *owner,
+    size_t offset)
+{
+    size_t cursor;
+    for (cursor = offset; cursor + 1U < owner->invalidation_count; ++cursor) {
+        size_t destination =
+            ((size_t)owner->invalidation_head + cursor) %
+            UCN_V6_CAPABILITY_INVALIDATION_DEPTH;
+        size_t source = (destination + 1U) %
+                        UCN_V6_CAPABILITY_INVALIDATION_DEPTH;
+        owner->invalidations[destination] = owner->invalidations[source];
+    }
+    if (owner->invalidation_count != 0U) {
+        size_t tail = ((size_t)owner->invalidation_head +
+                       owner->invalidation_count - 1U) %
+                      UCN_V6_CAPABILITY_INVALIDATION_DEPTH;
+        memset(&owner->invalidations[tail], 0,
+               sizeof(owner->invalidations[tail]));
+        --owner->invalidation_count;
+    }
+}
+
+static void invalidation_remove_descendants(
+    ucn_v6_capability_owner_t *owner,
+    const ucn_v6_stack_invalidation_t *parent)
+{
+    size_t offset = 0U;
+    while (offset < owner->invalidation_count) {
+        if (invalidation_covers(parent, invalidation_at(owner, offset))) {
+            invalidation_remove_at(owner, offset);
+        } else {
+            ++offset;
+        }
+    }
+}
+
+static bool invalidation_queue_contains_cover(
+    const ucn_v6_capability_owner_t *owner,
+    const ucn_v6_stack_invalidation_t *target)
+{
+    size_t offset;
+    for (offset = 0U; offset < owner->invalidation_count; ++offset) {
+        if (invalidation_covers(invalidation_at(owner, offset), target)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static size_t invalidation_queue_descendant_count(
+    const ucn_v6_capability_owner_t *owner,
+    const ucn_v6_stack_invalidation_t *parent)
+{
+    size_t offset;
+    size_t count = 0U;
+    for (offset = 0U; offset < owner->invalidation_count; ++offset) {
+        if (invalidation_covers(parent, invalidation_at(owner, offset))) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static bool invalidation_project_enqueue(
+    const ucn_v6_capability_owner_t *owner,
+    const ucn_v6_stack_invalidation_t *invalidation,
+    size_t *projected_count)
+{
+    size_t descendants;
+    if (projected_count == NULL) {
+        return false;
+    }
+    if (invalidation_queue_contains_cover(owner, invalidation)) {
+        return true;
+    }
+    descendants = invalidation_queue_descendant_count(owner, invalidation);
+    if (*projected_count < descendants) {
+        return false;
+    }
+    *projected_count = *projected_count - descendants + 1U;
+    return *projected_count <= UCN_V6_CAPABILITY_INVALIDATION_DEPTH;
+}
+
+static bool invalidation_enqueue(
+    ucn_v6_capability_owner_t *owner,
+    const ucn_v6_stack_invalidation_t *invalidation)
+{
+    size_t offset;
+    size_t covered = 0U;
+    for (offset = 0U; offset < owner->invalidation_count; ++offset) {
+        const ucn_v6_stack_invalidation_t *queued =
+            invalidation_at(owner, offset);
+        if (invalidation_covers(queued, invalidation)) {
+            return true;
+        }
+        if (invalidation_covers(invalidation, queued)) {
+            ++covered;
+        }
+    }
+    if (covered == 0U &&
+        !invalidation_queue_has_space(owner, 1U)) {
+        return false;
+    }
+    invalidation_remove_descendants(owner, invalidation);
+    invalidation_push(owner, invalidation);
+    return true;
+}
+
+static bool peer_session_key_is_valid(
+    const ucn_v6_cached_peer_capability_t *peer)
+{
+    return peer != NULL && peer->valid &&
+           ucn_v6_principal_is_valid(&peer->principal) &&
+           ucn_v6_binding_key_is_valid(&peer->binding) &&
+           peer->session_generation != 0U &&
+           peer->session_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           peer->ingress_link_id != 0U &&
+           peer->ingress_link_id != UINT16_MAX &&
+           peer->ingress_link_generation != 0U &&
+           peer->ingress_link_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD;
+}
+
+static bool invalidation_from_peer(
+    const ucn_v6_cached_peer_capability_t *peer,
+    ucn_v6_stack_invalidation_type_t type,
+    ucn_v6_stack_invalidation_t *invalidation)
+{
+    ucn_v6_stack_invalidation_t next;
+    if (!peer_session_key_is_valid(peer) || invalidation == NULL ||
+        (type != UCN_V6_STACK_INVALIDATE_LINK &&
+         type != UCN_V6_STACK_INVALIDATE_SESSION &&
+         type != UCN_V6_STACK_INVALIDATE_CAPABILITY)) {
+        return false;
+    }
+    memset(&next, 0, sizeof(next));
+    next.type = type;
+    next.link_id = peer->ingress_link_id;
+    next.link_generation = peer->ingress_link_generation;
+    if (type >= UCN_V6_STACK_INVALIDATE_SESSION) {
+        next.session.binding = peer->binding;
+        next.session.principal = peer->principal;
+        next.session.session_generation = peer->session_generation;
+    }
+    if (type >= UCN_V6_STACK_INVALIDATE_CAPABILITY) {
+        next.capability_generation = peer->record.capability_generation;
+    }
+    if (!ucn_v6_stack_invalidation_is_valid(&next)) {
+        return false;
+    }
+    *invalidation = next;
+    return true;
+}
+
+static bool invalidation_from_path(
+    const ucn_v6_cached_peer_capability_t *peer,
+    const ucn_v6_path_capability_t *path,
+    ucn_v6_stack_invalidation_t *invalidation)
+{
+    ucn_v6_stack_invalidation_t next;
+    if (!invalidation_from_peer(peer, UCN_V6_STACK_INVALIDATE_CAPABILITY,
+                                &next) ||
+        path == NULL || !path->valid || path->path_id == 0U ||
+        path->path_id == UINT16_MAX || path->path_generation == 0U ||
+        path->path_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
+        return false;
+    }
+    next.type = UCN_V6_STACK_INVALIDATE_PATH;
+    next.path_id = path->path_id;
+    next.path_generation = path->path_generation;
+    if (!ucn_v6_stack_invalidation_is_valid(&next)) {
+        return false;
+    }
+    *invalidation = next;
+    return true;
 }
 
 static ucn_v6_result_t checked_deadline(uint64_t now_us,
@@ -403,6 +682,35 @@ static bool frame_matches_payload(const ucn_v6_security_open_result_t *opened,
              memcmp(opened->frame.payload, payload, payload_length) == 0));
 }
 
+/* Security is the sole owner of the physical and Session parent selected for
+ * an authenticated ingress frame.  Capability must never accept a second,
+ * caller-supplied copy of that identity: doing so would let one Link's proof
+ * populate another Link's cache and survive the real parent's invalidation.
+ *
+ * Security 是认证入站帧物理父级与 Session 父级的唯一所有者。Capability
+ * 不能再接受调用方复制的第二份身份，否则一个 Link 的证明可能写入另一个 Link
+ * 的缓存，并逃过真实父级的失效事件。 */
+static bool opened_peer_parent_is_consistent(
+    const ucn_v6_security_open_result_t *opened)
+{
+    return opened != NULL &&
+           opened->ingress_link_instance_id != 0U &&
+           opened->ingress_link_instance_id != UINT16_MAX &&
+           opened->ingress_link_instance_generation != 0U &&
+           opened->ingress_link_instance_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           principal_equal(&opened->ingress_peer_session.principal,
+                           &opened->authenticated_principal) &&
+           opened->ingress_peer_session.binding.realm_id ==
+               opened->frame.realm_id &&
+           opened->ingress_peer_session.binding.node_address ==
+               opened->frame.source_address &&
+           opened->ingress_peer_session.binding.binding_generation ==
+               opened->frame.source_binding_generation &&
+           opened->ingress_peer_session.session_generation ==
+               opened->frame.session_generation;
+}
+
 static ucn_v6_cached_peer_capability_t *find_peer(
     ucn_v6_capability_owner_t *owner,
     const ucn_v6_principal_t *principal,
@@ -422,25 +730,35 @@ static ucn_v6_cached_peer_capability_t *find_peer(
     return allow_empty ? empty : NULL;
 }
 
-static void invalidate_paths_for_principal(
+static void invalidate_paths_for_parent_principal(
     ucn_v6_capability_owner_t *owner,
     const ucn_v6_principal_t *principal)
 {
     size_t index;
     for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PATHS; ++index) {
         if (owner->paths[index].valid &&
-            principal_equal(&owner->paths[index].destination_principal,
+            principal_equal(
+                &owner->paths[index].local_parent_session.principal,
                             principal)) {
             memset(&owner->paths[index], 0, sizeof(owner->paths[index]));
         }
     }
 }
 
+static bool peer_lease_expired(
+    const ucn_v6_cached_peer_capability_t *peer,
+    uint64_t now_us)
+{
+    return peer != NULL && peer->valid &&
+           ((peer->discovery_deadline_us != 0U &&
+             now_us >= peer->discovery_deadline_us) ||
+            (peer->capability_deadline_us != 0U &&
+             now_us >= peer->capability_deadline_us));
+}
+
 ucn_v6_result_t ucn_v6_capability_ingest_peer_hello(
     ucn_v6_capability_owner_t *owner,
     uint64_t now_us,
-    uint16_t ingress_link_id,
-    uint32_t ingress_link_generation,
     const ucn_v6_security_open_result_t *opened,
     const ucn_v6_capability_summary_t *summary,
     ucn_v6_hello_disposition_t *disposition)
@@ -449,15 +767,12 @@ ucn_v6_result_t ucn_v6_capability_ingest_peer_hello(
     ucn_v6_cached_peer_capability_t *peer;
     uint64_t deadline;
     if (!owner_is_valid(owner) || owner->faulted || summary == NULL ||
-        disposition == NULL || ingress_link_id == 0U ||
-        ingress_link_generation == 0U ||
-        ingress_link_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        disposition == NULL || !opened_peer_parent_is_consistent(opened) ||
         ucn_v6_capability_summary_encode(summary, payload) != UCN_V6_OK ||
         !frame_matches_payload(opened, UCN_V6_PROTOCOL_OPCODE_PEER_HELLO,
                                payload, sizeof(payload)) ||
         opened->frame.session_generation == 0U ||
         opened->frame.source_binding_generation == 0U ||
-        summary->link_instance_generation != ingress_link_generation ||
         checked_deadline(now_us, owner->discovery_lease_us,
                          &deadline) != UCN_V6_OK) {
         if (owner_is_valid(owner)) {
@@ -472,8 +787,11 @@ ucn_v6_result_t ucn_v6_capability_ingest_peer_hello(
         peer->binding.binding_generation !=
             opened->frame.source_binding_generation ||
         peer->session_generation != opened->frame.session_generation ||
+        peer->ingress_link_id != opened->ingress_link_instance_id ||
+        peer->ingress_link_generation !=
+            opened->ingress_link_instance_generation ||
         peer->record.link.link_instance_generation !=
-            ingress_link_generation ||
+            summary->link_instance_generation ||
         peer->record.capability_generation !=
             summary->capability_generation ||
         memcmp(peer->digest, summary->digest, sizeof(peer->digest)) != 0 ||
@@ -481,7 +799,7 @@ ucn_v6_result_t ucn_v6_capability_ingest_peer_hello(
         *disposition = UCN_V6_HELLO_QUERY_REQUIRED;
         return UCN_V6_OK;
     }
-    peer->ingress_link_id = ingress_link_id;
+    peer->ingress_link_id = opened->ingress_link_instance_id;
     peer->discovery_deadline_us = deadline;
     *disposition = UCN_V6_HELLO_MATCHED;
     return UCN_V6_OK;
@@ -490,8 +808,6 @@ ucn_v6_result_t ucn_v6_capability_ingest_peer_hello(
 ucn_v6_result_t ucn_v6_capability_ingest_advertise(
     ucn_v6_capability_owner_t *owner,
     uint64_t now_us,
-    uint16_t ingress_link_id,
-    uint32_t ingress_link_generation,
     const ucn_v6_security_open_result_t *opened,
     const ucn_v6_capability_record_t *record)
 {
@@ -501,15 +817,15 @@ ucn_v6_result_t ucn_v6_capability_ingest_advertise(
     uint64_t discovery_deadline;
     uint64_t capability_deadline;
     uint32_t expected_generation;
-    if (!owner_is_valid(owner) || owner->faulted || ingress_link_id == 0U ||
-        ingress_link_generation == 0U ||
-        ingress_link_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+    ucn_v6_stack_invalidation_t invalidation;
+    bool emit_invalidation = false;
+    if (!owner_is_valid(owner) || owner->faulted ||
+        !opened_peer_parent_is_consistent(opened) ||
         ucn_v6_capability_record_encode(record, payload) != UCN_V6_OK ||
         ucn_v6_capability_digest(record, digest) != UCN_V6_OK ||
         !frame_matches_payload(
             opened, UCN_V6_PROTOCOL_OPCODE_CAPABILITY_ADVERTISE,
             payload, sizeof(payload)) ||
-        record->link.link_instance_generation != ingress_link_generation ||
         checked_deadline(now_us, owner->discovery_lease_us,
                          &discovery_deadline) != UCN_V6_OK ||
         checked_deadline(now_us, owner->capability_lease_us,
@@ -526,17 +842,37 @@ ucn_v6_result_t ucn_v6_capability_ingest_advertise(
             peer->binding.binding_generation ==
                 opened->frame.source_binding_generation &&
             peer->session_generation == opened->frame.session_generation &&
-            peer->record.link.link_instance_generation ==
-                ingress_link_generation;
+            peer->ingress_link_id == opened->ingress_link_instance_id &&
+            peer->ingress_link_generation ==
+                opened->ingress_link_instance_generation;
         if (!same_domain) {
-            memset(peer, 0, sizeof(*peer));
-            peer = NULL;
+            /* Parent replacement is owned by Link/Security and must arrive as
+             * an explicit invalidation before a new Session domain can occupy
+             * this Principal slot.  Inferring replacement from an ADVERTISE
+             * would let a delayed old Session overwrite a newer parent. */
+            increment_saturated(&owner->stats.rejected_authentication);
+            return UCN_V6_ERR_REPLAY;
         } else if (peer->record.capability_generation ==
                    record->capability_generation) {
             if (memcmp(peer->digest, digest, sizeof(peer->digest)) != 0) {
                 return UCN_V6_ERR_REPLAY;
             }
-            peer->ingress_link_id = ingress_link_id;
+            if (!invalidation_from_peer(
+                    peer, UCN_V6_STACK_INVALIDATE_CAPABILITY,
+                    &invalidation)) {
+                owner->faulted = true;
+                return UCN_V6_ERR_STATE;
+            }
+            if (invalidation_queue_contains_cover(owner, &invalidation)) {
+                /* An exact-generation refresh is safe only after every
+                 * consumer has observed the prior lease revocation.  The
+                 * next generation is independently identifiable and may
+                 * advance while the old event is still queued. */
+                return UCN_V6_ERR_STATE;
+            }
+            peer->ingress_link_id = opened->ingress_link_instance_id;
+            peer->ingress_link_generation =
+                opened->ingress_link_instance_generation;
             peer->discovery_deadline_us = discovery_deadline;
             peer->capability_deadline_us = capability_deadline;
             return UCN_V6_OK;
@@ -547,6 +883,13 @@ ucn_v6_result_t ucn_v6_capability_ingest_advertise(
                 expected_generation != record->capability_generation) {
                 return UCN_V6_ERR_REPLAY;
             }
+            if (!invalidation_from_peer(
+                    peer, UCN_V6_STACK_INVALIDATE_CAPABILITY,
+                    &invalidation)) {
+                owner->faulted = true;
+                return UCN_V6_ERR_STATE;
+            }
+            emit_invalidation = true;
         }
     }
     if (peer == NULL) {
@@ -556,7 +899,13 @@ ucn_v6_result_t ucn_v6_capability_ingest_advertise(
         increment_saturated(&owner->stats.rejected_capacity);
         return UCN_V6_ERR_NO_SPACE;
     }
-    invalidate_paths_for_principal(owner, &opened->authenticated_principal);
+    if (emit_invalidation &&
+        !invalidation_enqueue(owner, &invalidation)) {
+        increment_saturated(&owner->stats.rejected_capacity);
+        return UCN_V6_ERR_NO_SPACE;
+    }
+    invalidate_paths_for_parent_principal(
+        owner, &opened->authenticated_principal);
     memset(peer, 0, sizeof(*peer));
     peer->valid = true;
     peer->principal = opened->authenticated_principal;
@@ -565,7 +914,8 @@ ucn_v6_result_t ucn_v6_capability_ingest_advertise(
     peer->binding.binding_generation =
         opened->frame.source_binding_generation;
     peer->session_generation = opened->frame.session_generation;
-    peer->ingress_link_id = ingress_link_id;
+    peer->ingress_link_id = opened->ingress_link_instance_id;
+    peer->ingress_link_generation = opened->ingress_link_instance_generation;
     peer->record = *record;
     memcpy(peer->digest, digest, sizeof(peer->digest));
     peer->discovery_deadline_us = discovery_deadline;
@@ -575,6 +925,8 @@ ucn_v6_result_t ucn_v6_capability_ingest_advertise(
 
 static ucn_v6_group_discovery_hint_t *find_hint(
     ucn_v6_capability_owner_t *owner,
+    uint16_t ingress_link_id,
+    uint32_t ingress_link_generation,
     const ucn_v6_binding_key_t *binding,
     uint32_t session_generation,
     bool allow_empty)
@@ -584,6 +936,8 @@ static ucn_v6_group_discovery_hint_t *find_hint(
     for (index = 0U; index < UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS; ++index) {
         ucn_v6_group_discovery_hint_t *hint = &owner->hints[index];
         if (hint->occupied &&
+            hint->ingress_link_id == ingress_link_id &&
+            hint->ingress_link_generation == ingress_link_generation &&
             ucn_v6_binding_key_equal(&hint->claimed_binding, binding) &&
             hint->claimed_session_generation == session_generation) {
             return hint;
@@ -714,8 +1068,6 @@ static void preview_group_budget(
 ucn_v6_result_t ucn_v6_capability_ingest_group_hello_hint(
     ucn_v6_capability_owner_t *owner,
     uint64_t now_us,
-    uint16_t ingress_link_id,
-    uint32_t ingress_link_generation,
     const ucn_v6_security_open_result_t *opened)
 {
     ucn_v6_binding_key_t binding;
@@ -724,10 +1076,15 @@ ucn_v6_result_t ucn_v6_capability_ingest_group_hello_hint(
     ucn_v6_group_hint_group_budget_t *group;
     ucn_v6_group_hint_link_budget_t next_link;
     ucn_v6_group_hint_group_budget_t next_group;
+    uint16_t ingress_link_id;
+    uint32_t ingress_link_generation;
     uint64_t deadline;
     if (!owner_is_valid(owner) || owner->faulted || opened == NULL ||
-        ingress_link_id == 0U || ingress_link_generation == 0U ||
-        ingress_link_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        opened->ingress_link_instance_id == 0U ||
+        opened->ingress_link_instance_id == UINT16_MAX ||
+        opened->ingress_link_instance_generation == 0U ||
+        opened->ingress_link_instance_generation >
+            UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         !opened->group_discovery_only || opened->hop_authenticated ||
         opened->endpoint_authorized ||
         opened->frame.frame_type != UCN_V6_FRAME_CONTROL ||
@@ -738,6 +1095,11 @@ ucn_v6_result_t ucn_v6_capability_ingest_group_hello_hint(
             UCN_V6_SERIAL_ROTATION_THRESHOLD) {
         return UCN_V6_ERR_SECURITY;
     }
+    /* Security is the sole source of the authenticated physical parent.
+     * Accepting a second caller-supplied Link key would allow a frame opened
+     * on Link A to consume or populate Link B's bounded discovery state. */
+    ingress_link_id = opened->ingress_link_instance_id;
+    ingress_link_generation = opened->ingress_link_instance_generation;
     binding.realm_id = opened->frame.realm_id;
     binding.node_address = opened->frame.source_address;
     binding.binding_generation = opened->frame.source_binding_generation;
@@ -745,7 +1107,8 @@ ucn_v6_result_t ucn_v6_capability_ingest_group_hello_hint(
         opened->frame.session_generation == 0U) {
         return UCN_V6_ERR_SECURITY;
     }
-    hint = find_hint(owner, &binding, opened->frame.session_generation, false);
+    hint = find_hint(owner, ingress_link_id, ingress_link_generation,
+                     &binding, opened->frame.session_generation, false);
     if (hint != NULL) {
         return now_us < hint->deadline_us ? UCN_V6_OK : UCN_V6_ERR_TIMEOUT;
     }
@@ -768,7 +1131,8 @@ ucn_v6_result_t ucn_v6_capability_ingest_group_hello_hint(
         increment_saturated(&owner->stats.rejected_capacity);
         return UCN_V6_ERR_NO_SPACE;
     }
-    hint = find_hint(owner, &binding, opened->frame.session_generation, true);
+    hint = find_hint(owner, ingress_link_id, ingress_link_generation,
+                     &binding, opened->frame.session_generation, true);
     if (hint == NULL ||
         checked_deadline(now_us, UCN_V6_GROUP_HINT_TIMEOUT_US,
                          &deadline) != UCN_V6_OK) {
@@ -810,16 +1174,39 @@ static bool path_capability_is_valid(
     return path != NULL && path->valid &&
            ucn_v6_principal_is_valid(&path->destination_principal) &&
            ucn_v6_binding_key_is_valid(&path->destination_binding) &&
-           path->session_generation != 0U &&
-           path->session_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
-           path->destination_link_instance_generation != 0U &&
-           path->destination_link_instance_generation <=
+           path->destination_session_generation != 0U &&
+           path->destination_session_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           path->destination_capability_generation != 0U &&
+           path->destination_capability_generation <=
                UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            digest_is_nonzero(path->destination_capability_digest) &&
+           (path->destination_realtime_mode_bits &
+            (uint16_t)~UCN_V6_CAPABILITY_REALTIME_MODE_BITS) == 0U &&
+           (((path->destination_realtime_mode_bits &
+              (UCN_V6_REALTIME_MODE_SYNCED |
+               UCN_V6_REALTIME_MODE_DEADLINE)) != 0U) ==
+            (path->destination_clock_domain_id != 0U &&
+             path->destination_clock_domain_generation != 0U &&
+             path->destination_clock_domain_generation <=
+                 UCN_V6_SERIAL_ROTATION_THRESHOLD)) &&
+           session_key_is_valid(&path->local_parent_session) &&
+           path->local_parent_link_id != 0U &&
+           path->local_parent_link_id != UINT16_MAX &&
+           path->local_parent_link_generation != 0U &&
+           path->local_parent_link_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           path->local_parent_capability_generation != 0U &&
+           path->local_parent_capability_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           digest_is_nonzero(path->local_parent_capability_digest) &&
            path->route_generation != 0U &&
            path->route_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
-           path->path_id != 0U && path->path_generation != 0U &&
+           path->path_id != 0U && path->path_id != UINT16_MAX &&
+           path->path_generation != 0U &&
            path->path_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           path->hop_count != 0U &&
+           path->hop_count <= UCN_V6_PATH_HOP_LIMIT &&
            path->path_frame_mtu != 0U &&
            path->path_frame_mtu <= UCN_V6_WIRE_MAX_FRAME_BYTES &&
            path->payload_budget != 0U &&
@@ -842,6 +1229,64 @@ static bool path_capability_is_valid(
            path->deadline_us != 0U && now_us < path->deadline_us;
 }
 
+bool ucn_v6_capability_cached_peer_is_live(
+    const ucn_v6_cached_peer_capability_t *peer,
+    uint64_t now_us)
+{
+    uint8_t digest[UCN_V6_CAPABILITY_DIGEST_BYTES];
+    return peer_session_key_is_valid(peer) && record_is_valid(&peer->record) &&
+           peer->discovery_deadline_us != 0U &&
+           peer->capability_deadline_us != 0U &&
+           now_us < peer->discovery_deadline_us &&
+           now_us < peer->capability_deadline_us &&
+           ucn_v6_capability_digest(&peer->record, digest) == UCN_V6_OK &&
+           memcmp(peer->digest, digest, sizeof(digest)) == 0;
+}
+
+bool ucn_v6_capability_path_is_live(
+    const ucn_v6_path_capability_t *path,
+    const ucn_v6_cached_peer_capability_t *parent_peer,
+    uint64_t now_us)
+{
+    return path_capability_is_valid(path, now_us) &&
+           ucn_v6_capability_cached_peer_is_live(parent_peer, now_us) &&
+           principal_equal(&path->local_parent_session.principal,
+                           &parent_peer->principal) &&
+           ucn_v6_binding_key_equal(&path->local_parent_session.binding,
+                                    &parent_peer->binding) &&
+           path->local_parent_session.session_generation ==
+               parent_peer->session_generation &&
+           path->local_parent_link_id == parent_peer->ingress_link_id &&
+           path->local_parent_link_generation ==
+               parent_peer->ingress_link_generation &&
+           path->local_parent_capability_generation ==
+               parent_peer->record.capability_generation &&
+           memcmp(path->local_parent_capability_digest,
+                  parent_peer->digest,
+                  UCN_V6_CAPABILITY_DIGEST_BYTES) == 0 &&
+           (path->feature_bits &
+            ~parent_peer->record.peer.feature_bits) == 0U &&
+           (path->hop_suite_bits &
+            ~parent_peer->record.peer.hop_suite_bits) == 0U &&
+           (path->e2e_suite_bits &
+            ~parent_peer->record.peer.e2e_suite_bits) == 0U &&
+           (uint32_t)path->max_message_class <=
+               (uint32_t)parent_peer->record.peer.max_message_class &&
+           path->max_window <= parent_peer->record.peer.max_rx_window &&
+           path->max_concurrency <=
+               parent_peer->record.peer.max_concurrent_transfers &&
+           (path->timestamp_capability_bits &
+            (uint16_t)~parent_peer->record.link
+                .timestamp_capability_bits) == 0U &&
+           (path->timestamp_capability_bits == 0U ||
+            path->timestamp_uncertainty_us >=
+                parent_peer->record.link.timestamp_uncertainty_us) &&
+           path->path_frame_mtu <=
+               parent_peer->record.link.link_frame_mtu &&
+           path->path_frame_mtu <=
+               parent_peer->record.link.processing_frame_mtu;
+}
+
 ucn_v6_result_t ucn_v6_capability_path_reduce_begin(
     const ucn_v6_path_budget_request_t *request,
     ucn_v6_path_budget_accumulator_t *accumulator)
@@ -855,15 +1300,26 @@ ucn_v6_result_t ucn_v6_capability_path_reduce_begin(
         request->frame_contract->payload_length != 0U ||
         !ucn_v6_principal_is_valid(&request->destination_principal) ||
         !ucn_v6_binding_key_is_valid(&request->destination_binding) ||
-        request->session_generation == 0U ||
-        request->session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        request->destination_link_instance_generation == 0U ||
-        request->destination_link_instance_generation >
+        request->destination_session_generation == 0U ||
+        request->destination_session_generation >
+            UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        request->destination_capability_generation == 0U ||
+        request->destination_capability_generation >
             UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         !digest_is_nonzero(request->destination_capability_digest) ||
+        (request->destination_realtime_mode_bits &
+         (uint16_t)~UCN_V6_CAPABILITY_REALTIME_MODE_BITS) != 0U ||
+        (((request->destination_realtime_mode_bits &
+           (UCN_V6_REALTIME_MODE_SYNCED |
+            UCN_V6_REALTIME_MODE_DEADLINE)) != 0U) !=
+         (request->destination_clock_domain_id != 0U &&
+          request->destination_clock_domain_generation != 0U &&
+          request->destination_clock_domain_generation <=
+              UCN_V6_SERIAL_ROTATION_THRESHOLD)) ||
         request->route_generation == 0U ||
         request->route_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        request->path_id == 0U || request->path_generation == 0U ||
+        request->path_id == 0U || request->path_id == UINT16_MAX ||
+        request->path_generation == 0U ||
         request->path_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         request->deadline_us == 0U ||
         request->path_policy_frame_mtu == 0U ||
@@ -893,12 +1349,19 @@ ucn_v6_result_t ucn_v6_capability_path_reduce_begin(
     initialized.derived.immutable_for_realtime = request->fixed_path;
     initialized.derived.destination_principal = request->destination_principal;
     initialized.derived.destination_binding = request->destination_binding;
-    initialized.derived.session_generation = request->session_generation;
-    initialized.derived.destination_link_instance_generation =
-        request->destination_link_instance_generation;
+    initialized.derived.destination_session_generation =
+        request->destination_session_generation;
+    initialized.derived.destination_capability_generation =
+        request->destination_capability_generation;
     memcpy(initialized.derived.destination_capability_digest,
            request->destination_capability_digest,
            sizeof(initialized.derived.destination_capability_digest));
+    initialized.derived.destination_realtime_mode_bits =
+        request->destination_realtime_mode_bits;
+    initialized.derived.destination_clock_domain_id =
+        request->destination_clock_domain_id;
+    initialized.derived.destination_clock_domain_generation =
+        request->destination_clock_domain_generation;
     initialized.derived.route_generation = request->route_generation;
     initialized.derived.path_id = request->path_id;
     initialized.derived.path_generation = request->path_generation;
@@ -918,15 +1381,38 @@ ucn_v6_result_t ucn_v6_capability_path_reduce_begin(
 }
 
 ucn_v6_result_t ucn_v6_capability_path_reduce_hop(
+    const ucn_v6_capability_owner_t *owner,
+    uint64_t now_us,
     ucn_v6_path_budget_accumulator_t *accumulator,
-    const ucn_v6_capability_record_t *record)
+    const ucn_v6_capability_peer_ref_t *hop_ref)
 {
+    ucn_v6_cached_peer_capability_t cached;
+    const ucn_v6_capability_record_t *record;
     ucn_v6_path_capability_t next;
     uint64_t uncertainty;
     uint32_t frame_limit;
-    if (accumulator == NULL || !accumulator->active ||
-        !record_is_valid(record)) {
+    if (!owner_is_valid(owner) || accumulator == NULL ||
+        !accumulator->active || accumulator->local_parent_bound ||
+        hop_ref == NULL ||
+        !ucn_v6_principal_is_valid(&hop_ref->principal) ||
+        !ucn_v6_binding_key_is_valid(&hop_ref->binding) ||
+        hop_ref->session_generation == 0U ||
+        hop_ref->session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        hop_ref->ingress_link_id == 0U ||
+        hop_ref->ingress_link_id == UINT16_MAX ||
+        hop_ref->ingress_link_generation == 0U ||
+        hop_ref->ingress_link_generation >
+            UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        ucn_v6_capability_copy_peer(
+            owner, now_us, &hop_ref->principal, &hop_ref->binding,
+            hop_ref->session_generation, hop_ref->ingress_link_generation,
+            &cached) != UCN_V6_OK ||
+        cached.ingress_link_id != hop_ref->ingress_link_id) {
         return UCN_V6_ERR_ARGUMENT;
+    }
+    record = &cached.record;
+    if (!record_is_valid(record)) {
+        return UCN_V6_ERR_STATE;
     }
     if (accumulator->hop_count == UCN_V6_PATH_HOP_LIMIT) {
         return UCN_V6_ERR_EXHAUSTED;
@@ -939,6 +1425,16 @@ ucn_v6_result_t ucn_v6_capability_path_reduce_hop(
         }
     }
     next = accumulator->derived;
+    next.local_parent_session.principal = cached.principal;
+    next.local_parent_session.binding = cached.binding;
+    next.local_parent_session.session_generation =
+        cached.session_generation;
+    next.local_parent_link_id = cached.ingress_link_id;
+    next.local_parent_link_generation = cached.ingress_link_generation;
+    next.local_parent_capability_generation =
+        cached.record.capability_generation;
+    memcpy(next.local_parent_capability_digest, cached.digest,
+           sizeof(next.local_parent_capability_digest));
     frame_limit = minimum_u32(record->link.link_frame_mtu,
                               record->link.processing_frame_mtu);
     next.path_frame_mtu = minimum_u32(next.path_frame_mtu, frame_limit);
@@ -954,9 +1450,90 @@ ucn_v6_result_t ucn_v6_capability_path_reduce_hop(
         next.max_concurrency, record->peer.max_concurrent_transfers);
     next.timestamp_capability_bits &=
         record->link.timestamp_capability_bits;
+    /* A derived Path is a bounded lease over every contributing Hop, not a
+     * timeless copy of their claims.  Keep the earliest discovery/capability
+     * deadline so an intermediate Hop can never be relied on after the
+     * authenticated record used by this reduction expires.  An exact-next
+     * generation may coexist until this old lease ends; immediate physical
+     * failure is still fenced hop-by-hop by Link/Session invalidation. */
+    if (cached.discovery_deadline_us < next.deadline_us) {
+        next.deadline_us = cached.discovery_deadline_us;
+    }
+    if (cached.capability_deadline_us < next.deadline_us) {
+        next.deadline_us = cached.capability_deadline_us;
+    }
     accumulator->derived = next;
     accumulator->timestamp_uncertainty_us = uncertainty;
     ++accumulator->hop_count;
+    accumulator->local_parent_bound = true;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_capability_path_reduce_downstream(
+    ucn_v6_path_budget_accumulator_t *accumulator,
+    const ucn_v6_path_capability_t *downstream,
+    uint64_t local_downstream_deadline_us)
+{
+    ucn_v6_path_capability_t next;
+    uint64_t uncertainty;
+    uint32_t total_hops;
+    if (accumulator == NULL || !accumulator->active ||
+        accumulator->downstream_reduced || downstream == NULL ||
+        !path_capability_is_valid(downstream, 0U) ||
+        local_downstream_deadline_us == 0U ||
+        !principal_equal(&accumulator->derived.destination_principal,
+                         &downstream->destination_principal) ||
+        !ucn_v6_binding_key_equal(
+            &accumulator->derived.destination_binding,
+            &downstream->destination_binding) ||
+        accumulator->derived.destination_session_generation !=
+            downstream->destination_session_generation ||
+        accumulator->derived.destination_capability_generation !=
+            downstream->destination_capability_generation ||
+        memcmp(accumulator->derived.destination_capability_digest,
+               downstream->destination_capability_digest,
+               UCN_V6_CAPABILITY_DIGEST_BYTES) != 0 ||
+        accumulator->derived.destination_realtime_mode_bits !=
+            downstream->destination_realtime_mode_bits ||
+        accumulator->derived.destination_clock_domain_id !=
+            downstream->destination_clock_domain_id ||
+        accumulator->derived.destination_clock_domain_generation !=
+            downstream->destination_clock_domain_generation) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    total_hops = (uint32_t)accumulator->hop_count + downstream->hop_count;
+    if (total_hops > UCN_V6_PATH_HOP_LIMIT) {
+        return UCN_V6_ERR_EXHAUSTED;
+    }
+    uncertainty = accumulator->timestamp_uncertainty_us;
+    if (downstream->timestamp_capability_bits != 0U) {
+        uncertainty += downstream->timestamp_uncertainty_us;
+        if (uncertainty > UINT32_MAX) {
+            return UCN_V6_ERR_EXHAUSTED;
+        }
+    }
+    next = accumulator->derived;
+    next.path_frame_mtu = minimum_u32(
+        next.path_frame_mtu, downstream->path_frame_mtu);
+    next.feature_bits &= downstream->feature_bits;
+    next.hop_suite_bits &= downstream->hop_suite_bits;
+    next.e2e_suite_bits &= downstream->e2e_suite_bits;
+    next.max_message_class = (ucn_v6_message_class_t)minimum_u32(
+        (uint32_t)next.max_message_class,
+        (uint32_t)downstream->max_message_class);
+    next.max_window = minimum_u16(next.max_window,
+                                  downstream->max_window);
+    next.max_concurrency = minimum_u16(next.max_concurrency,
+                                       downstream->max_concurrency);
+    next.timestamp_capability_bits &=
+        downstream->timestamp_capability_bits;
+    if (local_downstream_deadline_us < next.deadline_us) {
+        next.deadline_us = local_downstream_deadline_us;
+    }
+    accumulator->derived = next;
+    accumulator->timestamp_uncertainty_us = uncertainty;
+    accumulator->hop_count = (uint16_t)total_hops;
+    accumulator->downstream_reduced = true;
     return UCN_V6_OK;
 }
 
@@ -966,13 +1543,14 @@ ucn_v6_result_t ucn_v6_capability_path_reduce_finalize(
 {
     ucn_v6_path_capability_t derived;
     if (accumulator == NULL || path == NULL || !accumulator->active ||
-        accumulator->hop_count == 0U) {
+        !accumulator->local_parent_bound || accumulator->hop_count == 0U) {
         return UCN_V6_ERR_ARGUMENT;
     }
     derived = accumulator->derived;
     derived.timestamp_uncertainty_us =
         derived.timestamp_capability_bits == 0U ? 0U :
         (uint32_t)accumulator->timestamp_uncertainty_us;
+    derived.hop_count = accumulator->hop_count;
     if ((derived.feature_bits & accumulator->required_feature_bits) !=
             accumulator->required_feature_bits ||
         (derived.hop_suite_bits & accumulator->required_hop_suite_bits) !=
@@ -1010,6 +1588,33 @@ static bool path_key_equal(const ucn_v6_path_capability_t *left,
            left->path_id == right->path_id;
 }
 
+static const ucn_v6_cached_peer_capability_t *find_path_peer(
+    const ucn_v6_capability_owner_t *owner,
+    const ucn_v6_path_capability_t *path)
+{
+    size_t index;
+    for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PEERS; ++index) {
+        const ucn_v6_cached_peer_capability_t *peer = &owner->peers[index];
+        if (peer->valid &&
+            principal_equal(&peer->principal,
+                            &path->local_parent_session.principal) &&
+            ucn_v6_binding_key_equal(&peer->binding,
+                                     &path->local_parent_session.binding) &&
+            peer->session_generation ==
+                path->local_parent_session.session_generation &&
+            peer->ingress_link_id == path->local_parent_link_id &&
+            peer->ingress_link_generation ==
+                path->local_parent_link_generation &&
+            peer->record.capability_generation ==
+                path->local_parent_capability_generation &&
+            memcmp(peer->digest, path->local_parent_capability_digest,
+                   UCN_V6_CAPABILITY_DIGEST_BYTES) == 0) {
+            return peer;
+        }
+    }
+    return NULL;
+}
+
 static bool path_semantically_equal(const ucn_v6_path_capability_t *left,
                                     const ucn_v6_path_capability_t *right)
 {
@@ -1019,15 +1624,33 @@ static bool path_semantically_equal(const ucn_v6_path_capability_t *left,
                            &right->destination_principal) &&
            ucn_v6_binding_key_equal(&left->destination_binding,
                                     &right->destination_binding) &&
-           left->session_generation == right->session_generation &&
-           left->destination_link_instance_generation ==
-               right->destination_link_instance_generation &&
+           left->destination_session_generation ==
+               right->destination_session_generation &&
+           left->destination_capability_generation ==
+               right->destination_capability_generation &&
            memcmp(left->destination_capability_digest,
                   right->destination_capability_digest,
+                  UCN_V6_CAPABILITY_DIGEST_BYTES) == 0 &&
+           left->destination_realtime_mode_bits ==
+               right->destination_realtime_mode_bits &&
+           left->destination_clock_domain_id ==
+               right->destination_clock_domain_id &&
+           left->destination_clock_domain_generation ==
+               right->destination_clock_domain_generation &&
+           session_key_equal(&left->local_parent_session,
+                             &right->local_parent_session) &&
+           left->local_parent_link_id == right->local_parent_link_id &&
+           left->local_parent_link_generation ==
+               right->local_parent_link_generation &&
+           left->local_parent_capability_generation ==
+               right->local_parent_capability_generation &&
+           memcmp(left->local_parent_capability_digest,
+                  right->local_parent_capability_digest,
                   UCN_V6_CAPABILITY_DIGEST_BYTES) == 0 &&
            left->route_generation == right->route_generation &&
            left->path_id == right->path_id &&
            left->path_generation == right->path_generation &&
+           left->hop_count == right->hop_count &&
            left->path_frame_mtu == right->path_frame_mtu &&
            left->payload_budget == right->payload_budget &&
            left->fragment_data_budget == right->fragment_data_budget &&
@@ -1044,6 +1667,22 @@ static bool path_semantically_equal(const ucn_v6_path_capability_t *left,
            left->deadline_us == right->deadline_us;
 }
 
+static bool path_refresh_claim_equal(
+    const ucn_v6_path_capability_t *left,
+    const ucn_v6_path_capability_t *right)
+{
+    ucn_v6_path_capability_t left_claim;
+    ucn_v6_path_capability_t right_claim;
+    if (left == NULL || right == NULL) {
+        return false;
+    }
+    left_claim = *left;
+    right_claim = *right;
+    left_claim.deadline_us = 0U;
+    right_claim.deadline_us = 0U;
+    return path_semantically_equal(&left_claim, &right_claim);
+}
+
 ucn_v6_result_t ucn_v6_capability_install_path(
     ucn_v6_capability_owner_t *owner,
     uint64_t now_us,
@@ -1051,34 +1690,26 @@ ucn_v6_result_t ucn_v6_capability_install_path(
 {
     ucn_v6_path_capability_t *target = NULL;
     ucn_v6_cached_peer_capability_t peer;
+    ucn_v6_stack_invalidation_t invalidation;
+    bool emit_invalidation = false;
     size_t index;
     if (!owner_is_valid(owner) || owner->faulted ||
         !path_capability_is_valid(path, now_us)) {
         return UCN_V6_ERR_ARGUMENT;
     }
     if (ucn_v6_capability_copy_peer(
-            owner, now_us, &path->destination_principal,
-            &path->destination_binding, path->session_generation,
-            path->destination_link_instance_generation, &peer) != UCN_V6_OK ||
-        memcmp(peer.digest, path->destination_capability_digest,
-               sizeof(peer.digest)) != 0) {
+            owner, now_us, &path->local_parent_session.principal,
+            &path->local_parent_session.binding,
+            path->local_parent_session.session_generation,
+            path->local_parent_link_generation, &peer) != UCN_V6_OK ||
+        memcmp(peer.digest, path->local_parent_capability_digest,
+               sizeof(peer.digest)) != 0 ||
+        peer.ingress_link_id != path->local_parent_link_id ||
+        peer.record.capability_generation !=
+            path->local_parent_capability_generation) {
         return UCN_V6_ERR_STATE;
     }
-    if ((path->feature_bits & ~peer.record.peer.feature_bits) != 0U ||
-        (path->hop_suite_bits & ~peer.record.peer.hop_suite_bits) != 0U ||
-        (path->e2e_suite_bits & ~peer.record.peer.e2e_suite_bits) != 0U ||
-        (uint32_t)path->max_message_class >
-            (uint32_t)peer.record.peer.max_message_class ||
-        path->max_window > peer.record.peer.max_rx_window ||
-        path->max_concurrency >
-            peer.record.peer.max_concurrent_transfers ||
-        (path->timestamp_capability_bits &
-         (uint16_t)~peer.record.link.timestamp_capability_bits) != 0U ||
-        (path->timestamp_capability_bits != 0U &&
-         path->timestamp_uncertainty_us <
-             peer.record.link.timestamp_uncertainty_us) ||
-        path->path_frame_mtu > peer.record.link.link_frame_mtu ||
-        path->path_frame_mtu > peer.record.link.processing_frame_mtu) {
+    if (!ucn_v6_capability_path_is_live(path, &peer, now_us)) {
         return UCN_V6_ERR_ACCESS;
     }
     for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PATHS; ++index) {
@@ -1100,11 +1731,43 @@ ucn_v6_result_t ucn_v6_capability_install_path(
         if (path_semantically_equal(target, path)) {
             return UCN_V6_OK;
         }
+        if (target->path_generation == path->path_generation) {
+            const ucn_v6_cached_peer_capability_t *current_peer =
+                find_path_peer(owner, target);
+            if (!path_refresh_claim_equal(target, path) ||
+                current_peer == NULL ||
+                !invalidation_from_path(current_peer, target,
+                                        &invalidation)) {
+                return UCN_V6_ERR_REPLAY;
+            }
+            if (invalidation_queue_contains_cover(owner, &invalidation)) {
+                /* The exact-generation Path may become live again only after
+                 * every consumer has observed its prior lease revocation. */
+                return UCN_V6_ERR_STATE;
+            }
+            *target = *path;
+            return UCN_V6_OK;
+        }
         if (ucn_v6_serial_checked_next(target->path_generation,
                                        &expected_generation) != UCN_V6_OK ||
             path->path_generation != expected_generation) {
             return UCN_V6_ERR_REPLAY;
         }
+        {
+            const ucn_v6_cached_peer_capability_t *old_peer =
+                find_path_peer(owner, target);
+            if (old_peer == NULL ||
+                !invalidation_from_path(old_peer, target, &invalidation)) {
+                owner->faulted = true;
+                return UCN_V6_ERR_STATE;
+            }
+            emit_invalidation = true;
+        }
+    }
+    if (emit_invalidation &&
+        !invalidation_enqueue(owner, &invalidation)) {
+        increment_saturated(&owner->stats.rejected_capacity);
+        return UCN_V6_ERR_NO_SPACE;
     }
     *target = *path;
     return UCN_V6_OK;
@@ -1116,7 +1779,7 @@ ucn_v6_result_t ucn_v6_capability_copy_peer(
     const ucn_v6_principal_t *principal,
     const ucn_v6_binding_key_t *binding,
     uint32_t session_generation,
-    uint32_t link_instance_generation,
+    uint32_t ingress_link_generation,
     ucn_v6_cached_peer_capability_t *peer_out)
 {
     size_t index;
@@ -1124,8 +1787,8 @@ ucn_v6_result_t ucn_v6_capability_copy_peer(
         !ucn_v6_principal_is_valid(principal) ||
         !ucn_v6_binding_key_is_valid(binding) || session_generation == 0U ||
         session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        link_instance_generation == 0U ||
-        link_instance_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        ingress_link_generation == 0U ||
+        ingress_link_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         peer_out == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
@@ -1134,10 +1797,8 @@ ucn_v6_result_t ucn_v6_capability_copy_peer(
         if (peer->valid && principal_equal(&peer->principal, principal) &&
             ucn_v6_binding_key_equal(&peer->binding, binding) &&
             peer->session_generation == session_generation &&
-            peer->record.link.link_instance_generation ==
-                link_instance_generation) {
-            if (now_us >= peer->discovery_deadline_us ||
-                now_us >= peer->capability_deadline_us) {
+            peer->ingress_link_generation == ingress_link_generation) {
+            if (!ucn_v6_capability_cached_peer_is_live(peer, now_us)) {
                 return UCN_V6_ERR_TIMEOUT;
             }
             *peer_out = *peer;
@@ -1152,7 +1813,7 @@ ucn_v6_result_t ucn_v6_capability_copy_path(
     uint64_t now_us,
     const ucn_v6_principal_t *destination_principal,
     const ucn_v6_binding_key_t *destination_binding,
-    uint32_t session_generation,
+    uint32_t destination_session_generation,
     uint32_t route_generation,
     uint16_t path_id,
     uint32_t path_generation,
@@ -1163,11 +1824,11 @@ ucn_v6_result_t ucn_v6_capability_copy_path(
     if (!owner_is_valid(owner) || owner->faulted ||
         !ucn_v6_principal_is_valid(destination_principal) ||
         !ucn_v6_binding_key_is_valid(destination_binding) ||
-        session_generation == 0U ||
-        session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        destination_session_generation == 0U ||
+        destination_session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         route_generation == 0U ||
         route_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        path_id == 0U || path_generation == 0U ||
+        path_id == 0U || path_id == UINT16_MAX || path_generation == 0U ||
         path_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         path_out == NULL) {
         return UCN_V6_ERR_ARGUMENT;
@@ -1179,18 +1840,18 @@ ucn_v6_result_t ucn_v6_capability_copy_path(
                             destination_principal) &&
             ucn_v6_binding_key_equal(&path->destination_binding,
                                      destination_binding) &&
-            path->session_generation == session_generation &&
+            path->destination_session_generation ==
+                destination_session_generation &&
             path->route_generation == route_generation &&
             path->path_id == path_id &&
             path->path_generation == path_generation) {
-            if (now_us >= path->deadline_us ||
-                ucn_v6_capability_copy_peer(
-                    owner, now_us, destination_principal,
-                    destination_binding, session_generation,
-                    path->destination_link_instance_generation,
-                    &peer) != UCN_V6_OK ||
-                memcmp(peer.digest, path->destination_capability_digest,
-                       sizeof(peer.digest)) != 0) {
+            if (ucn_v6_capability_copy_peer(
+                    owner, now_us,
+                    &path->local_parent_session.principal,
+                    &path->local_parent_session.binding,
+                    path->local_parent_session.session_generation,
+                    path->local_parent_link_generation, &peer) != UCN_V6_OK ||
+                !ucn_v6_capability_path_is_live(path, &peer, now_us)) {
                 return UCN_V6_ERR_TIMEOUT;
             }
             *path_out = *path;
@@ -1205,23 +1866,106 @@ ucn_v6_result_t ucn_v6_capability_expire(
     uint64_t now_us)
 {
     size_t index;
+    size_t projected_count;
+    ucn_v6_stack_invalidation_t checked;
     if (!owner_is_valid(owner) || owner->faulted) {
         return UCN_V6_ERR_ARGUMENT;
     }
+    /* First validate and project the whole coalesced invalidation batch.  No
+     * cached authority is removed unless every required old-parent event
+     * fits.  Expiring peers and standalone paths are disjoint, so descendants
+     * of one generated event cannot be counted by another generated event. */
+    projected_count = owner->invalidation_count;
     for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PEERS; ++index) {
-        if (owner->peers[index].valid &&
-            (now_us >= owner->peers[index].discovery_deadline_us ||
-             now_us >= owner->peers[index].capability_deadline_us)) {
-            ucn_v6_principal_t expired_principal =
-                owner->peers[index].principal;
-            memset(&owner->peers[index], 0, sizeof(owner->peers[index]));
-            invalidate_paths_for_principal(owner, &expired_principal);
+        if (peer_lease_expired(&owner->peers[index], now_us)) {
+            if (!invalidation_from_peer(
+                    &owner->peers[index],
+                    UCN_V6_STACK_INVALIDATE_CAPABILITY, &checked)) {
+                owner->faulted = true;
+                return UCN_V6_ERR_STATE;
+            }
+            if (!invalidation_project_enqueue(
+                    owner, &checked, &projected_count)) {
+                increment_saturated(&owner->stats.rejected_capacity);
+                return UCN_V6_ERR_NO_SPACE;
+            }
         }
     }
     for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PATHS; ++index) {
         if (owner->paths[index].valid &&
+            owner->paths[index].deadline_us != 0U &&
             now_us >= owner->paths[index].deadline_us) {
-            memset(&owner->paths[index], 0, sizeof(owner->paths[index]));
+            const ucn_v6_cached_peer_capability_t *peer =
+                find_path_peer(owner, &owner->paths[index]);
+            bool peer_expires = peer_lease_expired(peer, now_us);
+            if (peer == NULL ||
+                (!peer_expires && !invalidation_from_path(
+                    peer, &owner->paths[index], &checked))) {
+                owner->faulted = true;
+                return UCN_V6_ERR_STATE;
+            }
+            if (!peer_expires &&
+                !invalidation_project_enqueue(
+                    owner, &checked, &projected_count)) {
+                increment_saturated(&owner->stats.rejected_capacity);
+                return UCN_V6_ERR_NO_SPACE;
+            }
+        }
+    }
+    if (projected_count > UCN_V6_CAPABILITY_INVALIDATION_DEPTH) {
+        increment_saturated(&owner->stats.rejected_capacity);
+        return UCN_V6_ERR_NO_SPACE;
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PEERS; ++index) {
+        if (peer_lease_expired(&owner->peers[index], now_us)) {
+            (void)invalidation_from_peer(
+                &owner->peers[index],
+                UCN_V6_STACK_INVALIDATE_CAPABILITY, &checked);
+            if (!invalidation_enqueue(owner, &checked)) {
+                owner->faulted = true;
+                return UCN_V6_ERR_STATE;
+            }
+        }
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PATHS; ++index) {
+        if (owner->paths[index].valid &&
+            owner->paths[index].deadline_us != 0U &&
+            now_us >= owner->paths[index].deadline_us) {
+            const ucn_v6_cached_peer_capability_t *peer =
+                find_path_peer(owner, &owner->paths[index]);
+            bool peer_expires = peer_lease_expired(peer, now_us);
+            if (!peer_expires) {
+                (void)invalidation_from_path(
+                    peer, &owner->paths[index], &checked);
+                if (!invalidation_enqueue(owner, &checked)) {
+                    owner->faulted = true;
+                    return UCN_V6_ERR_STATE;
+                }
+            }
+        }
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PEERS; ++index) {
+        if (peer_lease_expired(&owner->peers[index], now_us)) {
+            /* Lease expiry is not parent retirement.  Preserve the exact
+             * Session-bound generation/digest history so a later ADVERTISE
+             * in the same parent domain must be an exact refresh or the
+             * checked-next generation.  Zero deadlines also mark this
+             * invalidation as emitted, preventing duplicate queue entries. */
+            invalidate_paths_for_parent_principal(
+                owner, &owner->peers[index].principal);
+            owner->peers[index].discovery_deadline_us = 0U;
+            owner->peers[index].capability_deadline_us = 0U;
+        }
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PATHS; ++index) {
+        if (owner->paths[index].valid &&
+            owner->paths[index].deadline_us != 0U &&
+            now_us >= owner->paths[index].deadline_us) {
+            /* A Path lease is a child-liveness grant, not retirement of its
+             * generation domain.  Retain the immutable key and generation so
+             * a stale route transaction cannot reinstall an old generation.
+             * Link/Session/Capability parent retirement reclaims the slot. */
+            owner->paths[index].deadline_us = 0U;
         }
     }
     for (index = 0U; index < UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS; ++index) {
@@ -1286,8 +2030,175 @@ ucn_v6_result_t ucn_v6_capability_expire(
     return UCN_V6_OK;
 }
 
+static bool peer_matches_invalidation_parent(
+    const ucn_v6_cached_peer_capability_t *peer,
+    const ucn_v6_stack_invalidation_t *invalidation)
+{
+    if (!peer_session_key_is_valid(peer) || invalidation == NULL ||
+        peer->ingress_link_id != invalidation->link_id ||
+        peer->ingress_link_generation !=
+            invalidation->link_generation) {
+        return false;
+    }
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_LINK) {
+        return true;
+    }
+    return ucn_v6_binding_key_equal(&peer->binding,
+                                    &invalidation->session.binding) &&
+           principal_equal(&peer->principal,
+                           &invalidation->session.principal) &&
+           peer->session_generation ==
+               invalidation->session.session_generation;
+}
+
+ucn_v6_result_t ucn_v6_capability_apply_invalidation(
+    ucn_v6_capability_owner_t *owner,
+    const ucn_v6_stack_invalidation_t *invalidation)
+{
+    size_t index;
+    if (!owner_is_valid(owner) || owner->faulted ||
+        !ucn_v6_stack_invalidation_is_valid(invalidation)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+
+    for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PEERS; ++index) {
+        ucn_v6_cached_peer_capability_t *peer = &owner->peers[index];
+        if (!peer_matches_invalidation_parent(peer, invalidation)) {
+            continue;
+        }
+        if (invalidation->type == UCN_V6_STACK_INVALIDATE_LINK ||
+            invalidation->type == UCN_V6_STACK_INVALIDATE_SESSION) {
+            ucn_v6_principal_t retired_principal = peer->principal;
+            memset(peer, 0, sizeof(*peer));
+            invalidate_paths_for_parent_principal(owner,
+                                                  &retired_principal);
+            continue;
+        }
+        if (invalidation->type == UCN_V6_STACK_INVALIDATE_CAPABILITY &&
+            peer->record.capability_generation ==
+            invalidation->capability_generation) {
+            peer->discovery_deadline_us = 0U;
+            peer->capability_deadline_us = 0U;
+            invalidate_paths_for_parent_principal(owner,
+                                                  &peer->principal);
+        }
+    }
+
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_LINK) {
+        /* Group HELLO is authenticated in a Group context rather than a Peer
+         * Session, so its fixed-capacity hints and rate budgets are not found
+         * by the peer loop above.  They are nevertheless exact children of
+         * the physical Link generation and must retire on reopen. */
+        for (index = 0U; index < UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS;
+             ++index) {
+            if (owner->hints[index].occupied &&
+                owner->hints[index].ingress_link_id ==
+                    invalidation->link_id &&
+                owner->hints[index].ingress_link_generation ==
+                    invalidation->link_generation) {
+                memset(&owner->hints[index], 0, sizeof(owner->hints[index]));
+            }
+            if (owner->hint_groups[index].occupied &&
+                owner->hint_groups[index].ingress_link_id ==
+                    invalidation->link_id &&
+                owner->hint_groups[index].ingress_link_generation ==
+                    invalidation->link_generation) {
+                memset(&owner->hint_groups[index], 0,
+                       sizeof(owner->hint_groups[index]));
+            }
+        }
+        for (index = 0U; index < UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS;
+             ++index) {
+            if (owner->hint_links[index].occupied &&
+                owner->hint_links[index].ingress_link_id ==
+                    invalidation->link_id &&
+                owner->hint_links[index].ingress_link_generation ==
+                    invalidation->link_generation) {
+                memset(&owner->hint_links[index], 0,
+                       sizeof(owner->hint_links[index]));
+            }
+        }
+    }
+
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_PATH) {
+        for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PATHS; ++index) {
+            ucn_v6_path_capability_t *path = &owner->paths[index];
+            const ucn_v6_cached_peer_capability_t *peer =
+                path->valid ? find_path_peer(owner, path) : NULL;
+            if (path->valid &&
+                peer != NULL &&
+                peer->record.capability_generation ==
+                    invalidation->capability_generation &&
+                path->path_id == invalidation->path_id &&
+                path->path_generation == invalidation->path_generation &&
+                path->local_parent_link_id == invalidation->link_id &&
+                path->local_parent_link_generation ==
+                    invalidation->link_generation &&
+                path->local_parent_session.session_generation ==
+                    invalidation->session.session_generation &&
+                ucn_v6_binding_key_equal(
+                    &path->local_parent_session.binding,
+                    &invalidation->session.binding) &&
+                principal_equal(&path->local_parent_session.principal,
+                                &invalidation->session.principal)) {
+                /* PATH revokes liveness only.  The exact generation remains
+                 * occupied until its Capability/Session/Link parent retires,
+                 * preventing the same child domain from rolling back after a
+                 * timeout or delayed invalidation. */
+                path->deadline_us = 0U;
+            }
+        }
+    }
+    /* A parent invalidation subsumes every queued descendant from that exact
+     * parent generation.  Removing those entries is safe after the caller has
+     * presented the parent event and prevents an obsolete child backlog from
+     * consuming lifetime capacity.  Narrow or older events never remove a
+     * broader/newer entry. */
+    invalidation_remove_descendants(owner, invalidation);
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_capability_invalidation_peek(
+    const ucn_v6_capability_owner_t *owner,
+    ucn_v6_stack_invalidation_t *invalidation)
+{
+    if (!owner_is_valid(owner) || invalidation == NULL) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (owner->invalidation_count == 0U) {
+        return UCN_V6_ERR_NOT_FOUND;
+    }
+    *invalidation = owner->invalidations[owner->invalidation_head];
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_capability_invalidation_ack(
+    ucn_v6_capability_owner_t *owner,
+    const ucn_v6_stack_invalidation_t *invalidation)
+{
+    if (!owner_is_valid(owner) || invalidation == NULL ||
+        !ucn_v6_stack_invalidation_is_valid(invalidation)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (owner->invalidation_count == 0U) {
+        return UCN_V6_ERR_NOT_FOUND;
+    }
+    if (!invalidation_equal(
+            &owner->invalidations[owner->invalidation_head], invalidation)) {
+        return UCN_V6_ERR_STATE;
+    }
+    memset(&owner->invalidations[owner->invalidation_head], 0,
+           sizeof(owner->invalidations[owner->invalidation_head]));
+    owner->invalidation_head = (uint16_t)(
+        ((size_t)owner->invalidation_head + 1U) %
+        UCN_V6_CAPABILITY_INVALIDATION_DEPTH);
+    --owner->invalidation_count;
+    return UCN_V6_OK;
+}
+
 ucn_v6_result_t ucn_v6_capability_copy_view(
     const ucn_v6_capability_owner_t *owner,
+    uint64_t now_us,
     ucn_v6_capability_view_t *view)
 {
     ucn_v6_capability_view_t next;
@@ -1296,18 +2207,31 @@ ucn_v6_result_t ucn_v6_capability_copy_view(
         return UCN_V6_ERR_ARGUMENT;
     }
     next = owner->stats;
-    next.cached_peers = 0U;
-    next.installed_paths = 0U;
+    next.occupied_peer_slots = 0U;
+    next.live_peers = 0U;
+    next.occupied_path_slots = 0U;
+    next.live_paths = 0U;
     next.group_hints = 0U;
+    next.pending_invalidations = owner->invalidation_count;
     next.faulted = owner->faulted;
     for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PEERS; ++index) {
         if (owner->peers[index].valid) {
-            ++next.cached_peers;
+            ++next.occupied_peer_slots;
+            if (ucn_v6_capability_cached_peer_is_live(
+                    &owner->peers[index], now_us)) {
+                ++next.live_peers;
+            }
         }
     }
     for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PATHS; ++index) {
         if (owner->paths[index].valid) {
-            ++next.installed_paths;
+            const ucn_v6_cached_peer_capability_t *peer =
+                find_path_peer(owner, &owner->paths[index]);
+            ++next.occupied_path_slots;
+            if (peer != NULL && ucn_v6_capability_path_is_live(
+                                    &owner->paths[index], peer, now_us)) {
+                ++next.live_paths;
+            }
         }
     }
     for (index = 0U; index < UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS; ++index) {

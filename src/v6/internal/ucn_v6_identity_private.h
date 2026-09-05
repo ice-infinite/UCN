@@ -15,8 +15,12 @@ struct ucn_v6_identity_authority {
     uint32_t realm_id;
     ucn_v6_authority_epoch_t epoch;
     uint64_t local_lease_deadline_us;
+    uint64_t freshness_transaction_id;
+    uint64_t freshness_challenge_nonce;
+    uint64_t freshness_max_remaining_lease_us;
     ucn_v6_binding_slot_t bindings[UCN_V6_MAX_BINDING_SLOTS];
     ucn_v6_group_allocator_t groups;
+    ucn_v6_identity_authority_verifier_ops_t verifier;
     ucn_v6_identity_store_ops_t store;
     ucn_v6_callback_gate_t *callback_gate;
     bool epoch_valid;

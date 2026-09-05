@@ -63,6 +63,9 @@ static bool domain_is_valid(const ucn_v6_route_domain_t *domain)
                domain->destination_binding.realm_id &&
            domain->origin_session_generation != 0U &&
            domain->origin_session_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           domain->destination_session_generation != 0U &&
+           domain->destination_session_generation <=
                UCN_V6_SERIAL_ROTATION_THRESHOLD;
 }
 
@@ -79,7 +82,9 @@ static bool domain_equal(const ucn_v6_route_domain_t *left,
            principal_equal(&left->destination_principal,
                            &right->destination_principal) &&
            ucn_v6_binding_key_equal(&left->destination_binding,
-                                    &right->destination_binding);
+                                    &right->destination_binding) &&
+           left->destination_session_generation ==
+               right->destination_session_generation;
 }
 
 static bool path_capability_equal(const ucn_v6_path_capability_t *left,
@@ -92,15 +97,33 @@ static bool path_capability_equal(const ucn_v6_path_capability_t *left,
                            &right->destination_principal) &&
            ucn_v6_binding_key_equal(&left->destination_binding,
                                     &right->destination_binding) &&
-           left->session_generation == right->session_generation &&
-           left->destination_link_instance_generation ==
-               right->destination_link_instance_generation &&
+           left->destination_session_generation ==
+               right->destination_session_generation &&
+           left->destination_capability_generation ==
+               right->destination_capability_generation &&
            memcmp(left->destination_capability_digest,
                   right->destination_capability_digest,
+                  UCN_V6_CAPABILITY_DIGEST_BYTES) == 0 &&
+           left->destination_realtime_mode_bits ==
+               right->destination_realtime_mode_bits &&
+           left->destination_clock_domain_id ==
+               right->destination_clock_domain_id &&
+           left->destination_clock_domain_generation ==
+               right->destination_clock_domain_generation &&
+           session_equal(&left->local_parent_session,
+                         &right->local_parent_session) &&
+           left->local_parent_link_id == right->local_parent_link_id &&
+           left->local_parent_link_generation ==
+               right->local_parent_link_generation &&
+           left->local_parent_capability_generation ==
+               right->local_parent_capability_generation &&
+           memcmp(left->local_parent_capability_digest,
+                  right->local_parent_capability_digest,
                   UCN_V6_CAPABILITY_DIGEST_BYTES) == 0 &&
            left->route_generation == right->route_generation &&
            left->path_id == right->path_id &&
            left->path_generation == right->path_generation &&
+           left->hop_count == right->hop_count &&
            left->path_frame_mtu == right->path_frame_mtu &&
            left->payload_budget == right->payload_budget &&
            left->fragment_data_budget == right->fragment_data_budget &&
@@ -117,6 +140,22 @@ static bool path_capability_equal(const ucn_v6_path_capability_t *left,
            left->deadline_us == right->deadline_us;
 }
 
+static bool path_capability_claim_equal(
+    const ucn_v6_path_capability_t *left,
+    const ucn_v6_path_capability_t *right)
+{
+    ucn_v6_path_capability_t left_claim;
+    ucn_v6_path_capability_t right_claim;
+    if (left == NULL || right == NULL) {
+        return false;
+    }
+    left_claim = *left;
+    right_claim = *right;
+    left_claim.deadline_us = 0U;
+    right_claim.deadline_us = 0U;
+    return path_capability_equal(&left_claim, &right_claim);
+}
+
 static bool route_path_equal(const ucn_v6_route_path_t *left,
                              const ucn_v6_route_path_t *right)
 {
@@ -126,6 +165,8 @@ static bool route_path_equal(const ucn_v6_route_path_t *left,
            session_equal(&left->next_hop, &right->next_hop) &&
            left->egress_link_id == right->egress_link_id &&
            left->egress_link_generation == right->egress_link_generation &&
+           left->next_hop_capability_generation ==
+               right->next_hop_capability_generation &&
            left->hop_count == right->hop_count &&
            left->priority == right->priority &&
            left->weight == right->weight &&
@@ -143,16 +184,31 @@ static bool route_path_is_valid(const ucn_v6_route_domain_t *domain,
            session_is_valid(&path->next_hop) && path->egress_link_id != 0U &&
            path->egress_link_generation != 0U &&
            path->egress_link_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
-           path->hop_count != 0U && path->weight != 0U && path->available &&
+           path->next_hop_capability_generation != 0U &&
+           path->next_hop_capability_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           path->hop_count != 0U &&
+           path->hop_count <= UCN_V6_HOP_COUNT_MAX &&
+           path->weight != 0U && path->available &&
            path->capability.valid &&
            path->next_hop.binding.realm_id == domain->origin_binding.realm_id &&
            principal_equal(&path->capability.destination_principal,
                            &domain->destination_principal) &&
            ucn_v6_binding_key_equal(&path->capability.destination_binding,
-                                    &domain->destination_binding) &&
+                                     &domain->destination_binding) &&
+           path->capability.destination_session_generation ==
+               domain->destination_session_generation &&
            path->capability.route_generation == route_generation &&
            path->capability.path_id == path->path_id &&
            path->capability.path_generation == path->path_generation &&
+           path->capability.hop_count == path->hop_count &&
+           session_equal(&path->capability.local_parent_session,
+                         &path->next_hop) &&
+           path->capability.local_parent_link_id == path->egress_link_id &&
+           path->capability.local_parent_link_generation ==
+               path->egress_link_generation &&
+           path->capability.local_parent_capability_generation ==
+               path->next_hop_capability_generation &&
            path->capability.deadline_us != 0U &&
            bytes_nonzero(path->capability.destination_capability_digest,
                          UCN_V6_CAPABILITY_DIGEST_BYTES);
@@ -194,7 +250,8 @@ static bool owner_is_valid(const ucn_v6_route_owner_t *owner)
 {
     return owner != NULL && owner->magic == UCN_V6_ROUTE_OWNER_MAGIC &&
            owner->schema == UCN_V6_ROUTE_SCHEMA && owner->initialized &&
-           !owner->faulted && owner->canary == UCN_V6_ROUTE_OWNER_CANARY &&
+           !owner->faulted && owner->capability_owner != NULL &&
+           owner->canary == UCN_V6_ROUTE_OWNER_CANARY &&
            owner->layout_hash == UCN_V6_COMPILED_LAYOUT_HASH;
 }
 
@@ -251,13 +308,16 @@ static ucn_v6_route_set_slot_t *find_free_set(ucn_v6_route_owner_t *owner)
 
 static ucn_v6_route_candidate_view_t *find_candidate(
     ucn_v6_route_owner_t *owner,
+    const ucn_v6_route_domain_t *domain,
     uint64_t candidate_transaction_id)
 {
     size_t index;
     for (index = 0U; index < UCN_V6_CONFIG_ROUTE_CANDIDATES; ++index) {
         if (owner->candidates[index].value.occupied &&
             owner->candidates[index].value.candidate_transaction_id ==
-                candidate_transaction_id) {
+                candidate_transaction_id &&
+            domain_equal(
+                &owner->candidates[index].value.proposal.domain, domain)) {
             return &owner->candidates[index].value;
         }
     }
@@ -266,13 +326,16 @@ static ucn_v6_route_candidate_view_t *find_candidate(
 
 static const ucn_v6_route_candidate_view_t *find_candidate_const(
     const ucn_v6_route_owner_t *owner,
+    const ucn_v6_route_domain_t *domain,
     uint64_t candidate_transaction_id)
 {
     size_t index;
     for (index = 0U; index < UCN_V6_CONFIG_ROUTE_CANDIDATES; ++index) {
         if (owner->candidates[index].value.occupied &&
             owner->candidates[index].value.candidate_transaction_id ==
-                candidate_transaction_id) {
+                candidate_transaction_id &&
+            domain_equal(
+                &owner->candidates[index].value.proposal.domain, domain)) {
             return &owner->candidates[index].value;
         }
     }
@@ -379,6 +442,7 @@ static void proposal_digest(const ucn_v6_route_proposal_t *proposal,
     digest_u32(state, proposal->domain.origin_session_generation);
     digest_bytes(state, proposal->domain.destination_principal.bytes, 16U);
     digest_binding(state, &proposal->domain.destination_binding);
+    digest_u32(state, proposal->domain.destination_session_generation);
     digest_u32(state, proposal->route_generation);
     digest_byte(state, proposal->path_count);
     digest_byte(state, proposal->preferred_path_index);
@@ -392,14 +456,29 @@ static void proposal_digest(const ucn_v6_route_proposal_t *proposal,
         digest_u32(state, path->next_hop.session_generation);
         digest_u16(state, path->egress_link_id);
         digest_u32(state, path->egress_link_generation);
-        digest_byte(state, path->hop_count);
+        digest_u32(state, path->next_hop_capability_generation);
+        digest_u16(state, path->hop_count);
         digest_u16(state, path->priority);
         digest_u16(state, path->weight);
         digest_byte(state, path->available ? 1U : 0U);
-        digest_u32(state, capability->destination_link_instance_generation);
-        digest_u32(state, capability->session_generation);
+        digest_u32(state, capability->destination_capability_generation);
+        digest_u32(state, capability->destination_session_generation);
         digest_bytes(state, capability->destination_capability_digest,
                      UCN_V6_CAPABILITY_DIGEST_BYTES);
+        digest_u16(state, capability->destination_realtime_mode_bits);
+        digest_u16(state, capability->destination_clock_domain_id);
+        digest_u32(state, capability->destination_clock_domain_generation);
+        digest_bytes(state, capability->local_parent_session.principal.bytes,
+                     sizeof(capability->local_parent_session.principal.bytes));
+        digest_binding(state, &capability->local_parent_session.binding);
+        digest_u32(state,
+                   capability->local_parent_session.session_generation);
+        digest_u16(state, capability->local_parent_link_id);
+        digest_u32(state, capability->local_parent_link_generation);
+        digest_u32(state, capability->local_parent_capability_generation);
+        digest_bytes(state, capability->local_parent_capability_digest,
+                     UCN_V6_CAPABILITY_DIGEST_BYTES);
+        digest_u16(state, capability->hop_count);
         digest_byte(state, capability->immutable_for_realtime ? 1U : 0U);
         digest_u32(state, capability->path_frame_mtu);
         digest_u32(state, capability->payload_budget);
@@ -439,7 +518,8 @@ static bool activation_equal_candidate(
 static bool path_capability_is_current(
     const ucn_v6_capability_owner_t *capability_owner,
     uint64_t now_us,
-    const ucn_v6_route_path_t *path)
+    const ucn_v6_route_path_t *path,
+    ucn_v6_path_capability_t *current_out)
 {
     ucn_v6_path_capability_t current;
     if (capability_owner == NULL ||
@@ -447,14 +527,38 @@ static bool path_capability_is_current(
             capability_owner, now_us,
             &path->capability.destination_principal,
             &path->capability.destination_binding,
-            path->capability.session_generation,
+            path->capability.destination_session_generation,
             path->capability.route_generation,
             path->capability.path_id,
             path->capability.path_generation,
             &current) != UCN_V6_OK) {
         return false;
     }
-    return path_capability_equal(&current, &path->capability);
+    if (!path_capability_claim_equal(&current, &path->capability)) {
+        return false;
+    }
+    if (current_out != NULL) {
+        *current_out = current;
+    }
+    return true;
+}
+
+static bool next_hop_capability_is_current(
+    const ucn_v6_capability_owner_t *capability_owner,
+    uint64_t now_us,
+    const ucn_v6_route_path_t *path)
+{
+    ucn_v6_cached_peer_capability_t current;
+    if (capability_owner == NULL || path == NULL ||
+        ucn_v6_capability_copy_peer(
+            capability_owner, now_us, &path->next_hop.principal,
+            &path->next_hop.binding, path->next_hop.session_generation,
+            path->egress_link_generation, &current) != UCN_V6_OK) {
+        return false;
+    }
+    return current.ingress_link_id == path->egress_link_id &&
+           current.record.capability_generation ==
+               path->next_hop_capability_generation;
 }
 
 static void clear_pins_for_domain(ucn_v6_route_owner_t *owner,
@@ -476,6 +580,7 @@ ucn_v6_result_t ucn_v6_route_owner_init_in_place(
     void *storage,
     size_t storage_bytes,
     const ucn_v6_feature_manifest_t *manifest,
+    const ucn_v6_capability_owner_t *capability_owner,
     uint64_t candidate_timeout_us,
     uint64_t activation_retry_us,
     uint8_t activation_max_attempts,
@@ -484,10 +589,16 @@ ucn_v6_result_t ucn_v6_route_owner_init_in_place(
     ucn_v6_route_owner_t **owner_out)
 {
     ucn_v6_route_owner_t *owner;
-    if (owner_out == NULL || candidate_timeout_us == 0U ||
+    ucn_v6_capability_view_t capability_view;
+    if (owner_out == NULL || capability_owner == NULL ||
+        candidate_timeout_us == 0U ||
         activation_retry_us == 0U || activation_max_attempts == 0U ||
         previous_generation_grace_us == 0U || flow_pin_lease_us == 0U ||
         ucn_v6_manifest_validate_exact(manifest) != UCN_V6_OK ||
+        ucn_v6_capability_copy_view(capability_owner, 0U,
+                                    &capability_view) !=
+            UCN_V6_OK ||
+        capability_view.faulted ||
         ucn_v6_storage_validate(storage, storage_bytes,
                                 UCN_V6_ROUTE_OWNER_STORAGE_BYTES,
                                 UCN_V6_STORAGE_ALIGNMENT) != UCN_V6_OK) {
@@ -498,6 +609,7 @@ ucn_v6_result_t ucn_v6_route_owner_init_in_place(
     owner->magic = UCN_V6_ROUTE_OWNER_MAGIC;
     owner->schema = UCN_V6_ROUTE_SCHEMA;
     owner->layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
+    owner->capability_owner = capability_owner;
     owner->candidate_timeout_us = candidate_timeout_us;
     owner->activation_retry_us = activation_retry_us;
     owner->activation_max_attempts = activation_max_attempts;
@@ -529,13 +641,12 @@ ucn_v6_result_t ucn_v6_route_candidate_begin(
         !deadline_build(now_us, owner->candidate_timeout_us, &deadline_us)) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    candidate = find_candidate(owner, candidate_transaction_id);
+    candidate = find_candidate(owner, domain, candidate_transaction_id);
     if (candidate != NULL) {
         if (now_us >= candidate->deadline_us) {
             return UCN_V6_ERR_TIMEOUT;
         }
-        return domain_equal(&candidate->proposal.domain, domain) &&
-               candidate->proposal.route_generation ==
+        return candidate->proposal.route_generation ==
                    proposed_route_generation ?
                    UCN_V6_OK : UCN_V6_ERR_REPLAY;
     }
@@ -581,7 +692,6 @@ ucn_v6_result_t ucn_v6_route_candidate_begin(
 
 ucn_v6_result_t ucn_v6_route_candidate_add_path(
     ucn_v6_route_owner_t *owner,
-    const ucn_v6_capability_owner_t *capability_owner,
     uint64_t now_us,
     uint64_t candidate_transaction_id,
     const ucn_v6_route_domain_t *domain,
@@ -592,12 +702,9 @@ ucn_v6_result_t ucn_v6_route_candidate_add_path(
     if (!owner_is_valid(owner) || !domain_is_valid(domain) || path == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    candidate = find_candidate(owner, candidate_transaction_id);
+    candidate = find_candidate(owner, domain, candidate_transaction_id);
     if (candidate == NULL) {
         return UCN_V6_ERR_NOT_FOUND;
-    }
-    if (!domain_equal(domain, &candidate->proposal.domain)) {
-        return UCN_V6_ERR_REPLAY;
     }
     if (now_us >= candidate->deadline_us) {
         return UCN_V6_ERR_TIMEOUT;
@@ -607,7 +714,10 @@ ucn_v6_result_t ucn_v6_route_candidate_add_path(
     }
     if (!route_path_is_valid(domain, candidate->proposal.route_generation,
                              path) ||
-        !path_capability_is_current(capability_owner, now_us, path)) {
+        !next_hop_capability_is_current(owner->capability_owner, now_us,
+                                        path) ||
+        !path_capability_is_current(owner->capability_owner, now_us, path,
+                                    NULL)) {
         return UCN_V6_ERR_STATE;
     }
     for (index = 0U; index < candidate->proposal.path_count; ++index) {
@@ -628,16 +738,18 @@ ucn_v6_result_t ucn_v6_route_candidate_record_probe(
     ucn_v6_route_owner_t *owner,
     uint64_t now_us,
     uint64_t candidate_transaction_id,
+    const ucn_v6_route_domain_t *domain,
     uint16_t path_id,
     uint32_t path_generation)
 {
     ucn_v6_route_candidate_view_t *candidate;
     size_t index;
-    if (!owner_is_valid(owner) || path_id == 0U || path_generation == 0U ||
+    if (!owner_is_valid(owner) || !domain_is_valid(domain) ||
+        path_id == 0U || path_generation == 0U ||
         path_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    candidate = find_candidate(owner, candidate_transaction_id);
+    candidate = find_candidate(owner, domain, candidate_transaction_id);
     if (candidate == NULL) {
         return UCN_V6_ERR_NOT_FOUND;
     }
@@ -670,15 +782,17 @@ ucn_v6_result_t ucn_v6_route_candidate_prepare_activation(
     ucn_v6_route_owner_t *owner,
     uint64_t now_us,
     uint64_t candidate_transaction_id,
+    const ucn_v6_route_domain_t *domain,
     ucn_v6_route_activation_t *activation)
 {
     ucn_v6_route_candidate_view_t *candidate;
     ucn_v6_route_activation_t next;
     uint16_t all_paths;
-    if (!owner_is_valid(owner) || activation == NULL) {
+    if (!owner_is_valid(owner) || !domain_is_valid(domain) ||
+        activation == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    candidate = find_candidate(owner, candidate_transaction_id);
+    candidate = find_candidate(owner, domain, candidate_transaction_id);
     if (candidate == NULL) {
         return UCN_V6_ERR_NOT_FOUND;
     }
@@ -710,15 +824,16 @@ ucn_v6_result_t ucn_v6_route_candidate_record_activation_send(
     ucn_v6_route_owner_t *owner,
     uint64_t now_us,
     uint64_t candidate_transaction_id,
+    const ucn_v6_route_domain_t *domain,
     bool submitted)
 {
     ucn_v6_route_candidate_view_t *candidate;
     uint16_t all_paths;
     uint64_t next_retry_us;
-    if (!owner_is_valid(owner)) {
+    if (!owner_is_valid(owner) || !domain_is_valid(domain)) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    candidate = find_candidate(owner, candidate_transaction_id);
+    candidate = find_candidate(owner, domain, candidate_transaction_id);
     if (candidate == NULL) {
         return UCN_V6_ERR_NOT_FOUND;
     }
@@ -750,7 +865,6 @@ ucn_v6_result_t ucn_v6_route_candidate_record_activation_send(
 
 ucn_v6_result_t ucn_v6_route_candidate_commit_ack(
     ucn_v6_route_owner_t *owner,
-    const ucn_v6_capability_owner_t *capability_owner,
     uint64_t now_us,
     const ucn_v6_route_activation_t *ack)
 {
@@ -760,10 +874,14 @@ ucn_v6_result_t ucn_v6_route_candidate_commit_ack(
     uint64_t previous_deadline_us = 0U;
     uint32_t expected_generation = 1U;
     size_t index;
-    if (!owner_is_valid(owner) || capability_owner == NULL || ack == NULL) {
+    if (!owner_is_valid(owner) || ack == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    candidate = find_candidate(owner, ack->candidate_transaction_id);
+    if (!domain_is_valid(&ack->domain)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    candidate = find_candidate(owner, &ack->domain,
+                               ack->candidate_transaction_id);
     if (candidate == NULL) {
         return UCN_V6_ERR_NOT_FOUND;
     }
@@ -793,8 +911,12 @@ ucn_v6_result_t ucn_v6_route_candidate_commit_ack(
         }
     }
     for (index = 0U; index < candidate->proposal.path_count; ++index) {
-        if (!path_capability_is_current(capability_owner, now_us,
-                                        &candidate->proposal.paths[index])) {
+        if (!next_hop_capability_is_current(
+                owner->capability_owner, now_us,
+                &candidate->proposal.paths[index]) ||
+            !path_capability_is_current(owner->capability_owner, now_us,
+                                        &candidate->proposal.paths[index],
+                                        NULL)) {
             return UCN_V6_ERR_STATE;
         }
     }
@@ -822,13 +944,15 @@ ucn_v6_result_t ucn_v6_route_candidate_commit_ack(
 ucn_v6_result_t ucn_v6_route_copy_candidate(
     const ucn_v6_route_owner_t *owner,
     uint64_t candidate_transaction_id,
+    const ucn_v6_route_domain_t *domain,
     ucn_v6_route_candidate_view_t *candidate)
 {
     const ucn_v6_route_candidate_view_t *found;
-    if (!owner_is_valid(owner) || candidate == NULL) {
+    if (!owner_is_valid(owner) || !domain_is_valid(domain) ||
+        candidate == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    found = find_candidate_const(owner, candidate_transaction_id);
+    found = find_candidate_const(owner, domain, candidate_transaction_id);
     if (found == NULL) {
         return UCN_V6_ERR_NOT_FOUND;
     }
@@ -860,8 +984,8 @@ static bool path_is_usable(
     uint64_t now_us)
 {
     return path != NULL && path->available && path->capability.valid &&
-           now_us < path->capability.deadline_us &&
-           path_capability_is_current(capability_owner, now_us, path);
+           next_hop_capability_is_current(capability_owner, now_us, path) &&
+           path_capability_is_current(capability_owner, now_us, path, NULL);
 }
 
 static int find_path_index(const ucn_v6_route_proposal_t *proposal,
@@ -948,7 +1072,6 @@ static ucn_v6_route_flow_pin_t *find_free_flow_pin(
 
 ucn_v6_result_t ucn_v6_route_select(
     ucn_v6_route_owner_t *owner,
-    const ucn_v6_capability_owner_t *capability_owner,
     uint64_t now_us,
     const ucn_v6_route_select_request_t *request,
     ucn_v6_route_selection_t *selection)
@@ -957,8 +1080,7 @@ ucn_v6_result_t ucn_v6_route_select(
     ucn_v6_route_selection_t next;
     int selected = -1;
     size_t index;
-    if (!owner_is_valid(owner) || capability_owner == NULL ||
-        request == NULL || selection == NULL ||
+    if (!owner_is_valid(owner) || request == NULL || selection == NULL ||
         !domain_is_valid(&request->domain) || request->flow_id == 0U ||
         request->policy < UCN_V6_ROUTE_POLICY_PINNED ||
         request->policy > UCN_V6_ROUTE_POLICY_WEIGHTED_MULTIPATH) {
@@ -970,11 +1092,12 @@ ucn_v6_result_t ucn_v6_route_select(
     }
     memset(&next, 0, sizeof(next));
     if (request->policy == UCN_V6_ROUTE_POLICY_PINNED) {
-        selected = find_path_index(&set->current, capability_owner,
+        selected = find_path_index(&set->current, owner->capability_owner,
                                    request->pinned_path_id,
                                    request->pinned_path_generation, now_us);
     } else if (request->policy == UCN_V6_ROUTE_POLICY_ACTIVE_STANDBY) {
-        selected = select_primary(&set->current, capability_owner, now_us);
+        selected = select_primary(&set->current, owner->capability_owner,
+                                  now_us);
     } else if (request->policy == UCN_V6_ROUTE_POLICY_PER_FLOW_HASH) {
         ucn_v6_route_flow_pin_t *pin = find_flow_pin(
             owner, &request->domain, set->current.route_generation,
@@ -987,7 +1110,7 @@ ucn_v6_result_t ucn_v6_route_select(
             pin = NULL;
         }
         if (pin != NULL) {
-            selected = find_path_index(&set->current, capability_owner,
+            selected = find_path_index(&set->current, owner->capability_owner,
                                        pin->path_id,
                                        pin->path_generation, now_us);
             if (selected >= 0) {
@@ -1005,7 +1128,7 @@ ucn_v6_result_t ucn_v6_route_select(
             size_t ordinal;
             uint64_t deadline_us;
             for (index = 0U; index < set->current.path_count; ++index) {
-                if (path_is_usable(capability_owner,
+                if (path_is_usable(owner->capability_owner,
                                    &set->current.paths[index], now_us)) {
                     ++usable_count;
                 }
@@ -1014,7 +1137,7 @@ ucn_v6_result_t ucn_v6_route_select(
                 ordinal = (size_t)(flow_hash(request->flow_id, 0U) %
                                    usable_count);
                 for (index = 0U; index < set->current.path_count; ++index) {
-                    if (path_is_usable(capability_owner,
+                    if (path_is_usable(owner->capability_owner,
                                        &set->current.paths[index], now_us)) {
                         if (ordinal == 0U) {
                             selected = (int)index;
@@ -1053,7 +1176,7 @@ ucn_v6_result_t ucn_v6_route_select(
             return UCN_V6_ERR_ACCESS;
         }
         for (index = 0U; index < set->current.path_count; ++index) {
-            if (path_is_usable(capability_owner,
+            if (path_is_usable(owner->capability_owner,
                                &set->current.paths[index], now_us)) {
                 if (UINT32_MAX - total_weight <
                     set->current.paths[index].weight) {
@@ -1067,7 +1190,7 @@ ucn_v6_result_t ucn_v6_route_select(
                                        request->packet_sequence) %
                               total_weight);
             for (index = 0U; index < set->current.path_count; ++index) {
-                if (path_is_usable(capability_owner,
+                if (path_is_usable(owner->capability_owner,
                                    &set->current.paths[index], now_us)) {
                     if (pick < set->current.paths[index].weight) {
                         selected = (int)index;
@@ -1083,7 +1206,105 @@ ucn_v6_result_t ucn_v6_route_select(
     }
     next.route_generation = set->current.route_generation;
     next.path = set->current.paths[selected];
+    /* A same-generation Path lease refresh changes only the live deadline.
+     * Return the Capability Owner's current value rather than the RouteSet's
+     * frozen discovery snapshot, while keeping every immutable claim exact. */
+    if (!path_capability_is_current(owner->capability_owner, now_us,
+                                    &next.path, &next.path.capability)) {
+        return UCN_V6_ERR_STATE;
+    }
     *selection = next;
+    return UCN_V6_OK;
+}
+
+static ucn_v6_result_t resolve_path(
+    const ucn_v6_route_owner_t *owner,
+    uint64_t now_us,
+    const ucn_v6_route_domain_t *domain,
+    uint32_t route_generation,
+    uint16_t path_id,
+    uint32_t path_generation,
+    ucn_v6_route_path_t *path)
+{
+    const ucn_v6_route_set_slot_t *set;
+    const ucn_v6_route_proposal_t *proposal = NULL;
+    ucn_v6_route_path_t resolved;
+    int index;
+    if (!owner_is_valid(owner) || !domain_is_valid(domain) || path == NULL ||
+        route_generation == 0U ||
+        route_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        path_id == 0U || path_id == UINT16_MAX || path_generation == 0U ||
+        path_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    set = find_set_const(owner, domain);
+    if (set == NULL) {
+        return UCN_V6_ERR_NOT_FOUND;
+    }
+    if (set->current.route_generation == route_generation) {
+        proposal = &set->current;
+    } else if (set->previous_valid &&
+               set->previous.route_generation == route_generation &&
+               now_us < set->previous_deadline_us) {
+        proposal = &set->previous;
+    } else {
+        return UCN_V6_ERR_REPLAY;
+    }
+    index = find_path_index(proposal, owner->capability_owner, path_id,
+                            path_generation, now_us);
+    if (index < 0) {
+        return UCN_V6_ERR_NOT_FOUND;
+    }
+    resolved = proposal->paths[index];
+    if (!path_capability_is_current(owner->capability_owner, now_us,
+                                    &resolved,
+                                    &resolved.capability)) {
+        return UCN_V6_ERR_STATE;
+    }
+    *path = resolved;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_route_resolve_ref(
+    const ucn_v6_route_owner_t *owner,
+    uint64_t now_us,
+    const ucn_v6_route_path_ref_t *reference,
+    ucn_v6_route_resolution_t *resolution)
+{
+    ucn_v6_route_resolution_t next;
+    ucn_v6_result_t result;
+    if (reference == NULL || resolution == NULL) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(&next, 0, sizeof(next));
+    result = resolve_path(
+        owner, now_us, &reference->domain, reference->route_generation,
+        reference->path_id, reference->path_generation, &next.path);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    if (!principal_equal(&next.path.capability.destination_principal,
+                         &reference->domain.destination_principal) ||
+        !ucn_v6_binding_key_equal(
+            &next.path.capability.destination_binding,
+            &reference->domain.destination_binding) ||
+        next.path.capability.destination_session_generation !=
+            reference->domain.destination_session_generation) {
+        return UCN_V6_ERR_STATE;
+    }
+    next.dependency.type = UCN_V6_STACK_INVALIDATE_PATH;
+    next.dependency.link_id = next.path.capability.local_parent_link_id;
+    next.dependency.link_generation =
+        next.path.capability.local_parent_link_generation;
+    next.dependency.session = next.path.capability.local_parent_session;
+    next.dependency.capability_generation =
+        next.path.capability.local_parent_capability_generation;
+    next.dependency.path_id = reference->path_id;
+    next.dependency.path_generation = reference->path_generation;
+    if (!ucn_v6_stack_invalidation_is_valid(&next.dependency)) {
+        return UCN_V6_ERR_STATE;
+    }
+    *resolution = next;
     return UCN_V6_OK;
 }
 
@@ -1156,53 +1377,69 @@ static bool domain_origin_is_session(
                session->session_generation;
 }
 
-static bool route_path_uses_session(
+static bool route_path_matches_invalidation(
     const ucn_v6_route_path_t *path,
-    const ucn_v6_session_key_t *session)
+    const ucn_v6_stack_invalidation_t *invalidation)
 {
-    return path != NULL && session != NULL &&
-           (session_equal(&path->next_hop, session) ||
-            (principal_equal(&path->capability.destination_principal,
-                             &session->principal) &&
-             ucn_v6_binding_key_equal(
-                 &path->capability.destination_binding,
-                 &session->binding) &&
-             path->capability.session_generation ==
-                 session->session_generation));
-}
-
-static bool proposal_uses_session(
-    const ucn_v6_route_proposal_t *proposal,
-    const ucn_v6_session_key_t *session)
-{
-    size_t index;
-    if (proposal == NULL || session == NULL) {
+    bool next_hop_parent;
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_LINK) {
+        return path->egress_link_id == invalidation->link_id &&
+               path->egress_link_generation ==
+                   invalidation->link_generation;
+    }
+    next_hop_parent =
+        path->egress_link_id == invalidation->link_id &&
+        path->egress_link_generation == invalidation->link_generation &&
+        session_equal(&path->next_hop, &invalidation->session);
+    if (!next_hop_parent) {
         return false;
     }
-    if (domain_origin_is_session(&proposal->domain, session)) {
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_SESSION) {
+        return true;
+    }
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_CAPABILITY) {
+        return path->next_hop_capability_generation ==
+               invalidation->capability_generation;
+    }
+    return path->next_hop_capability_generation ==
+               invalidation->capability_generation &&
+           path->path_id == invalidation->path_id &&
+           path->path_generation == invalidation->path_generation;
+}
+
+static bool proposal_matches_invalidation(
+    const ucn_v6_route_proposal_t *proposal,
+    const ucn_v6_stack_invalidation_t *invalidation)
+{
+    size_t index;
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_SESSION &&
+        domain_origin_is_session(&proposal->domain, &invalidation->session)) {
         return true;
     }
     for (index = 0U; index < proposal->path_count; ++index) {
-        if (route_path_uses_session(&proposal->paths[index], session)) {
+        if (route_path_matches_invalidation(&proposal->paths[index],
+                                            invalidation)) {
             return true;
         }
     }
     return false;
 }
 
-ucn_v6_result_t ucn_v6_route_invalidate_session(
+ucn_v6_result_t ucn_v6_route_apply_invalidation(
     ucn_v6_route_owner_t *owner,
-    const ucn_v6_session_key_t *session)
+    const ucn_v6_stack_invalidation_t *invalidation)
 {
     size_t index;
-    if (!owner_is_valid(owner) || !session_is_valid(session)) {
+    if (!owner_is_valid(owner) ||
+        !ucn_v6_stack_invalidation_is_valid(invalidation)) {
         return UCN_V6_ERR_ARGUMENT;
     }
     for (index = 0U; index < UCN_V6_CONFIG_ROUTE_CANDIDATES; ++index) {
         ucn_v6_route_candidate_view_t *candidate =
             &owner->candidates[index].value;
         if (candidate->occupied &&
-            proposal_uses_session(&candidate->proposal, session)) {
+            proposal_matches_invalidation(&candidate->proposal,
+                                          invalidation)) {
             memset(candidate, 0, sizeof(*candidate));
             if (owner->stats.candidates != 0U) {
                 --owner->stats.candidates;
@@ -1211,18 +1448,44 @@ ucn_v6_result_t ucn_v6_route_invalidate_session(
     }
     for (index = 0U; index < UCN_V6_CONFIG_ROUTE_SETS; ++index) {
         ucn_v6_route_set_slot_t *set = &owner->sets[index];
-        if (set->occupied && proposal_uses_session(&set->current, session)) {
+        bool current_matches;
+        bool previous_matches;
+        if (!set->occupied) {
+            continue;
+        }
+        current_matches = proposal_matches_invalidation(&set->current,
+                                                        invalidation);
+        previous_matches = set->previous_valid &&
+            proposal_matches_invalidation(&set->previous, invalidation);
+        if (current_matches) {
             clear_pins_for_domain(owner, &set->current.domain);
             memset(set, 0, sizeof(*set));
             if (owner->stats.route_sets != 0U) {
                 --owner->stats.route_sets;
             }
+        } else if (previous_matches) {
+            /* A delayed event for the grace-only proposal must not destroy
+             * the already-switched current RouteSet.  Previous is an
+             * independent immutable snapshot and can be retired alone.
+             *
+             * 仅匹配 Grace 上一代的迟到事件不得删除已切换的新 Current；
+             * Previous 是独立不可变快照，可单独退休。 */
+            memset(&set->previous, 0, sizeof(set->previous));
+            set->previous_valid = false;
+            set->previous_deadline_us = 0U;
         }
     }
     for (index = 0U; index < UCN_V6_CONFIG_ROUTE_SETS; ++index) {
-        if (owner->domains[index].occupied &&
+        if (invalidation->type == UCN_V6_STACK_INVALIDATE_SESSION &&
+            owner->domains[index].occupied &&
             domain_origin_is_session(&owner->domains[index].domain,
-                                     session)) {
+                                     &invalidation->session)) {
+            /* Capability/Path are child generations and cannot erase the
+             * Session-owned transaction replay floor.  Only retirement of
+             * the exact Session parent releases this fixed slot.
+             *
+             * Capability/Path 属于子代际，不能清除 Session 所有的事务防重放
+             * 高水位；只有精确 Session 父域退休才释放该固定槽。 */
             memset(&owner->domains[index], 0, sizeof(owner->domains[index]));
         }
     }

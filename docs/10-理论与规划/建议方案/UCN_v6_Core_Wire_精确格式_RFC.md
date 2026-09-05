@@ -1,6 +1,6 @@
 # UCN v6 Core Wire 精确格式 RFC
 
-> 状态：V6-03 隔离实现与分项自审基线；最终统一外审延期。
+> 状态：V6-03 隔离实现后的当前 v6-only 规范；本轮破坏性自审已同步双 Sequence 与 16-bit Hop Limit，等待统一外审。
 > 适用范围：`UCN_BUILD_V6_EXPERIMENTAL=ON` 的 default-OFF Codec。
 > 禁止事项：本 RFC 尚不授权生产 RX/TX、真实 Key 查找、Tag 验证或 Authority 副作用。
 
@@ -10,8 +10,9 @@
 所有多字节整数均为网络序（big-endian），没有 C 结构体直拷、隐式 padding 或本机字节序。
 Decoder 只接受 Version 6；使用相同 Magic 的 v4/v5 帧仍会因 Version/长度/合同不符被拒绝。
 
-当前 Suite Registry 只登记 `suite_id=1`，其 E2E 和 Link Tag 均固定为 16 B。这只是让 Codec
-可以冻结长度与 Key Selector，不表示 V6-07 的密码算法、Nonce、KDF 或 Key 生命周期已经实现。
+当前 Registry 登记 Hop Auth `suite_id=1`、E2E Auth-only `suite_id=1` 以及 E2E
+AEAD `suite_id=2/3`，所有 Tag 固定为 16 B。Codec 只负责唯一字节布局和 Selector
+合法域；密码实现、Nonce/KDF、Key 生命周期和 ACL 由 Security Owner 负责。
 
 ## 2. 公共前缀
 
@@ -23,8 +24,8 @@ Decoder 只接受 Version 6；使用相同 Magic 的 v4/v5 帧仍会因 Version/
 | 3 | 1 | Frame Type | 1 Bootstrap、2 Control、3 Data、4 Transfer、5 Diagnostic |
 | 4 | 1 | Flags | 第 4 节的八个存在位 |
 | 5 | 1 | Traffic/Guarantee | bit 0..1=Q0..Q3；bit 2..3=Guarantee；bit 4..7 必须为零 |
-| 6 | 1 | Hop Limit | 非零；逐跳递减 |
-| 7 | 1 | Header Contract | 当前唯一合法值 `1` |
+| 6 | 2 | Hop Limit | 网络序；`1..65534`；逐跳递减；`0/65535` 拒绝 |
+| 8 | 1 | Header Contract | 当前唯一合法值 `1` |
 
 Guarantee 值为 0 Best Effort、1 Latest、2 Reliable；3 保留并拒绝。Frame Type 只表示大类，
 Bootstrap/Control/Transfer/Diagnostic 的具体操作只能来自 Protocol Context。
@@ -35,30 +36,33 @@ Bootstrap/Control/Transfer/Diagnostic 的具体操作只能来自 Protocol Conte
 
 | Offset | 长度 | 字段 |
 | ---: | ---: | --- |
-| 8 | 4 | Realm ID |
-| 12 | A | Source Address |
-| 12+A | A | Destination Address |
-| 12+2A | 4 | Source Binding Generation |
-| 16+2A | 4 | Destination Binding Generation |
-| 20+2A | 4 | Session Generation |
-| 24+2A | 4 | Packet Sequence |
-| 28+2A | 2 | Payload Length |
-| 30+2A | 0 | 固定顺序扩展起点 |
+| 9 | 4 | Realm ID |
+| 13 | A | Source Address |
+| 13+A | A | Destination Address |
+| 13+2A | 4 | Source Binding Generation |
+| 17+2A | 4 | Destination Binding Generation |
+| 21+2A | 4 | Session Generation |
+| 25+2A | 4 | Origin Sequence |
+| 29+2A | 4 | Hop Sequence |
+| 33+2A | 2 | Payload Length |
+| 35+2A | 0 | 固定顺序扩展起点 |
 
 没有扩展、Payload 或 Tag 时，加末尾 CRC32C 的基础 Frame 长度固定为：
 
 | Class | Address Bytes | 最大普通地址 | Base Frame Bytes |
 | --- | ---: | ---: | ---: |
-| A0 | 1 | `0xFE` | 36 |
-| A1 | 2 | `0xFFFE` | 38 |
-| A2 | 3 | `0xFFFFFE` | 40 |
-| A3 | 4 | `0xFFFFFFFE` | 42 |
+| A0 | 1 | `0xFE` | 41 |
+| A1 | 2 | `0xFFFE` | 43 |
+| A2 | 3 | `0xFFFFFE` | 45 |
+| A3 | 4 | `0xFFFFFFFE` | 47 |
 
 每档全 1 地址是 Link-local 保留目的地址，不是普通节点地址。普通 Frame 的 Source、Destination、
-双 Binding、Session 和 Packet Sequence 必须非零；32-bit 所有权序列还必须不超过
-`0xFFFFFFFE`。
+普通 Peer Frame 的双 Binding、Session 和 Hop Sequence 必须非零；
+`origin_sequence` 只在 E2E Context 存在时必须非零，无 E2E 时必须为零。
+Group HELLO 的 Origin Sequence 必须非零而 Hop Sequence 为零。所有 32-bit
+Sequence/Generation 不得超过 `0xFFFFFFFE`。
 
-Bootstrap 唯一允许 Source/Binding/Session/Sequence 为零；Destination 必须是本档全 1，
+Bootstrap 唯一允许 Source/Binding/Session/两个 Sequence 为零；Destination 必须是本档全 1，
 Hop Limit=1，Traffic=Q0，Guarantee=Best Effort。Group HELLO 唯一允许 Destination Binding
 为零；Destination 同样是本档全 1，Hop Limit=1，Traffic=Q1，Guarantee=Latest。
 
@@ -75,8 +79,9 @@ Hop Limit=1，Traffic=Q0，Guarantee=Best Effort。Group HELLO 唯一允许 Dest
 | 6 | `0x40` | Path Context | 6 |
 | 7 | `0x80` | Hop Scheduling Context | 16 |
 
-扩展严格按 bit 0 到 bit 7 的顺序连续编码，不允许重排或 TLV。Peer 与 Group 互斥；Route 与
-Path 互斥。缺失扩展时，对应 semantic 字段和 Tag 必须全零，禁止依赖本地默认值形成第二种
+扩展严格按 bit 0 到 bit 7 的顺序连续编码，不允许重排或 TLV。Peer 与 Group 互斥。
+Route 和 Path 可以同时存在：前者标识 Route Generation，后者标识该 Route 中的
+精确 Path。缺失扩展时，对应 semantic 字段和 Tag 必须全零，禁止依赖本地默认值形成第二种
 canonical 表示。
 
 ### 4.1 Peer Hop Security Context
@@ -145,8 +150,10 @@ CRC32C[4]
 CRC32C 使用 reflected Castagnoli polynomial `0x82F63B78`、初值 `0xFFFFFFFF`、终值按位取反，
 覆盖除 CRC 自身外的完整 Wire Frame。CRC 只用于随机错误早拒绝，不代替安全 Tag。
 
-理论最大 Frame 为 65,669 B（A3、最大互斥扩展组合、65,535 B Payload、双 16 B Tag 和 CRC）。
-Decoder 在 CRC 扫描前拒绝超过该值的输入；产品实际接受上限仍由 Path Frame MTU 限制。
+保守最大 Frame 容量为 65,678 B（A3、全部固定扩展的大小上界、
+65,535 B Payload、双 16 B Tag 和 CRC）。某一具体 Frame Type 的组合合同可以让
+实际最大值更小，但不得超过该公开容量上界。Decoder 在 CRC 扫描前拒绝
+超限输入；产品实际接受上限仍由 Path Frame MTU 限制。
 
 ## 6. Frame 类型约束
 
@@ -196,14 +203,14 @@ AAD 固定 80 B。缺失的 E2E、Protocol、Message、Route/Path 或 Budget 语
 | 30 | 4 | canonical Destination Address |
 | 34 | 4 | Destination Binding Generation |
 | 38 | 4 | Session Generation |
-| 42 | 4 | Packet Sequence |
+| 42 | 4 | Origin Sequence |
 | 46 | 2 | Source Endpoint；缺失为 0 |
 | 48 | 2 | Destination Endpoint；缺失为 0 |
 | 50 | 8 | Operation ID；缺失为 0 |
-| 58 | 1 | Context Kind：0 None、1 Route、2 Path |
-| 59 | 4 | Route Generation；非 Route 为 0 |
-| 63 | 2 | Path ID；非 Path 为 0 |
-| 65 | 4 | Path Generation；非 Path 为 0 |
+| 58 | 1 | Context Presence Mask：bit0 Route、bit1 Path；0 None、1 Route、2 Path、3 Route+Path |
+| 59 | 4 | Route Generation；Route bit 为 0 时必须为 0 |
+| 63 | 2 | Path ID；Path bit 为 0 时必须为 0 |
+| 65 | 4 | Path Generation；Path bit 为 0 时必须为 0 |
 | 69 | 1 | Initial Budget Presence：0/1 |
 | 70 | 8 | Initial Budget；缺失为 0 |
 | 78 | 2 | Payload Length |
@@ -217,10 +224,10 @@ Hop Limit、Peer/Group selector、remaining budget 和 Link Tag 不进入 E2E AA
 Destination 为本档 Link-local 全 1：
 
 ```text
-A0/42B 55430601080001011122334400FF0000000000000000000000000000000000040102DEADBEEF93C9D2DB
-A1/44B 5543460108000101112233440000FFFF0000000000000000000000000000000000040102DEADBEEF78D68D5C
-A2/46B 554386010800010111223344000000FFFFFF0000000000000000000000000000000000040102DEADBEEFAB419569
-A3/48B 5543C601080001011122334400000000FFFFFFFF0000000000000000000000000000000000040102DEADBEEF039415BE
+A0/47B 5543060108000001011122334400FF0000000000000000000000000000000000000000040102DEADBEEF90DB5E23
+A1/49B 554346010800000101112233440000FFFF0000000000000000000000000000000000000000040102DEADBEEF062DAAB6
+A2/51B 55438601080000010111223344000000FFFFFF0000000000000000000000000000000000000000040102DEADBEEFE64E614F
+A3/53B 5543C60108000001011122334400000000FFFFFFFF0000000000000000000000000000000000000000040102DEADBEEF93A65A53
 ```
 
 Golden 是独立字节常量，测试分别比较完整输出，不用 parser/builder 往返自行证明自己。
@@ -229,8 +236,8 @@ Golden 是独立字节常量，测试分别比较完整输出，不用 parser/bu
 
 - Encoder 在参数、容量或语义失败时不修改 output 与 output length；
 - Decoder 使用局部对象，只有完整长度、CRC、字段与 canonical 合同全部通过后才写回；
-- 39/41 B、截断、追加、旧 Version、坏 Magic、坏 CRC、保留 Traffic bit、双 Context、零 Key、
-  Route/Path 双存、Operation 规则、Budget 反向和保留地址误用均拒绝；
+- 小于 A0 最小基础长度、截断、追加、旧 Version、坏 Magic/CRC、保留 Traffic bit、
+  Peer/Group 双 Context、零 Key、非规范缺省 Context、Operation 规则、Budget 反向和保留地址误用均拒绝；
 - fixed-seed 4096 次随机输入验证失败不写回，若随机输入恰好合法则重新编码必须逐字节相同；
 - `UCN_BUILD_V6_EXPERIMENTAL=OFF` 时默认 `ucn_core` 不含任何 `ucn_v6_*` 符号；
 - V6-07 外审 GO 之前，生产 Node/Adapter/Service 不得调用本 Codec。

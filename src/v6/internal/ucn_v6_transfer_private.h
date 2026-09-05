@@ -21,6 +21,8 @@ typedef struct ucn_v6_transfer_tx_slot {
     bool occupied;
     ucn_v6_transfer_tx_phase_t phase;
     ucn_v6_transfer_send_request_t request;
+    /* Complete next-hop through Path parent chain proven by Route Owner. */
+    ucn_v6_stack_invalidation_t dependency;
     uint16_t fragment_count;
     uint16_t cumulative_base;
     uint32_t message_crc32c;
@@ -32,6 +34,7 @@ typedef struct ucn_v6_transfer_rx_slot {
     bool occupied;
     bool complete;
     ucn_v6_session_key_t origin;
+    ucn_v6_message_descriptor_t message;
     uint64_t operation_id;
     uint64_t message_id;
     ucn_v6_message_class_t message_class;
@@ -48,6 +51,7 @@ typedef struct ucn_v6_transfer_rx_slot {
 typedef struct ucn_v6_transfer_recent_slot {
     bool occupied;
     ucn_v6_session_key_t origin;
+    ucn_v6_message_descriptor_t message;
     uint64_t operation_id;
     uint64_t message_id;
     ucn_v6_message_class_t message_class;
@@ -75,6 +79,7 @@ struct ucn_v6_transfer_owner {
     uint16_t schema;
     uint16_t reserved;
     uint64_t layout_hash;
+    const ucn_v6_route_owner_t *route_owner;
     uint64_t retry_interval_us;
     uint8_t fragment_max_attempts;
     uint64_t receive_timeout_us;

@@ -101,7 +101,109 @@ static bool owner_is_valid(const ucn_v6_realtime_owner_t *owner)
     return owner != NULL && owner->magic == UCN_V6_REALTIME_OWNER_MAGIC &&
            owner->schema == UCN_V6_REALTIME_OWNER_SCHEMA &&
            owner->layout_hash == UCN_V6_COMPILED_LAYOUT_HASH &&
-           owner->initialized && owner->canary == UCN_V6_REALTIME_OWNER_CANARY;
+           owner->initialized && owner->route_owner != NULL &&
+           owner->canary == UCN_V6_REALTIME_OWNER_CANARY;
+}
+
+static ucn_v6_result_t callback_scope_enter(
+    ucn_v6_callback_gate_t *gate, const void *scope_owner,
+    uint64_t *violations_before)
+{
+    if (gate == NULL || scope_owner == NULL || violations_before == NULL) {
+        return UCN_V6_ERR_STATE;
+    }
+    *violations_before = ucn_v6_callback_gate_violation_count(gate);
+    if (*violations_before == UINT64_MAX ||
+        ucn_v6_callback_gate_try_enter(gate, scope_owner) != UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
+    }
+    return UCN_V6_OK;
+}
+
+static ucn_v6_result_t callback_scope_finish(
+    ucn_v6_callback_gate_t *gate, const void *scope_owner,
+    uint64_t violations_before, ucn_v6_result_t callback_result)
+{
+    const uint64_t violations_after =
+        ucn_v6_callback_gate_violation_count(gate);
+    const ucn_v6_result_t leave_result =
+        ucn_v6_callback_gate_leave(gate, scope_owner);
+
+    if (leave_result != UCN_V6_OK || violations_before == UINT64_MAX ||
+        violations_after == UINT64_MAX ||
+        violations_after != violations_before) {
+        return UCN_V6_ERR_STATE;
+    }
+    return callback_result;
+}
+
+static bool owner_gate_probe(ucn_v6_realtime_owner_t *owner)
+{
+    uint64_t violations_before;
+    ucn_v6_result_t result;
+
+    if (!owner_is_valid(owner) || owner->callback_gate == NULL) {
+        return false;
+    }
+    /* A real try-enter probe records callback re-entry.  A read-only
+     * is_active() check would let a provider hide the nested violation. */
+    result = callback_scope_enter(owner->callback_gate, owner,
+                                  &violations_before);
+    if (result != UCN_V6_OK) {
+        return false;
+    }
+    result = callback_scope_finish(owner->callback_gate, owner,
+                                   violations_before, UCN_V6_OK);
+    if (result != UCN_V6_OK || owner->io_active) {
+        owner->io_faulted = true;
+        owner->stats.faulted = true;
+        return false;
+    }
+    return true;
+}
+
+static bool owner_api_is_available(ucn_v6_realtime_owner_t *owner)
+{
+    return owner_is_valid(owner) && !owner->io_faulted &&
+           owner_gate_probe(owner);
+}
+
+static ucn_v6_result_t owner_io_enter(
+    ucn_v6_realtime_owner_t *owner, uint64_t *violations_before)
+{
+    ucn_v6_result_t result;
+    if (owner == NULL || owner->io_active || owner->io_faulted) {
+        return UCN_V6_ERR_STATE;
+    }
+    result = callback_scope_enter(owner->callback_gate, owner,
+                                  violations_before);
+    if (result == UCN_V6_OK) {
+        owner->io_active = true;
+    }
+    return result;
+}
+
+static ucn_v6_result_t owner_io_finish(
+    ucn_v6_realtime_owner_t *owner, uint64_t violations_before,
+    ucn_v6_result_t callback_result)
+{
+    uint64_t violations_after;
+    ucn_v6_result_t leave_result;
+    if (owner == NULL || !owner->io_active) {
+        return UCN_V6_ERR_STATE;
+    }
+    violations_after = ucn_v6_callback_gate_violation_count(
+        owner->callback_gate);
+    leave_result = ucn_v6_callback_gate_leave(owner->callback_gate, owner);
+    owner->io_active = false;
+    if (leave_result != UCN_V6_OK || violations_before == UINT64_MAX ||
+        violations_after == UINT64_MAX ||
+        violations_after != violations_before) {
+        owner->io_faulted = true;
+        owner->stats.faulted = true;
+        return UCN_V6_ERR_STATE;
+    }
+    return callback_result;
 }
 
 static bool ranges_overlap(const void *left, size_t left_size,
@@ -340,10 +442,6 @@ static bool domain_config_is_valid(const ucn_v6_time_domain_config_t *config)
            ucn_v6_binding_key_is_valid(&config->master_binding) &&
            config->master_session_generation != 0U &&
            config->master_session_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
-           config->route_generation != 0U &&
-           config->route_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
-           config->path_id != 0U && config->path_generation != 0U &&
-           config->path_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            config->lock_sample_count != 0U &&
            config->lock_sample_count <= UCN_V6_REALTIME_SAMPLE_WINDOW &&
            config->sync_timeout_us != 0U && config->max_holdover_us != 0U &&
@@ -353,7 +451,7 @@ static bool domain_config_is_valid(const ucn_v6_time_domain_config_t *config)
 }
 
 static bool domain_config_equal(const ucn_v6_time_domain_config_t *left,
-                                const ucn_v6_time_domain_config_t *right)
+                                 const ucn_v6_time_domain_config_t *right)
 {
     return left->clock_domain_id == right->clock_domain_id &&
            left->domain_generation == right->domain_generation &&
@@ -363,9 +461,6 @@ static bool domain_config_equal(const ucn_v6_time_domain_config_t *left,
                                     &right->master_binding) &&
            left->master_session_generation ==
                right->master_session_generation &&
-           left->route_generation == right->route_generation &&
-           left->path_id == right->path_id &&
-           left->path_generation == right->path_generation &&
            left->lock_sample_count == right->lock_sample_count &&
            left->sync_timeout_us == right->sync_timeout_us &&
            left->max_holdover_us == right->max_holdover_us &&
@@ -374,30 +469,393 @@ static bool domain_config_equal(const ucn_v6_time_domain_config_t *left,
                right->oscillator_uncertainty_ppb;
 }
 
+static bool route_domain_equal(const ucn_v6_route_domain_t *left,
+                               const ucn_v6_route_domain_t *right)
+{
+    return left != NULL && right != NULL &&
+           principal_equal(&left->origin_principal,
+                           &right->origin_principal) &&
+           ucn_v6_binding_key_equal(&left->origin_binding,
+                                    &right->origin_binding) &&
+           left->origin_session_generation ==
+               right->origin_session_generation &&
+           principal_equal(&left->destination_principal,
+                           &right->destination_principal) &&
+           ucn_v6_binding_key_equal(&left->destination_binding,
+                                    &right->destination_binding) &&
+           left->destination_session_generation ==
+               right->destination_session_generation;
+}
+
+static bool route_ref_equal(const ucn_v6_route_path_ref_t *left,
+                            const ucn_v6_route_path_ref_t *right)
+{
+    return left != NULL && right != NULL &&
+           route_domain_equal(&left->domain, &right->domain) &&
+           left->route_generation == right->route_generation &&
+           left->path_id == right->path_id &&
+           left->path_generation == right->path_generation;
+}
+
+static bool realtime_session_equal(const ucn_v6_session_key_t *left,
+                                   const ucn_v6_session_key_t *right)
+{
+    return left != NULL && right != NULL &&
+           principal_equal(&left->principal, &right->principal) &&
+           ucn_v6_binding_key_equal(&left->binding, &right->binding) &&
+           left->session_generation == right->session_generation;
+}
+
+static bool invalidation_equal(const ucn_v6_stack_invalidation_t *left,
+                               const ucn_v6_stack_invalidation_t *right)
+{
+    return left != NULL && right != NULL && left->type == right->type &&
+           left->link_id == right->link_id &&
+           left->link_generation == right->link_generation &&
+           realtime_session_equal(&left->session, &right->session) &&
+           left->capability_generation == right->capability_generation &&
+           left->path_id == right->path_id &&
+           left->path_generation == right->path_generation;
+}
+
+static bool route_ref_is_valid(const ucn_v6_route_path_ref_t *reference)
+{
+    return reference != NULL &&
+           ucn_v6_principal_is_valid(&reference->domain.origin_principal) &&
+           ucn_v6_binding_key_is_valid(&reference->domain.origin_binding) &&
+           reference->domain.origin_session_generation != 0U &&
+           reference->domain.origin_session_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           ucn_v6_principal_is_valid(
+               &reference->domain.destination_principal) &&
+           ucn_v6_binding_key_is_valid(
+               &reference->domain.destination_binding) &&
+           reference->domain.destination_session_generation != 0U &&
+           reference->domain.destination_session_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           reference->domain.origin_binding.realm_id ==
+               reference->domain.destination_binding.realm_id &&
+           reference->route_generation != 0U &&
+           reference->route_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           reference->path_id != 0U && reference->path_id != UINT16_MAX &&
+           reference->path_generation != 0U &&
+           reference->path_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD;
+}
+
+static bool bytes_are_zero(const uint8_t *bytes, size_t length)
+{
+    size_t index;
+    for (index = 0U; index < length; ++index) {
+        if (bytes[index] != 0U) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool path_proof_equal(
+    const ucn_v6_realtime_path_proof_t *left,
+    const ucn_v6_realtime_path_proof_t *right)
+{
+    return left != NULL && right != NULL &&
+           left->destination_capability_generation ==
+               right->destination_capability_generation &&
+           memcmp(left->destination_capability_digest,
+                  right->destination_capability_digest,
+                  UCN_V6_CAPABILITY_DIGEST_BYTES) == 0 &&
+           memcmp(left->local_parent_capability_digest,
+                  right->local_parent_capability_digest,
+                  UCN_V6_CAPABILITY_DIGEST_BYTES) == 0 &&
+           left->destination_realtime_mode_bits ==
+               right->destination_realtime_mode_bits &&
+           left->destination_clock_domain_id ==
+               right->destination_clock_domain_id &&
+           left->destination_clock_domain_generation ==
+               right->destination_clock_domain_generation &&
+           left->feature_bits == right->feature_bits &&
+           left->timestamp_capability_bits ==
+               right->timestamp_capability_bits &&
+           left->timestamp_uncertainty_us ==
+               right->timestamp_uncertainty_us;
+}
+
+static bool path_proof_is_valid(
+    const ucn_v6_realtime_path_proof_t *proof)
+{
+    return proof != NULL &&
+           proof->destination_capability_generation != 0U &&
+           proof->destination_capability_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           !bytes_are_zero(proof->destination_capability_digest,
+                           UCN_V6_CAPABILITY_DIGEST_BYTES) &&
+           !bytes_are_zero(proof->local_parent_capability_digest,
+                           UCN_V6_CAPABILITY_DIGEST_BYTES) &&
+           (proof->destination_realtime_mode_bits &
+            UCN_V6_REALTIME_MODE_SYNCED) != 0U &&
+           proof->destination_clock_domain_id != 0U &&
+           proof->destination_clock_domain_id <=
+               UCN_V6_REALTIME_DOMAIN_ID_MAX &&
+           proof->destination_clock_domain_generation != 0U &&
+           proof->destination_clock_domain_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           (proof->feature_bits & UCN_V6_FEATURE_REALTIME) != 0U &&
+           (proof->timestamp_capability_bits &
+            (UCN_V6_TIMESTAMP_RX_HARDWARE |
+             UCN_V6_TIMESTAMP_TX_HARDWARE)) ==
+               (UCN_V6_TIMESTAMP_RX_HARDWARE |
+                UCN_V6_TIMESTAMP_TX_HARDWARE) &&
+           proof->timestamp_uncertainty_us != 0U;
+}
+
+static void build_path_proof(
+    const ucn_v6_path_capability_t *path,
+    ucn_v6_realtime_path_proof_t *proof)
+{
+    memset(proof, 0, sizeof(*proof));
+    proof->destination_capability_generation =
+        path->destination_capability_generation;
+    memcpy(proof->destination_capability_digest,
+           path->destination_capability_digest,
+           UCN_V6_CAPABILITY_DIGEST_BYTES);
+    memcpy(proof->local_parent_capability_digest,
+           path->local_parent_capability_digest,
+           UCN_V6_CAPABILITY_DIGEST_BYTES);
+    proof->destination_realtime_mode_bits =
+        path->destination_realtime_mode_bits;
+    proof->destination_clock_domain_id = path->destination_clock_domain_id;
+    proof->destination_clock_domain_generation =
+        path->destination_clock_domain_generation;
+    proof->feature_bits = path->feature_bits;
+    proof->timestamp_capability_bits = path->timestamp_capability_bits;
+    proof->timestamp_uncertainty_us = path->timestamp_uncertainty_us;
+}
+
+static bool realtime_path_is_admissible(
+    const ucn_v6_path_capability_t *path,
+    const ucn_v6_time_domain_config_t *config)
+{
+    return path != NULL && config != NULL && path->valid &&
+           path->immutable_for_realtime &&
+           principal_equal(&path->destination_principal,
+                           &config->master_principal) &&
+           ucn_v6_binding_key_equal(&path->destination_binding,
+                                    &config->master_binding) &&
+           path->destination_session_generation ==
+               config->master_session_generation &&
+           (path->destination_realtime_mode_bits &
+            UCN_V6_REALTIME_MODE_SYNCED) != 0U &&
+           path->destination_clock_domain_id == config->clock_domain_id &&
+           path->destination_clock_domain_generation ==
+               config->domain_generation &&
+           (path->feature_bits & UCN_V6_FEATURE_REALTIME) != 0U &&
+           (path->timestamp_capability_bits &
+            (UCN_V6_TIMESTAMP_RX_HARDWARE |
+             UCN_V6_TIMESTAMP_TX_HARDWARE)) ==
+               (UCN_V6_TIMESTAMP_RX_HARDWARE |
+                UCN_V6_TIMESTAMP_TX_HARDWARE) &&
+           path->timestamp_uncertainty_us != 0U;
+}
+
+static bool domain_record_is_valid(
+    const ucn_v6_realtime_domain_record_t *record)
+{
+    return record != NULL && domain_config_is_valid(&record->config) &&
+           route_ref_is_valid(&record->route_ref) &&
+           ucn_v6_stack_invalidation_is_valid(
+               &record->route_dependency) &&
+           record->route_dependency.type == UCN_V6_STACK_INVALIDATE_PATH &&
+           path_proof_is_valid(&record->path_proof) &&
+           principal_equal(&record->route_ref.domain.destination_principal,
+                           &record->config.master_principal) &&
+           ucn_v6_binding_key_equal(
+               &record->route_ref.domain.destination_binding,
+               &record->config.master_binding) &&
+           record->route_ref.domain.destination_session_generation ==
+               record->config.master_session_generation &&
+           record->route_ref.path_id ==
+               record->route_dependency.path_id &&
+           record->route_ref.path_generation ==
+               record->route_dependency.path_generation &&
+           record->path_proof.destination_clock_domain_id ==
+               record->config.clock_domain_id &&
+           record->path_proof.destination_clock_domain_generation ==
+               record->config.domain_generation;
+}
+
+static bool domain_record_equal(
+    const ucn_v6_realtime_domain_record_t *left,
+    const ucn_v6_realtime_domain_record_t *right)
+{
+    return domain_config_equal(&left->config, &right->config) &&
+           route_ref_equal(&left->route_ref, &right->route_ref) &&
+           invalidation_equal(&left->route_dependency,
+                              &right->route_dependency) &&
+           path_proof_equal(&left->path_proof, &right->path_proof);
+}
+
+static bool serial_not_older(uint32_t previous, uint32_t next)
+{
+    return previous != 0U &&
+           previous <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           next >= previous && next <= UCN_V6_SERIAL_ROTATION_THRESHOLD;
+}
+
+/* A Time Domain generation is the outer authority generation, but it does not
+ * erase the anti-rollback rules of its still-live parent domains.  Values may
+ * restart only when the RFC-defined parent changes (Binding, Session, Link
+ * slot, or Path ID). */
+static bool domain_record_transition_is_valid(
+    const ucn_v6_realtime_domain_record_t *previous,
+    const ucn_v6_realtime_domain_record_t *next)
+{
+    uint32_t expected_domain_generation;
+    uint32_t expected_session_generation;
+    bool same_principal;
+    bool same_binding;
+    bool same_session;
+
+    if (!domain_record_is_valid(previous) || !domain_record_is_valid(next) ||
+        previous->config.clock_domain_id != next->config.clock_domain_id ||
+        ucn_v6_serial_checked_next(previous->config.domain_generation,
+                                   &expected_domain_generation) != UCN_V6_OK ||
+        expected_domain_generation != next->config.domain_generation) {
+        return false;
+    }
+
+    same_principal = principal_equal(&previous->config.master_principal,
+                                     &next->config.master_principal);
+    same_binding = same_principal && ucn_v6_binding_key_equal(
+        &previous->config.master_binding, &next->config.master_binding);
+    if (!same_binding) {
+        /* A new Principal/Binding is a new parent domain.  The candidate was
+         * already validated canonically, so its child generations may begin
+         * from their legal non-zero values. */
+        return true;
+    }
+
+    same_session = previous->config.master_session_generation ==
+                   next->config.master_session_generation;
+    if (!same_session) {
+        if (ucn_v6_serial_checked_next(
+                previous->config.master_session_generation,
+                &expected_session_generation) != UCN_V6_OK ||
+            expected_session_generation !=
+                next->config.master_session_generation ||
+            next->path_proof.destination_capability_generation !=
+                1U) {
+            return false;
+        }
+        /* Security and Route Owners already prove their own child generation
+         * histories. Realtime persists only the exact resolved proof used by
+         * this Domain generation. */
+        return true;
+    }
+
+    return serial_not_older(
+        previous->path_proof.destination_capability_generation,
+        next->path_proof.destination_capability_generation);
+}
+
+/* A Member restart or a re-authenticated Peer Session does not own the
+ * Master-issued Domain generation.  It may rebind that same Domain only when
+ * Security has advanced the exact Master Session parent.  The old Session's
+ * Capability/Route/Path child generations may then restart, while local
+ * policy and the Master identity remain unchanged. */
+static bool domain_record_session_recovery_is_valid(
+    const ucn_v6_realtime_domain_record_t *previous,
+    const ucn_v6_realtime_domain_record_t *next)
+{
+    uint32_t expected_session_generation;
+
+    if (!domain_record_is_valid(previous) || !domain_record_is_valid(next) ||
+        previous->config.clock_domain_id != next->config.clock_domain_id ||
+        previous->config.domain_generation != next->config.domain_generation ||
+        !principal_equal(&previous->config.master_principal,
+                         &next->config.master_principal) ||
+        !ucn_v6_binding_key_equal(&previous->config.master_binding,
+                                  &next->config.master_binding) ||
+        ucn_v6_serial_checked_next(
+            previous->config.master_session_generation,
+            &expected_session_generation) != UCN_V6_OK ||
+        next->config.master_session_generation != expected_session_generation ||
+        next->path_proof.destination_capability_generation != 1U ||
+        previous->config.lock_sample_count != next->config.lock_sample_count ||
+        previous->config.sync_timeout_us != next->config.sync_timeout_us ||
+        previous->config.max_holdover_us != next->config.max_holdover_us ||
+        previous->config.max_offset_jump_us !=
+            next->config.max_offset_jump_us ||
+        previous->config.oscillator_uncertainty_ppb !=
+            next->config.oscillator_uncertainty_ppb) {
+        return false;
+    }
+    return true;
+}
+
+static void build_domain_record(
+    const ucn_v6_time_domain_config_t *config,
+    const ucn_v6_route_path_ref_t *route_ref,
+    const ucn_v6_route_resolution_t *resolution,
+    ucn_v6_realtime_domain_record_t *record)
+{
+    memset(record, 0, sizeof(*record));
+    record->config = *config;
+    record->route_ref = *route_ref;
+    record->route_dependency = resolution->dependency;
+    build_path_proof(&resolution->path.capability, &record->path_proof);
+}
+
+static void build_domain_record_from_slot(
+    const ucn_v6_time_domain_slot_t *slot,
+    ucn_v6_realtime_domain_record_t *record)
+{
+    memset(record, 0, sizeof(*record));
+    record->config = slot->config;
+    record->route_ref = slot->route_ref;
+    record->route_dependency = slot->route_dependency;
+    record->path_proof = slot->path_proof;
+}
+
 ucn_v6_result_t ucn_v6_realtime_owner_init_in_place(
     void *storage,
     size_t storage_bytes,
     const ucn_v6_feature_manifest_t *manifest,
+    const ucn_v6_route_owner_t *route_owner,
     const ucn_v6_realtime_generation_store_ops_t *generation_store,
     ucn_v6_callback_gate_t *callback_gate,
     ucn_v6_realtime_owner_t **owner)
 {
     ucn_v6_realtime_owner_t initialized;
-    if (owner == NULL || generation_store == NULL ||
+    uint64_t violations_before = 0U;
+    ucn_v6_result_t gate_result;
+    if (owner == NULL || route_owner == NULL ||
+        generation_store == NULL ||
         generation_store->load_domain_record == NULL ||
         generation_store->reserve_domain_record == NULL ||
         callback_gate == NULL ||
-        ucn_v6_callback_gate_is_active(callback_gate) ||
+        ucn_v6_callback_gate_violation_count(callback_gate) == UINT64_MAX ||
         ucn_v6_manifest_validate_exact(manifest) != UCN_V6_OK ||
         ucn_v6_storage_validate(storage, storage_bytes,
                                 UCN_V6_REALTIME_OWNER_STORAGE_BYTES,
                                 UCN_V6_STORAGE_ALIGNMENT) != UCN_V6_OK) {
         return UCN_V6_ERR_CONFIG;
     }
+    /* A recursive init from a generation-store callback must be observable by
+     * the outer scope, while caller storage remains untouched. */
+    gate_result = callback_scope_enter(callback_gate, storage,
+                                       &violations_before);
+    if (gate_result != UCN_V6_OK) {
+        return gate_result;
+    }
+    gate_result = callback_scope_finish(callback_gate, storage,
+                                        violations_before, UCN_V6_OK);
+    if (gate_result != UCN_V6_OK) {
+        return gate_result;
+    }
     memset(&initialized, 0, sizeof(initialized));
     initialized.magic = UCN_V6_REALTIME_OWNER_MAGIC;
     initialized.schema = UCN_V6_REALTIME_OWNER_SCHEMA;
     initialized.layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
+    initialized.route_owner = route_owner;
     initialized.generation_store = *generation_store;
     initialized.callback_gate = callback_gate;
     initialized.initialized = true;
@@ -426,9 +884,11 @@ ucn_v6_result_t ucn_v6_realtime_set_endpoint_policy(
 {
     ucn_v6_realtime_policy_slot_t *slot;
     size_t index;
-    if (!owner_is_valid(owner) || owner->io_active ||
-        !policy_is_valid(policy)) {
+    if (!owner_is_valid(owner) || !policy_is_valid(policy)) {
         return UCN_V6_ERR_ARGUMENT;
+    }
+    if (!owner_api_is_available(owner)) {
+        return UCN_V6_ERR_STATE;
     }
     slot = find_policy(owner, policy->destination_endpoint);
     if (slot == NULL) {
@@ -464,56 +924,146 @@ static ucn_v6_time_domain_slot_t *find_domain(
     return NULL;
 }
 
+static void clear_acquisition(ucn_v6_time_domain_slot_t *slot);
+
+static bool copy_current_domain_dependencies(
+    const ucn_v6_realtime_owner_t *owner,
+    const ucn_v6_time_domain_config_t *config,
+    const ucn_v6_route_path_ref_t *route_ref,
+    uint64_t now_us,
+    ucn_v6_route_resolution_t *resolution)
+{
+    if (owner == NULL || owner->route_owner == NULL || config == NULL ||
+        route_ref == NULL || resolution == NULL ||
+        !principal_equal(&route_ref->domain.destination_principal,
+                         &config->master_principal) ||
+        !ucn_v6_binding_key_equal(&route_ref->domain.destination_binding,
+                                  &config->master_binding) ||
+        route_ref->domain.destination_session_generation !=
+            config->master_session_generation ||
+        ucn_v6_route_resolve_ref(owner->route_owner, now_us, route_ref,
+                                 resolution) != UCN_V6_OK) {
+        return false;
+    }
+    return realtime_path_is_admissible(&resolution->path.capability, config);
+}
+
+static bool domain_dependency_is_current(
+    const ucn_v6_realtime_owner_t *owner,
+    const ucn_v6_time_domain_slot_t *slot,
+    uint64_t now_us)
+{
+    ucn_v6_route_resolution_t resolution;
+    ucn_v6_realtime_path_proof_t current_proof;
+    if (owner == NULL || slot == NULL || !slot->occupied) {
+        return false;
+    }
+    if (!copy_current_domain_dependencies(
+            owner, &slot->config, &slot->route_ref, now_us, &resolution)) {
+        return false;
+    }
+    build_path_proof(&resolution.path.capability, &current_proof);
+    return invalidation_equal(&slot->route_dependency,
+                              &resolution.dependency) &&
+           path_proof_equal(&slot->path_proof, &current_proof);
+}
+
+static bool phase_holds_lock(ucn_v6_time_domain_phase_t phase)
+{
+    return phase == UCN_V6_TIME_LOCKED || phase == UCN_V6_TIME_HOLDOVER;
+}
+
+static void fault_domain(ucn_v6_realtime_owner_t *owner,
+                         ucn_v6_time_domain_slot_t *slot)
+{
+    if (phase_holds_lock(slot->phase) && owner->stats.locked_domains != 0U) {
+        --owner->stats.locked_domains;
+    }
+    slot->phase = UCN_V6_TIME_FAULT;
+    owner->stats.faulted = true;
+}
+
+static bool expire_domain_dependencies(ucn_v6_realtime_owner_t *owner,
+                                       ucn_v6_time_domain_slot_t *slot,
+                                       uint64_t now_us)
+{
+    if (owner == NULL || slot == NULL) {
+        return false;
+    }
+    if (slot->dependency_invalidated) {
+        return true;
+    }
+    if (domain_dependency_is_current(owner, slot, now_us) &&
+        slot->dependency_deadline_us != 0U &&
+        now_us < slot->dependency_deadline_us) {
+        return false;
+    }
+    if (phase_holds_lock(slot->phase) &&
+        owner->stats.locked_domains != 0U) {
+        --owner->stats.locked_domains;
+    }
+    if (slot->phase != UCN_V6_TIME_FAULT) {
+        slot->phase = UCN_V6_TIME_UNSYNCED;
+        clear_acquisition(slot);
+    }
+    slot->dependency_invalidated = true;
+    slot->dependency_deadline_us = 0U;
+    return true;
+}
+
 ucn_v6_result_t ucn_v6_realtime_bind_domain(
     ucn_v6_realtime_owner_t *owner,
     const ucn_v6_time_domain_config_t *config,
-    const ucn_v6_path_capability_t *fixed_path,
-    const ucn_v6_cached_peer_capability_t *master_capability)
+    const ucn_v6_route_path_ref_t *fixed_route_ref,
+    uint64_t now_us)
 {
     ucn_v6_time_domain_slot_t replacement;
     ucn_v6_time_domain_slot_t *slot;
+    ucn_v6_realtime_domain_record_t runtime_record;
     ucn_v6_realtime_domain_record_t durable;
     ucn_v6_realtime_domain_record_t candidate;
     ucn_v6_result_t result;
+    ucn_v6_route_resolution_t resolution;
+    uint64_t violations_before = 0U;
+    bool runtime_transition = false;
+    bool runtime_session_recovery = false;
+    bool reserve_required = false;
     size_t index;
-    if (!owner_is_valid(owner) || owner->io_active ||
-        !domain_config_is_valid(config) || fixed_path == NULL ||
-        master_capability == NULL || !fixed_path->valid ||
-        !fixed_path->immutable_for_realtime ||
-        (fixed_path->feature_bits & UCN_V6_FEATURE_REALTIME) == 0U ||
-        (fixed_path->timestamp_capability_bits &
-         (UCN_V6_TIMESTAMP_RX_HARDWARE | UCN_V6_TIMESTAMP_TX_HARDWARE)) !=
-            (UCN_V6_TIMESTAMP_RX_HARDWARE | UCN_V6_TIMESTAMP_TX_HARDWARE) ||
-        fixed_path->timestamp_uncertainty_us == 0U ||
-        !master_capability->valid ||
-        !principal_equal(&master_capability->principal,
-                         &config->master_principal) ||
-        !ucn_v6_binding_key_equal(&master_capability->binding,
-                                  &config->master_binding) ||
-        master_capability->session_generation !=
-            config->master_session_generation ||
-        (master_capability->record.peer.feature_bits &
-         UCN_V6_FEATURE_REALTIME) == 0U ||
-        (master_capability->record.peer.realtime_mode_bits &
-         UCN_V6_REALTIME_MODE_SYNCED) == 0U ||
-        master_capability->record.peer.clock_domain_id !=
-            config->clock_domain_id ||
-        master_capability->record.peer.clock_domain_generation !=
-            config->domain_generation ||
-        !principal_equal(&fixed_path->destination_principal,
-                         &config->master_principal) ||
-        !ucn_v6_binding_key_equal(&fixed_path->destination_binding,
-                                  &config->master_binding) ||
-        fixed_path->session_generation != config->master_session_generation ||
-        fixed_path->route_generation != config->route_generation ||
-        fixed_path->path_id != config->path_id ||
-        fixed_path->path_generation != config->path_generation) {
+    if (!owner_is_valid(owner) || !domain_config_is_valid(config) ||
+        fixed_route_ref == NULL) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (!owner_api_is_available(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (!copy_current_domain_dependencies(
+            owner, config, fixed_route_ref, now_us, &resolution)) {
+        return UCN_V6_ERR_ACCESS;
+    }
+    build_domain_record(config, fixed_route_ref, &resolution, &candidate);
+    if (!domain_record_is_valid(&candidate)) {
         return UCN_V6_ERR_ARGUMENT;
     }
     slot = find_domain(owner, config->clock_domain_id);
-    if (slot != NULL &&
-        config->domain_generation <= slot->config.domain_generation) {
-        return UCN_V6_ERR_REPLAY;
+    if (slot != NULL) {
+        build_domain_record_from_slot(slot, &runtime_record);
+        if (config->domain_generation < slot->config.domain_generation) {
+            return UCN_V6_ERR_REPLAY;
+        }
+        if (config->domain_generation == slot->config.domain_generation) {
+            runtime_session_recovery =
+                domain_record_session_recovery_is_valid(&runtime_record,
+                                                        &candidate);
+            if (!runtime_session_recovery) {
+                return UCN_V6_ERR_REPLAY;
+            }
+        } else {
+            runtime_transition = domain_record_transition_is_valid(
+                &runtime_record, &candidate);
+            if (!runtime_transition) {
+                return UCN_V6_ERR_REPLAY;
+            }
+        }
     }
     if (slot == NULL) {
         for (index = 0U; index < UCN_V6_CONFIG_TIME_DOMAINS; ++index) {
@@ -526,78 +1076,104 @@ ucn_v6_result_t ucn_v6_realtime_bind_domain(
     if (slot == NULL) {
         return UCN_V6_ERR_NO_SPACE;
     }
-    if (ucn_v6_callback_gate_try_enter(owner->callback_gate, owner) !=
-        UCN_V6_OK) {
-        return UCN_V6_ERR_STATE;
+    result = owner_io_enter(owner, &violations_before);
+    if (result != UCN_V6_OK) {
+        return result;
     }
-    owner->io_active = true;
     memset(&durable, 0, sizeof(durable));
     result = owner->generation_store.load_domain_record(
-        owner->generation_store.context, &config->master_principal,
-        config->clock_domain_id, &durable);
+        owner->generation_store.context, config->clock_domain_id, &durable);
     if (result != UCN_V6_OK && result != UCN_V6_ERR_NOT_FOUND) {
-        owner->io_active = false;
-        (void)ucn_v6_callback_gate_leave(owner->callback_gate, owner);
-        return UCN_V6_ERR_STATE;
+        result = UCN_V6_ERR_STATE;
+        goto io_finished;
     }
     if (result == UCN_V6_OK &&
-        (!domain_config_is_valid(&durable.config) ||
-         !principal_equal(&durable.config.master_principal,
-                          &config->master_principal) ||
+        (!domain_record_is_valid(&durable) ||
          durable.config.clock_domain_id != config->clock_domain_id)) {
-        owner->io_active = false;
-        (void)ucn_v6_callback_gate_leave(owner->callback_gate, owner);
-        return UCN_V6_ERR_STATE;
+        result = UCN_V6_ERR_STATE;
+        goto io_finished;
     }
     if (result == UCN_V6_OK &&
         durable.config.domain_generation > config->domain_generation) {
-        owner->io_active = false;
-        (void)ucn_v6_callback_gate_leave(owner->callback_gate, owner);
-        return UCN_V6_ERR_REPLAY;
+        result = UCN_V6_ERR_REPLAY;
+        goto io_finished;
     }
     if (result == UCN_V6_OK &&
-        durable.config.domain_generation == config->domain_generation &&
-        !domain_config_equal(&durable.config, config)) {
-        owner->io_active = false;
-        (void)ucn_v6_callback_gate_leave(owner->callback_gate, owner);
-        return UCN_V6_ERR_REPLAY;
+        durable.config.domain_generation == config->domain_generation) {
+        if (domain_record_equal(&durable, &candidate)) {
+            /* Exact durable bytes may complete an interrupted in-process
+             * transition, but a fresh Owner cannot resurrect an already-used
+             * Security Session without a new authenticated challenge. */
+            if (!runtime_transition && !runtime_session_recovery) {
+                result = UCN_V6_ERR_REPLAY;
+                goto io_finished;
+            }
+        } else {
+            if (!domain_record_session_recovery_is_valid(&durable,
+                                                         &candidate)) {
+                result = UCN_V6_ERR_REPLAY;
+                goto io_finished;
+            }
+            reserve_required = true;
+        }
+    } else if (result == UCN_V6_OK &&
+               durable.config.domain_generation <
+                   config->domain_generation) {
+        if (!domain_record_transition_is_valid(&durable, &candidate)) {
+            result = UCN_V6_ERR_REPLAY;
+            goto io_finished;
+        }
+        reserve_required = true;
+    } else if (result == UCN_V6_ERR_NOT_FOUND) {
+        reserve_required = true;
     }
-    if (result == UCN_V6_ERR_NOT_FOUND ||
-        durable.config.domain_generation < config->domain_generation) {
-        memset(&candidate, 0, sizeof(candidate));
-        candidate.config = *config;
+    if (reserve_required) {
         result = owner->generation_store.reserve_domain_record(
             owner->generation_store.context, &candidate);
         if (result != UCN_V6_OK) {
-            owner->io_active = false;
-            (void)ucn_v6_callback_gate_leave(owner->callback_gate, owner);
-            return UCN_V6_ERR_STATE;
+            result = UCN_V6_ERR_STATE;
+            goto io_finished;
         }
         memset(&durable, 0, sizeof(durable));
         result = owner->generation_store.load_domain_record(
-            owner->generation_store.context, &config->master_principal,
-            config->clock_domain_id, &durable);
+            owner->generation_store.context, config->clock_domain_id, &durable);
         if (result != UCN_V6_OK ||
-            !domain_config_is_valid(&durable.config) ||
-            !domain_config_equal(&durable.config, config)) {
-            owner->io_active = false;
-            (void)ucn_v6_callback_gate_leave(owner->callback_gate, owner);
-            return UCN_V6_ERR_STATE;
+            !domain_record_is_valid(&durable) ||
+            !domain_record_equal(&durable, &candidate)) {
+            result = UCN_V6_ERR_STATE;
+            goto io_finished;
         }
     }
-    owner->io_active = false;
-    if (ucn_v6_callback_gate_leave(owner->callback_gate, owner) !=
-        UCN_V6_OK) {
-        owner->stats.faulted = true;
-        return UCN_V6_ERR_STATE;
+    result = UCN_V6_OK;
+
+io_finished:
+    result = owner_io_finish(owner, violations_before, result);
+    if (result != UCN_V6_OK) {
+        return result;
     }
     memset(&replacement, 0, sizeof(replacement));
     replacement.occupied = true;
     replacement.config = *config;
     replacement.phase = UCN_V6_TIME_ACQUIRING;
+    replacement.route_ref = *fixed_route_ref;
+    replacement.route_dependency = candidate.route_dependency;
+    replacement.path_proof = candidate.path_proof;
+    replacement.dependency_deadline_us =
+        resolution.path.capability.deadline_us;
+    if (runtime_session_recovery) {
+        /* The Security Session changed, so acquisition/filter history cannot
+         * cross the parent boundary.  Runtime monotonic sample/output fences,
+         * however, belong to this Member and this Domain generation and must
+         * survive the rebind. */
+        replacement.last_sample_local_us = slot->last_sample_local_us;
+        replacement.last_output_local_us = slot->last_output_local_us;
+        replacement.last_output_domain_us = slot->last_output_domain_us;
+        replacement.has_sample_high_water = slot->has_sample_high_water;
+        replacement.has_output_high_water = slot->has_output_high_water;
+    }
     if (!slot->occupied) {
         ++owner->stats.domains;
-    } else if (slot->phase == UCN_V6_TIME_LOCKED &&
+    } else if (phase_holds_lock(slot->phase) &&
                owner->stats.locked_domains != 0U) {
         --owner->stats.locked_domains;
     }
@@ -660,7 +1236,8 @@ static bool apply_offset(uint64_t local, int64_t offset, uint64_t *domain)
 
 ucn_v6_result_t ucn_v6_realtime_ingest_sample(
     ucn_v6_realtime_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened)
+    const ucn_v6_security_open_result_t *opened,
+    uint64_t now_us)
 {
     ucn_v6_time_sync_sample_t decoded;
     const ucn_v6_time_sync_sample_t *sample = &decoded;
@@ -669,7 +1246,7 @@ ucn_v6_result_t ucn_v6_realtime_ingest_sample(
     int64_t next_offset;
     int64_t offset_delta;
     uint64_t candidate_time;
-    if (!owner_is_valid(owner) || owner->io_active || opened == NULL ||
+    if (!owner_is_valid(owner) || opened == NULL ||
         opened->frame.frame_type != UCN_V6_FRAME_CONTROL ||
         (opened->frame.flags & UCN_V6_FLAG_PROTOCOL_CONTEXT) == 0U ||
         opened->frame.protocol_opcode !=
@@ -679,13 +1256,22 @@ ucn_v6_result_t ucn_v6_realtime_ingest_sample(
                                        &decoded) != UCN_V6_OK) {
         return UCN_V6_ERR_ARGUMENT;
     }
+    if (!owner_api_is_available(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
     slot = find_domain(owner, sample->clock_domain_id);
+    if (slot != NULL && expire_domain_dependencies(owner, slot, now_us)) {
+        increment_saturated(&owner->stats.rejected_samples);
+        return UCN_V6_ERR_ACCESS;
+    }
     if (slot == NULL || slot->phase == UCN_V6_TIME_FAULT ||
+        sample->local_sample_us > now_us ||
         sample->domain_generation != slot->config.domain_generation ||
         !opened->hop_authenticated || !opened->endpoint_authorized ||
         (opened->frame.flags & UCN_V6_FLAG_E2E_CONTEXT) == 0U ||
         !principal_equal(&opened->authenticated_principal,
                          &slot->config.master_principal) ||
+        opened->frame.realm_id != slot->config.master_binding.realm_id ||
         opened->frame.source_address != slot->config.master_binding.node_address ||
         opened->frame.source_binding_generation !=
             slot->config.master_binding.binding_generation ||
@@ -694,9 +1280,10 @@ ucn_v6_result_t ucn_v6_realtime_ingest_sample(
         (opened->frame.flags & (UCN_V6_FLAG_ROUTE_CONTEXT |
                                 UCN_V6_FLAG_PATH_CONTEXT)) !=
             (UCN_V6_FLAG_ROUTE_CONTEXT | UCN_V6_FLAG_PATH_CONTEXT) ||
-        opened->frame.route_generation != slot->config.route_generation ||
-        opened->frame.path.path_id != slot->config.path_id ||
-        opened->frame.path.path_generation != slot->config.path_generation ||
+        opened->frame.route_generation != slot->route_ref.route_generation ||
+        opened->frame.path.path_id != slot->route_ref.path_id ||
+        opened->frame.path.path_generation !=
+            slot->route_ref.path_generation ||
         (slot->has_sample_high_water &&
          sample->local_sample_us <= slot->last_sample_local_us) ||
         ucn_v6_realtime_uncertainty_aggregate(
@@ -708,8 +1295,7 @@ ucn_v6_result_t ucn_v6_realtime_ingest_sample(
         (!difference_i64(sample->offset_us, slot->offset_us,
                          &offset_delta) ||
          magnitude_i64(offset_delta) > slot->config.max_offset_jump_us)) {
-        slot->phase = UCN_V6_TIME_FAULT;
-        owner->stats.faulted = true;
+        fault_domain(owner, slot);
         return UCN_V6_ERR_STATE;
     }
     slot->offsets[slot->sample_cursor] = sample->offset_us;
@@ -726,8 +1312,7 @@ ucn_v6_result_t ucn_v6_realtime_ingest_sample(
                       &candidate_time) ||
         (slot->has_output_high_water &&
          candidate_time < slot->last_output_domain_us)) {
-        slot->phase = UCN_V6_TIME_FAULT;
-        owner->stats.faulted = true;
+        fault_domain(owner, slot);
         return UCN_V6_ERR_STATE;
     }
     slot->offset_us = next_offset;
@@ -755,6 +1340,48 @@ static void clear_acquisition(ucn_v6_time_domain_slot_t *slot)
     slot->base_uncertainty_us = 0U;
 }
 
+ucn_v6_result_t ucn_v6_realtime_step(
+    ucn_v6_realtime_owner_t *owner,
+    uint64_t now_us)
+{
+    size_t index;
+    if (!owner_is_valid(owner)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (!owner_api_is_available(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_TIME_DOMAINS; ++index) {
+        ucn_v6_time_domain_slot_t *slot = &owner->domains[index];
+        uint64_t elapsed;
+        uint64_t expiry_age;
+        if (!slot->occupied || slot->phase == UCN_V6_TIME_FAULT ||
+            expire_domain_dependencies(owner, slot, now_us) ||
+            !slot->has_sample_high_water) {
+            continue;
+        }
+        if (now_us < slot->last_sample_local_us) {
+            fault_domain(owner, slot);
+            continue;
+        }
+        elapsed = now_us - slot->last_sample_local_us;
+        expiry_age = slot->config.sync_timeout_us +
+                     slot->config.max_holdover_us;
+        if (elapsed >= expiry_age) {
+            if (phase_holds_lock(slot->phase) &&
+                owner->stats.locked_domains != 0U) {
+                --owner->stats.locked_domains;
+            }
+            slot->phase = UCN_V6_TIME_UNSYNCED;
+            clear_acquisition(slot);
+        } else if (elapsed >= slot->config.sync_timeout_us &&
+                   slot->phase == UCN_V6_TIME_LOCKED) {
+            slot->phase = UCN_V6_TIME_HOLDOVER;
+        }
+    }
+    return UCN_V6_OK;
+}
+
 ucn_v6_result_t ucn_v6_realtime_get_clock(
     ucn_v6_realtime_owner_t *owner,
     uint16_t clock_domain_id,
@@ -768,10 +1395,16 @@ ucn_v6_result_t ucn_v6_realtime_get_clock(
     uint64_t seconds;
     uint64_t remainder;
     uint64_t domain_time;
-    if (!owner_is_valid(owner) || owner->io_active || view == NULL) {
+    if (!owner_is_valid(owner) || view == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
+    if (!owner_api_is_available(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
     slot = find_domain(owner, clock_domain_id);
+    if (slot != NULL && expire_domain_dependencies(owner, slot, local_now_us)) {
+        return UCN_V6_ERR_TIMEOUT;
+    }
     if (slot == NULL || !slot->has_sample_high_water ||
         local_now_us < slot->last_sample_local_us ||
         slot->phase == UCN_V6_TIME_FAULT) {
@@ -780,8 +1413,7 @@ ucn_v6_result_t ucn_v6_realtime_get_clock(
     elapsed = local_now_us - slot->last_sample_local_us;
     if (elapsed >= slot->config.sync_timeout_us +
                    slot->config.max_holdover_us) {
-        if ((slot->phase == UCN_V6_TIME_LOCKED ||
-             slot->phase == UCN_V6_TIME_HOLDOVER) &&
+        if (phase_holds_lock(slot->phase) &&
             owner->stats.locked_domains != 0U) {
             --owner->stats.locked_domains;
         }
@@ -802,8 +1434,7 @@ ucn_v6_result_t ucn_v6_realtime_get_clock(
             slot->config.oscillator_uncertainty_ppb ||
         remainder > (UINT64_MAX - UINT64_C(999999999)) /
             slot->config.oscillator_uncertainty_ppb) {
-        slot->phase = UCN_V6_TIME_FAULT;
-        owner->stats.faulted = true;
+        fault_domain(owner, slot);
         return UCN_V6_ERR_STATE;
     }
     growth = seconds * slot->config.oscillator_uncertainty_ppb +
@@ -815,8 +1446,7 @@ ucn_v6_result_t ucn_v6_realtime_get_clock(
         (slot->has_output_high_water &&
          (local_now_us < slot->last_output_local_us ||
           domain_time < slot->last_output_domain_us))) {
-        slot->phase = UCN_V6_TIME_FAULT;
-        owner->stats.faulted = true;
+        fault_domain(owner, slot);
         return UCN_V6_ERR_STATE;
     }
     memset(&produced, 0, sizeof(produced));
@@ -883,11 +1513,14 @@ ucn_v6_result_t ucn_v6_realtime_prepare_payload(
     ucn_v6_realtime_clock_view_t clock;
     uint8_t encoded[UCN_V6_REALTIME_ENVELOPE_BYTES];
     uint64_t sender_uncertainty;
-    if (!owner_is_valid(owner) || owner->io_active ||
+    if (!owner_is_valid(owner) ||
         destination_endpoint == 0U || local_capture_us == 0U ||
         business_payload == NULL || business_length == 0U ||
         output == NULL || result == NULL) {
         return UCN_V6_ERR_ARGUMENT;
+    }
+    if (!owner_api_is_available(owner)) {
+        return UCN_V6_ERR_STATE;
     }
     slot = find_policy(owner, destination_endpoint);
     if (slot == NULL) {
@@ -975,6 +1608,9 @@ static ucn_v6_result_t evaluate_payload(
         opened->frame.message.destination_endpoint == 0U ||
         opened->frame.payload == NULL || opened->frame.payload_length == 0U) {
         return UCN_V6_ERR_ARGUMENT;
+    }
+    if (!owner_api_is_available(owner)) {
+        return UCN_V6_ERR_STATE;
     }
     slot = find_policy(owner, opened->frame.message.destination_endpoint);
     if (slot == NULL) {
@@ -1102,12 +1738,77 @@ ucn_v6_result_t ucn_v6_realtime_execution_admit(
     return UCN_V6_OK;
 }
 
+static bool realtime_invalidation_matches(
+    const ucn_v6_time_domain_slot_t *slot,
+    const ucn_v6_stack_invalidation_t *invalidation)
+{
+    const ucn_v6_stack_invalidation_t *dependency =
+        &slot->route_dependency;
+    if (!ucn_v6_stack_invalidation_is_valid(dependency) ||
+        dependency->link_id != invalidation->link_id ||
+        dependency->link_generation != invalidation->link_generation) {
+        return false;
+    }
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_LINK) {
+        return true;
+    }
+    if (!realtime_session_equal(&dependency->session,
+                                &invalidation->session)) {
+        return false;
+    }
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_SESSION) {
+        return true;
+    }
+    if (dependency->capability_generation !=
+        invalidation->capability_generation) {
+        return false;
+    }
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_CAPABILITY) {
+        return true;
+    }
+    return dependency->path_id == invalidation->path_id &&
+           dependency->path_generation == invalidation->path_generation;
+}
+
+ucn_v6_result_t ucn_v6_realtime_apply_invalidation(
+    ucn_v6_realtime_owner_t *owner,
+    const ucn_v6_stack_invalidation_t *invalidation)
+{
+    size_t index;
+    if (!owner_is_valid(owner) ||
+        !ucn_v6_stack_invalidation_is_valid(invalidation)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (!owner_api_is_available(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_TIME_DOMAINS; ++index) {
+        ucn_v6_time_domain_slot_t *slot = &owner->domains[index];
+        if (!slot->occupied ||
+            !realtime_invalidation_matches(slot, invalidation)) {
+            continue;
+        }
+        if (phase_holds_lock(slot->phase) &&
+            owner->stats.locked_domains != 0U) {
+            --owner->stats.locked_domains;
+        }
+        slot->phase = UCN_V6_TIME_UNSYNCED;
+        clear_acquisition(slot);
+        slot->dependency_invalidated = true;
+        slot->dependency_deadline_us = 0U;
+    }
+    return UCN_V6_OK;
+}
+
 ucn_v6_result_t ucn_v6_realtime_copy_view(
     const ucn_v6_realtime_owner_t *owner,
     ucn_v6_realtime_view_t *view)
 {
     if (!owner_is_valid(owner) || view == NULL) {
         return UCN_V6_ERR_ARGUMENT;
+    }
+    if (!owner_gate_probe((ucn_v6_realtime_owner_t *)owner)) {
+        return UCN_V6_ERR_STATE;
     }
     *view = owner->stats;
     return UCN_V6_OK;

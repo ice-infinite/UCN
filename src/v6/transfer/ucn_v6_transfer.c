@@ -71,7 +71,160 @@ static bool domain_is_valid(const ucn_v6_route_domain_t *domain)
                domain->destination_binding.realm_id &&
            domain->origin_session_generation != 0U &&
            domain->origin_session_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           domain->destination_session_generation != 0U &&
+           domain->destination_session_generation <=
                UCN_V6_SERIAL_ROTATION_THRESHOLD;
+}
+
+static bool domain_equal(const ucn_v6_route_domain_t *left,
+                         const ucn_v6_route_domain_t *right)
+{
+    return left != NULL && right != NULL &&
+           principal_equal(&left->origin_principal,
+                           &right->origin_principal) &&
+           ucn_v6_binding_key_equal(&left->origin_binding,
+                                    &right->origin_binding) &&
+           left->origin_session_generation ==
+               right->origin_session_generation &&
+           principal_equal(&left->destination_principal,
+                           &right->destination_principal) &&
+           ucn_v6_binding_key_equal(&left->destination_binding,
+                                    &right->destination_binding) &&
+           left->destination_session_generation ==
+               right->destination_session_generation;
+}
+
+static bool route_ref_is_valid(const ucn_v6_route_path_ref_t *reference)
+{
+    return reference != NULL && domain_is_valid(&reference->domain) &&
+           reference->route_generation != 0U &&
+           reference->route_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           reference->path_id != 0U && reference->path_id != UINT16_MAX &&
+           reference->path_generation != 0U &&
+           reference->path_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD;
+}
+
+static bool invalidation_equal(const ucn_v6_stack_invalidation_t *left,
+                               const ucn_v6_stack_invalidation_t *right)
+{
+    return left->type == right->type && left->link_id == right->link_id &&
+           left->link_generation == right->link_generation &&
+           session_equal(&left->session, &right->session) &&
+           left->capability_generation == right->capability_generation &&
+           left->path_id == right->path_id &&
+           left->path_generation == right->path_generation;
+}
+
+static bool invalidation_covers(const ucn_v6_stack_invalidation_t *parent,
+                                const ucn_v6_stack_invalidation_t *child)
+{
+    if (!ucn_v6_stack_invalidation_is_valid(parent) ||
+        !ucn_v6_stack_invalidation_is_valid(child) ||
+        parent->link_id != child->link_id ||
+        parent->link_generation != child->link_generation) {
+        return false;
+    }
+    if (parent->type == UCN_V6_STACK_INVALIDATE_LINK) {
+        return true;
+    }
+    if (!session_equal(&parent->session, &child->session)) {
+        return false;
+    }
+    if (parent->type == UCN_V6_STACK_INVALIDATE_SESSION) {
+        return true;
+    }
+    if (parent->capability_generation != child->capability_generation) {
+        return false;
+    }
+    if (parent->type == UCN_V6_STACK_INVALIDATE_CAPABILITY) {
+        return true;
+    }
+    return parent->path_id == child->path_id &&
+           parent->path_generation == child->path_generation;
+}
+
+static ucn_v6_result_t resolve_path(
+    const ucn_v6_transfer_owner_t *owner,
+    uint64_t now_us,
+    const ucn_v6_route_path_ref_t *reference,
+    ucn_v6_route_path_t *route_path_out,
+    ucn_v6_stack_invalidation_t *dependency_out)
+{
+    ucn_v6_route_resolution_t resolution;
+    ucn_v6_result_t result;
+    if (owner->route_owner == NULL) {
+        return UCN_V6_ERR_CONFIG;
+    }
+    if (!route_ref_is_valid(reference) ||
+        route_path_out == NULL || dependency_out == NULL) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(&resolution, 0, sizeof(resolution));
+    result = ucn_v6_route_resolve_ref(
+        owner->route_owner, now_us, reference, &resolution);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    if (!principal_equal(&resolution.path.capability.destination_principal,
+                         &reference->domain.destination_principal) ||
+        !ucn_v6_binding_key_equal(
+            &resolution.path.capability.destination_binding,
+            &reference->domain.destination_binding) ||
+        resolution.path.capability.destination_session_generation !=
+            reference->domain.destination_session_generation) {
+        return UCN_V6_ERR_STATE;
+    }
+    *route_path_out = resolution.path;
+    *dependency_out = resolution.dependency;
+    return UCN_V6_OK;
+}
+
+static bool path_satisfies_request(
+    const ucn_v6_route_path_t *route_path,
+    const ucn_v6_transfer_send_request_t *request)
+{
+    const ucn_v6_path_capability_t *path;
+    if (route_path == NULL) {
+        return false;
+    }
+    path = &route_path->capability;
+    return request != NULL && path->valid &&
+           principal_equal(&path->destination_principal,
+                            &request->route_ref.domain.destination_principal) &&
+           ucn_v6_binding_key_equal(
+               &path->destination_binding,
+               &request->route_ref.domain.destination_binding) &&
+           path->destination_session_generation ==
+               request->route_ref.domain.destination_session_generation &&
+           path->route_generation == request->route_ref.route_generation &&
+           path->path_id == request->route_ref.path_id &&
+           path->path_generation == request->route_ref.path_generation &&
+           path->fragment_data_budget >= request->fragment_data_budget &&
+           path->max_window >= request->window_size &&
+           path->max_message_class >= request->message_class &&
+           (path->feature_bits & UCN_V6_FEATURE_TRANSFER) != 0U;
+}
+
+static ucn_v6_result_t resolve_tx_path(
+    const ucn_v6_transfer_owner_t *owner,
+    uint64_t now_us,
+    const ucn_v6_transfer_tx_slot_t *tx,
+    ucn_v6_route_path_t *path_out)
+{
+    ucn_v6_stack_invalidation_t dependency;
+    ucn_v6_result_t result;
+    memset(&dependency, 0, sizeof(dependency));
+    result = resolve_path(owner, now_us, &tx->request.route_ref,
+                          path_out, &dependency);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    if (!invalidation_equal(&dependency, &tx->dependency) ||
+        !path_satisfies_request(path_out, &tx->request)) {
+        return UCN_V6_ERR_REPLAY;
+    }
+    return UCN_V6_OK;
 }
 
 static bool send_request_is_valid(
@@ -79,8 +232,8 @@ static bool send_request_is_valid(
 {
     uint32_t count;
     size_t class_bytes;
-    if (request == NULL || !domain_is_valid(&request->route_domain) ||
-        !request->path.valid || request->message_id == 0U ||
+    if (request == NULL || !route_ref_is_valid(&request->route_ref) ||
+        request->message_id == 0U ||
         request->message_id > UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
         request->buffer_token == 0U || request->payload == NULL ||
         request->payload_length == 0U ||
@@ -90,33 +243,15 @@ static bool send_request_is_valid(
         request->message.operation_id > UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
         request->message_id != request->message.operation_id ||
         request->message.delivery_guarantee != UCN_V6_DELIVERY_RELIABLE ||
+        request->message.interaction_role < UCN_V6_INTERACTION_REQUEST ||
+        request->message.interaction_role > UCN_V6_INTERACTION_ERROR ||
         (request->message.traffic_class != UCN_V6_TRAFFIC_Q2 &&
          request->message.traffic_class != UCN_V6_TRAFFIC_Q3) ||
         request->message.source_endpoint == 0U ||
         request->message.destination_endpoint == 0U ||
         request->fragment_data_budget == 0U ||
-        request->fragment_data_budget > request->path.fragment_data_budget ||
         request->window_size == 0U ||
-        request->window_size > UCN_V6_CONFIG_TRANSFER_WINDOW ||
-        request->window_size > request->path.max_window ||
-        (request->path.feature_bits & UCN_V6_FEATURE_TRANSFER) == 0U ||
-        request->path.route_generation == 0U ||
-        request->path.route_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        request->path.path_id == 0U || request->path.path_generation == 0U ||
-        request->path.path_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
-        return false;
-    }
-    if (!principal_equal(&request->path.destination_principal,
-                         &request->route_domain.destination_principal) ||
-        !ucn_v6_binding_key_equal(&request->path.destination_binding,
-                                  &request->route_domain.destination_binding) ||
-        request->path.session_generation == 0U ||
-        request->path.session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        request->path.destination_link_instance_generation == 0U ||
-        request->path.destination_link_instance_generation >
-            UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        request->path.max_message_class < request->message_class ||
-        request->path.deadline_us == 0U) {
+        request->window_size > UCN_V6_CONFIG_TRANSFER_WINDOW) {
         return false;
     }
     class_bytes = ucn_v6_message_class_bytes(request->message_class);
@@ -189,6 +324,7 @@ ucn_v6_result_t ucn_v6_transfer_owner_init_in_place(
     void *storage,
     size_t storage_bytes,
     const ucn_v6_feature_manifest_t *manifest,
+    const ucn_v6_route_owner_t *route_owner,
     uint64_t retry_interval_us,
     uint8_t fragment_max_attempts,
     uint64_t receive_timeout_us,
@@ -196,9 +332,13 @@ ucn_v6_result_t ucn_v6_transfer_owner_init_in_place(
     ucn_v6_transfer_owner_t **owner_out)
 {
     ucn_v6_transfer_owner_t *owner;
+    ucn_v6_route_view_t route_view;
     if (owner_out == NULL || retry_interval_us == 0U ||
         fragment_max_attempts == 0U || receive_timeout_us == 0U ||
         recent_completion_us == 0U ||
+        (route_owner != NULL &&
+         (ucn_v6_route_copy_view(route_owner, &route_view) != UCN_V6_OK ||
+          route_view.faulted)) ||
         ucn_v6_manifest_validate_exact(manifest) != UCN_V6_OK ||
         ucn_v6_storage_validate(storage, storage_bytes,
                                 UCN_V6_TRANSFER_OWNER_STORAGE_BYTES,
@@ -210,6 +350,7 @@ ucn_v6_result_t ucn_v6_transfer_owner_init_in_place(
     owner->magic = UCN_V6_TRANSFER_OWNER_MAGIC;
     owner->schema = UCN_V6_TRANSFER_SCHEMA;
     owner->layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
+    owner->route_owner = route_owner;
     owner->retry_interval_us = retry_interval_us;
     owner->fragment_max_attempts = fragment_max_attempts;
     owner->receive_timeout_us = receive_timeout_us;
@@ -226,35 +367,33 @@ ucn_v6_result_t ucn_v6_transfer_send_begin(
     const ucn_v6_transfer_send_request_t *request)
 {
     ucn_v6_transfer_tx_slot_t *tx;
+    ucn_v6_route_path_t path;
+    ucn_v6_stack_invalidation_t dependency;
+    ucn_v6_result_t result;
     uint16_t fragment_count;
     uint16_t path_concurrency = 0U;
     size_t index;
-    if (!owner_is_valid(owner) || !send_request_is_valid(request) ||
-        request->path.deadline_us <= now_us) {
+    if (!owner_is_valid(owner) || !send_request_is_valid(request)) {
         return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(&path, 0, sizeof(path));
+    memset(&dependency, 0, sizeof(dependency));
+    result = resolve_path(owner, now_us, &request->route_ref, &path,
+                          &dependency);
+    if (result != UCN_V6_OK || !path_satisfies_request(&path, request)) {
+        return result != UCN_V6_OK ? result : UCN_V6_ERR_ACCESS;
     }
     if (find_tx(owner, request->message_id) != NULL) {
         return UCN_V6_ERR_REPLAY;
     }
     for (index = 0U; index < UCN_V6_CONFIG_TRANSFER_TX_SLOTS; ++index) {
         if (owner->tx[index].occupied &&
-            principal_equal(
-                &owner->tx[index].request.path.destination_principal,
-                &request->path.destination_principal) &&
-            ucn_v6_binding_key_equal(
-                &owner->tx[index].request.path.destination_binding,
-                &request->path.destination_binding) &&
-            owner->tx[index].request.path.session_generation ==
-                request->path.session_generation &&
-            owner->tx[index].request.path.route_generation ==
-                request->path.route_generation &&
-            owner->tx[index].request.path.path_id == request->path.path_id &&
-            owner->tx[index].request.path.path_generation ==
-                request->path.path_generation) {
+            invalidation_equal(&owner->tx[index].dependency,
+                               &dependency)) {
             ++path_concurrency;
         }
     }
-    if (path_concurrency >= request->path.max_concurrency) {
+    if (path_concurrency >= path.capability.max_concurrency) {
         return UCN_V6_ERR_NO_SPACE;
     }
     if ((tx = find_free_tx(owner)) == NULL) {
@@ -268,6 +407,7 @@ ucn_v6_result_t ucn_v6_transfer_send_begin(
     tx->occupied = true;
     tx->phase = UCN_V6_TRANSFER_TX_SENDING;
     tx->request = *request;
+    tx->dependency = dependency;
     tx->fragment_count = fragment_count;
     tx->message_crc32c =
         ucn_v6_crc32c(request->payload, request->payload_length);
@@ -298,6 +438,7 @@ ucn_v6_result_t ucn_v6_transfer_next_fragment(
 {
     ucn_v6_transfer_tx_slot_t *tx;
     ucn_v6_transfer_fragment_t fragment;
+    ucn_v6_route_path_t path;
     size_t index;
     if (!owner_is_valid(owner) || fragment_out == NULL || message_id == 0U) {
         return UCN_V6_ERR_ARGUMENT;
@@ -313,7 +454,7 @@ ucn_v6_result_t ucn_v6_transfer_next_fragment(
         return tx->phase == UCN_V6_TRANSFER_TX_REASSEMBLED ?
                    UCN_V6_ERR_STATE : UCN_V6_ERR_TIMEOUT;
     }
-    if (now_us >= tx->request.path.deadline_us) {
+    if (resolve_tx_path(owner, now_us, tx, &path) != UCN_V6_OK) {
         tx->phase = UCN_V6_TRANSFER_TX_FAILED;
         return UCN_V6_ERR_TIMEOUT;
     }
@@ -370,6 +511,7 @@ ucn_v6_result_t ucn_v6_transfer_record_fragment_submit(
 {
     ucn_v6_transfer_tx_slot_t *tx;
     ucn_v6_transfer_tx_fragment_state_t *state;
+    ucn_v6_route_path_t path;
     bool retransmission;
     if (!owner_is_valid(owner) || !owner->selected || message_id == 0U ||
         owner->selected_tx_index >= UCN_V6_CONFIG_TRANSFER_TX_SLOTS ||
@@ -387,6 +529,14 @@ ucn_v6_result_t ucn_v6_transfer_record_fragment_submit(
     }
     if (submitted && state->sent && now_us < state->last_submit_us) {
         return UCN_V6_ERR_STATE;
+    }
+    if (submitted && resolve_tx_path(owner, now_us, tx, &path) != UCN_V6_OK) {
+        tx->phase = UCN_V6_TRANSFER_TX_FAILED;
+        owner->selected = false;
+        owner->selected_tx_index = 0U;
+        owner->selected_fragment_index = 0U;
+        owner->stats.selection_pending = false;
+        return UCN_V6_ERR_TIMEOUT;
     }
     retransmission = state->sent;
     if (submitted) {
@@ -427,18 +577,20 @@ static bool sack_context_matches(const ucn_v6_transfer_tx_slot_t *tx,
                 UCN_V6_FLAG_ROUTE_CONTEXT |
                 UCN_V6_FLAG_PATH_CONTEXT) &&
            principal_equal(&opened->authenticated_principal,
-                           &tx->request.route_domain.destination_principal) &&
+                           &tx->request.route_ref.domain.destination_principal) &&
            frame->realm_id ==
-               tx->request.route_domain.destination_binding.realm_id &&
+               tx->request.route_ref.domain.destination_binding.realm_id &&
            frame->source_address ==
-               tx->request.route_domain.destination_binding.node_address &&
+               tx->request.route_ref.domain.destination_binding.node_address &&
            frame->source_binding_generation ==
-               tx->request.route_domain.destination_binding.binding_generation &&
-           frame->session_generation == tx->request.path.session_generation &&
+               tx->request.route_ref.domain.destination_binding.binding_generation &&
+           frame->session_generation ==
+               tx->request.route_ref.domain.destination_session_generation &&
            frame->message.operation_id == tx->request.message.operation_id &&
-           frame->route_generation == tx->request.path.route_generation &&
-           frame->path.path_id == tx->request.path.path_id &&
-           frame->path.path_generation == tx->request.path.path_generation;
+           frame->route_generation == tx->request.route_ref.route_generation &&
+           frame->path.path_id == tx->request.route_ref.path_id &&
+           frame->path.path_generation ==
+               tx->request.route_ref.path_generation;
 }
 
 static bool tx_fragment_was_sent(const ucn_v6_transfer_tx_slot_t *tx,
@@ -478,11 +630,13 @@ static void rebuild_window(ucn_v6_transfer_tx_slot_t *tx,
 
 ucn_v6_result_t ucn_v6_transfer_apply_sack(
     ucn_v6_transfer_owner_t *owner,
+    uint64_t now_us,
     const ucn_v6_security_open_result_t *opened)
 {
     ucn_v6_transfer_sack_t sack;
     ucn_v6_transfer_tx_slot_t *tx;
     ucn_v6_transfer_tx_fragment_state_t candidate[UCN_V6_CONFIG_TRANSFER_WINDOW];
+    ucn_v6_route_path_t path;
     uint16_t new_base;
     uint16_t index;
     if (!owner_is_valid(owner) || opened == NULL ||
@@ -494,6 +648,10 @@ ucn_v6_result_t ucn_v6_transfer_apply_sack(
     tx = find_tx(owner, sack.message_id);
     if (tx == NULL) {
         return UCN_V6_ERR_NOT_FOUND;
+    }
+    if (tx->phase != UCN_V6_TRANSFER_TX_SENDING ||
+        resolve_tx_path(owner, now_us, tx, &path) != UCN_V6_OK) {
+        return UCN_V6_ERR_TIMEOUT;
     }
     if (!sack_context_matches(tx, opened) ||
         sack.fragment_count != tx->fragment_count ||
@@ -604,37 +762,55 @@ ucn_v6_result_t ucn_v6_transfer_rebind_path(
     ucn_v6_transfer_owner_t *owner,
     uint64_t now_us,
     uint64_t message_id,
-    const ucn_v6_path_capability_t *path)
+    const ucn_v6_route_path_ref_t *route_ref)
 {
     ucn_v6_transfer_tx_slot_t *tx;
-    if (!owner_is_valid(owner) || path == NULL || !path->valid ||
+    ucn_v6_transfer_send_request_t candidate_request;
+    ucn_v6_route_path_t current_path;
+    ucn_v6_route_path_t path;
+    ucn_v6_stack_invalidation_t dependency;
+    ucn_v6_result_t result;
+    uint16_t path_concurrency = 0U;
+    size_t index;
+    if (!owner_is_valid(owner) || !route_ref_is_valid(route_ref) ||
         (tx = find_tx(owner, message_id)) == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
     if (tx->phase != UCN_V6_TRANSFER_TX_SENDING || owner->selected ||
-        !principal_equal(&path->destination_principal,
-                         &tx->request.route_domain.destination_principal) ||
-        !ucn_v6_binding_key_equal(
-            &path->destination_binding,
-            &tx->request.route_domain.destination_binding) ||
-        path->session_generation != tx->request.path.session_generation ||
-        path->session_generation == 0U ||
-        path->session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        path->destination_link_instance_generation == 0U ||
-        path->destination_link_instance_generation >
-            UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        path->fragment_data_budget < tx->request.fragment_data_budget ||
-        path->max_window < tx->request.window_size ||
-        path->max_message_class < tx->request.message_class ||
-        (path->feature_bits & UCN_V6_FEATURE_TRANSFER) == 0U ||
-        path->route_generation == 0U ||
-        path->route_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        path->path_id == 0U || path->path_generation == 0U ||
-        path->path_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        path->deadline_us <= now_us) {
+        !domain_equal(&route_ref->domain, &tx->request.route_ref.domain)) {
         return UCN_V6_ERR_STATE;
     }
-    tx->request.path = *path;
+    /* Rebinding is a proactive switch inside the already-proven parent
+     * domain, not a way to resurrect a transfer whose frozen Path has been
+     * revoked or replaced.  Resolve the old parent before considering the
+     * caller's new stable reference; failure leaves the TX byte-for-byte
+     * unchanged and canonical invalidation/expiry performs retirement. */
+    if (resolve_tx_path(owner, now_us, tx, &current_path) != UCN_V6_OK) {
+        return UCN_V6_ERR_TIMEOUT;
+    }
+    candidate_request = tx->request;
+    candidate_request.route_ref = *route_ref;
+    memset(&path, 0, sizeof(path));
+    memset(&dependency, 0, sizeof(dependency));
+    result = resolve_path(owner, now_us, route_ref,
+                          &path, &dependency);
+    if (result != UCN_V6_OK ||
+        !path_satisfies_request(&path, &candidate_request)) {
+        return result != UCN_V6_OK ? result : UCN_V6_ERR_ACCESS;
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_TRANSFER_TX_SLOTS; ++index) {
+        if (&owner->tx[index] != tx && owner->tx[index].occupied &&
+            owner->tx[index].phase == UCN_V6_TRANSFER_TX_SENDING &&
+            invalidation_equal(&owner->tx[index].dependency,
+                               &dependency)) {
+            ++path_concurrency;
+        }
+    }
+    if (path_concurrency >= path.capability.max_concurrency) {
+        return UCN_V6_ERR_NO_SPACE;
+    }
+    tx->request.route_ref = *route_ref;
+    tx->dependency = dependency;
     return UCN_V6_OK;
 }
 
@@ -673,7 +849,44 @@ static bool fragment_context_is_valid(
            opened->frame.delivery_guarantee == UCN_V6_DELIVERY_RELIABLE &&
            (opened->frame.traffic_class == UCN_V6_TRAFFIC_Q2 ||
             opened->frame.traffic_class == UCN_V6_TRAFFIC_Q3) &&
-           opened->frame.message.operation_id != 0U;
+           opened->frame.message.interaction_role >=
+               UCN_V6_INTERACTION_REQUEST &&
+           opened->frame.message.interaction_role <=
+               UCN_V6_INTERACTION_ERROR &&
+           opened->frame.message.source_endpoint != 0U &&
+           opened->frame.message.destination_endpoint != 0U &&
+           opened->frame.message.operation_id != 0U &&
+           opened->frame.message.operation_id <=
+               UCN_V6_SERIAL64_ROTATION_THRESHOLD;
+}
+
+static ucn_v6_message_descriptor_t message_from_fragment(
+    const ucn_v6_security_open_result_t *opened,
+    const ucn_v6_transfer_fragment_t *fragment)
+{
+    ucn_v6_message_descriptor_t message;
+    memset(&message, 0, sizeof(message));
+    message.traffic_class = opened->frame.traffic_class;
+    message.delivery_guarantee = opened->frame.delivery_guarantee;
+    message.interaction_role = opened->frame.message.interaction_role;
+    message.source_endpoint = opened->frame.message.source_endpoint;
+    message.destination_endpoint = opened->frame.message.destination_endpoint;
+    message.operation_id = opened->frame.message.operation_id;
+    message.payload_length = fragment->total_length;
+    return message;
+}
+
+static bool message_equal(const ucn_v6_message_descriptor_t *left,
+                          const ucn_v6_message_descriptor_t *right)
+{
+    return left != NULL && right != NULL &&
+           left->traffic_class == right->traffic_class &&
+           left->delivery_guarantee == right->delivery_guarantee &&
+           left->interaction_role == right->interaction_role &&
+           left->source_endpoint == right->source_endpoint &&
+           left->destination_endpoint == right->destination_endpoint &&
+           left->operation_id == right->operation_id &&
+           left->payload_length == right->payload_length;
 }
 
 static ucn_v6_transfer_rx_slot_t *find_rx(
@@ -783,6 +996,7 @@ ucn_v6_result_t ucn_v6_transfer_receive_fragment(
     ucn_v6_transfer_rx_slot_t *rx;
     const ucn_v6_transfer_recent_slot_t *recent;
     ucn_v6_session_key_t origin;
+    ucn_v6_message_descriptor_t message;
     uint64_t deadline;
     uint32_t offset;
     if (!owner_is_valid(owner) || result_out == NULL ||
@@ -793,6 +1007,7 @@ ucn_v6_result_t ucn_v6_transfer_receive_fragment(
         return UCN_V6_ERR_MALFORMED;
     }
     origin = origin_from_opened(opened);
+    message = message_from_fragment(opened, &fragment);
     if (!session_is_valid(&origin) ||
         fragment.message_id != opened->frame.message.operation_id) {
         return UCN_V6_ERR_SECURITY;
@@ -802,7 +1017,8 @@ ucn_v6_result_t ucn_v6_transfer_receive_fragment(
                          opened->frame.message.operation_id,
                          fragment.message_id);
     if (recent != NULL) {
-        if (recent->message_class != fragment.message_class ||
+        if (!message_equal(&recent->message, &message) ||
+            recent->message_class != fragment.message_class ||
             recent->total_length != fragment.total_length ||
             recent->fragment_count != fragment.fragment_count ||
             recent->fragment_data_budget != fragment.fragment_data_budget ||
@@ -829,6 +1045,7 @@ ucn_v6_result_t ucn_v6_transfer_receive_fragment(
         memset(rx, 0, sizeof(*rx));
         rx->occupied = true;
         rx->origin = origin;
+        rx->message = message;
         rx->operation_id = opened->frame.message.operation_id;
         rx->message_id = fragment.message_id;
         rx->message_class = fragment.message_class;
@@ -838,7 +1055,8 @@ ucn_v6_result_t ucn_v6_transfer_receive_fragment(
         rx->message_crc32c = fragment.message_crc32c;
         rx->deadline_us = deadline;
         ++owner->stats.rx_active;
-    } else if (rx->message_class != fragment.message_class ||
+    } else if (!message_equal(&rx->message, &message) ||
+               rx->message_class != fragment.message_class ||
                rx->total_length != fragment.total_length ||
                rx->fragment_count != fragment.fragment_count ||
                rx->fragment_data_budget != fragment.fragment_data_budget ||
@@ -923,6 +1141,7 @@ ucn_v6_result_t ucn_v6_transfer_copy_completed(
     }
     memset(&completed, 0, sizeof(completed));
     completed.origin = rx->origin;
+    completed.message = rx->message;
     completed.operation_id = rx->operation_id;
     completed.message_id = rx->message_id;
     completed.message_class = rx->message_class;
@@ -964,6 +1183,7 @@ ucn_v6_result_t ucn_v6_transfer_retire_completed(
     memset(recent, 0, sizeof(*recent));
     recent->occupied = true;
     recent->origin = rx->origin;
+    recent->message = rx->message;
     recent->operation_id = rx->operation_id;
     recent->message_id = rx->message_id;
     recent->message_class = rx->message_class;
@@ -1192,9 +1412,26 @@ ucn_v6_result_t ucn_v6_transfer_reserve_credit(
     return UCN_V6_OK;
 }
 
-ucn_v6_result_t ucn_v6_transfer_invalidate_session(
-    ucn_v6_transfer_owner_t *owner,
+static bool session_resource_matches(
+    const ucn_v6_stack_invalidation_t *invalidation,
     const ucn_v6_session_key_t *session,
+    uint16_t link_id,
+    uint32_t link_generation)
+{
+    if (invalidation->link_id != link_id ||
+        invalidation->link_generation != link_generation) {
+        return false;
+    }
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_LINK) {
+        return true;
+    }
+    return invalidation->type == UCN_V6_STACK_INVALIDATE_SESSION &&
+           session_equal(&invalidation->session, session);
+}
+
+ucn_v6_result_t ucn_v6_transfer_apply_invalidation(
+    ucn_v6_transfer_owner_t *owner,
+    const ucn_v6_stack_invalidation_t *invalidation,
     uint64_t *retired_tx_buffer_tokens,
     size_t retired_capacity,
     size_t *retired_count,
@@ -1203,7 +1440,8 @@ ucn_v6_result_t ucn_v6_transfer_invalidate_session(
     ucn_v6_transfer_invalidation_result_t result;
     size_t needed = 0U;
     size_t index;
-    if (!owner_is_valid(owner) || !session_is_valid(session) ||
+    if (!owner_is_valid(owner) ||
+        !ucn_v6_stack_invalidation_is_valid(invalidation) ||
         retired_count == NULL || result_out == NULL ||
         (retired_capacity != 0U && retired_tx_buffer_tokens == NULL)) {
         return UCN_V6_ERR_ARGUMENT;
@@ -1211,12 +1449,7 @@ ucn_v6_result_t ucn_v6_transfer_invalidate_session(
     for (index = 0U; index < UCN_V6_CONFIG_TRANSFER_TX_SLOTS; ++index) {
         const ucn_v6_transfer_tx_slot_t *tx = &owner->tx[index];
         if (tx->occupied &&
-            principal_equal(&tx->request.path.destination_principal,
-                            &session->principal) &&
-            ucn_v6_binding_key_equal(&tx->request.path.destination_binding,
-                                     &session->binding) &&
-            tx->request.path.session_generation ==
-                session->session_generation) {
+            invalidation_covers(invalidation, &tx->dependency)) {
             ++needed;
         }
     }
@@ -1228,15 +1461,12 @@ ucn_v6_result_t ucn_v6_transfer_invalidate_session(
     for (index = 0U; index < UCN_V6_CONFIG_TRANSFER_TX_SLOTS; ++index) {
         ucn_v6_transfer_tx_slot_t *tx = &owner->tx[index];
         if (tx->occupied &&
-            principal_equal(&tx->request.path.destination_principal,
-                            &session->principal) &&
-            ucn_v6_binding_key_equal(&tx->request.path.destination_binding,
-                                     &session->binding) &&
-            tx->request.path.session_generation ==
-                session->session_generation) {
+            invalidation_covers(invalidation, &tx->dependency)) {
             retired_tx_buffer_tokens[needed++] = tx->request.buffer_token;
             if (owner->selected && owner->selected_tx_index == index) {
                 owner->selected = false;
+                owner->selected_tx_index = 0U;
+                owner->selected_fragment_index = 0U;
                 owner->stats.selection_pending = false;
             }
             memset(tx, 0, sizeof(*tx));
@@ -1246,9 +1476,14 @@ ucn_v6_result_t ucn_v6_transfer_invalidate_session(
             }
         }
     }
+    /* RX reassembly is keyed by the authenticated end-to-end origin, not by
+     * a mutable forwarding Path.  Only an exact Session event can retire it;
+     * Link-only and Capability/Path events have no provable RX ownership. */
     for (index = 0U; index < UCN_V6_CONFIG_TRANSFER_RX_SLOTS; ++index) {
         if (owner->rx[index].occupied &&
-            session_equal(&owner->rx[index].origin, session)) {
+            invalidation->type == UCN_V6_STACK_INVALIDATE_SESSION &&
+            session_equal(&owner->rx[index].origin,
+                          &invalidation->session)) {
             memset(&owner->rx[index], 0, sizeof(owner->rx[index]));
             ++result.rx_retired;
             if (owner->stats.rx_active != 0U) {
@@ -1258,7 +1493,9 @@ ucn_v6_result_t ucn_v6_transfer_invalidate_session(
     }
     for (index = 0U; index < UCN_V6_CONFIG_TRANSFER_RECENT; ++index) {
         if (owner->recent[index].occupied &&
-            session_equal(&owner->recent[index].origin, session)) {
+            invalidation->type == UCN_V6_STACK_INVALIDATE_SESSION &&
+            session_equal(&owner->recent[index].origin,
+                          &invalidation->session)) {
             memset(&owner->recent[index], 0, sizeof(owner->recent[index]));
             ++result.recent_retired;
             if (owner->stats.recent_completions != 0U) {
@@ -1269,7 +1506,10 @@ ucn_v6_result_t ucn_v6_transfer_invalidate_session(
     for (index = 0U;
          index < UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS * 2U; ++index) {
         if (owner->credits[index].occupied &&
-            session_equal(&owner->credits[index].peer, session)) {
+            session_resource_matches(
+                invalidation, &owner->credits[index].peer,
+                owner->credits[index].update.link_id,
+                owner->credits[index].update.link_generation)) {
             memset(&owner->credits[index], 0, sizeof(owner->credits[index]));
             ++result.credit_slots_retired;
         }
@@ -1277,7 +1517,10 @@ ucn_v6_result_t ucn_v6_transfer_invalidate_session(
     for (index = 0U; index < UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS;
          ++index) {
         if (owner->reservations[index].occupied &&
-            session_equal(&owner->reservations[index].value.peer, session)) {
+            session_resource_matches(
+                invalidation, &owner->reservations[index].value.peer,
+                owner->reservations[index].value.link_id,
+                owner->reservations[index].value.link_generation)) {
             memset(&owner->reservations[index], 0,
                    sizeof(owner->reservations[index]));
             ++result.credit_reservations_retired;
@@ -1348,9 +1591,11 @@ ucn_v6_result_t ucn_v6_transfer_expire(
         return UCN_V6_ERR_ARGUMENT;
     }
     for (index = 0U; index < UCN_V6_CONFIG_TRANSFER_TX_SLOTS; ++index) {
+        ucn_v6_route_path_t path;
         if (owner->tx[index].occupied &&
             owner->tx[index].phase == UCN_V6_TRANSFER_TX_SENDING &&
-            now_us >= owner->tx[index].request.path.deadline_us) {
+            resolve_tx_path(owner, now_us, &owner->tx[index], &path) !=
+                UCN_V6_OK) {
             owner->tx[index].phase = UCN_V6_TRANSFER_TX_FAILED;
             if (owner->selected && owner->selected_tx_index == index) {
                 owner->selected = false;
@@ -1361,7 +1606,7 @@ ucn_v6_result_t ucn_v6_transfer_expire(
         }
     }
     for (index = 0U; index < UCN_V6_CONFIG_TRANSFER_RX_SLOTS; ++index) {
-        if (owner->rx[index].occupied &&
+        if (owner->rx[index].occupied && !owner->rx[index].complete &&
             now_us >= owner->rx[index].deadline_us) {
             memset(&owner->rx[index], 0, sizeof(owner->rx[index]));
             if (owner->stats.rx_active != 0U) {
@@ -1378,13 +1623,11 @@ ucn_v6_result_t ucn_v6_transfer_expire(
             }
         }
     }
-    for (index = 0U;
-         index < UCN_V6_CONFIG_TRANSFER_CREDIT_LINKS * 2U; ++index) {
-        if (owner->credits[index].occupied &&
-            now_us >= owner->credits[index].deadline_us) {
-            memset(&owner->credits[index], 0, sizeof(owner->credits[index]));
-        }
-    }
+    /* An expired credit lease is unusable, but its Generation/Sequence
+     * high-water remains authoritative until the exact Session or Link is
+     * invalidated.  Deleting the slot here would let an old gen=1/seq=1
+     * advertisement create a fresh lease and let a pre-expiry reservation
+     * return credit into that new lease (ABA). */
     return UCN_V6_OK;
 }
 

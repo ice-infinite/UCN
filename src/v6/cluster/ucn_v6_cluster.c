@@ -5,6 +5,8 @@
 
 #define RECORD_MAGIC UINT32_C(0x56364352)
 #define RECORD_BODY_BYTES (UCN_V6_CLUSTER_RECORD_BYTES - 4U)
+#define TRANSITION_BODY_BYTES                                                \
+    ((size_t)(112U + UCN_V6_CONFIG_CLUSTER_VOTERS * 28U))
 #define CONTROL_BODY_BYTES (UCN_V6_CLUSTER_CONTROL_BYTES - 4U)
 #define DIRECTORY_BODY_BYTES (UCN_V6_CLUSTER_DIRECTORY_BYTES - 4U)
 
@@ -59,6 +61,38 @@ static bool binding_equal(const ucn_v6_binding_key_t *left,
            left->binding_generation == right->binding_generation;
 }
 
+static bool session_equal(const ucn_v6_session_key_t *left,
+                          const ucn_v6_session_key_t *right)
+{
+    return left != NULL && right != NULL &&
+           principal_equal(&left->principal, &right->principal) &&
+           binding_equal(&left->binding, &right->binding) &&
+           left->session_generation == right->session_generation;
+}
+
+static bool directory_equal(
+    const ucn_v6_cluster_directory_entry_t *left,
+    const ucn_v6_cluster_directory_entry_t *right)
+{
+    return left != NULL && right != NULL &&
+           left->occupied == right->occupied &&
+           left->remote_cluster_id == right->remote_cluster_id &&
+           left->remote_epoch.cluster_id == right->remote_epoch.cluster_id &&
+           left->remote_epoch.term == right->remote_epoch.term &&
+           principal_equal(&left->remote_epoch.head_principal,
+                           &right->remote_epoch.head_principal) &&
+           binding_equal(&left->remote_epoch.head_binding,
+                         &right->remote_epoch.head_binding) &&
+           session_equal(&left->next_hop, &right->next_hop) &&
+           left->route_generation == right->route_generation &&
+           left->path_id == right->path_id &&
+           left->path_generation == right->path_generation &&
+           left->authority_proof.proof_id == right->authority_proof.proof_id &&
+           left->authority_proof.generation ==
+               right->authority_proof.generation &&
+           left->lease_duration_us == right->lease_duration_us;
+}
+
 static bool route_domain_equal(const ucn_v6_route_domain_t *left,
                                const ucn_v6_route_domain_t *right)
 {
@@ -71,42 +105,19 @@ static bool route_domain_equal(const ucn_v6_route_domain_t *left,
            principal_equal(&left->destination_principal,
                            &right->destination_principal) &&
            binding_equal(&left->destination_binding,
-                         &right->destination_binding);
+                         &right->destination_binding) &&
+           left->destination_session_generation ==
+               right->destination_session_generation;
 }
 
-static bool path_capability_equal(const ucn_v6_path_capability_t *left,
-                                  const ucn_v6_path_capability_t *right)
+static bool route_ref_equal(const ucn_v6_route_path_ref_t *left,
+                            const ucn_v6_route_path_ref_t *right)
 {
     return left != NULL && right != NULL &&
-           left->valid == right->valid &&
-           left->immutable_for_realtime == right->immutable_for_realtime &&
-           principal_equal(&left->destination_principal,
-                           &right->destination_principal) &&
-           binding_equal(&left->destination_binding,
-                         &right->destination_binding) &&
-           left->session_generation == right->session_generation &&
-           left->destination_link_instance_generation ==
-               right->destination_link_instance_generation &&
-           memcmp(left->destination_capability_digest,
-                  right->destination_capability_digest,
-                  UCN_V6_CAPABILITY_DIGEST_BYTES) == 0 &&
+           route_domain_equal(&left->domain, &right->domain) &&
            left->route_generation == right->route_generation &&
            left->path_id == right->path_id &&
-           left->path_generation == right->path_generation &&
-           left->path_frame_mtu == right->path_frame_mtu &&
-           left->payload_budget == right->payload_budget &&
-           left->fragment_data_budget == right->fragment_data_budget &&
-           left->feature_bits == right->feature_bits &&
-           left->hop_suite_bits == right->hop_suite_bits &&
-           left->e2e_suite_bits == right->e2e_suite_bits &&
-           left->max_message_class == right->max_message_class &&
-           left->max_window == right->max_window &&
-           left->max_concurrency == right->max_concurrency &&
-           left->timestamp_capability_bits ==
-               right->timestamp_capability_bits &&
-           left->timestamp_uncertainty_us ==
-               right->timestamp_uncertainty_us &&
-           left->deadline_us == right->deadline_us;
+           left->path_generation == right->path_generation;
 }
 
 static bool tunnel_equal(const ucn_v6_cluster_tunnel_t *left,
@@ -117,8 +128,7 @@ static bool tunnel_equal(const ucn_v6_cluster_tunnel_t *left,
            left->tunnel_id == right->tunnel_id &&
            left->source_cluster_id == right->source_cluster_id &&
            left->destination_cluster_id == right->destination_cluster_id &&
-           route_domain_equal(&left->route_domain, &right->route_domain) &&
-           path_capability_equal(&left->path, &right->path) &&
+           route_ref_equal(&left->route_ref, &right->route_ref) &&
            left->deadline_us == right->deadline_us;
 }
 
@@ -138,6 +148,59 @@ static bool voter_equal(const ucn_v6_cluster_voter_t *left,
     return left != NULL && right != NULL &&
            principal_equal(&left->principal, &right->principal) &&
            binding_equal(&left->binding, &right->binding);
+}
+
+/* These helpers intentionally inspect semantic fields instead of object
+ * representation.  Public v6 structs may contain implementation-defined C
+ * padding, so memcmp against a zero-initialized object is not a portable
+ * canonicality check. */
+static bool principal_is_zero(const ucn_v6_principal_t *principal)
+{
+    size_t index;
+    if (principal == NULL) {
+        return false;
+    }
+    for (index = 0U; index < sizeof(principal->bytes); ++index) {
+        if (principal->bytes[index] != 0U) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool binding_is_zero(const ucn_v6_binding_key_t *binding)
+{
+    return binding != NULL && binding->realm_id == 0U &&
+           binding->node_address == 0U &&
+           binding->binding_generation == 0U;
+}
+
+static bool voter_is_zero(const ucn_v6_cluster_voter_t *voter)
+{
+    return voter != NULL && principal_is_zero(&voter->principal) &&
+           binding_is_zero(&voter->binding);
+}
+
+static bool epoch_is_zero(const ucn_v6_cluster_epoch_t *epoch)
+{
+    return epoch != NULL && epoch->cluster_id == 0U && epoch->term == 0U &&
+           principal_is_zero(&epoch->head_principal) &&
+           binding_is_zero(&epoch->head_binding);
+}
+
+static bool config_is_zero(const ucn_v6_cluster_config_t *config)
+{
+    size_t index;
+    if (config == NULL || config->valid || config->config_id != 0U ||
+        config->generation != 0U || config->voter_count != 0U) {
+        return false;
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_VOTERS; ++index) {
+        if (!voter_is_zero(&config->voters[index])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void writer_bytes(byte_writer_t *writer, const void *value, size_t length)
@@ -360,9 +423,7 @@ bool ucn_v6_cluster_config_is_valid(const ucn_v6_cluster_config_t *config)
         }
     }
     for (; index < UCN_V6_CONFIG_CLUSTER_VOTERS; ++index) {
-        ucn_v6_cluster_voter_t zero;
-        memset(&zero, 0, sizeof(zero));
-        if (memcmp(&config->voters[index], &zero, sizeof(zero)) != 0) {
+        if (!voter_is_zero(&config->voters[index])) {
             return false;
         }
     }
@@ -455,11 +516,7 @@ static void read_config(byte_reader_t *reader,
         read_voter(reader, &config->voters[index]);
     }
     if (!config->valid) {
-        ucn_v6_cluster_config_t zero;
-        memset(&zero, 0, sizeof(zero));
-        if (config->config_id != 0U || config->generation != 0U ||
-            config->voter_count != 0U ||
-            memcmp(config->voters, zero.voters, sizeof(config->voters)) != 0) {
+        if (!config_is_zero(config)) {
             reader->ok = false;
         }
     }
@@ -471,14 +528,8 @@ static bool backup_is_valid(const ucn_v6_cluster_backup_t *backup)
         return false;
     }
     if (!backup->valid) {
-        ucn_v6_principal_t zero_principal;
-        memset(&zero_principal, 0, sizeof(zero_principal));
-        return !backup->ready &&
-               memcmp(&backup->principal, &zero_principal,
-                      sizeof(zero_principal)) == 0 &&
-               backup->binding.realm_id == 0U &&
-               backup->binding.node_address == 0U &&
-               backup->binding.binding_generation == 0U &&
+        return !backup->ready && principal_is_zero(&backup->principal) &&
+               binding_is_zero(&backup->binding) &&
                backup->generation == 0U &&
                backup->config_transaction_id == 0U &&
                backup->acknowledged_config_generation == 0U;
@@ -497,17 +548,9 @@ static bool vote_is_valid(const ucn_v6_cluster_vote_id_t *vote)
         return false;
     }
     if (!vote->valid) {
-        ucn_v6_cluster_epoch_t zero_epoch;
-        ucn_v6_principal_t zero_principal;
-        memset(&zero_epoch, 0, sizeof(zero_epoch));
-        memset(&zero_principal, 0, sizeof(zero_principal));
-        return memcmp(&vote->source_epoch, &zero_epoch,
-                      sizeof(zero_epoch)) == 0 &&
-               memcmp(&vote->candidate_principal, &zero_principal,
-                      sizeof(zero_principal)) == 0 &&
-               vote->candidate_binding.realm_id == 0U &&
-               vote->candidate_binding.node_address == 0U &&
-               vote->candidate_binding.binding_generation == 0U &&
+        return epoch_is_zero(&vote->source_epoch) &&
+               principal_is_zero(&vote->candidate_principal) &&
+               binding_is_zero(&vote->candidate_binding) &&
                vote->backup_generation == 0U;
     }
     return ucn_v6_cluster_epoch_is_valid(&vote->source_epoch) &&
@@ -523,18 +566,14 @@ static bool transition_is_valid(
         return false;
     }
     if (!transition->valid) {
-        ucn_v6_cluster_transition_proof_t zero;
-        memset(&zero, 0, sizeof(zero));
         return !transition->ready &&
                transition->kind == UCN_V6_CLUSTER_TRANSITION_NONE &&
                transition->transaction_id == 0U &&
-               memcmp(&transition->old_epoch, &zero.old_epoch,
-                      sizeof(zero.old_epoch)) == 0 &&
-               memcmp(&transition->target_epoch, &zero.target_epoch,
-                      sizeof(zero.target_epoch)) == 0 &&
+               epoch_is_zero(&transition->old_epoch) &&
+               epoch_is_zero(&transition->target_epoch) &&
                transition->target_config_id == 0U &&
                transition->target_config_generation == 0U &&
-               !transition->target_config.valid &&
+               config_is_zero(&transition->target_config) &&
                transition->old_voter_bitmap == 0U &&
                transition->new_voter_bitmap == 0U;
     }
@@ -566,10 +605,10 @@ static bool snapshot_is_valid(const ucn_v6_cluster_snapshot_t *snapshot)
         return false;
     }
     if (!snapshot->active_epoch_valid) {
-        ucn_v6_cluster_epoch_t zero;
-        memset(&zero, 0, sizeof(zero));
-        if (memcmp(&snapshot->active_epoch, &zero, sizeof(zero)) != 0 ||
-            snapshot->max_epoch_valid || snapshot->stable_config.valid ||
+        if (!epoch_is_zero(&snapshot->active_epoch) ||
+            snapshot->max_epoch_valid ||
+            !epoch_is_zero(&snapshot->max_epoch) ||
+            !config_is_zero(&snapshot->stable_config) ||
             snapshot->joint_valid || snapshot->backup.valid ||
             snapshot->last_vote.valid || snapshot->transition.valid ||
             snapshot->role != UCN_V6_CLUSTER_OBSERVER ||
@@ -595,7 +634,7 @@ static bool snapshot_is_valid(const ucn_v6_cluster_snapshot_t *snapshot)
             return false;
         }
     } else if (snapshot->joint_transaction_id != 0U ||
-               snapshot->joint_new_config.valid) {
+               !config_is_zero(&snapshot->joint_new_config)) {
         return false;
     }
     if (!backup_is_valid(&snapshot->backup) ||
@@ -732,7 +771,7 @@ static void write_transition(
         writer_u32(writer, transition->old_voter_bitmap);
         writer_u32(writer, transition->new_voter_bitmap);
     } else {
-        writer_skip(writer, 560U);
+        writer_skip(writer, TRANSITION_BODY_BYTES);
     }
 }
 
@@ -1040,7 +1079,10 @@ static bool directory_wire_is_valid(
            ucn_v6_binding_key_is_valid(&entry->next_hop.binding) &&
            serial_valid(entry->next_hop.session_generation) &&
            serial_valid(entry->route_generation) && entry->path_id != 0U &&
-           serial_valid(entry->path_generation) && entry->deadline_us != 0U;
+           serial_valid(entry->path_generation) &&
+           entry->authority_proof.proof_id != 0U &&
+           serial_valid(entry->authority_proof.generation) &&
+           entry->lease_duration_us != 0U;
 }
 
 ucn_v6_result_t ucn_v6_cluster_directory_encode(
@@ -1071,7 +1113,9 @@ ucn_v6_result_t ucn_v6_cluster_directory_encode(
     writer_u32(&writer, entry->route_generation);
     writer_u16(&writer, entry->path_id);
     writer_u32(&writer, entry->path_generation);
-    writer_u64(&writer, entry->deadline_us);
+    writer_u32(&writer, entry->authority_proof.proof_id);
+    writer_u32(&writer, entry->authority_proof.generation);
+    writer_u64(&writer, entry->lease_duration_us);
     writer_skip(&writer, 2U);
     if (!writer.ok || writer.offset != DIRECTORY_BODY_BYTES) {
         return UCN_V6_ERR_EXHAUSTED;
@@ -1123,7 +1167,9 @@ ucn_v6_result_t ucn_v6_cluster_directory_decode(
     decoded.route_generation = reader_u32(&reader);
     decoded.path_id = reader_u16(&reader);
     decoded.path_generation = reader_u32(&reader);
-    decoded.deadline_us = reader_u64(&reader);
+    decoded.authority_proof.proof_id = reader_u32(&reader);
+    decoded.authority_proof.generation = reader_u32(&reader);
+    decoded.lease_duration_us = reader_u64(&reader);
     if (!reader_zero(&reader, 2U) || !reader.ok ||
         reader.offset != DIRECTORY_BODY_BYTES ||
         !directory_wire_is_valid(&decoded)) {
@@ -1138,6 +1184,7 @@ static bool owner_is_valid(const ucn_v6_cluster_owner_t *owner)
     return owner != NULL && owner->magic == UCN_V6_CLUSTER_OWNER_MAGIC &&
            owner->schema == UCN_V6_CLUSTER_OWNER_SCHEMA &&
            owner->layout_hash == UCN_V6_COMPILED_LAYOUT_HASH &&
+           owner->capability_owner != NULL && owner->route_owner != NULL &&
            owner->initialized && owner->canary == UCN_V6_CLUSTER_OWNER_CANARY;
 }
 
@@ -1148,23 +1195,78 @@ static bool store_is_valid(const ucn_v6_cluster_store_ops_t *store)
            store->load != NULL && store->submit != NULL;
 }
 
-static bool gate_is_available(ucn_v6_cluster_owner_t *owner)
+static ucn_v6_result_t callback_scope_enter(
+    ucn_v6_callback_gate_t *gate, const void *scope_owner,
+    uint64_t *violations_before)
 {
-    return owner != NULL && owner->callback_gate != NULL &&
-           !ucn_v6_callback_gate_is_active(owner->callback_gate);
-}
-
-static ucn_v6_result_t gate_enter(ucn_v6_cluster_owner_t *owner)
-{
-    if (!gate_is_available(owner)) {
+    if (gate == NULL || scope_owner == NULL || violations_before == NULL) {
         return UCN_V6_ERR_STATE;
     }
-    return ucn_v6_callback_gate_try_enter(owner->callback_gate, owner);
+    *violations_before = ucn_v6_callback_gate_violation_count(gate);
+    if (*violations_before == UINT64_MAX ||
+        ucn_v6_callback_gate_try_enter(gate, scope_owner) != UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
+    }
+    return UCN_V6_OK;
 }
 
-static void gate_leave(ucn_v6_cluster_owner_t *owner)
+static ucn_v6_result_t callback_scope_finish(
+    ucn_v6_callback_gate_t *gate, const void *scope_owner,
+    uint64_t violations_before, ucn_v6_result_t callback_result)
 {
-    (void)ucn_v6_callback_gate_leave(owner->callback_gate, owner);
+    const uint64_t violations_after =
+        ucn_v6_callback_gate_violation_count(gate);
+    const ucn_v6_result_t leave_result =
+        ucn_v6_callback_gate_leave(gate, scope_owner);
+
+    if (leave_result != UCN_V6_OK || violations_before == UINT64_MAX ||
+        violations_after == UINT64_MAX ||
+        violations_after != violations_before) {
+        return UCN_V6_ERR_STATE;
+    }
+    return callback_result;
+}
+
+static bool gate_is_available(ucn_v6_cluster_owner_t *owner)
+{
+    uint64_t violations_before;
+    ucn_v6_result_t result;
+
+    if (owner == NULL || owner->callback_gate == NULL) {
+        return false;
+    }
+    /* Probe the shared gate with the real Owner identity.  Unlike a separate
+     * is_active() read this records a callback re-entry in violation_count,
+     * so the outer callback scope cannot silently succeed after discarding
+     * the nested API error. */
+    result = callback_scope_enter(owner->callback_gate, owner,
+                                  &violations_before);
+    if (result != UCN_V6_OK) {
+        return false;
+    }
+    return callback_scope_finish(owner->callback_gate, owner,
+                                 violations_before, UCN_V6_OK) == UCN_V6_OK;
+}
+
+static ucn_v6_result_t gate_enter(
+    ucn_v6_cluster_owner_t *owner, uint64_t *violations_before)
+{
+    if (owner == NULL) {
+        return UCN_V6_ERR_STATE;
+    }
+    return callback_scope_enter(owner->callback_gate, owner,
+                                violations_before);
+}
+
+static ucn_v6_result_t gate_finish(
+    ucn_v6_cluster_owner_t *owner, uint64_t violations_before,
+    ucn_v6_result_t callback_result)
+{
+    if (owner == NULL) {
+        return UCN_V6_ERR_STATE;
+    }
+    return callback_scope_finish(owner->callback_gate, owner,
+                                 violations_before, callback_result);
 }
 
 static void persistence_fault(ucn_v6_cluster_owner_t *owner)
@@ -1179,6 +1281,7 @@ static ucn_v6_result_t persist_snapshot(
 {
     size_t loaded_length = 0U;
     uint64_t loaded_witness = 0U;
+    uint64_t violations_before = 0U;
     ucn_v6_result_t result;
     if (owner == NULL || requested == NULL || owner->persistence_faulted) {
         return UCN_V6_ERR_STATE;
@@ -1195,7 +1298,7 @@ static ucn_v6_result_t persist_snapshot(
     if (result != UCN_V6_OK) {
         return result;
     }
-    result = gate_enter(owner);
+    result = gate_enter(owner, &violations_before);
     if (result != UCN_V6_OK) {
         return result;
     }
@@ -1215,7 +1318,7 @@ static ucn_v6_result_t persist_snapshot(
                                    UCN_V6_CLUSTER_RECORD_BYTES,
                                    &loaded_length);
     }
-    gate_leave(owner);
+    result = gate_finish(owner, violations_before, result);
     if (result != UCN_V6_OK ||
         loaded_witness != owner->staging.record_generation ||
         loaded_length != UCN_V6_CLUSTER_RECORD_BYTES ||
@@ -1247,21 +1350,35 @@ static int config_voter_index(const ucn_v6_cluster_config_t *config,
     return -1;
 }
 
-static ucn_v6_cluster_member_t *find_member(
+static ucn_v6_cluster_member_slot_t *find_member_slot(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_principal_t *principal,
-    const ucn_v6_binding_key_t *binding)
+    const ucn_v6_principal_t *principal)
 {
     size_t index;
     for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_MEMBERS; ++index) {
-        ucn_v6_cluster_member_t *member = &owner->members[index].value;
-        if (member->occupied &&
-            principal_equal(&member->session.principal, principal) &&
-            binding_equal(&member->session.binding, binding)) {
-            return member;
+        ucn_v6_cluster_member_slot_t *slot = &owner->members[index];
+        if (slot->keyed &&
+            principal_equal(&slot->value.session.principal, principal)) {
+            return slot;
         }
     }
     return NULL;
+}
+
+static void member_slot_fence(ucn_v6_cluster_member_slot_t *slot)
+{
+    if (slot == NULL || !slot->keyed) {
+        return;
+    }
+    memset(slot, 0, sizeof(*slot));
+}
+
+static void member_slot_expire_lease(ucn_v6_cluster_member_slot_t *slot)
+{
+    if (slot == NULL || !slot->keyed) {
+        return;
+    }
+    memset(slot, 0, sizeof(*slot));
 }
 
 static const ucn_v6_cluster_member_t *find_member_const(
@@ -1281,18 +1398,187 @@ static const ucn_v6_cluster_member_t *find_member_const(
     return NULL;
 }
 
+static const ucn_v6_cluster_member_slot_t *find_member_slot_const(
+    const ucn_v6_cluster_owner_t *owner,
+    const ucn_v6_principal_t *principal,
+    const ucn_v6_binding_key_t *binding)
+{
+    size_t index;
+    if (owner == NULL) {
+        return NULL;
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_MEMBERS; ++index) {
+        const ucn_v6_cluster_member_slot_t *slot = &owner->members[index];
+        if (slot->value.occupied &&
+            principal_equal(&slot->value.session.principal, principal) &&
+            binding_equal(&slot->value.session.binding, binding)) {
+            return slot;
+        }
+    }
+    return NULL;
+}
+
+static bool member_is_live(
+    const ucn_v6_cluster_owner_t *owner,
+    const ucn_v6_cluster_member_t *member,
+    const uint8_t capability_digest[UCN_V6_CAPABILITY_DIGEST_BYTES],
+    uint64_t now_us);
+
+static bool member_value_is_live(const ucn_v6_cluster_owner_t *owner,
+                                 const ucn_v6_cluster_member_t *member,
+                                 uint64_t now_us)
+{
+    const ucn_v6_cluster_member_slot_t *slot;
+    if (member == NULL) {
+        return false;
+    }
+    slot = find_member_slot_const(owner, &member->session.principal,
+                                  &member->session.binding);
+    return slot != NULL && &slot->value == member &&
+           member_is_live(owner, member, slot->capability_digest, now_us);
+}
+
+static uint64_t member_effective_deadline(
+    const ucn_v6_cluster_member_t *member)
+{
+    uint64_t deadline;
+    if (member == NULL || !member->occupied) {
+        return 0U;
+    }
+    deadline = member->lease_deadline_us;
+    if (member->discovery_deadline_us < deadline) {
+        deadline = member->discovery_deadline_us;
+    }
+    if (member->capability_deadline_us < deadline) {
+        deadline = member->capability_deadline_us;
+    }
+    return deadline;
+}
+
+static bool copy_current_peer(
+    const ucn_v6_cluster_owner_t *owner,
+    const ucn_v6_principal_t *principal,
+    const ucn_v6_binding_key_t *binding,
+    uint32_t session_generation,
+    uint16_t ingress_link_id,
+    uint32_t ingress_link_generation,
+    uint32_t capability_generation,
+    const uint8_t capability_digest[UCN_V6_CAPABILITY_DIGEST_BYTES],
+    uint64_t now_us,
+    ucn_v6_cached_peer_capability_t *current)
+{
+    return owner != NULL && owner->capability_owner != NULL &&
+           current != NULL &&
+           ucn_v6_capability_copy_peer(
+               owner->capability_owner, now_us, principal, binding,
+               session_generation, ingress_link_generation, current) ==
+               UCN_V6_OK &&
+           current->ingress_link_id == ingress_link_id &&
+           current->record.capability_generation == capability_generation &&
+           memcmp(current->digest, capability_digest,
+                  UCN_V6_CAPABILITY_DIGEST_BYTES) == 0;
+}
+
+static bool member_is_live(const ucn_v6_cluster_owner_t *owner,
+                           const ucn_v6_cluster_member_t *member,
+                           const uint8_t capability_digest[
+                               UCN_V6_CAPABILITY_DIGEST_BYTES],
+                           uint64_t now_us)
+{
+    ucn_v6_cached_peer_capability_t current;
+    return member != NULL && member->occupied &&
+           member_effective_deadline(member) > now_us &&
+           copy_current_peer(owner, &member->session.principal,
+                             &member->session.binding,
+                             member->session.session_generation,
+                             member->ingress_link_id,
+                             member->ingress_link_generation,
+                             member->capability_generation,
+                             capability_digest, now_us, &current);
+}
+
+static void observe_current_head_lease(
+    ucn_v6_cluster_owner_t *owner,
+    const ucn_v6_cluster_member_t *member)
+{
+    uint64_t observed_deadline;
+    if (owner == NULL || member == NULL ||
+        !owner->durable.active_epoch_valid ||
+        !principal_equal(&member->session.principal,
+                         &owner->durable.active_epoch.head_principal) ||
+        !binding_equal(&member->session.binding,
+                       &owner->durable.active_epoch.head_binding)) {
+        return;
+    }
+    observed_deadline = member_effective_deadline(member);
+    if (owner->observed_head_lease &&
+        epoch_equal(&owner->observed_head_epoch,
+                    &owner->durable.active_epoch) &&
+        owner->observed_head_lease_deadline_us >= observed_deadline) {
+        return;
+    }
+    owner->observed_head_lease = true;
+    owner->observed_head_epoch = owner->durable.active_epoch;
+    owner->observed_head_lease_deadline_us = observed_deadline;
+}
+
+static void refresh_current_head_observation(ucn_v6_cluster_owner_t *owner)
+{
+    const ucn_v6_cluster_member_t *member;
+    if (owner == NULL || !owner->durable.active_epoch_valid ||
+        (principal_equal(&owner->durable.active_epoch.head_principal,
+                         &owner->local_principal) &&
+         binding_equal(&owner->durable.active_epoch.head_binding,
+                       &owner->local_binding))) {
+        if (owner != NULL) {
+            owner->observed_head_lease = false;
+            memset(&owner->observed_head_epoch, 0,
+                   sizeof(owner->observed_head_epoch));
+            owner->observed_head_lease_deadline_us = 0U;
+        }
+        return;
+    }
+    member = find_member_const(owner,
+                               &owner->durable.active_epoch.head_principal,
+                               &owner->durable.active_epoch.head_binding);
+    if (member == NULL) {
+        if (!owner->observed_head_lease ||
+            !epoch_equal(&owner->observed_head_epoch,
+                         &owner->durable.active_epoch)) {
+            owner->observed_head_lease = false;
+            memset(&owner->observed_head_epoch, 0,
+                   sizeof(owner->observed_head_epoch));
+            owner->observed_head_lease_deadline_us = 0U;
+        }
+        return;
+    }
+    observe_current_head_lease(owner, member);
+}
+
+static bool remote_head_lease_expiry_is_proven(
+    const ucn_v6_cluster_owner_t *owner, uint64_t now_us)
+{
+    return owner != NULL && owner->observed_head_lease &&
+           epoch_equal(&owner->observed_head_epoch,
+                       &owner->durable.active_epoch) &&
+           owner->observed_head_lease_deadline_us != 0U &&
+           owner->observed_head_lease_deadline_us <= now_us;
+}
+
 static bool voter_live(const ucn_v6_cluster_owner_t *owner,
                        const ucn_v6_cluster_voter_t *voter,
                        uint64_t now_us)
 {
-    const ucn_v6_cluster_member_t *member;
+    const ucn_v6_cluster_member_slot_t *slot;
     if (principal_equal(&voter->principal, &owner->local_principal) &&
         binding_equal(&voter->binding, &owner->local_binding)) {
         return true;
     }
-    member = find_member_const(owner, &voter->principal, &voter->binding);
-    return member != NULL && member->lease_deadline_us > now_us &&
-           member->voter;
+    slot = find_member_slot_const(owner, &voter->principal, &voter->binding);
+    return slot != NULL &&
+           member_is_live(owner, &slot->value, slot->capability_digest,
+                          now_us) &&
+           slot->value.voter;
 }
 
 static uint32_t config_live_bitmap(const ucn_v6_cluster_owner_t *owner,
@@ -1330,6 +1616,113 @@ static bool bitmap_has_quorum(uint32_t bitmap, uint8_t voter_count)
     return (bitmap & ~allowed) == 0U && bit_count(bitmap) >= required;
 }
 
+static bool authority_proof_ref_equal(
+    const ucn_v6_cluster_authority_proof_ref_t *left,
+    const ucn_v6_cluster_authority_proof_ref_t *right)
+{
+    return left != NULL && right != NULL &&
+           left->proof_id == right->proof_id &&
+           left->generation == right->generation;
+}
+
+static bool authority_proof_view_equal(
+    const ucn_v6_cluster_authority_proof_view_t *left,
+    const ucn_v6_cluster_authority_proof_view_t *right)
+{
+    return left != NULL && right != NULL && left->valid == right->valid &&
+           authority_proof_ref_equal(&left->ref, &right->ref) &&
+           epoch_equal(&left->epoch, &right->epoch) &&
+           left->stable_config_id == right->stable_config_id &&
+           left->stable_config_generation ==
+               right->stable_config_generation &&
+           left->joint_valid == right->joint_valid &&
+           left->joint_config_id == right->joint_config_id &&
+           left->joint_config_generation ==
+               right->joint_config_generation &&
+           left->stable_quorum_verified ==
+               right->stable_quorum_verified &&
+           left->joint_quorum_verified == right->joint_quorum_verified &&
+           left->route_generation == right->route_generation &&
+           left->path_id == right->path_id &&
+           left->path_generation == right->path_generation &&
+           memcmp(left->evidence_digest, right->evidence_digest,
+                  sizeof(left->evidence_digest)) == 0 &&
+           left->lease_deadline_us == right->lease_deadline_us;
+}
+
+static bool bytes_nonzero(const uint8_t *bytes, size_t length)
+{
+    size_t index;
+    if (bytes == NULL || length == 0U) {
+        return false;
+    }
+    for (index = 0U; index < length; ++index) {
+        if (bytes[index] != 0U) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool authority_proof_view_is_valid(
+    const ucn_v6_cluster_authority_proof_view_t *view,
+    const ucn_v6_cluster_directory_entry_t *entry,
+    uint64_t now_us)
+{
+    if (view == NULL || entry == NULL || !view->valid ||
+        !authority_proof_ref_equal(&view->ref, &entry->authority_proof) ||
+        !epoch_equal(&view->epoch, &entry->remote_epoch) ||
+        !serial_valid(view->stable_config_id) ||
+        !serial_valid(view->stable_config_generation) ||
+        !view->stable_quorum_verified ||
+        view->route_generation != entry->route_generation ||
+        view->path_id != entry->path_id ||
+        view->path_generation != entry->path_generation ||
+        !bytes_nonzero(view->evidence_digest,
+                       sizeof(view->evidence_digest)) ||
+        view->lease_deadline_us <= now_us) {
+        return false;
+    }
+    if (!view->joint_valid) {
+        return view->joint_config_id == 0U &&
+               view->joint_config_generation == 0U &&
+               !view->joint_quorum_verified;
+    }
+    return serial_valid(view->joint_config_id) &&
+           serial_valid(view->joint_config_generation) &&
+           view->joint_quorum_verified;
+}
+
+static bool resolve_authority_proof(
+    ucn_v6_cluster_owner_t *owner,
+    const ucn_v6_cluster_directory_entry_t *entry,
+    uint64_t now_us,
+    ucn_v6_cluster_authority_proof_view_t *view)
+{
+    ucn_v6_cluster_authority_proof_view_t candidate;
+    uint64_t violations_before = 0U;
+    ucn_v6_result_t result;
+    if (owner == NULL || entry == NULL || view == NULL ||
+        owner->authority_proof_owner.resolve_verified == NULL) {
+        return false;
+    }
+    memset(&candidate, 0, sizeof(candidate));
+    result = gate_enter(owner, &violations_before);
+    if (result != UCN_V6_OK) {
+        return false;
+    }
+    result = owner->authority_proof_owner.resolve_verified(
+        owner->authority_proof_owner.context, &entry->authority_proof,
+        now_us, &candidate);
+    result = gate_finish(owner, violations_before, result);
+    if (result != UCN_V6_OK ||
+        !authority_proof_view_is_valid(&candidate, entry, now_us)) {
+        return false;
+    }
+    *view = candidate;
+    return true;
+}
+
 static bool config_has_live_quorum(const ucn_v6_cluster_owner_t *owner,
                                    const ucn_v6_cluster_config_t *config,
                                    uint64_t now_us)
@@ -1338,8 +1731,8 @@ static bool config_has_live_quorum(const ucn_v6_cluster_owner_t *owner,
                              config->voter_count);
 }
 
-static void recompute_authority(ucn_v6_cluster_owner_t *owner,
-                                uint64_t now_us)
+static bool authority_is_live(const ucn_v6_cluster_owner_t *owner,
+                              uint64_t now_us)
 {
     bool stable_quorum;
     bool joint_quorum = true;
@@ -1351,10 +1744,7 @@ static void recompute_authority(ucn_v6_cluster_owner_t *owner,
                          &owner->local_principal) ||
         !binding_equal(&owner->durable.active_epoch.head_binding,
                        &owner->local_binding)) {
-        if (owner != NULL) {
-            owner->authority_active = false;
-        }
-        return;
+        return false;
     }
     stable_quorum = config_has_live_quorum(owner,
                                            &owner->durable.stable_config,
@@ -1363,21 +1753,53 @@ static void recompute_authority(ucn_v6_cluster_owner_t *owner,
         joint_quorum = config_has_live_quorum(
             owner, &owner->durable.joint_new_config, now_us);
     }
-    owner->authority_active = stable_quorum && joint_quorum;
+    return stable_quorum && joint_quorum;
+}
+
+static void recompute_authority(ucn_v6_cluster_owner_t *owner,
+                                uint64_t now_us)
+{
+    if (owner != NULL) {
+        owner->authority_active = authority_is_live(owner, now_us);
+    }
+}
+
+static bool opened_source_session(
+    const ucn_v6_security_open_result_t *opened,
+    ucn_v6_session_key_t *source_session)
+{
+    ucn_v6_session_key_t source;
+
+    if (opened == NULL || source_session == NULL ||
+        !opened->hop_authenticated || !opened->endpoint_authorized ||
+        (opened->frame.flags & UCN_V6_FLAG_E2E_CONTEXT) == 0U ||
+        !ucn_v6_principal_is_valid(&opened->authenticated_principal) ||
+        !ucn_v6_principal_is_valid(
+            &opened->ingress_peer_session.principal) ||
+        !ucn_v6_binding_key_is_valid(
+            &opened->ingress_peer_session.binding) ||
+        !serial_valid(opened->ingress_peer_session.session_generation)) {
+        return false;
+    }
+    memset(&source, 0, sizeof(source));
+    source.principal = opened->authenticated_principal;
+    source.binding.realm_id = opened->frame.realm_id;
+    source.binding.node_address = opened->frame.source_address;
+    source.binding.binding_generation =
+        opened->frame.source_binding_generation;
+    source.session_generation = opened->frame.session_generation;
+    if (!ucn_v6_binding_key_is_valid(&source.binding) ||
+        !serial_valid(source.session_generation)) {
+        return false;
+    }
+    *source_session = source;
+    return true;
 }
 
 static bool opened_is_authorized(const ucn_v6_security_open_result_t *opened)
 {
-    return opened != NULL && opened->hop_authenticated &&
-           opened->endpoint_authorized &&
-           (opened->frame.flags & UCN_V6_FLAG_E2E_CONTEXT) != 0U &&
-           ucn_v6_principal_is_valid(&opened->authenticated_principal) &&
-           ucn_v6_binding_key_is_valid(&opened->ingress_peer_session.binding) &&
-           principal_equal(&opened->authenticated_principal,
-                           &opened->ingress_peer_session.principal) &&
-           opened->ingress_peer_session.session_generation != 0U &&
-           opened->ingress_peer_session.session_generation <=
-               UCN_V6_SERIAL_ROTATION_THRESHOLD;
+    ucn_v6_session_key_t source;
+    return opened_source_session(opened, &source);
 }
 
 static bool opened_cluster_control(
@@ -1406,6 +1828,7 @@ static bool opened_cluster_directory(
     ucn_v6_cluster_directory_entry_t *entry)
 {
     return opened_is_authorized(opened) && entry != NULL &&
+           serial_valid(opened->frame.origin_sequence) &&
            opened->frame.frame_type == UCN_V6_FRAME_CONTROL &&
            (opened->frame.flags & UCN_V6_FLAG_PROTOCOL_CONTEXT) != 0U &&
            opened->frame.protocol_opcode ==
@@ -1438,6 +1861,9 @@ ucn_v6_result_t ucn_v6_cluster_owner_init_in_place(
     const ucn_v6_principal_t *local_principal,
     const ucn_v6_binding_key_t *local_binding,
     uint32_t local_session_generation,
+    const ucn_v6_capability_owner_t *capability_owner,
+    const ucn_v6_route_owner_t *route_owner,
+    const ucn_v6_cluster_authority_proof_owner_ops_t *authority_proof_owner,
     const ucn_v6_cluster_store_ops_t *store,
     ucn_v6_callback_gate_t *callback_gate,
     ucn_v6_cluster_owner_t **owner)
@@ -1446,6 +1872,7 @@ ucn_v6_result_t ucn_v6_cluster_owner_init_in_place(
     size_t length = 0U;
     uint64_t witness = 0U;
     uint64_t verify_witness = 0U;
+    uint64_t violations_before = 0U;
     ucn_v6_result_t witness_result;
     ucn_v6_result_t result;
     if (owner != NULL) {
@@ -1454,15 +1881,31 @@ ucn_v6_result_t ucn_v6_cluster_owner_init_in_place(
     if (owner == NULL || local_principal == NULL || local_binding == NULL ||
         !ucn_v6_principal_is_valid(local_principal) ||
         !ucn_v6_binding_key_is_valid(local_binding) ||
-        !serial_valid(local_session_generation) || !store_is_valid(store) ||
+        !serial_valid(local_session_generation) ||
+        capability_owner == NULL || route_owner == NULL ||
+        (authority_proof_owner != NULL &&
+         authority_proof_owner->resolve_verified == NULL) ||
+        !store_is_valid(store) ||
         callback_gate == NULL ||
         ucn_v6_manifest_validate_exact(manifest) != UCN_V6_OK ||
         (manifest->feature_bits & UCN_V6_FEATURE_CLUSTER) == 0U ||
         ucn_v6_storage_validate(storage, storage_bytes,
                                 UCN_V6_CLUSTER_OWNER_STORAGE_BYTES,
                                 UCN_V6_STORAGE_ALIGNMENT) != UCN_V6_OK ||
-        ucn_v6_callback_gate_is_active(callback_gate)) {
+        ucn_v6_callback_gate_violation_count(callback_gate) == UINT64_MAX) {
         return UCN_V6_ERR_CONFIG;
+    }
+    /* Probe before clearing caller storage.  A recursive init from a Store
+     * callback must be rejected without destroying the live outer Owner. */
+    result = callback_scope_enter(callback_gate, storage,
+                                  &violations_before);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    result = callback_scope_finish(callback_gate, storage,
+                                   violations_before, UCN_V6_OK);
+    if (result != UCN_V6_OK) {
+        return result;
     }
     memset(storage, 0, storage_bytes);
     target = (ucn_v6_cluster_owner_t *)storage;
@@ -1472,10 +1915,16 @@ ucn_v6_result_t ucn_v6_cluster_owner_init_in_place(
     target->local_principal = *local_principal;
     target->local_binding = *local_binding;
     target->local_session_generation = local_session_generation;
+    target->capability_owner = capability_owner;
+    target->route_owner = route_owner;
+    if (authority_proof_owner != NULL) {
+        target->authority_proof_owner = *authority_proof_owner;
+    }
     target->store = *store;
     target->callback_gate = callback_gate;
     target->canary = UCN_V6_CLUSTER_OWNER_CANARY;
-    result = ucn_v6_callback_gate_try_enter(callback_gate, storage);
+    result = callback_scope_enter(callback_gate, storage,
+                                  &violations_before);
     if (result != UCN_V6_OK) {
         memset(storage, 0, storage_bytes);
         return result;
@@ -1483,7 +1932,14 @@ ucn_v6_result_t ucn_v6_cluster_owner_init_in_place(
     witness_result = store->load_generation_witness(store->context, &witness);
     result = store->load(store->context, target->record_verify,
                          UCN_V6_CLUSTER_RECORD_BYTES, &length);
-    (void)ucn_v6_callback_gate_leave(callback_gate, storage);
+    {
+        ucn_v6_result_t scope_result = callback_scope_finish(
+            callback_gate, storage, violations_before, UCN_V6_OK);
+        if (scope_result != UCN_V6_OK) {
+            memset(storage, 0, storage_bytes);
+            return scope_result;
+        }
+    }
     if (result == UCN_V6_ERR_NOT_FOUND &&
         witness_result == UCN_V6_ERR_NOT_FOUND) {
         memset(&target->durable, 0, sizeof(target->durable));
@@ -1516,7 +1972,8 @@ ucn_v6_result_t ucn_v6_cluster_owner_init_in_place(
         memset(storage, 0, storage_bytes);
         return UCN_V6_ERR_STATE;
     }
-    result = ucn_v6_callback_gate_try_enter(callback_gate, storage);
+    result = callback_scope_enter(callback_gate, storage,
+                                  &violations_before);
     if (result != UCN_V6_OK) {
         memset(storage, 0, storage_bytes);
         return result;
@@ -1536,7 +1993,8 @@ ucn_v6_result_t ucn_v6_cluster_owner_init_in_place(
         result = store->load(store->context, target->record_verify,
                              UCN_V6_CLUSTER_RECORD_BYTES, &length);
     }
-    (void)ucn_v6_callback_gate_leave(callback_gate, storage);
+    result = callback_scope_finish(callback_gate, storage,
+                                   violations_before, result);
     if (result != UCN_V6_OK ||
         verify_witness != target->durable.record_generation ||
         length != UCN_V6_CLUSTER_RECORD_BYTES ||
@@ -1583,58 +2041,90 @@ ucn_v6_result_t ucn_v6_cluster_create(
 ucn_v6_result_t ucn_v6_cluster_admit_member(
     ucn_v6_cluster_owner_t *owner,
     const ucn_v6_security_open_result_t *opened,
-    const ucn_v6_cached_peer_capability_t *capability,
+    const ucn_v6_capability_peer_ref_t *peer_ref,
     uint64_t now_us, uint64_t lease_duration_us)
 {
-    ucn_v6_cluster_member_t *member;
+    ucn_v6_cluster_member_slot_t *slot;
+    ucn_v6_cluster_member_t replacement;
+    ucn_v6_cached_peer_capability_t current_capability;
+    ucn_v6_session_key_t source_session;
     size_t index;
     uint64_t deadline;
-    if (!owner_is_valid(owner) || !gate_is_available(owner) ||
-        !opened_is_authorized(opened) || capability == NULL ||
-        !capability->valid || capability->discovery_deadline_us <= now_us ||
-        capability->capability_deadline_us <= now_us ||
+    if (!owner_is_valid(owner)) {
+        return UCN_V6_ERR_SECURITY;
+    }
+    if (!gate_is_available(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (!opened_source_session(opened, &source_session) ||
+        peer_ref == NULL ||
         lease_duration_us == 0U ||
         UINT64_MAX - now_us < lease_duration_us ||
-        !principal_equal(&opened->authenticated_principal,
-                         &capability->principal) ||
-        !principal_equal(&opened->ingress_peer_session.principal,
-                         &capability->principal) ||
-        !binding_equal(&opened->ingress_peer_session.binding,
-                       &capability->binding) ||
-        opened->ingress_peer_session.session_generation !=
-            capability->session_generation ||
-        (capability->record.peer.feature_bits & UCN_V6_FEATURE_CLUSTER) == 0U ||
-        !serial_valid(capability->record.capability_generation)) {
-        if (owner_is_valid(owner)) increment_saturated(&owner->rejected_security);
+        !principal_equal(&source_session.principal, &peer_ref->principal) ||
+        !binding_equal(&source_session.binding,
+                       &peer_ref->binding) ||
+        source_session.session_generation !=
+            peer_ref->session_generation ||
+        peer_ref->ingress_link_id == 0U ||
+        peer_ref->ingress_link_id == UINT16_MAX ||
+        !serial_valid(peer_ref->ingress_link_generation)) {
+        increment_saturated(&owner->rejected_security);
+        return UCN_V6_ERR_SECURITY;
+    }
+    if (ucn_v6_capability_copy_peer(
+            owner->capability_owner, now_us, &peer_ref->principal,
+            &peer_ref->binding, peer_ref->session_generation,
+            peer_ref->ingress_link_generation, &current_capability) !=
+            UCN_V6_OK ||
+        current_capability.ingress_link_id != peer_ref->ingress_link_id ||
+        (current_capability.record.peer.feature_bits &
+         UCN_V6_FEATURE_CLUSTER) == 0U) {
+        increment_saturated(&owner->rejected_security);
         return UCN_V6_ERR_SECURITY;
     }
     deadline = now_us + lease_duration_us;
-    member = find_member(owner, &capability->principal, &capability->binding);
-    if (member == NULL) {
+    slot = find_member_slot(owner, &current_capability.principal);
+    if (slot == NULL) {
         for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_MEMBERS; ++index) {
-            if (!owner->members[index].value.occupied) {
-                member = &owner->members[index].value;
+            if (!owner->members[index].keyed) {
+                slot = &owner->members[index];
                 break;
             }
         }
     }
-    if (member == NULL) {
+    if (slot == NULL) {
         return UCN_V6_ERR_NO_SPACE;
     }
-    memset(member, 0, sizeof(*member));
-    member->occupied = true;
-    member->session = opened->ingress_peer_session;
-    member->capability_generation = capability->record.capability_generation;
-    member->capability_feature_bits = capability->record.peer.feature_bits;
-    member->voter = config_voter_index(&owner->durable.stable_config,
-                                       &capability->principal,
-                                       &capability->binding) >= 0 ||
-                    (owner->durable.joint_valid &&
-                     config_voter_index(&owner->durable.joint_new_config,
-                                        &capability->principal,
-                                        &capability->binding) >= 0);
-    member->backup_eligible = member->voter;
-    member->lease_deadline_us = deadline;
+    memset(&replacement, 0, sizeof(replacement));
+    replacement.occupied = true;
+    replacement.session = source_session;
+    replacement.ingress_link_id = current_capability.ingress_link_id;
+    replacement.ingress_link_generation =
+        current_capability.ingress_link_generation;
+    replacement.capability_generation =
+        current_capability.record.capability_generation;
+    replacement.capability_feature_bits =
+        current_capability.record.peer.feature_bits;
+    replacement.voter = config_voter_index(&owner->durable.stable_config,
+                                            &current_capability.principal,
+                                            &current_capability.binding) >= 0 ||
+                        (owner->durable.joint_valid &&
+                         config_voter_index(
+                             &owner->durable.joint_new_config,
+                             &current_capability.principal,
+                             &current_capability.binding) >= 0);
+    replacement.backup_eligible = replacement.voter;
+    replacement.discovery_deadline_us =
+        current_capability.discovery_deadline_us;
+    replacement.capability_deadline_us =
+        current_capability.capability_deadline_us;
+    replacement.lease_deadline_us = deadline;
+    slot->value = replacement;
+    memcpy(slot->capability_digest, current_capability.digest,
+           UCN_V6_CAPABILITY_DIGEST_BYTES);
+    slot->keyed = true;
+    slot->fenced = false;
+    observe_current_head_lease(owner, &slot->value);
     recompute_authority(owner, now_us);
     return UCN_V6_OK;
 }
@@ -1658,7 +2148,8 @@ ucn_v6_result_t ucn_v6_cluster_assign_backup(
         return UCN_V6_ERR_STATE;
     }
     member = find_member_const(owner, &backup->principal, &backup->binding);
-    if (member == NULL || !member->backup_eligible) {
+    if (!member_value_is_live(owner, member, now_us) ||
+        !member->backup_eligible) {
         return UCN_V6_ERR_ACCESS;
     }
     if (owner->durable.backup.valid &&
@@ -1677,11 +2168,15 @@ ucn_v6_result_t ucn_v6_cluster_assign_backup(
 
 ucn_v6_result_t ucn_v6_cluster_backup_ack_config(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened)
+    const ucn_v6_security_open_result_t *opened,
+    uint64_t now_us)
 {
     ucn_v6_cluster_control_t control;
     ucn_v6_cluster_snapshot_t *next;
+    const ucn_v6_cluster_member_t *member;
+    ucn_v6_session_key_t source_session;
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
+        !opened_source_session(opened, &source_session) ||
         !opened_cluster_control(opened, UCN_V6_CLUSTER_CTL_CONFIG_ACK,
                                 &control) ||
         !owner->durable.backup.valid || !owner->durable.joint_valid ||
@@ -1690,10 +2185,16 @@ ucn_v6_result_t ucn_v6_cluster_backup_ack_config(
         control.config_id != owner->durable.joint_new_config.config_id ||
         control.config_generation != owner->durable.joint_new_config.generation ||
         !epoch_equal(&control.old_epoch, &owner->durable.active_epoch) ||
-        !principal_equal(&opened->authenticated_principal,
+        !principal_equal(&source_session.principal,
                          &owner->durable.backup.principal) ||
-        !binding_equal(&opened->ingress_peer_session.binding,
+        !binding_equal(&source_session.binding,
                        &owner->durable.backup.binding)) {
+        return UCN_V6_ERR_ACCESS;
+    }
+    member = find_member_const(owner, &source_session.principal,
+                               &source_session.binding);
+    if (!member_value_is_live(owner, member, now_us) ||
+        !member->backup_eligible) {
         return UCN_V6_ERR_ACCESS;
     }
     owner->staging = owner->durable;
@@ -1768,7 +2269,12 @@ ucn_v6_result_t ucn_v6_cluster_commit_joint(
          (!owner->durable.backup.ready ||
           owner->durable.backup.config_transaction_id != transaction_id ||
           owner->durable.backup.acknowledged_config_generation !=
-              owner->durable.joint_new_config.generation))) {
+              owner->durable.joint_new_config.generation ||
+          !member_value_is_live(
+              owner,
+              find_member_const(owner, &owner->durable.backup.principal,
+                                &owner->durable.backup.binding),
+              now_us)))) {
         increment_saturated(&owner->rejected_quorum);
         return UCN_V6_ERR_ACCESS;
     }
@@ -1861,13 +2367,8 @@ ucn_v6_result_t ucn_v6_cluster_begin_takeover(
         !next_serial(owner->durable.active_epoch.term, &term)) {
         return UCN_V6_ERR_STATE;
     }
-    {
-        const ucn_v6_cluster_member_t *head_member = find_member_const(
-            owner, &owner->durable.active_epoch.head_principal,
-            &owner->durable.active_epoch.head_binding);
-        if (head_member != NULL && head_member->lease_deadline_us > now_us) {
-            return UCN_V6_ERR_ACCESS;
-        }
+    if (!remote_head_lease_expiry_is_proven(owner, now_us)) {
+        return UCN_V6_ERR_ACCESS;
     }
     self_index = config_voter_index(&owner->durable.stable_config,
                                     &owner->local_principal,
@@ -1900,7 +2401,8 @@ ucn_v6_result_t ucn_v6_cluster_begin_takeover(
 
 ucn_v6_result_t ucn_v6_cluster_record_transition_vote(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened)
+    const ucn_v6_security_open_result_t *opened,
+    uint64_t now_us)
 {
     ucn_v6_cluster_control_t decoded;
     const ucn_v6_cluster_control_t *vote = &decoded;
@@ -1909,11 +2411,17 @@ ucn_v6_result_t ucn_v6_cluster_record_transition_vote(
     int new_index;
     uint32_t old_bit = 0U;
     uint32_t new_bit = 0U;
-    if (!owner_is_valid(owner) || !gate_is_available(owner) ||
-        !owner->durable.transition.valid ||
+    ucn_v6_session_key_t source_session;
+    if (!owner_is_valid(owner)) {
+        return UCN_V6_ERR_ACCESS;
+    }
+    if (!gate_is_available(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (!owner->durable.transition.valid ||
         (owner->durable.phase != UCN_V6_CLUSTER_PHASE_TAKEOVER &&
          owner->durable.phase != UCN_V6_CLUSTER_PHASE_RECOVERY)) {
-        if (owner_is_valid(owner)) increment_saturated(&owner->rejected_security);
+        increment_saturated(&owner->rejected_security);
         return UCN_V6_ERR_ACCESS;
     }
     if (!opened_cluster_control(
@@ -1922,6 +2430,10 @@ ucn_v6_result_t ucn_v6_cluster_record_transition_vote(
                 UCN_V6_CLUSTER_CTL_TAKEOVER_VOTE :
                 UCN_V6_CLUSTER_CTL_RECOVERY_VOTE,
             &decoded)) {
+        increment_saturated(&owner->rejected_security);
+        return UCN_V6_ERR_ACCESS;
+    }
+    if (!opened_source_session(opened, &source_session)) {
         increment_saturated(&owner->rejected_security);
         return UCN_V6_ERR_ACCESS;
     }
@@ -1946,13 +2458,20 @@ ucn_v6_result_t ucn_v6_cluster_record_transition_vote(
         return UCN_V6_ERR_ACCESS;
     }
     old_index = config_voter_index(&owner->durable.stable_config,
-                                   &opened->authenticated_principal,
-                                   &opened->ingress_peer_session.binding);
+                                   &source_session.principal,
+                                   &source_session.binding);
     new_index = config_voter_index(
         &owner->durable.transition.target_config,
-        &opened->authenticated_principal,
-        &opened->ingress_peer_session.binding);
+        &source_session.principal,
+        &source_session.binding);
     if (old_index < 0 && new_index < 0) return UCN_V6_ERR_ACCESS;
+    {
+        const ucn_v6_cluster_member_t *member = find_member_const(
+            owner, &source_session.principal, &source_session.binding);
+        if (!member_value_is_live(owner, member, now_us) || !member->voter) {
+            return UCN_V6_ERR_ACCESS;
+        }
+    }
     if (old_index >= 0) old_bit = UINT32_C(1) << (uint32_t)old_index;
     if (new_index >= 0) new_bit = UINT32_C(1) << (uint32_t)new_index;
     if ((old_bit == 0U ||
@@ -1985,8 +2504,13 @@ ucn_v6_result_t ucn_v6_cluster_commit_takeover(
 {
     ucn_v6_cluster_snapshot_t *next;
     ucn_v6_result_t result;
-    if (!owner_is_valid(owner) || !gate_is_available(owner) ||
-        owner->durable.phase != UCN_V6_CLUSTER_PHASE_TAKEOVER ||
+    if (!owner_is_valid(owner)) {
+        return UCN_V6_ERR_ACCESS;
+    }
+    if (!gate_is_available(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (owner->durable.phase != UCN_V6_CLUSTER_PHASE_TAKEOVER ||
         !owner->durable.transition.valid ||
         owner->durable.transition.kind !=
             UCN_V6_CLUSTER_TRANSITION_TAKEOVER ||
@@ -2004,7 +2528,10 @@ ucn_v6_result_t ucn_v6_cluster_commit_takeover(
     next->phase = UCN_V6_CLUSTER_PHASE_STABLE;
     memset(&next->transition, 0, sizeof(next->transition));
     result = persist_snapshot(owner, next);
-    if (result == UCN_V6_OK) recompute_authority(owner, now_us);
+    if (result == UCN_V6_OK) {
+        refresh_current_head_observation(owner);
+        recompute_authority(owner, now_us);
+    }
     return result;
 }
 
@@ -2071,7 +2598,9 @@ ucn_v6_result_t ucn_v6_cluster_handover_ready(
     ucn_v6_cluster_control_t decoded;
     const ucn_v6_cluster_control_t *ready = &decoded;
     ucn_v6_cluster_snapshot_t *next;
+    ucn_v6_session_key_t source_session;
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
+        !opened_source_session(opened, &source_session) ||
         !opened_cluster_control(opened, UCN_V6_CLUSTER_CTL_HANDOVER_READY,
                                 &decoded) ||
         owner->durable.phase != UCN_V6_CLUSTER_PHASE_HANDOVER ||
@@ -2085,9 +2614,9 @@ ucn_v6_result_t ucn_v6_cluster_handover_ready(
         owner->durable.transition.target_config_id != ready->config_id ||
         owner->durable.transition.target_config_generation !=
             ready->config_generation ||
-        !principal_equal(&opened->authenticated_principal,
+        !principal_equal(&source_session.principal,
                          &owner->durable.transition.target_epoch.head_principal) ||
-        !binding_equal(&opened->ingress_peer_session.binding,
+        !binding_equal(&source_session.binding,
                        &owner->durable.transition.target_epoch.head_binding)) {
         return UCN_V6_ERR_ACCESS;
     }
@@ -2131,7 +2660,13 @@ ucn_v6_result_t ucn_v6_cluster_commit_handover(
     next->authority_fenced = true;
     memset(&next->transition, 0, sizeof(next->transition));
     owner->authority_active = false;
-    return persist_snapshot(owner, next);
+    {
+        ucn_v6_result_t result = persist_snapshot(owner, next);
+        if (result == UCN_V6_OK) {
+            refresh_current_head_observation(owner);
+        }
+        return result;
+    }
 }
 
 ucn_v6_result_t ucn_v6_cluster_begin_recovery(
@@ -2157,13 +2692,12 @@ ucn_v6_result_t ucn_v6_cluster_begin_recovery(
             UCN_V6_CONFIG_CLUSTER_TOMBSTONES) {
         return UCN_V6_ERR_STATE;
     }
-    {
-        const ucn_v6_cluster_member_t *head_member = find_member_const(
-            owner, &owner->durable.active_epoch.head_principal,
-            &owner->durable.active_epoch.head_binding);
-        if (head_member != NULL && head_member->lease_deadline_us > now_us) {
-            return UCN_V6_ERR_ACCESS;
-        }
+    if (!(principal_equal(&owner->durable.active_epoch.head_principal,
+                          &owner->local_principal) &&
+          binding_equal(&owner->durable.active_epoch.head_binding,
+                        &owner->local_binding)) &&
+        !remote_head_lease_expiry_is_proven(owner, now_us)) {
+        return UCN_V6_ERR_ACCESS;
     }
     for (index = 0U; index < owner->durable.tombstone_count; ++index) {
         if (owner->durable.tombstones[index].retired_cluster_id ==
@@ -2183,6 +2717,16 @@ ucn_v6_result_t ucn_v6_cluster_begin_recovery(
                           UCN_V6_CLUSTER_TRANSITION_RECOVERY,
                           transaction_id, &owner->durable.active_epoch,
                           target_epoch, &owner->durable.stable_config);
+    {
+        int self_index = config_voter_index(
+            &owner->durable.stable_config, &owner->local_principal,
+            &owner->local_binding);
+        if (self_index >= 0) {
+            uint32_t self_bit = UINT32_C(1) << (uint32_t)self_index;
+            next->transition.old_voter_bitmap = self_bit;
+            next->transition.new_voter_bitmap = self_bit;
+        }
+    }
     return persist_snapshot(owner, next);
 }
 
@@ -2192,8 +2736,13 @@ ucn_v6_result_t ucn_v6_cluster_commit_recovery(
 {
     ucn_v6_cluster_snapshot_t *next;
     ucn_v6_result_t result;
-    if (!owner_is_valid(owner) || !gate_is_available(owner) ||
-        owner->durable.phase != UCN_V6_CLUSTER_PHASE_RECOVERY ||
+    if (!owner_is_valid(owner)) {
+        return UCN_V6_ERR_ACCESS;
+    }
+    if (!gate_is_available(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (owner->durable.phase != UCN_V6_CLUSTER_PHASE_RECOVERY ||
         !owner->durable.transition.valid ||
         !serial64_valid(transaction_id) ||
         owner->durable.transition.transaction_id != transaction_id ||
@@ -2219,7 +2768,10 @@ ucn_v6_result_t ucn_v6_cluster_commit_recovery(
     next->phase = UCN_V6_CLUSTER_PHASE_STABLE;
     memset(&next->transition, 0, sizeof(next->transition));
     result = persist_snapshot(owner, next);
-    if (result == UCN_V6_OK) recompute_authority(owner, now_us);
+    if (result == UCN_V6_OK) {
+        refresh_current_head_observation(owner);
+        recompute_authority(owner, now_us);
+    }
     return result;
 }
 
@@ -2263,11 +2815,17 @@ ucn_v6_result_t ucn_v6_cluster_rekey(
     next->max_epoch = next->active_epoch;
     next->stable_config.config_id = 1U;
     next->stable_config.generation = 1U;
-    return persist_snapshot(owner, next);
+    {
+        ucn_v6_result_t result = persist_snapshot(owner, next);
+        if (result == UCN_V6_OK) {
+            refresh_current_head_observation(owner);
+        }
+        return result;
+    }
 }
 
 static bool directory_entry_is_valid(
-    const ucn_v6_cluster_directory_entry_t *entry, uint64_t now_us)
+    const ucn_v6_cluster_directory_entry_t *entry)
 {
     return entry != NULL && entry->occupied &&
            serial_valid(entry->remote_cluster_id) &&
@@ -2277,34 +2835,173 @@ static bool directory_entry_is_valid(
            ucn_v6_binding_key_is_valid(&entry->next_hop.binding) &&
            serial_valid(entry->next_hop.session_generation) &&
            serial_valid(entry->route_generation) && entry->path_id != 0U &&
-           serial_valid(entry->path_generation) && entry->deadline_us > now_us;
+           serial_valid(entry->path_generation) &&
+           entry->authority_proof.proof_id != 0U &&
+           serial_valid(entry->authority_proof.generation) &&
+           entry->lease_duration_us != 0U;
+}
+
+static bool cached_cluster_capability_is_live(
+    const ucn_v6_cached_peer_capability_t *capability,
+    const ucn_v6_principal_t *principal,
+    const ucn_v6_binding_key_t *binding,
+    uint32_t session_generation,
+    uint64_t now_us)
+{
+    return ucn_v6_capability_cached_peer_is_live(capability, now_us) &&
+           principal_equal(&capability->principal, principal) &&
+           binding_equal(&capability->binding, binding) &&
+           capability->session_generation == session_generation &&
+           (capability->record.peer.feature_bits & UCN_V6_FEATURE_CLUSTER) !=
+               0U;
+}
+
+static bool directory_slot_is_live(
+    const ucn_v6_cluster_owner_t *owner,
+    const ucn_v6_cluster_directory_slot_t *slot, uint64_t now_us)
+{
+    ucn_v6_cached_peer_capability_t current;
+    return slot != NULL && slot->value.occupied &&
+           authority_proof_view_is_valid(&slot->authority_proof,
+                                         &slot->value, now_us) &&
+           slot->local_deadline_us > now_us &&
+           slot->discovery_deadline_us > now_us &&
+           slot->capability_deadline_us > now_us &&
+           copy_current_peer(
+               owner, &slot->value.next_hop.principal,
+               &slot->value.next_hop.binding,
+               slot->value.next_hop.session_generation,
+               slot->ingress_link_id, slot->ingress_link_generation,
+               slot->capability_generation, slot->capability_digest,
+               now_us, &current);
+}
+
+static bool directory_local_deadline(
+    const ucn_v6_cluster_directory_entry_t *entry,
+    const ucn_v6_cached_peer_capability_t *capability,
+    const ucn_v6_cluster_authority_proof_view_t *authority_proof,
+    uint64_t now_us, uint64_t *deadline_us)
+{
+    uint64_t deadline;
+    if (entry == NULL || capability == NULL || authority_proof == NULL ||
+        !authority_proof_view_is_valid(authority_proof, entry, now_us) ||
+        deadline_us == NULL ||
+        entry->lease_duration_us == 0U ||
+        UINT64_MAX - now_us < entry->lease_duration_us) {
+        return false;
+    }
+    deadline = now_us + entry->lease_duration_us;
+    if (capability->discovery_deadline_us < deadline) {
+        deadline = capability->discovery_deadline_us;
+    }
+    if (capability->capability_deadline_us < deadline) {
+        deadline = capability->capability_deadline_us;
+    }
+    if (authority_proof->lease_deadline_us < deadline) {
+        deadline = authority_proof->lease_deadline_us;
+    }
+    if (deadline <= now_us) {
+        return false;
+    }
+    *deadline_us = deadline;
+    return true;
+}
+
+static bool tunnel_slot_is_live(const ucn_v6_cluster_owner_t *owner,
+                                const ucn_v6_cluster_tunnel_slot_t *slot,
+                                uint64_t now_us)
+{
+    ucn_v6_route_resolution_t resolution;
+    return slot != NULL && slot->value.occupied &&
+           slot->value.deadline_us > now_us &&
+           owner != NULL && owner->route_owner != NULL &&
+           ucn_v6_route_resolve_ref(owner->route_owner, now_us,
+                                    &slot->value.route_ref,
+                                    &resolution) == UCN_V6_OK &&
+           resolution.path.capability.deadline_us >=
+               slot->value.deadline_us;
 }
 
 ucn_v6_result_t ucn_v6_cluster_directory_install(
     ucn_v6_cluster_owner_t *owner,
     const ucn_v6_security_open_result_t *opened,
+    const ucn_v6_capability_peer_ref_t *ingress_peer_ref,
     uint64_t now_us)
 {
     ucn_v6_cluster_directory_entry_t decoded;
     const ucn_v6_cluster_directory_entry_t *entry = &decoded;
+    ucn_v6_cached_peer_capability_t current_capability;
+    ucn_v6_cluster_authority_proof_view_t authority_proof;
+    ucn_v6_session_key_t source_session;
     size_t index;
     size_t empty = UCN_V6_CONFIG_CLUSTER_DIRECTORY;
-    if (!owner_is_valid(owner) || !gate_is_available(owner) ||
+    uint64_t local_deadline_us;
+    if (!owner_is_valid(owner)) {
+        return UCN_V6_ERR_SECURITY;
+    }
+    if (!gate_is_available(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (!opened_source_session(opened, &source_session) ||
         !opened_cluster_directory(opened, &decoded) ||
-        !directory_entry_is_valid(entry, now_us) ||
-        !principal_equal(&opened->authenticated_principal,
-                         &entry->remote_epoch.head_principal)) {
-        if (owner_is_valid(owner)) increment_saturated(&owner->rejected_security);
+        !directory_entry_is_valid(entry) ||
+        !principal_equal(&source_session.principal,
+                         &entry->remote_epoch.head_principal) ||
+        !binding_equal(&source_session.binding,
+                       &entry->remote_epoch.head_binding) ||
+        ingress_peer_ref == NULL ||
+        !session_equal(&opened->ingress_peer_session, &entry->next_hop) ||
+        !principal_equal(&ingress_peer_ref->principal,
+                         &entry->next_hop.principal) ||
+        !binding_equal(&ingress_peer_ref->binding,
+                       &entry->next_hop.binding) ||
+        ingress_peer_ref->session_generation !=
+            entry->next_hop.session_generation ||
+        ingress_peer_ref->ingress_link_id == 0U ||
+        ingress_peer_ref->ingress_link_id == UINT16_MAX ||
+        ucn_v6_capability_copy_peer(
+            owner->capability_owner, now_us, &ingress_peer_ref->principal,
+            &ingress_peer_ref->binding,
+            ingress_peer_ref->session_generation,
+            ingress_peer_ref->ingress_link_generation,
+            &current_capability) !=
+            UCN_V6_OK ||
+        current_capability.ingress_link_id !=
+            ingress_peer_ref->ingress_link_id ||
+        !cached_cluster_capability_is_live(
+            &current_capability, &entry->next_hop.principal,
+            &entry->next_hop.binding,
+            entry->next_hop.session_generation, now_us) ||
+        !resolve_authority_proof(owner, entry, now_us, &authority_proof) ||
+        !directory_local_deadline(entry, &current_capability,
+                                  &authority_proof, now_us,
+                                  &local_deadline_us)) {
+        increment_saturated(&owner->rejected_security);
         return UCN_V6_ERR_SECURITY;
     }
     for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_DIRECTORY; ++index) {
-        ucn_v6_cluster_directory_entry_t *current =
-            &owner->directory[index].value;
-        if (!current->occupied || current->deadline_us <= now_us) {
+        ucn_v6_cluster_directory_slot_t *slot = &owner->directory[index];
+        ucn_v6_cluster_directory_entry_t *current = &slot->value;
+        if (!slot->keyed) {
             if (empty == UCN_V6_CONFIG_CLUSTER_DIRECTORY) empty = index;
             continue;
         }
         if (current->remote_cluster_id == entry->remote_cluster_id) {
+            bool same_sequence_domain =
+                session_equal(&entry->next_hop, &current->next_hop);
+            bool same_proof = authority_proof_ref_equal(
+                &entry->authority_proof, &current->authority_proof);
+            if (same_proof &&
+                !authority_proof_view_equal(&authority_proof,
+                                            &slot->authority_proof)) {
+                increment_saturated(&owner->rejected_security);
+                return UCN_V6_ERR_SECURITY;
+            }
+            if (same_sequence_domain &&
+                opened->frame.origin_sequence < slot->last_origin_sequence) {
+                increment_saturated(&owner->rejected_replay);
+                return UCN_V6_ERR_REPLAY;
+            }
             if (entry->remote_epoch.term < current->remote_epoch.term ||
                 (entry->remote_epoch.term == current->remote_epoch.term &&
                  (!principal_equal(&entry->remote_epoch.head_principal,
@@ -2314,7 +3011,62 @@ ucn_v6_result_t ucn_v6_cluster_directory_install(
                 increment_saturated(&owner->rejected_replay);
                 return UCN_V6_ERR_REPLAY;
             }
+            if (epoch_equal(&entry->remote_epoch, &current->remote_epoch)) {
+                if (entry->authority_proof.proof_id !=
+                        current->authority_proof.proof_id ||
+                    entry->authority_proof.generation <
+                        current->authority_proof.generation ||
+                    entry->route_generation < current->route_generation ||
+                    entry->path_generation < current->path_generation ||
+                    (entry->route_generation == current->route_generation &&
+                     !session_equal(&entry->next_hop, &current->next_hop)) ||
+                    (entry->path_generation == current->path_generation &&
+                     entry->path_id != current->path_id)) {
+                    increment_saturated(&owner->rejected_replay);
+                    return UCN_V6_ERR_REPLAY;
+                }
+                if (entry->route_generation == current->route_generation &&
+                    entry->path_generation == current->path_generation) {
+                    if ((!same_proof &&
+                         (entry->authority_proof.proof_id !=
+                              current->authority_proof.proof_id ||
+                          entry->authority_proof.generation <=
+                              current->authority_proof.generation)) ||
+                        (same_proof && !directory_equal(entry, current)) ||
+                        slot->fenced ||
+                        opened->frame.origin_sequence ==
+                            slot->last_origin_sequence) {
+                        if (!slot->fenced && directory_equal(entry, current) &&
+                            opened->frame.origin_sequence ==
+                                slot->last_origin_sequence) {
+                            return UCN_V6_OK;
+                        }
+                        increment_saturated(&owner->rejected_replay);
+                        return UCN_V6_ERR_REPLAY;
+                    }
+                }
+            }
+            if (same_sequence_domain &&
+                opened->frame.origin_sequence <= slot->last_origin_sequence) {
+                increment_saturated(&owner->rejected_replay);
+                return UCN_V6_ERR_REPLAY;
+            }
             *current = *entry;
+            slot->authority_proof = authority_proof;
+            slot->ingress_link_id = current_capability.ingress_link_id;
+            slot->ingress_link_generation =
+                current_capability.ingress_link_generation;
+            slot->capability_generation =
+                current_capability.record.capability_generation;
+            memcpy(slot->capability_digest, current_capability.digest,
+                   UCN_V6_CAPABILITY_DIGEST_BYTES);
+            slot->discovery_deadline_us =
+                current_capability.discovery_deadline_us;
+            slot->capability_deadline_us =
+                current_capability.capability_deadline_us;
+            slot->local_deadline_us = local_deadline_us;
+            slot->last_origin_sequence = opened->frame.origin_sequence;
+            slot->fenced = false;
             return UCN_V6_OK;
         }
     }
@@ -2322,6 +3074,24 @@ ucn_v6_result_t ucn_v6_cluster_directory_install(
         return UCN_V6_ERR_NO_SPACE;
     }
     owner->directory[empty].value = *entry;
+    owner->directory[empty].authority_proof = authority_proof;
+    owner->directory[empty].ingress_link_id =
+        current_capability.ingress_link_id;
+    owner->directory[empty].ingress_link_generation =
+        current_capability.ingress_link_generation;
+    owner->directory[empty].capability_generation =
+        current_capability.record.capability_generation;
+    memcpy(owner->directory[empty].capability_digest,
+           current_capability.digest, UCN_V6_CAPABILITY_DIGEST_BYTES);
+    owner->directory[empty].discovery_deadline_us =
+        current_capability.discovery_deadline_us;
+    owner->directory[empty].capability_deadline_us =
+        current_capability.capability_deadline_us;
+    owner->directory[empty].local_deadline_us = local_deadline_us;
+    owner->directory[empty].last_origin_sequence =
+        opened->frame.origin_sequence;
+    owner->directory[empty].keyed = true;
+    owner->directory[empty].fenced = false;
     return UCN_V6_OK;
 }
 
@@ -2333,55 +3103,80 @@ static bool tunnel_is_valid(const ucn_v6_cluster_tunnel_t *tunnel,
            serial_valid(tunnel->destination_cluster_id) &&
            tunnel->source_cluster_id != tunnel->destination_cluster_id &&
            ucn_v6_principal_is_valid(
-               &tunnel->route_domain.origin_principal) &&
+               &tunnel->route_ref.domain.origin_principal) &&
            ucn_v6_binding_key_is_valid(
-               &tunnel->route_domain.origin_binding) &&
-           serial_valid(tunnel->route_domain.origin_session_generation) &&
+               &tunnel->route_ref.domain.origin_binding) &&
+           serial_valid(
+               tunnel->route_ref.domain.origin_session_generation) &&
            ucn_v6_principal_is_valid(
-               &tunnel->route_domain.destination_principal) &&
+               &tunnel->route_ref.domain.destination_principal) &&
            ucn_v6_binding_key_is_valid(
-               &tunnel->route_domain.destination_binding) &&
-           tunnel->path.valid &&
-           principal_equal(&tunnel->path.destination_principal,
-                           &tunnel->route_domain.destination_principal) &&
-           binding_equal(&tunnel->path.destination_binding,
-                         &tunnel->route_domain.destination_binding) &&
-           tunnel->path.session_generation != 0U &&
-           serial_valid(tunnel->path.route_generation) &&
-           tunnel->path.path_id != 0U &&
-           serial_valid(tunnel->path.path_generation) &&
-           tunnel->path.payload_budget != 0U &&
-           tunnel->path.fragment_data_budget != 0U &&
-           tunnel->path.deadline_us >= tunnel->deadline_us &&
+               &tunnel->route_ref.domain.destination_binding) &&
+           serial_valid(
+               tunnel->route_ref.domain.destination_session_generation) &&
+           serial_valid(tunnel->route_ref.route_generation) &&
+           tunnel->route_ref.path_id != 0U &&
+           tunnel->route_ref.path_id != UINT16_MAX &&
+           serial_valid(tunnel->route_ref.path_generation) &&
            tunnel->deadline_us > now_us;
 }
 
 ucn_v6_result_t ucn_v6_cluster_tunnel_install(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_cluster_tunnel_t *tunnel, uint64_t now_us)
+    const ucn_v6_cluster_tunnel_request_t *request,
+    uint64_t now_us)
 {
     size_t index;
     size_t empty = UCN_V6_CONFIG_CLUSTER_TUNNELS;
+    ucn_v6_route_resolution_t resolution;
+    ucn_v6_cluster_tunnel_t resolved_tunnel;
+    const ucn_v6_cluster_tunnel_t *tunnel = &resolved_tunnel;
     if (!owner_is_valid(owner) || !gate_is_available(owner)) {
         return UCN_V6_ERR_STATE;
     }
     recompute_authority(owner, now_us);
-    if (!owner->authority_active || !tunnel_is_valid(tunnel, now_us) ||
-        tunnel->source_cluster_id != owner->durable.active_epoch.cluster_id ||
-        !principal_equal(&tunnel->route_domain.origin_principal,
+    if (!owner->authority_active || request == NULL ||
+        request->tunnel_id == 0U ||
+        !serial_valid(request->source_cluster_id) ||
+        !serial_valid(request->destination_cluster_id) ||
+        request->source_cluster_id == request->destination_cluster_id ||
+        request->deadline_us <= now_us ||
+        ucn_v6_route_resolve_ref(owner->route_owner, now_us,
+                                 &request->route_ref,
+                                 &resolution) != UCN_V6_OK ||
+        (resolution.path.capability.feature_bits &
+         UCN_V6_FEATURE_CLUSTER) == 0U ||
+        resolution.path.capability.deadline_us < request->deadline_us ||
+        request->source_cluster_id != owner->durable.active_epoch.cluster_id ||
+        !principal_equal(&request->route_ref.domain.origin_principal,
                          &owner->local_principal) ||
-        !binding_equal(&tunnel->route_domain.origin_binding,
-                       &owner->local_binding)) {
+        !binding_equal(&request->route_ref.domain.origin_binding,
+                       &owner->local_binding) ||
+        request->route_ref.domain.origin_session_generation !=
+            owner->local_session_generation) {
+        return UCN_V6_ERR_ACCESS;
+    }
+    memset(&resolved_tunnel, 0, sizeof(resolved_tunnel));
+    resolved_tunnel.occupied = true;
+    resolved_tunnel.tunnel_id = request->tunnel_id;
+    resolved_tunnel.source_cluster_id = request->source_cluster_id;
+    resolved_tunnel.destination_cluster_id = request->destination_cluster_id;
+    resolved_tunnel.route_ref = request->route_ref;
+    resolved_tunnel.deadline_us = request->deadline_us;
+    if (!tunnel_is_valid(&resolved_tunnel, now_us)) {
         return UCN_V6_ERR_ACCESS;
     }
     for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_TUNNELS; ++index) {
-        ucn_v6_cluster_tunnel_t *current = &owner->tunnels[index].value;
-        if (!current->occupied || current->deadline_us <= now_us) {
+        ucn_v6_cluster_tunnel_slot_t *slot = &owner->tunnels[index];
+        ucn_v6_cluster_tunnel_t *current = &slot->value;
+        if (!slot->keyed) {
             if (empty == UCN_V6_CONFIG_CLUSTER_TUNNELS) empty = index;
             continue;
         }
         if (current->tunnel_id == tunnel->tunnel_id) {
-            if (tunnel_equal(current, tunnel)) {
+            if (!slot->fenced &&
+                tunnel_slot_is_live(owner, slot, now_us) &&
+                tunnel_equal(current, tunnel)) {
                 return UCN_V6_OK;
             }
             return UCN_V6_ERR_REPLAY;
@@ -2389,6 +3184,9 @@ ucn_v6_result_t ucn_v6_cluster_tunnel_install(
     }
     if (empty == UCN_V6_CONFIG_CLUSTER_TUNNELS) return UCN_V6_ERR_NO_SPACE;
     owner->tunnels[empty].value = *tunnel;
+    owner->tunnels[empty].dependency = resolution.dependency;
+    owner->tunnels[empty].keyed = true;
+    owner->tunnels[empty].fenced = false;
     return UCN_V6_OK;
 }
 
@@ -2400,8 +3198,11 @@ ucn_v6_result_t ucn_v6_cluster_copy_tunnel(
     if (!owner_is_valid(owner) || tunnel_id == 0U || tunnel == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
+    if (!authority_is_live(owner, now_us)) {
+        return UCN_V6_ERR_ACCESS;
+    }
     for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_TUNNELS; ++index) {
-        if (owner->tunnels[index].value.occupied &&
+        if (tunnel_slot_is_live(owner, &owner->tunnels[index], now_us) &&
             owner->tunnels[index].value.tunnel_id == tunnel_id &&
             owner->tunnels[index].value.deadline_us > now_us) {
             *tunnel = owner->tunnels[index].value;
@@ -2419,24 +3220,124 @@ ucn_v6_result_t ucn_v6_cluster_step(
         return UCN_V6_ERR_STATE;
     }
     for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_MEMBERS; ++index) {
-        if (owner->members[index].value.occupied &&
-            owner->members[index].value.lease_deadline_us <= now_us) {
-            memset(&owner->members[index], 0, sizeof(owner->members[index]));
+        ucn_v6_cluster_member_slot_t *slot = &owner->members[index];
+        if (slot->value.occupied &&
+            !member_value_is_live(owner, &slot->value, now_us)) {
+            if (slot->value.discovery_deadline_us <= now_us ||
+                slot->value.capability_deadline_us <= now_us) {
+                member_slot_fence(slot);
+            } else {
+                member_slot_expire_lease(slot);
+            }
         }
     }
     for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_DIRECTORY; ++index) {
         if (owner->directory[index].value.occupied &&
-            owner->directory[index].value.deadline_us <= now_us) {
-            memset(&owner->directory[index], 0, sizeof(owner->directory[index]));
+            !directory_slot_is_live(owner, &owner->directory[index],
+                                    now_us)) {
+            memset(&owner->directory[index], 0,
+                   sizeof(owner->directory[index]));
         }
     }
     for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_TUNNELS; ++index) {
         if (owner->tunnels[index].value.occupied &&
-            owner->tunnels[index].value.deadline_us <= now_us) {
-            memset(&owner->tunnels[index], 0, sizeof(owner->tunnels[index]));
+            !tunnel_slot_is_live(owner, &owner->tunnels[index], now_us)) {
+            memset(&owner->tunnels[index], 0,
+                   sizeof(owner->tunnels[index]));
         }
     }
     recompute_authority(owner, now_us);
+    return UCN_V6_OK;
+}
+
+static bool invalidation_matches_dependency(
+    const ucn_v6_stack_invalidation_t *invalidation,
+    uint16_t link_id,
+    uint32_t link_generation,
+    const ucn_v6_session_key_t *session,
+    uint32_t capability_generation,
+    uint16_t path_id,
+    uint32_t path_generation)
+{
+    if (invalidation->link_id != link_id ||
+        invalidation->link_generation != link_generation) {
+        return false;
+    }
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_LINK) {
+        return true;
+    }
+    if (session == NULL || !session_equal(&invalidation->session, session)) {
+        return false;
+    }
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_SESSION) {
+        return true;
+    }
+    if (invalidation->capability_generation != capability_generation) {
+        return false;
+    }
+    if (invalidation->type == UCN_V6_STACK_INVALIDATE_CAPABILITY) {
+        return true;
+    }
+    return invalidation->path_id == path_id &&
+           invalidation->path_generation == path_generation;
+}
+
+static bool invalidation_matches_parent(
+    const ucn_v6_stack_invalidation_t *invalidation,
+    const ucn_v6_stack_invalidation_t *parent)
+{
+    return parent != NULL &&
+           ucn_v6_stack_invalidation_is_valid(parent) &&
+           invalidation_matches_dependency(
+               invalidation, parent->link_id, parent->link_generation,
+               &parent->session, parent->capability_generation,
+               parent->path_id, parent->path_generation);
+}
+
+ucn_v6_result_t ucn_v6_cluster_apply_invalidation(
+    ucn_v6_cluster_owner_t *owner,
+    const ucn_v6_stack_invalidation_t *invalidation)
+{
+    size_t index;
+    bool member_revoked = false;
+    if (!owner_is_valid(owner) || !gate_is_available(owner) ||
+        !ucn_v6_stack_invalidation_is_valid(invalidation)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_MEMBERS; ++index) {
+        ucn_v6_cluster_member_t *member = &owner->members[index].value;
+        if (owner->members[index].keyed &&
+            invalidation->type != UCN_V6_STACK_INVALIDATE_PATH &&
+            invalidation_matches_dependency(
+                invalidation, member->ingress_link_id,
+                member->ingress_link_generation, &member->session,
+                member->capability_generation, 0U, 0U)) {
+            member_slot_fence(&owner->members[index]);
+            member_revoked = true;
+        }
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_DIRECTORY; ++index) {
+        ucn_v6_cluster_directory_slot_t *slot = &owner->directory[index];
+        if (slot->keyed && invalidation_matches_dependency(
+                invalidation, slot->ingress_link_id,
+                slot->ingress_link_generation, &slot->value.next_hop,
+                slot->capability_generation, slot->value.path_id,
+                slot->value.path_generation)) {
+            memset(slot, 0, sizeof(*slot));
+        }
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_TUNNELS; ++index) {
+        ucn_v6_cluster_tunnel_slot_t *slot = &owner->tunnels[index];
+        if (!slot->keyed) {
+            continue;
+        }
+        if (invalidation_matches_parent(invalidation, &slot->dependency)) {
+            memset(slot, 0, sizeof(*slot));
+        }
+    }
+    if (member_revoked) {
+        owner->authority_active = false;
+    }
     return UCN_V6_OK;
 }
 
@@ -2481,20 +3382,19 @@ ucn_v6_result_t ucn_v6_cluster_copy_view(
     result.rejected_quorum = owner->rejected_quorum;
     result.rejected_replay = owner->rejected_replay;
     for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_MEMBERS; ++index) {
-        if (owner->members[index].value.occupied &&
-            owner->members[index].value.lease_deadline_us > now_us) {
+        if (member_value_is_live(owner, &owner->members[index].value,
+                                 now_us)) {
             ++result.members;
         }
     }
     for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_DIRECTORY; ++index) {
-        if (owner->directory[index].value.occupied &&
-            owner->directory[index].value.deadline_us > now_us) {
+        if (directory_slot_is_live(owner, &owner->directory[index],
+                                   now_us)) {
             ++result.directory_entries;
         }
     }
     for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_TUNNELS; ++index) {
-        if (owner->tunnels[index].value.occupied &&
-            owner->tunnels[index].value.deadline_us > now_us) {
+        if (tunnel_slot_is_live(owner, &owner->tunnels[index], now_us)) {
             ++result.tunnels;
         }
     }

@@ -15,6 +15,10 @@ struct ucn_v6_security_manager {
     ucn_v6_security_store_ops_t store;
     ucn_v6_security_crypto_ops_t crypto;
     ucn_v6_callback_gate_t *callback_gate;
+    ucn_v6_stack_invalidation_t
+        invalidations[UCN_V6_SECURITY_INVALIDATION_DEPTH];
+    uint16_t invalidation_head;
+    uint16_t invalidation_count;
     bool initialized;
     bool faulted;
     uint64_t canary;

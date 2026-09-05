@@ -53,9 +53,21 @@ typedef struct ucn_v6_bootstrap_transcript {
     uint32_t address_binding_generation;
     uint32_t authority_address;
     uint32_t authority_binding_generation;
+    uint16_t selected_link_instance_id;
     uint8_t binding_lease_id[16];
     uint64_t binding_lease_duration_us;
     uint64_t authority_lease_sequence;
+    uint64_t authority_lease_duration_us;
+    uint64_t freshness_max_remaining_lease_us;
+    uint8_t durable_fence_token[16];
+    uint8_t allocation_high_water_digest[16];
+    uint8_t quorum_config_digest[UCN_V6_AUTHORITY_DIGEST_BYTES];
+    uint8_t signer_set_digest[UCN_V6_AUTHORITY_DIGEST_BYTES];
+    uint8_t threshold_proof_digest[UCN_V6_AUTHORITY_DIGEST_BYTES];
+    uint8_t freshness_proof_transcript_hash[UCN_V6_AUTHORITY_DIGEST_BYTES];
+    uint16_t authority_signer_count;
+    uint16_t authority_quorum_threshold;
+    uint8_t binding_mode;
     uint8_t selected_hop_suite;
     uint16_t selected_hop_key_id;
     uint32_t selected_hop_key_generation;
@@ -98,7 +110,7 @@ typedef struct ucn_v6_bootstrap_config {
 typedef struct ucn_v6_bootstrap_owner ucn_v6_bootstrap_owner_t;
 #ifndef UCN_V6_BOOTSTRAP_OWNER_STORAGE_BYTES
 #define UCN_V6_BOOTSTRAP_OWNER_STORAGE_BYTES                           \
-    ((size_t)(512U + UCN_V6_CONFIG_BOOTSTRAP_PENDING * 2U * 256U +   \
+    ((size_t)(512U + UCN_V6_CONFIG_BOOTSTRAP_PENDING * 2U * 512U +   \
               UCN_V6_CONFIG_BOOTSTRAP_LINKS * 48U))
 #endif
 typedef union ucn_v6_bootstrap_owner_storage {
@@ -110,13 +122,38 @@ typedef union ucn_v6_bootstrap_owner_storage {
 struct ucn_v6_feature_manifest;
 
 typedef enum ucn_v6_bootstrap_event {
-    UCN_V6_BOOTSTRAP_EVENT_AUTHORITY_PROOF = 1,
-    UCN_V6_BOOTSTRAP_EVENT_DEVICE_PROOF = 2,
-    UCN_V6_BOOTSTRAP_EVENT_ADDRESS_OFFER = 3,
-    UCN_V6_BOOTSTRAP_EVENT_DEVICE_COMMIT = 4,
-    UCN_V6_BOOTSTRAP_EVENT_FINAL_DURABLE = 5,
-    UCN_V6_BOOTSTRAP_EVENT_ABORT = 6
+    UCN_V6_BOOTSTRAP_EVENT_COOKIE = 1,
+    UCN_V6_BOOTSTRAP_EVENT_AUTHORITY_PROOF = 2,
+    UCN_V6_BOOTSTRAP_EVENT_DEVICE_PROOF = 3,
+    UCN_V6_BOOTSTRAP_EVENT_ADDRESS_OFFER = 4,
+    UCN_V6_BOOTSTRAP_EVENT_DEVICE_COMMIT = 5,
+    UCN_V6_BOOTSTRAP_EVENT_FINAL_DURABLE = 6,
+    UCN_V6_BOOTSTRAP_EVENT_ABORT = 7
 } ucn_v6_bootstrap_event_t;
+
+#define UCN_V6_BOOTSTRAP_EVIDENCE_MAX_BYTES ((size_t)128U)
+
+/* EN: Canonical, bounded proof bytes for exactly one Bootstrap event.  The
+ * trusted verifier interprets them in the supplied event/transcript domain.
+ * 中文：仅对应一个 Bootstrap 事件的规范、有界证明字节。可信验证器必须在
+ * 给定 Event/Transcript 域内解释它。 */
+typedef struct ucn_v6_bootstrap_evidence {
+    uint16_t length;
+    uint8_t bytes[UCN_V6_BOOTSTRAP_EVIDENCE_MAX_BYTES];
+} ucn_v6_bootstrap_evidence_t;
+
+typedef struct ucn_v6_bootstrap_verifier_ops {
+    void *context;
+    ucn_v6_result_t (*authorize_event)(
+        void *context,
+        ucn_v6_bootstrap_event_t event,
+        ucn_v6_bootstrap_flow_t flow,
+        const ucn_v6_bootstrap_key_t *key,
+        const ucn_v6_bootstrap_transcript_t *transcript,
+        const ucn_v6_binding_key_t *existing_binding,
+        uint64_t now_us,
+        const ucn_v6_bootstrap_evidence_t *evidence);
+} ucn_v6_bootstrap_verifier_ops_t;
 
 /* EN: Initializes bounded JOIN and REAUTH state owned by one protocol task.
  * 中文：初始化由单一协议任务持有的有界 JOIN/REAUTH 状态。 */
@@ -125,6 +162,8 @@ ucn_v6_result_t ucn_v6_bootstrap_owner_init_in_place(
     size_t storage_bytes,
     const struct ucn_v6_feature_manifest *manifest,
     const ucn_v6_bootstrap_config_t *config,
+    const ucn_v6_bootstrap_verifier_ops_t *verifier,
+    ucn_v6_callback_gate_t *callback_gate,
     ucn_v6_bootstrap_owner_t **owner);
 /* EN: Applies no-amplification and the exact {Link ID, generation} budget.
  * 中文：执行无放大与精确 {Link ID, generation} 认证前令牌预算。 */
@@ -135,15 +174,18 @@ ucn_v6_result_t ucn_v6_bootstrap_admit_initial_hello(
     uint64_t now_us,
     size_t request_bytes,
     size_t response_bytes);
-/* EN: Opens a fixed pending slot only after a stateless Cookie succeeds.
- * 中文：仅在无状态 Cookie 通过后创建固定 pending 槽。 */
+/* EN: Opens a fixed pending slot only after a stateless Cookie succeeds and
+ * only when the key's exact ingress {Link ID,generation} equals the selected
+ * Link instance committed by the transcript.
+ * 中文：仅在无状态 Cookie 成功，且 Key 的精确入站 {Link ID,代际} 与
+ * Transcript 承诺的 Selected Link Instance 完全一致后创建固定 pending 槽。 */
 ucn_v6_result_t ucn_v6_bootstrap_open_after_cookie(
     ucn_v6_bootstrap_owner_t *owner,
     ucn_v6_bootstrap_flow_t flow,
     const ucn_v6_bootstrap_key_t *key,
     const ucn_v6_bootstrap_transcript_t *transcript,
     const ucn_v6_binding_key_t *existing_binding,
-    bool cookie_verified,
+    const ucn_v6_bootstrap_evidence_t *cookie_evidence,
     uint64_t now_us);
 /* EN: Advances the mutually authenticated transcript in strict order.
  * 中文：按严格顺序推进双向认证 transcript。 */
@@ -153,7 +195,7 @@ ucn_v6_result_t ucn_v6_bootstrap_advance(
     const ucn_v6_bootstrap_key_t *key,
     const ucn_v6_bootstrap_transcript_t *transcript,
     ucn_v6_bootstrap_event_t event,
-    bool proof_verified,
+    const ucn_v6_bootstrap_evidence_t *evidence,
     uint64_t now_us);
 /* EN: Copies diagnostics without exposing a writable internal slot.
  * 中文：复制诊断快照，不暴露可写的内部槽位。 */

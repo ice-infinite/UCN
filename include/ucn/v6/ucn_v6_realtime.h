@@ -8,7 +8,8 @@
  * payload.  Relays never parse this object; the outer Hop Budget, when
  * present, remains the only hop-visible deadline hint. */
 
-#include "ucn/v6/ucn_v6_capability.h"
+#include "ucn/v6/ucn_v6_route.h"
+#include "ucn/v6/ucn_v6_owner.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -90,9 +91,6 @@ typedef struct ucn_v6_time_domain_config {
     ucn_v6_principal_t master_principal;
     ucn_v6_binding_key_t master_binding;
     uint32_t master_session_generation;
-    uint32_t route_generation;
-    uint16_t path_id;
-    uint32_t path_generation;
     uint8_t lock_sample_count;
     uint64_t sync_timeout_us;
     uint64_t max_holdover_us;
@@ -100,11 +98,34 @@ typedef struct ucn_v6_time_domain_config {
     uint32_t oscillator_uncertainty_ppb;
 } ucn_v6_time_domain_config_t;
 
+/* Durable proof fields that are relevant to Realtime admission.  This is not
+ * a second Path object: Route Owner remains the only live Path authority.
+ * The proof binds the exact destination/local Capability digests and only the
+ * capability fields whose change invalidates Time Domain acquisition.
+ * 持久化的 Realtime 准入证明字段。它不是第二份 Path 对象；Route Owner
+ * 始终是唯一在线 Path 权威。该证明绑定目标/本地 Capability 摘要，并只保存
+ * 会使时间域采集失效的能力字段。 */
+typedef struct ucn_v6_realtime_path_proof {
+    uint32_t destination_capability_generation;
+    uint8_t destination_capability_digest[UCN_V6_CAPABILITY_DIGEST_BYTES];
+    uint8_t local_parent_capability_digest[UCN_V6_CAPABILITY_DIGEST_BYTES];
+    uint16_t destination_realtime_mode_bits;
+    uint16_t destination_clock_domain_id;
+    uint32_t destination_clock_domain_generation;
+    uint32_t feature_bits;
+    uint16_t timestamp_capability_bits;
+    uint32_t timestamp_uncertainty_us;
+} ucn_v6_realtime_path_proof_t;
+
 /* Durable, canonical proposal identity for one Domain generation.  Equality
- * is field-wise; a generation may never be rebound to another Session/Path
- * or timing policy after reset. */
+ * is field-wise.  The Master owns Domain generation: a Member may retain that
+ * generation only when Security advances the exact Master Session and this
+ * complete identity is durably replaced before acquisition. */
 typedef struct ucn_v6_realtime_domain_record {
     ucn_v6_time_domain_config_t config;
+    ucn_v6_route_path_ref_t route_ref;
+    ucn_v6_stack_invalidation_t route_dependency;
+    ucn_v6_realtime_path_proof_t path_proof;
 } ucn_v6_realtime_domain_record_t;
 
 typedef struct ucn_v6_time_sync_sample {
@@ -154,14 +175,19 @@ typedef struct ucn_v6_realtime_receive_view {
     size_t business_length;
 } ucn_v6_realtime_receive_view_t;
 
-/* The generation store is synchronous and anti-rollback.  Once a record is
- * reserved, the same {master principal, clock domain, generation} may only
- * reload with an exactly equal canonical Domain proposal. */
+/* The generation store is synchronous and anti-rollback. clock_domain_id is
+ * the sole lookup key; a Master change must advance the Master-owned Domain
+ * generation.  A Member reboot may recover that same Domain only through the
+ * exact checked-next Security Session plus fresh authenticated Capability and
+ * Path proof.  Exact Session/Path replay is rejected.  High-rate local output
+ * watermarks are deliberately not written to Flash, so this contract proves
+ * freshness across reboot but does not promise a durable local clock-output
+ * watermark; products requiring that stronger property need a separate local
+ * monotonic-output witness. */
 typedef struct ucn_v6_realtime_generation_store_ops {
     void *context;
     ucn_v6_result_t (*load_domain_record)(
         void *context,
-        const ucn_v6_principal_t *master,
         uint16_t clock_domain_id,
         ucn_v6_realtime_domain_record_t *record);
     ucn_v6_result_t (*reserve_domain_record)(
@@ -214,6 +240,7 @@ ucn_v6_result_t ucn_v6_realtime_owner_init_in_place(
     void *storage,
     size_t storage_bytes,
     const ucn_v6_feature_manifest_t *manifest,
+    const ucn_v6_route_owner_t *route_owner,
     const ucn_v6_realtime_generation_store_ops_t *generation_store,
     ucn_v6_callback_gate_t *callback_gate,
     ucn_v6_realtime_owner_t **owner);
@@ -228,15 +255,16 @@ ucn_v6_result_t ucn_v6_realtime_set_endpoint_policy(
 ucn_v6_result_t ucn_v6_realtime_bind_domain(
     ucn_v6_realtime_owner_t *owner,
     const ucn_v6_time_domain_config_t *config,
-    const ucn_v6_path_capability_t *fixed_path,
-    const ucn_v6_cached_peer_capability_t *master_capability);
+    const ucn_v6_route_path_ref_t *fixed_route_ref,
+    uint64_t now_us);
 
 /* EN: Admits one authenticated sample; dynamic paths and diagnostic-only
  * capabilities never contribute to LOCKED.
  * 中文：准入一个已认证采样；动态 Path 和仅诊断能力绝不推动 LOCKED。 */
 ucn_v6_result_t ucn_v6_realtime_ingest_sample(
     ucn_v6_realtime_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened);
+    const ucn_v6_security_open_result_t *opened,
+    uint64_t now_us);
 ucn_v6_result_t ucn_v6_realtime_get_clock(
     ucn_v6_realtime_owner_t *owner,
     uint16_t clock_domain_id,
@@ -275,6 +303,18 @@ ucn_v6_result_t ucn_v6_realtime_execution_admit(
     ucn_v6_realtime_receive_view_t *view,
     const uint8_t **business_payload,
     size_t *business_length);
+/* EN: Advances dependency and holdover expiry even while no Endpoint reads the
+ * Domain, so diagnostics cannot retain stale LOCKED state.
+ * 中文：即使没有 Endpoint 读取 Domain，也推进依赖与保持期过期，防止诊断
+ * 长期保留陈旧 LOCKED 状态。 */
+ucn_v6_result_t ucn_v6_realtime_step(
+    ucn_v6_realtime_owner_t *owner,
+    uint64_t now_us);
+/* EN: Immediately invalidates a bound Time Domain dependency generation.
+ * 中文：立即失效绑定到 Time Domain 的依赖代际。 */
+ucn_v6_result_t ucn_v6_realtime_apply_invalidation(
+    ucn_v6_realtime_owner_t *owner,
+    const ucn_v6_stack_invalidation_t *invalidation);
 ucn_v6_result_t ucn_v6_realtime_copy_view(
     const ucn_v6_realtime_owner_t *owner,
     ucn_v6_realtime_view_t *view);

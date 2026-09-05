@@ -137,7 +137,8 @@ Endpoint 不增加时间字节。
 | Address Binding Generation | 固定 32 bit | 单次 Realm/Address 绑定 | 是 | 防止地址复用 ABA，绑定 Source/Destination |
 | Node Alias | 产品定义 | 可修改 | 否 | 人员管理和诊断显示 |
 | Session Generation | 固定 32 bit | 启动/轮换 | 是 | Replay、Nonce 与权限代际 |
-| Packet Sequence | 固定 32 bit | 单 Session | 是 | 去重、Replay 和事务关联 |
+| Origin Sequence | 固定 32 bit | 单 E2E/Group 重放域 | 是 | 跨中继保持不变，绑定端到端或 Group 消息身份 |
+| Hop Sequence | 固定 32 bit | 单下一跳 Peer Session | 是 | 每跳重新分配，用于 Hop Replay 和重签 |
 | Bootstrap Transaction ID | 固定 64 bit | 单次一跳入网事务 | Bootstrap only | 区分未分配地址的并发设备 |
 
 Device Identity 不允许直接拿 MAC、串口号或 CAN ID 代替。MAC 可以参与出厂导入或
@@ -426,7 +427,7 @@ Authority Lease Sequence 内，后续 proof 的 `max_remaining_lease_us` 不得�
 
 ### 5.5 Generation 所有权、父域与重置
 
-除 Packet Sequence 外，下列所有权代际统一采用非零 32-bit checked serial。每个子代际
+下列所有权代际和线上 Sequence 统一使用非零 32-bit checked serial。每个子代际
 只有在父域已经不可逆变化后才允许从 1 重新开始：
 
 | 对象 | Owner | 父域/唯一性范围 | 持久化要求 | 合法重置条件 |
@@ -434,7 +435,8 @@ Authority Lease Sequence 内，后续 proof 的 `max_remaining_lease_us` 不得�
 | Address Authority Generation | Realm Authority Quorum/Fence Owner | `{realm}`，更换 Principal 也连续 | Authority Epoch、Fence 与 allocation high-water 必须原子持久化/复制 | 仅完成旧 Fence 失效和合法换主后的 checked-next；不得因分区或更换 Principal 重置 |
 | Address Binding Generation | 当前 Realm Address Authority | `{realm,address}`，跨 Authority 换主连续 | Authority anti-rollback high-water、Binding Certificate 必须持久化 | 新 Realm；同 Realm/Address 永不重复 |
 | Session Generation | Device Principal | `{realm,address,binding_generation,principal}` | 启动/重键前 persist-before-use | 新 Address Binding；同 Binding 下不重复 |
-| Packet Sequence | Session Sender | `{principal,session_generation}` | 发送区间预留，高水位不得回退 | 仅新 Session Generation |
+| Origin Sequence | E2E/Group Sender | E2E 为 `{source principal,source session_generation,e2e selector}`；Group 为 `{group key selector,claimed source binding/session}` | 发送区间预留，高水位不得回退 | 仅新 E2E Session Generation 或 Group Key Generation |
+| Hop Sequence | Peer Session Sender | `{next-hop principal,next-hop session_generation,hop selector}` | 发送区间预留，高水位不得回退 | 仅新下一跳 Session Generation |
 | Link Instance Generation | Link Owner | `{local boot incarnation,link slot,peer binding}` | 若父 boot incarnation 持久化，可随新父域重置 | reopen 必须先推进父域或本代际 |
 | Capability Generation | Capability Owner | `{principal,session_generation}` | 已发布值不得在同 Session 回退 | 仅新 Session 或 checked-next |
 | Group Policy Generation（线上 `group_generation`） | Realm Manifest 选定的唯一 Group Policy Owner：签名静态配置或当前逻辑 Realm Address Authority/quorum，二者不可同时写 | `{realm,group_id}`；动态 `group_id` 只能等于 Realm 分配高水位的 checked-next，禁止稀疏指定/回收；静态 `group_id` 只能来自固定 Manifest 槽 | 动态模式持久化单个 `group_id_allocation_high_water`；静态模式持久化固定槽的 `NEVER_ACTIVATED/ACTIVE/RETIRED` 状态；Policy 摘要、Owner/Fence 与 Generation high-water 均 persist-before-publish | 仅新 Realm 或从未分配/激活的 Group ID 建立新父域；删除不降低分配高水位、不把静态槽恢复为未使用；Generation 到阈值时退休该 Group 并分配新 ID，容量/ID 耗尽则 Fault |
@@ -523,8 +525,8 @@ A0～A3 Decoder。发送方选择能够表达 Realm 内 Source/Destination 且�
 | 3 | Frame Type | 1 B | Bootstrap/Control/Data/Transfer/Diagnostic 大类 |
 | 4 | Flags | 1 B | 扩展与安全存在位 |
 | 5 | Traffic + Guarantee | 1 B | 2 bit Traffic；Delivery Guarantee 独立编码 |
-| 6 | Hop Limit | 1 B | 每跳递减，受 Hop Auth 保护 |
-| 7 | Header Contract | 1 B | 冻结扩展组合/保留位 |
+| 6 | Hop Limit | 2 B | 网络序无符号数；`1..65534`，每跳递减，受 Hop Auth 保护；`0/65535` 拒绝 |
+| 8 | Header Contract | 1 B | 冻结扩展组合/保留位 |
 
 公共前缀之后按固定顺序编码：
 
@@ -535,7 +537,8 @@ Destination Address      1/2/3/4 B
 Source Binding Generation      4 B fixed
 Destination Binding Generation 4 B fixed
 Session Generation       4 B fixed
-Packet Sequence          4 B fixed
+Origin Sequence          4 B fixed
+Hop Sequence             4 B fixed
 Payload Length           2 B fixed
 Optional Peer Hop Security Context or Group Security Context
 Optional E2E Security Context
@@ -553,14 +556,14 @@ CRC32C
 在不含扩展和 Tag 时，候选基础头加 CRC 的长度为：
 
 ```text
-A0: 36 B
-A1: 38 B
-A2: 40 B
-A3: 42 B
+A0: 41 B
+A1: 43 B
+A2: 45 B
+A3: 47 B
 ```
 
 这里有意接受 A0 比 v5 W0 更大的开销，以换取地址复用防 ABA、固定安全代际、固定
-Sequence、固定 Realm 和 CRC32C。若后续实测证明 Classic CAN 无法接受该成本，应优化
+Origin/Hop Sequence、16-bit Hop Limit、固定 Realm 和 CRC32C。若后续实测证明 Classic CAN 无法接受该成本，应优化
 Carrier 或增加经过独立安全审计的邻接压缩上下文，不能再次把 Binding/Session 代际压缩
 成 1 B。
 
@@ -598,15 +601,17 @@ Context 不存在时对应 Tag 必须不存在。不得通过逐个试 Key、猜
 携带 Group Context；Bootstrap 在 Session 前两者都不携带。两个 Context 同时存在、Context
 与 Frame/Opcode 不匹配或对应 Tag 缺失时，必须在任何 Replay、邻接或发现状态写入前拒绝。
 
-Route Context 与 Path Context 在普通 Data Frame 中互斥：动态 Route 使用 Route
-Generation；Pinned Path 使用 Path ID/Generation。静态直连/静态 Route 可以不携带二者。
+Route Context 与 Path Context 是两个正交的存在位：动态 Route 使用 Route Generation，
+Pinned Path 使用 Path ID/Generation；当精确 Path 属于一个可替换的 RouteSet 时两者必须同时
+存在并同时进入端到端认证域。静态直连/静态 Route 可以不携带二者。Canonical AAD 的
+Context Presence Mask 固定为 bit0=Route、bit1=Path，不得把同时存在降格解释成任一单独类型。
 
 ### 6.4 可变外层与不可变内层
 
 字段分为：
 
 - **端到端不可变域**：Protocol Version、Address Class、不可变 Flags、Header Contract、
-  Realm、Source/Destination Address 与 Binding Generation、Session、Sequence、Frame
+  Realm、Source/Destination Address 与 Binding Generation、Session、Origin Sequence、Frame
   Type、Traffic、Delivery Guarantee、Interaction Role、Endpoint、Route/Path Context、
   Protocol Opcode、E2E Security Context、Operation ID、Payload Length 与 Payload；
 - **逐跳可变域**：Hop Limit、Peer Hop/Group Security Context、remaining Hop Budget、局部
@@ -623,9 +628,9 @@ e2e_security_mode + e2e_suite_id + e2e_key_id + e2e_key_generation
 realm
 canonical_source_address + source_binding_generation
 canonical_destination_address + destination_binding_generation
-session_generation + packet_sequence
+session_generation + origin_sequence
 source_endpoint + destination_endpoint + operation_id（存在时）
-route_context 或 path_context（按 contract 精确一种）
+route_context + path_context（各自按存在位写入；允许两者同时存在）
 initial_hop_scheduling_budget（存在时；remaining 不进入 AAD）
 payload_length
 ```
@@ -1046,9 +1051,17 @@ E2E Auth-only 或 E2E AEAD，并验证 6.4 的完整 canonical AAD。只有显�
 `PUBLIC_UNAUTHENTICATED` 且 ACL 不引用原始 Principal 的 Endpoint 才可只靠 Hop 安全；
 该模式不得承载 Q0 权威控制、Request 副作用或权限提升。
 
+Security 解封后交给 Capability、Route、QoS、Transfer、Realtime 与 Cluster 的
+`ucn_v6_security_open_result_t` 是已验证语义 DTO，不是跨进程、跨地址空间或可抵御任意
+本地写内存攻击的不可伪造权能。Security 与这些进程内直接使用方共同构成 MCU 固件的可信计算基；
+本地任意内存破坏、恶意调用者伪造 DTO 属于内存安全/固件完整性问题，不能由 C99 结构体解决。
+所有使用方仍必须独立校验字段合法域及自身需要的父代际、ACL、Deadline 与 Authority 条件，
+但不得把“结构体由调用方可写”误述成远端网络攻击者可绕过 Security 的线上认证。
+
 ### 9.3 Replay 与持久化
 
-- Packet Sequence 在单 Session 内严格前进；
+- Origin Sequence 在端到端/Group 重放域内严格前进，中继不得修改；
+- Hop Sequence 在每个下一跳 Peer Session 内严格前进，中继验证入站后为出站重新分配；
 - 发送端通过持久化区间预留，不能每帧写 Flash；
 - 接收端为授权 Source/Session 维护固定 Replay Window；
 - Session Generation、Key ID、Key Generation、Sequence 高水位和撤销状态不得回退；
@@ -1114,8 +1127,11 @@ RouteSet
  route_generation}
 ```
 
-Candidate/Activate/ACK 再绑定 Candidate Transaction ID。Candidate 一旦开始 Probe、分配
-Generation 或发送 Activate，其 Path Snapshot 永久冻结；任何路径变化必须新建事务。
+Candidate 的唯一主键是 `{完整 Route Domain, Candidate Transaction ID}`，事务高水位也
+由同一 Route Domain 持有；不同业务 Origin/Route Domain 可合法复用相同数值的 Transaction
+ID，不得互相拒绝或命中。Activate/ACK 必须继续绑定该完整主键、Route Generation 与冻结
+Proposal Digest。Candidate 一旦开始 Probe、分配 Generation 或发送 Activate，其 Path
+Snapshot 永久冻结；任何路径变化必须新建事务。
 同一地址被另一 Device 重新获得后，即使它碰巧使用相同 Session Generation，也不能命中
 旧 RouteSet、Replay、Capability、ACL 或 Path；Address Binding Generation 是地址租约
 所有权的一部分，而不是诊断字段。
@@ -1162,6 +1178,20 @@ freshness
 
 共同判断。不得把一跳 Heartbeat 当成多跳路径可达证明。
 
+Route Owner 是下游模块使用路径的唯一真相源。Transfer、Realtime 或业务发送方只能保存
+`{Route Domain, Route Generation, Path ID, Path Generation}` 稳定引用；每次产生发送、SACK、
+Deadline 或执行副作用前，必须由 Route Owner 重新解析当前或仍在有界 Grace 内的精确 Path，
+并同时重验即时下一跳 Capability 与目标 Path Capability。调用方不得直接构造完整
+`RoutePath` 作为授权输入。
+
+Capability、Route 与 QoS 的累计跳数统一使用 16-bit 无符号语义，合法范围为
+`1..65534`；`0` 表示无有效路径，`65535` 保留为无效/耗尽哨兵。Route Proposal Digest 必须
+编码完整 16-bit 跳数，不能截断成 8-bit，也不能让 256 跳以上的合法 Path 在模块边界别名。
+Wire Hop Limit 使用同一 16-bit 合法域，因此任何能被 Route Owner 安装的路径都有
+唯一、可表达的逐帧转发范围；不允许再存在“路径模型合法，但帧因 8-bit TTL 无法到达”
+的第二套跳数上限。产品仍应在 Manifest/Policy 中把实际可用上限收窄到已验证的
+实时范围，而不是默认使用 65534 跳。
+
 ## 11. Transfer、流水和拥塞控制
 
 ### 11.1 消息等级
@@ -1187,6 +1217,15 @@ v6 建议以固定窗口 Selective Repeat 取代默认 Go-Back-N：
 - Recent Completion 防止最后 ACK 丢失导致重复执行；
 - Result 与 Reassembly ACK 分离。
 
+发送中的 Transfer 只冻结 Route Owner 给出的一个规范依赖链
+`{本机出口 Link, next-hop Session, next-hop Capability, Route, Path}`，以及稳定的
+`{Route Domain, Route Generation, Path ID, Path Generation}` 引用。Path Capability 中的
+本地父级必须与本机即时出口完全相同；目标 Capability/Session 则是该 Path 声明的一部分，
+由 Route Owner 在每次发送和 ACK 推进前重新解析并校验。依赖链精确失效，或 Route Owner
+无法重新解析同一 Route/Path 引用时，后续副作用立即失败关闭；清理路径仍须返还
+caller-owned Buffer Token。尤其在 `A→B→C` 中，A-B 出口断开必须终止 A 的 Transfer，
+不能只检查 C 的目标能力租约，也不能让调用方用自构造 Path 绕过 Route Owner。
+
 ### 11.3 逐跳 Credit
 
 端到端 ACK 解决完整性，不解决中继队列被快速源端压满。Q2/Q3 增加有界逐跳 Credit：
@@ -1194,8 +1233,14 @@ v6 建议以固定窗口 Selective Repeat 取代默认 Go-Back-N：
 - 每个 Link/Class 有固定可用 Credit；
 - 中继只有在下一跳有 Credit 时接纳新的 Bulk Fragment；
 - Q0/Q1 拥有独立预留，不被 Q3 借尽；
-- Credit 丢失通过 Generation/周期刷新/超时收敛；
+- Credit 租约到期后立即停止借用，但槽位保留 Peer Session、Link Generation、Credit
+  Generation 和 Sequence 高水位；不得因超时清槽而从 1 重新开始。只有精确 Session/Link
+  失效或显式安全重建才释放该代际历史；
 - 不允许负 Credit、无限累计或由未认证对端提高预算。
+
+接收端重组超时只回收尚未完成的消息。完整消息一旦进入 `COMPLETE`，其 Payload 与重放
+身份归应用消费生命周期所有；只有应用显式复制/领取并退休后才可释放。应用迟滞必须形成
+可见背压，不能靠普通重组定时器静默丢弃完整消息或重新开放同一 Message ID 的执行窗口。
 
 ### 11.4 多跳流水
 
@@ -1208,8 +1253,8 @@ v6 建议以固定窗口 Selective Repeat 取代默认 Go-Back-N：
 默认调度建议采用两层结构：
 
 1. Admission：Q0 预留、源/目标本地 Deadline 和 Endpoint Budget；
-2. Link Scheduler：Q0 bounded priority/EDF，Q1 per-flow Latest round-robin，Q2/Q3 使用
-   Weighted DRR。
+2. Link Scheduler：Q0 在 Flow 间执行有界 round-robin、在同一 Flow 内执行 bounded
+   priority/EDF；Q1 执行 per-flow Latest round-robin；Q2/Q3 使用 Weighted DRR。
 
 中继默认只看到 Traffic Class，不读取 E2E 加密 Payload 内的绝对 Deadline。只有 Frame
 显式携带 15 节定义的 Hop Scheduling Budget 时，中继才可在本地 EDF 中使用该预算；
@@ -1222,8 +1267,9 @@ Peer、Source Binding 和 Flow 落入编译期固定的 admission/token bucket�
 - 不能把 Q1/Q2/Q3 提升为 Q0，也不能改变 Delivery Guarantee；
 - 不能占用其他 Class、其他 Source 或其他 Flow 的保留 Credit；
 - Q0 的固定预留只由本地 ACL/Endpoint policy 授予，极小 Budget 不能扩大该预留；
-- 同 Class 内先执行 per-source/per-flow quota，再在本 Flow 已获准的候选中用 remaining
-  budget 做 EDF；因此单个恶意 Peer 不能靠持续声明极小 Budget 饿死同级 Flow；
+- 同 Class 内先执行 per-source/per-flow quota，Flow 之间保持有界公平轮转，只在本 Flow
+  已获准的候选中使用本地 priority 与 remaining budget 做 EDF；因此单个恶意 Peer 不能靠
+  持续声明极小 Budget 饿死同级 Flow；
 - 接收必须验证 `initial_budget_us > 0`、`remaining_budget_us > 0` 且
   `remaining_budget_us <= initial_budget_us <= endpoint/path_policy_max_budget_us`；
 - 每跳以 checked-subtract 扣除已测 residence time 与保守 transmit bound，只能减不能增；

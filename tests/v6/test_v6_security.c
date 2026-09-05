@@ -22,8 +22,9 @@ typedef struct fake_store {
     bool present;
     bool reject_submit;
     bool corrupt_reload;
+    bool perturb_padding;
     bool witness_present;
-    uint64_t generation_witness;
+    ucn_v6_durable_generation_witness_t witness;
     bool reenter_on_reserve;
     ucn_v6_security_manager_t *reenter_manager;
     ucn_v6_principal_t reenter_peer;
@@ -33,32 +34,98 @@ typedef struct fake_store {
     ucn_v6_security_snapshot_t snapshot;
 } fake_store_t;
 
-static ucn_v6_result_t load_generation_witness(
+static void poison_gap(
+    void *object,
+    size_t left_offset,
+    size_t left_size,
+    size_t right_offset)
+{
+    size_t index;
+    uint8_t *bytes = (uint8_t *)object;
+    for (index = left_offset + left_size; index < right_offset; ++index) {
+        bytes[index] = UINT8_C(0xA5);
+    }
+}
+
+static void perturb_snapshot_padding(
+    ucn_v6_security_snapshot_t *snapshot)
+{
+    size_t index;
+    size_t group_index;
+    size_t key_index;
+
+    poison_gap(snapshot,
+               offsetof(ucn_v6_security_snapshot_t, local_binding_valid),
+               sizeof(snapshot->local_binding_valid),
+               offsetof(ucn_v6_security_snapshot_t, local_binding));
+    for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
+        ucn_v6_security_session_record_t *session =
+            &snapshot->sessions[index];
+        poison_gap(session,
+                   offsetof(ucn_v6_security_session_record_t,
+                            link_instance_id),
+                   sizeof(session->link_instance_id),
+                   offsetof(ucn_v6_security_session_record_t,
+                            link_instance_generation));
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_ACL_ENTRIES; ++index) {
+        ucn_v6_acl_entry_t *entry = &snapshot->acl_entries[index];
+        poison_gap(entry, offsetof(ucn_v6_acl_entry_t, revoked),
+                   sizeof(entry->revoked),
+                   offsetof(ucn_v6_acl_entry_t, key));
+    }
+    for (group_index = 0U;
+         group_index < UCN_V6_CONFIG_STATIC_GROUP_SLOTS; ++group_index) {
+        for (key_index = 0U;
+             key_index < UCN_V6_CONFIG_GROUP_KEY_SLOTS; ++key_index) {
+            ucn_v6_group_key_slot_t *key =
+                &snapshot->group_keys[group_index][key_index];
+            poison_gap(key, offsetof(ucn_v6_group_key_slot_t, requires_rekey),
+                       sizeof(key->requires_rekey),
+                       offsetof(ucn_v6_group_key_slot_t, group_id));
+        }
+    }
+    for (index = 0U;
+         index < UCN_V6_CONFIG_GROUP_REPLAY_SOURCES; ++index) {
+        ucn_v6_group_replay_source_t *source =
+            &snapshot->group_replay_sources[index];
+        poison_gap(source,
+                   offsetof(ucn_v6_group_replay_source_t, occupied),
+                   sizeof(source->occupied),
+                   offsetof(ucn_v6_group_replay_source_t, group_id));
+    }
+}
+
+static ucn_v6_result_t load_witness(
     void *context,
-    uint64_t *generation)
+    ucn_v6_durable_generation_witness_t *witness)
 {
     fake_store_t *store = (fake_store_t *)context;
+    if (witness == NULL) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
     if (!store->witness_present) {
         return UCN_V6_ERR_NOT_FOUND;
     }
-    *generation = store->generation_witness;
+    *witness = store->witness;
     return UCN_V6_OK;
 }
 
-static ucn_v6_result_t reserve_generation_witness(
+static ucn_v6_result_t reserve_witness(
     void *context,
-    uint64_t generation)
+    const ucn_v6_durable_generation_witness_t *witness)
 {
     fake_store_t *store = (fake_store_t *)context;
     if (store->reenter_on_reserve) {
         store->reenter_result = ucn_v6_security_require_reauth(
             store->reenter_manager, &store->reenter_peer);
     }
-    if ((store->witness_present && generation <= store->generation_witness) ||
-        generation == 0U) {
+    if (witness == NULL || witness->witness_generation == 0U ||
+        (store->witness_present && witness->witness_generation <=
+             store->witness.witness_generation)) {
         return UCN_V6_ERR_REPLAY;
     }
-    store->generation_witness = generation;
+    store->witness = *witness;
     store->witness_present = true;
     return UCN_V6_OK;
 }
@@ -67,6 +134,14 @@ typedef struct fake_crypto {
     unsigned proofs;
     unsigned tag_checks;
     unsigned aead_opens;
+    bool reenter_on_proof;
+    bool invalid_result_on_proof;
+    bool leave_gate_on_proof;
+    ucn_v6_security_manager_t *reenter_manager;
+    ucn_v6_callback_gate_t *reenter_gate;
+    ucn_v6_principal_t reenter_peer;
+    ucn_v6_result_t reenter_result;
+    ucn_v6_result_t forced_leave_result;
 } fake_crypto_t;
 
 #if UCN_V6_FEATURE_ADAPTER_ENABLED
@@ -220,6 +295,9 @@ static ucn_v6_result_t store_load(void *context,
         return UCN_V6_ERR_NOT_FOUND;
     }
     *snapshot = store->snapshot;
+    if (store->perturb_padding) {
+        perturb_snapshot_padding(snapshot);
+    }
     if (store->corrupt_reload) {
         snapshot->magic ^= UINT32_C(1);
     }
@@ -275,6 +353,17 @@ static ucn_v6_result_t verify_proof(
 {
     fake_crypto_t *crypto = (fake_crypto_t *)context;
     ++crypto->proofs;
+    if (crypto->reenter_on_proof) {
+        crypto->reenter_result = ucn_v6_security_require_reauth(
+            crypto->reenter_manager, &crypto->reenter_peer);
+    }
+    if (crypto->leave_gate_on_proof) {
+        crypto->forced_leave_result = ucn_v6_callback_gate_leave(
+            crypto->reenter_gate, crypto->reenter_manager);
+    }
+    if (crypto->invalid_result_on_proof) {
+        return (ucn_v6_result_t)1;
+    }
     return ucn_v6_principal_is_valid(principal) && canonical != NULL &&
            canonical_length != 0U && proof != NULL && proof_length == 1U &&
            proof[0] == (uint8_t)role ? UCN_V6_OK : UCN_V6_ERR_SECURITY;
@@ -376,8 +465,8 @@ static ucn_v6_security_store_ops_t store_ops(fake_store_t *store)
     ucn_v6_security_store_ops_t ops;
     memset(&ops, 0, sizeof(ops));
     ops.context = store;
-    ops.load_generation_witness = load_generation_witness;
-    ops.reserve_generation_witness = reserve_generation_witness;
+    ops.load_witness = load_witness;
+    ops.reserve_witness = reserve_witness;
     ops.load = store_load;
     ops.submit = store_submit;
     return ops;
@@ -401,7 +490,11 @@ static ucn_v6_bootstrap_transcript_t make_transcript_pair(
     value.joining_device_principal = *device;
     value.joining_device_identity_digest = make_principal(0x30U);
     value.authority_principal = *authority;
-    value.authority_generation = 1U;
+    /* Give every test Authority a stable Realm-wide epoch derived from its
+     * fixed address.  This keeps multi-peer fixtures honest: changing the
+     * Authority principal is an Authority transfer, never a same-generation
+     * alias. */
+    value.authority_generation = authority_address;
     value.device_nonce = transaction_id + 1U;
     value.authority_nonce = transaction_id + 2U;
     value.transaction_id = transaction_id;
@@ -411,9 +504,28 @@ static ucn_v6_bootstrap_transcript_t make_transcript_pair(
     value.address_binding_generation = device_binding_generation;
     value.authority_address = authority_address;
     value.authority_binding_generation = authority_binding_generation;
+    value.selected_link_instance_id = 1U;
     fill_bytes(value.binding_lease_id, sizeof(value.binding_lease_id), 0x50U);
     value.binding_lease_duration_us = 50000U;
-    value.authority_lease_sequence = 9U;
+    value.authority_lease_sequence = authority_address;
+    value.authority_lease_duration_us = 100000U;
+    value.freshness_max_remaining_lease_us = 50000U;
+    fill_bytes(value.durable_fence_token,
+               sizeof(value.durable_fence_token),
+               (uint8_t)(0x80U + authority_address));
+    fill_bytes(value.allocation_high_water_digest,
+               sizeof(value.allocation_high_water_digest), 0x90U);
+    fill_bytes(value.quorum_config_digest,
+               sizeof(value.quorum_config_digest), 0xA0U);
+    fill_bytes(value.signer_set_digest,
+               sizeof(value.signer_set_digest), 0xB0U);
+    fill_bytes(value.threshold_proof_digest,
+               sizeof(value.threshold_proof_digest), 0xC0U);
+    fill_bytes(value.freshness_proof_transcript_hash,
+               sizeof(value.freshness_proof_transcript_hash), 0xD0U);
+    value.authority_signer_count = 3U;
+    value.authority_quorum_threshold = 2U;
+    value.binding_mode = UCN_V6_ADDRESS_LEASED;
     value.selected_hop_suite = UCN_V6_SUITE_HMAC_SHA256_128;
     value.selected_hop_key_id = 2U;
     value.selected_hop_key_generation = 3U;
@@ -455,38 +567,84 @@ static ucn_v6_join_commit_t make_join(
     authority_binding.binding_generation =
         transcript->authority_binding_generation;
     commit.transcript = *transcript;
+    commit.authority_epoch.realm_id = transcript->realm_id;
     commit.authority_epoch.authority_principal =
         transcript->authority_principal;
-    commit.authority_epoch.authority_generation = 1U;
-    fill_bytes(commit.authority_epoch.durable_fence_token, 16U, 0x80U);
-    fill_bytes(commit.authority_epoch.allocation_high_water_digest, 16U, 0x90U);
-    commit.authority_epoch.lease_sequence = 9U;
-    commit.authority_epoch.lease_duration_us = 100000U;
-    commit.authority_epoch.quorum_proven = true;
-    commit.authority_epoch.durable = true;
+    commit.authority_epoch.authority_generation =
+        transcript->authority_generation;
+    memcpy(commit.authority_epoch.durable_fence_token,
+           transcript->durable_fence_token,
+           sizeof(commit.authority_epoch.durable_fence_token));
+    memcpy(commit.authority_epoch.allocation_high_water_digest,
+           transcript->allocation_high_water_digest,
+           sizeof(commit.authority_epoch.allocation_high_water_digest));
+    commit.authority_epoch.lease_sequence =
+        transcript->authority_lease_sequence;
+    commit.authority_epoch.lease_duration_us =
+        transcript->authority_lease_duration_us;
+    memcpy(commit.authority_epoch.quorum_config_digest,
+           transcript->quorum_config_digest,
+           sizeof(commit.authority_epoch.quorum_config_digest));
+    memcpy(commit.authority_epoch.signer_set_digest,
+           transcript->signer_set_digest,
+           sizeof(commit.authority_epoch.signer_set_digest));
+    memcpy(commit.authority_epoch.threshold_proof_digest,
+           transcript->threshold_proof_digest,
+           sizeof(commit.authority_epoch.threshold_proof_digest));
+    commit.authority_epoch.signer_count = transcript->authority_signer_count;
+    commit.authority_epoch.quorum_threshold =
+        transcript->authority_quorum_threshold;
+    commit.authority_freshness.verifier_device_principal =
+        transcript->joining_device_principal;
+    commit.authority_freshness.challenge_nonce =
+        transcript->lease_freshness_challenge_nonce;
+    commit.authority_freshness.transaction_id = transcript->transaction_id;
+    commit.authority_freshness.authority_lease_sequence =
+        transcript->authority_lease_sequence;
+    commit.authority_freshness.max_remaining_lease_us =
+        transcript->freshness_max_remaining_lease_us;
+    memcpy(commit.authority_freshness.binding_lease_id,
+           transcript->binding_lease_id,
+           sizeof(commit.authority_freshness.binding_lease_id));
+    commit.authority_freshness.binding_generation =
+        transcript->address_binding_generation;
+    memcpy(commit.authority_freshness.proof_transcript_hash,
+           transcript->freshness_proof_transcript_hash,
+           sizeof(commit.authority_freshness.proof_transcript_hash));
     commit.joining_binding_certificate.device_principal =
         transcript->joining_device_principal;
     commit.joining_binding_certificate.authority_principal =
         transcript->authority_principal;
     commit.joining_binding_certificate.binding = device_binding;
-    commit.joining_binding_certificate.authority_generation = 1U;
+    commit.joining_binding_certificate.authority_generation =
+        transcript->authority_generation;
     memcpy(commit.joining_binding_certificate.lease_id,
            transcript->binding_lease_id, 16U);
-    commit.joining_binding_certificate.lease_duration_us = 50000U;
-    commit.joining_binding_certificate.authority_lease_sequence = 9U;
-    commit.joining_binding_certificate.mode = UCN_V6_ADDRESS_LEASED;
+    commit.joining_binding_certificate.lease_duration_us =
+        transcript->binding_lease_duration_us;
+    commit.joining_binding_certificate.authority_lease_sequence =
+        transcript->authority_lease_sequence;
+    commit.joining_binding_certificate.mode =
+        (ucn_v6_address_mode_t)transcript->binding_mode;
     commit.local_binding = device_side ? device_binding : authority_binding;
     commit.peer_binding = device_side ? authority_binding : device_binding;
     commit.session_generation = transcript->selected_session_generation;
+    commit.link_instance_id = transcript->selected_link_instance_id;
     commit.link_instance_generation =
         transcript->selected_link_instance_generation;
-    commit.hop_selector.suite_id = UCN_V6_SUITE_HMAC_SHA256_128;
-    commit.hop_selector.key_id = 2U;
-    commit.hop_selector.key_generation = 3U;
-    commit.e2e_selector.suite_id = UCN_V6_SUITE_AES_GCM_128;
-    commit.e2e_selector.key_id = 4U;
-    commit.e2e_selector.key_generation = 5U;
-    commit.authority_local_lease_deadline_us = 90000U;
+    commit.hop_selector.suite_id = transcript->selected_hop_suite;
+    commit.hop_selector.key_id = transcript->selected_hop_key_id;
+    commit.hop_selector.key_generation =
+        transcript->selected_hop_key_generation;
+    commit.e2e_selector.suite_id = transcript->selected_e2e_suite;
+    commit.e2e_selector.key_id = transcript->selected_e2e_key_id;
+    commit.e2e_selector.key_generation =
+        transcript->selected_e2e_key_generation;
+    commit.authority_challenge_started_local_us = 0U;
+    commit.authority_lease_policy.local_timer_resolution_us = 1U;
+    commit.authority_lease_policy.timer_read_uncertainty_known = true;
+    commit.authority_lease_policy.local_policy_max_lease_us =
+        transcript->freshness_max_remaining_lease_us;
     commit.device_proof = device_proof;
     commit.device_proof_length = sizeof(device_proof);
     commit.authority_proof = authority_proof;
@@ -507,6 +665,163 @@ static ucn_v6_bootstrap_key_t make_bootstrap_key(
     key.identity_digest = transcript->joining_device_identity_digest;
     key.transaction_id = transcript->transaction_id;
     return key;
+}
+
+static ucn_v6_callback_gate_t bootstrap_gate = {0};
+static bool bootstrap_gate_ready;
+
+static ucn_v6_bootstrap_evidence_t bootstrap_evidence(
+    ucn_v6_bootstrap_event_t event,
+    ucn_v6_bootstrap_flow_t flow,
+    const ucn_v6_bootstrap_key_t *key,
+    const ucn_v6_bootstrap_transcript_t *transcript,
+    const ucn_v6_binding_key_t *existing_binding)
+{
+    ucn_v6_bootstrap_evidence_t evidence;
+    memset(&evidence, 0, sizeof(evidence));
+    evidence.length = 16U;
+    evidence.bytes[0] = (uint8_t)event;
+    evidence.bytes[1] = (uint8_t)flow;
+    evidence.bytes[2] = (uint8_t)(key->ingress_link_id >> 8U);
+    evidence.bytes[3] = (uint8_t)key->ingress_link_id;
+    evidence.bytes[4] = (uint8_t)(key->transaction_id >> 56U);
+    evidence.bytes[5] = (uint8_t)(key->transaction_id >> 48U);
+    evidence.bytes[6] = (uint8_t)(key->transaction_id >> 40U);
+    evidence.bytes[7] = (uint8_t)(key->transaction_id >> 32U);
+    evidence.bytes[8] = (uint8_t)(key->transaction_id >> 24U);
+    evidence.bytes[9] = (uint8_t)(key->transaction_id >> 16U);
+    evidence.bytes[10] = (uint8_t)(key->transaction_id >> 8U);
+    evidence.bytes[11] = (uint8_t)key->transaction_id;
+    evidence.bytes[12] = (uint8_t)(transcript->authority_generation >> 8U);
+    evidence.bytes[13] = (uint8_t)transcript->authority_generation;
+    evidence.bytes[14] = existing_binding == NULL ? 0U :
+        (uint8_t)(existing_binding->binding_generation >> 8U);
+    evidence.bytes[15] = existing_binding == NULL ? 0U :
+        (uint8_t)existing_binding->binding_generation;
+    return evidence;
+}
+
+static ucn_v6_result_t authorize_bootstrap_event(
+    void *context,
+    ucn_v6_bootstrap_event_t event,
+    ucn_v6_bootstrap_flow_t flow,
+    const ucn_v6_bootstrap_key_t *key,
+    const ucn_v6_bootstrap_transcript_t *transcript,
+    const ucn_v6_binding_key_t *existing_binding,
+    uint64_t now_us,
+    const ucn_v6_bootstrap_evidence_t *evidence)
+{
+    ucn_v6_bootstrap_evidence_t expected = bootstrap_evidence(
+        event, flow, key, transcript, existing_binding);
+    (void)context;
+    (void)now_us;
+    return evidence != NULL &&
+                   memcmp(evidence, &expected, sizeof(expected)) == 0 ?
+               UCN_V6_OK : UCN_V6_ERR_SECURITY;
+}
+
+static ucn_v6_result_t bootstrap_owner_init_for_test(
+    void *storage,
+    size_t storage_bytes,
+    const struct ucn_v6_feature_manifest *manifest,
+    const ucn_v6_bootstrap_config_t *config,
+    ucn_v6_bootstrap_owner_t **owner)
+{
+    ucn_v6_bootstrap_verifier_ops_t verifier;
+    memset(&verifier, 0, sizeof(verifier));
+    verifier.authorize_event = authorize_bootstrap_event;
+    if (!bootstrap_gate_ready) {
+        ucn_v6_result_t result = ucn_v6_callback_gate_init(
+            &bootstrap_gate, NULL, no_lock, no_lock);
+        if (result != UCN_V6_OK) {
+            return result;
+        }
+        bootstrap_gate_ready = true;
+    }
+    return ucn_v6_bootstrap_owner_init_in_place(
+        storage, storage_bytes, manifest, config, &verifier,
+        &bootstrap_gate, owner);
+}
+
+static ucn_v6_result_t bootstrap_open_for_test(
+    ucn_v6_bootstrap_owner_t *owner,
+    ucn_v6_bootstrap_flow_t flow,
+    const ucn_v6_bootstrap_key_t *key,
+    const ucn_v6_bootstrap_transcript_t *transcript,
+    const ucn_v6_binding_key_t *existing_binding,
+    bool verified,
+    uint64_t now_us)
+{
+    ucn_v6_bootstrap_evidence_t evidence = bootstrap_evidence(
+        UCN_V6_BOOTSTRAP_EVENT_COOKIE, flow, key, transcript,
+        existing_binding);
+    if (!verified) {
+        evidence.bytes[0] ^= UINT8_C(0x80);
+    }
+    return ucn_v6_bootstrap_open_after_cookie(
+        owner, flow, key, transcript, existing_binding, &evidence, now_us);
+}
+
+static ucn_v6_result_t bootstrap_advance_for_test(
+    ucn_v6_bootstrap_owner_t *owner,
+    ucn_v6_bootstrap_flow_t flow,
+    const ucn_v6_bootstrap_key_t *key,
+    const ucn_v6_bootstrap_transcript_t *transcript,
+    ucn_v6_bootstrap_event_t event,
+    bool verified,
+    uint64_t now_us)
+{
+    ucn_v6_bootstrap_pending_t pending;
+    const ucn_v6_binding_key_t *existing_binding = NULL;
+    ucn_v6_bootstrap_evidence_t evidence;
+    memset(&pending, 0, sizeof(pending));
+    if (flow == UCN_V6_BOOTSTRAP_FLOW_REAUTH &&
+        ucn_v6_bootstrap_copy_pending(owner, flow, key, &pending) ==
+            UCN_V6_OK) {
+        existing_binding = &pending.existing_binding;
+    }
+    evidence = bootstrap_evidence(event, flow, key, transcript,
+                                  existing_binding);
+    if (!verified) {
+        evidence.bytes[0] ^= UINT8_C(0x80);
+    }
+    return ucn_v6_bootstrap_advance(
+        owner, flow, key, transcript, event, &evidence, now_us);
+}
+
+#define ucn_v6_bootstrap_owner_init_in_place bootstrap_owner_init_for_test
+#define ucn_v6_bootstrap_open_after_cookie bootstrap_open_for_test
+#define ucn_v6_bootstrap_advance bootstrap_advance_for_test
+
+static bool security_session_event_matches(
+    const ucn_v6_stack_invalidation_t *event,
+    uint16_t link_id,
+    uint32_t link_generation,
+    const ucn_v6_principal_t *peer,
+    const ucn_v6_binding_key_t *peer_binding,
+    uint32_t session_generation)
+{
+    return event->type == UCN_V6_STACK_INVALIDATE_SESSION &&
+           event->link_id == link_id &&
+           event->link_generation == link_generation &&
+           memcmp(event->session.principal.bytes, peer->bytes,
+                  sizeof(peer->bytes)) == 0 &&
+           ucn_v6_binding_key_equal(&event->session.binding, peer_binding) &&
+           event->session.session_generation == session_generation &&
+           event->capability_generation == 0U && event->path_id == 0U &&
+           event->path_generation == 0U;
+}
+
+static ucn_v6_stack_invalidation_t link_invalidation(
+    uint16_t link_id,
+    uint32_t link_generation)
+{
+    ucn_v6_stack_invalidation_t value;
+    memset(&value, 0, sizeof(value));
+    value.type = UCN_V6_STACK_INVALIDATE_LINK;
+    value.link_id = link_id;
+    value.link_generation = link_generation;
+    return value;
 }
 
 static int complete_bootstrap(
@@ -582,6 +897,65 @@ static int install_pair_session(
     CHECK(ucn_v6_security_commit_join(
               manager, bootstrap, &key, 20U, &join) == UCN_V6_OK);
     return 0;
+}
+
+static int reauth_pair_session_exact(
+    ucn_v6_security_manager_t *manager,
+    const ucn_v6_principal_t *device,
+    uint32_t device_address,
+    uint32_t device_binding_generation,
+    const ucn_v6_principal_t *authority,
+    uint32_t authority_address,
+    uint32_t authority_binding_generation,
+    bool local_is_device,
+    uint64_t transaction_id,
+    uint32_t discriminator,
+    uint32_t session_generation,
+    uint32_t link_instance_generation,
+    uint32_t hop_key_generation)
+{
+    const ucn_v6_bootstrap_config_t config = {
+        2U, 1U, 2U, 1U, UINT64_C(10000)
+    };
+    ucn_v6_bootstrap_owner_storage_t bootstrap_storage;
+    ucn_v6_bootstrap_owner_t *bootstrap = NULL;
+    ucn_v6_bootstrap_transcript_t value = make_transcript_pair(
+        device, device_address, device_binding_generation,
+        authority, authority_address, authority_binding_generation,
+        transaction_id, link_instance_generation);
+    ucn_v6_bootstrap_key_t key;
+    ucn_v6_join_commit_t join;
+    value.flow = UCN_V6_BOOTSTRAP_FLOW_REAUTH;
+    value.selected_session_generation = session_generation;
+    value.selected_hop_key_generation = hop_key_generation;
+    key = make_bootstrap_key(&value, discriminator);
+    join = make_join(&value, local_is_device);
+
+    CHECK(ucn_v6_bootstrap_owner_init_in_place(
+              bootstrap_storage.bytes, sizeof(bootstrap_storage),
+              ucn_v6_compiled_manifest(), &config, &bootstrap) == UCN_V6_OK);
+    CHECK(complete_bootstrap(bootstrap, &value, &key, 30U) == 0);
+    CHECK(ucn_v6_security_commit_join(
+              manager, bootstrap, &key, 40U, &join) == UCN_V6_OK);
+    return 0;
+}
+
+static int reauth_pair_session(
+    ucn_v6_security_manager_t *manager,
+    const ucn_v6_principal_t *device,
+    uint32_t device_address,
+    uint32_t device_binding_generation,
+    const ucn_v6_principal_t *authority,
+    uint32_t authority_address,
+    uint32_t authority_binding_generation,
+    bool local_is_device,
+    uint64_t transaction_id,
+    uint32_t discriminator)
+{
+    return reauth_pair_session_exact(
+        manager, device, device_address, device_binding_generation,
+        authority, authority_address, authority_binding_generation,
+        local_is_device, transaction_id, discriminator, 2U, 7U, 4U);
 }
 
 static ucn_v6_acl_entry_t make_acl(
@@ -714,11 +1088,23 @@ static int test_join_acl_aead_replay(void)
     ucn_v6_security_open_result_t opened;
     ucn_v6_security_open_result_t sentinel;
     ucn_v6_security_view_t view;
+    ucn_v6_stack_invalidation_t invalidation;
+    uint8_t durable_receipt[512U];
+    uint8_t durable_receipt_again[512U];
+    size_t durable_receipt_length = 0U;
+    size_t durable_receipt_again_length = 0U;
+    uint64_t durable_receipt_generation = 0U;
+    uint64_t durable_receipt_again_generation = 0U;
+    static const uint8_t durable_receipt_proof[] = {
+        UCN_V6_PROOF_SESSION_DURABLE_RECEIPT
+    };
 
     memset(&device_store, 0, sizeof(device_store));
     memset(&authority_store, 0, sizeof(authority_store));
     memset(&device_crypto, 0, sizeof(device_crypto));
     memset(&authority_crypto, 0, sizeof(authority_crypto));
+    memset(&device_gate, 0, sizeof(device_gate));
+    memset(&authority_gate, 0, sizeof(authority_gate));
     device_store_api = store_ops(&device_store);
     authority_store_api = store_ops(&authority_store);
     device_crypto_api = crypto_ops(&device_crypto);
@@ -768,29 +1154,73 @@ static int test_join_acl_aead_replay(void)
         CHECK(ucn_v6_security_commit_join(
                   device_manager, incomplete_owner, &incomplete_key, 30U,
                   &incomplete_join) == UCN_V6_ERR_STATE);
-        CHECK(device_store.submits == 0U);
+        CHECK(device_store.submits == 1U);
     }
+    device_join.authority_challenge_started_local_us = 101U;
     CHECK(ucn_v6_security_commit_join(
               device_manager, device_bootstrap, &bootstrap_key, 100U,
-              &device_join) == UCN_V6_OK);
+              &device_join) == UCN_V6_ERR_SECURITY);
+    CHECK(device_store.submits == 1U);
+    device_join.authority_challenge_started_local_us = 0U;
+
+    /* The peer can issue a recovery receipt only from its exact, durably
+     * reloaded ADMITTED session.  The device then completes the same JOIN
+     * without relying on volatile Bootstrap state. */
     CHECK(ucn_v6_security_commit_join(
               authority_manager, authority_bootstrap, &bootstrap_key, 100U,
               &authority_join) == UCN_V6_OK);
-    CHECK(device_store.submits == 1U && authority_store.submits == 1U);
+    memset(durable_receipt, 0xA5, sizeof(durable_receipt));
+    CHECK(ucn_v6_security_export_join_durable_receipt(
+              authority_manager, &device, durable_receipt,
+              sizeof(durable_receipt), &durable_receipt_length,
+              &durable_receipt_generation) == UCN_V6_OK);
+    CHECK(durable_receipt_length == UCN_V6_SECURITY_JOIN_RECEIPT_BYTES &&
+          durable_receipt[0] == 0xD1U &&
+          durable_receipt_generation ==
+              authority_store.snapshot.snapshot_generation);
+    memset(durable_receipt_again, 0x5A, sizeof(durable_receipt_again));
+    CHECK(ucn_v6_security_export_join_durable_receipt(
+              authority_manager, &device, durable_receipt_again,
+              sizeof(durable_receipt_again),
+              &durable_receipt_again_length,
+              &durable_receipt_again_generation) == UCN_V6_OK);
+    CHECK(durable_receipt_again_length == durable_receipt_length &&
+          durable_receipt_again_generation == durable_receipt_generation &&
+          memcmp(durable_receipt_again, durable_receipt,
+                 durable_receipt_length) == 0);
+    {
+        ucn_v6_principal_t stranger = make_principal(0xE0U);
+        uint8_t before[sizeof(durable_receipt_again)];
+        size_t length_before = durable_receipt_again_length;
+        uint64_t generation_before = durable_receipt_again_generation;
+        memcpy(before, durable_receipt_again, sizeof(before));
+        CHECK(ucn_v6_security_export_join_durable_receipt(
+                  authority_manager, &stranger, durable_receipt_again,
+                  sizeof(durable_receipt_again),
+                  &durable_receipt_again_length,
+                  &durable_receipt_again_generation) == UCN_V6_ERR_NOT_FOUND);
+        CHECK(memcmp(before, durable_receipt_again, sizeof(before)) == 0 &&
+              durable_receipt_again_length == length_before &&
+              durable_receipt_again_generation == generation_before);
+    }
+    device_join.peer_durable_receipt_proof = durable_receipt_proof;
+    device_join.peer_durable_receipt_proof_length =
+        sizeof(durable_receipt_proof);
+    device_join.peer_durable_receipt_generation =
+        durable_receipt_generation;
+    CHECK(ucn_v6_security_commit_join(
+              device_manager, NULL, NULL, 100U, &device_join) == UCN_V6_OK);
+    CHECK(device_store.submits == 2U && authority_store.submits == 2U);
     CHECK(ucn_v6_security_commit_join(
               device_manager, device_bootstrap, &bootstrap_key, 101U,
               &device_join) == UCN_V6_OK);
-    CHECK(device_store.submits == 1U);
-    --device_join.authority_local_lease_deadline_us;
+    CHECK(device_store.submits == 2U);
+    --device_join.authority_freshness.max_remaining_lease_us;
     CHECK(ucn_v6_security_commit_join(
               device_manager, device_bootstrap, &bootstrap_key, 102U,
-              &device_join) == UCN_V6_ERR_STATE);
-    ++device_join.authority_local_lease_deadline_us;
-    CHECK(device_store.submits == 1U);
-
-    device_store.reenter_manager = device_manager;
-    device_store.reenter_peer = authority;
-    device_store.reenter_on_reserve = true;
+              &device_join) == UCN_V6_ERR_SECURITY);
+    ++device_join.authority_freshness.max_remaining_lease_us;
+    CHECK(device_store.submits == 2U);
 
     outbound = make_acl(&device, 7U, 3U, 8U, 4U,
                         UCN_V6_SECURITY_OUTBOUND);
@@ -798,8 +1228,6 @@ static int test_join_acl_aead_replay(void)
                        UCN_V6_SECURITY_INBOUND);
     CHECK(ucn_v6_security_set_acl(device_manager, &outbound, &admin,
                                   admin_proof, sizeof(admin_proof)) == UCN_V6_OK);
-    CHECK(device_store.reenter_result == UCN_V6_ERR_STATE);
-    device_store.reenter_on_reserve = false;
     CHECK(ucn_v6_security_set_acl(authority_manager, &inbound, &admin,
                                   admin_proof, sizeof(admin_proof)) == UCN_V6_OK);
 
@@ -826,7 +1254,7 @@ static int test_join_acl_aead_replay(void)
     CHECK(memcmp(cipher, payload, sizeof(payload)) != 0);
     memset(&opened, 0, sizeof(opened));
     CHECK(ucn_v6_security_open_frame(
-              authority_manager, 200U, 6U, &device, encoded, encoded_length,
+              authority_manager, 200U, 1U, 6U, &device, encoded, encoded_length,
               plaintext, sizeof(plaintext), &opened) == UCN_V6_OK);
     CHECK(opened.hop_authenticated && opened.endpoint_authorized &&
           !opened.group_discovery_only);
@@ -834,7 +1262,7 @@ static int test_join_acl_aead_replay(void)
     memset(&sentinel, 0xA5, sizeof(sentinel));
     opened = sentinel;
     CHECK(ucn_v6_security_open_frame(
-              authority_manager, 201U, 6U, &device, encoded, encoded_length,
+              authority_manager, 201U, 1U, 6U, &device, encoded, encoded_length,
               plaintext, sizeof(plaintext), &opened) == UCN_V6_ERR_REPLAY);
     CHECK(memcmp(&opened, &sentinel, sizeof(opened)) == 0);
 
@@ -849,7 +1277,7 @@ static int test_join_acl_aead_replay(void)
         tampered[encoded_length - 1U] = (uint8_t)crc;
     }
     CHECK(ucn_v6_security_open_frame(
-              authority_manager, 202U, 6U, &device, tampered, encoded_length,
+              authority_manager, 202U, 1U, 6U, &device, tampered, encoded_length,
               plaintext, sizeof(plaintext), &opened) == UCN_V6_ERR_SECURITY);
     {
         ucn_v6_acl_entry_t control_out = make_control_acl(
@@ -892,7 +1320,7 @@ static int test_join_acl_aead_replay(void)
                   sizeof(frame_work), encoded, sizeof(encoded),
                   &encoded_length) == UCN_V6_OK);
         CHECK(ucn_v6_security_open_frame(
-                  authority_manager, 251U, 6U, &device, encoded,
+                  authority_manager, 251U, 1U, 6U, &device, encoded,
                   encoded_length, one_byte_work, sizeof(one_byte_work),
                   &opened) == UCN_V6_OK);
         control.protocol_opcode = 11U;
@@ -906,7 +1334,7 @@ static int test_join_acl_aead_replay(void)
         memset(&sentinel, 0x5A, sizeof(sentinel));
         opened = sentinel;
         CHECK(ucn_v6_security_open_frame(
-                  authority_manager, 253U, 6U, &device, encoded,
+                  authority_manager, 253U, 1U, 6U, &device, encoded,
                   encoded_length, one_byte_work, sizeof(one_byte_work),
                   &opened) == UCN_V6_ERR_ACCESS);
         CHECK(memcmp(&opened, &sentinel, sizeof(opened)) == 0);
@@ -952,7 +1380,7 @@ static int test_join_acl_aead_replay(void)
                   &encoded_length) == UCN_V6_OK);
         CHECK(hello.origin_sequence == 0U && hello.hop_sequence == 4U);
         CHECK(ucn_v6_security_open_frame(
-                  authority_manager, 261U, 6U, &device, encoded,
+                  authority_manager, 261U, 1U, 6U, &device, encoded,
                   encoded_length, NULL, 0U, &opened) == UCN_V6_OK);
         CHECK(opened.hop_authenticated && !opened.endpoint_authorized &&
               !opened.group_discovery_only);
@@ -961,6 +1389,54 @@ static int test_join_acl_aead_replay(void)
         CHECK(opened.frame.payload_length == sizeof(hello_payload));
         CHECK(memcmp(opened.frame.payload, hello_payload,
                      sizeof(hello_payload)) == 0);
+    }
+
+    {
+        ucn_v6_binding_key_t authority_binding = { 1U, 8U, 4U };
+        memset(&invalidation, 0xA5, sizeof(invalidation));
+        {
+            ucn_v6_stack_invalidation_t before = invalidation;
+            CHECK(ucn_v6_security_invalidation_peek(
+                      device_manager, &invalidation) ==
+                  UCN_V6_ERR_NOT_FOUND);
+            CHECK(memcmp(&invalidation, &before, sizeof(before)) == 0);
+        }
+        CHECK(ucn_v6_security_require_reauth(
+                  device_manager, &authority) == UCN_V6_OK);
+        CHECK(ucn_v6_security_require_reauth(
+                  device_manager, &authority) == UCN_V6_OK);
+        memset(durable_receipt_again, 0x6CU,
+               sizeof(durable_receipt_again));
+        durable_receipt_again_length = 77U;
+        durable_receipt_again_generation = 88U;
+        {
+            uint8_t before[sizeof(durable_receipt_again)];
+            memcpy(before, durable_receipt_again, sizeof(before));
+            CHECK(ucn_v6_security_export_join_durable_receipt(
+                      device_manager, &authority, durable_receipt_again,
+                      sizeof(durable_receipt_again),
+                      &durable_receipt_again_length,
+                      &durable_receipt_again_generation) == UCN_V6_ERR_STATE);
+            CHECK(memcmp(before, durable_receipt_again, sizeof(before)) == 0 &&
+                  durable_receipt_again_length == 77U &&
+                  durable_receipt_again_generation == 88U);
+        }
+        CHECK(ucn_v6_security_invalidation_peek(
+                  device_manager, &invalidation) == UCN_V6_OK);
+        CHECK(security_session_event_matches(
+                  &invalidation, 1U, 6U, &authority,
+                  &authority_binding, 1U));
+        {
+            ucn_v6_stack_invalidation_t wrong = invalidation;
+            ++wrong.session.session_generation;
+            CHECK(ucn_v6_security_invalidation_ack(
+                      device_manager, &wrong) == UCN_V6_ERR_STATE);
+            CHECK(ucn_v6_security_invalidation_peek(
+                      device_manager, &wrong) == UCN_V6_OK);
+            CHECK(wrong.session.session_generation == 1U);
+        }
+        CHECK(ucn_v6_security_invalidation_ack(
+                  device_manager, &invalidation) == UCN_V6_OK);
     }
 
     /* A reboot never treats a persisted local monotonic deadline as live. */
@@ -979,6 +1455,7 @@ static int test_join_acl_aead_replay(void)
     transcript.lease_freshness_challenge_nonce = 104U;
     transcript.selected_session_generation = 2U;
     transcript.selected_link_instance_generation = 7U;
+    transcript.selected_hop_key_generation = 4U;
     fill_bytes(transcript.prior_messages_hash,
                sizeof(transcript.prior_messages_hash), 0xB0U);
     device_join = make_join(&transcript, true);
@@ -993,11 +1470,27 @@ static int test_join_acl_aead_replay(void)
               &device_bootstrap) == UCN_V6_OK);
     CHECK(complete_bootstrap(device_bootstrap, &transcript, &bootstrap_key,
                              280U) == 0);
-    CHECK(ucn_v6_security_commit_join(
-              device_manager, device_bootstrap, &bootstrap_key, 300U,
-              &device_join) == UCN_V6_OK);
+    {
+        ucn_v6_result_t reauth_result = ucn_v6_security_commit_join(
+            device_manager, device_bootstrap, &bootstrap_key, 300U,
+            &device_join);
+        if (reauth_result != UCN_V6_OK) {
+            fprintf(stderr, "reauth result=%d\n", reauth_result);
+        }
+        CHECK(reauth_result == UCN_V6_OK);
+    }
     CHECK(ucn_v6_security_copy_view(device_manager, &view) == UCN_V6_OK);
-    CHECK(view.admitted_sessions == 1U);
+    CHECK(view.admitted_sessions == 1U && view.pending_invalidations == 1U);
+    {
+        ucn_v6_binding_key_t authority_binding = { 1U, 8U, 4U };
+        CHECK(ucn_v6_security_invalidation_peek(
+                  device_manager, &invalidation) == UCN_V6_OK);
+        CHECK(security_session_event_matches(
+                  &invalidation, 1U, 6U, &authority,
+                  &authority_binding, 1U));
+        CHECK(ucn_v6_security_invalidation_ack(
+                  device_manager, &invalidation) == UCN_V6_OK);
+    }
     {
         ucn_v6_group_policy_slot_t group;
         ucn_v6_group_key_slot_t key;
@@ -1064,7 +1557,7 @@ static int test_join_acl_aead_replay(void)
               decoded.group.group_id == 41U);
     }
     {
-        ucn_v6_key_selector_t next_hop = { 1U, 2U, 4U };
+        ucn_v6_key_selector_t next_hop = { 1U, 2U, 5U };
         ucn_v6_key_selector_t next_e2e = { 2U, 4U, 6U };
         CHECK(ucn_v6_security_rotate_session_keys(
                   device_manager, 400U, &authority, &next_hop, &next_e2e,
@@ -1073,6 +1566,16 @@ static int test_join_acl_aead_replay(void)
         CHECK(ucn_v6_security_revoke_session(
                   device_manager, &authority, &admin, admin_proof,
                   sizeof(admin_proof)) == UCN_V6_OK);
+        {
+            ucn_v6_binding_key_t authority_binding = { 1U, 8U, 4U };
+            CHECK(ucn_v6_security_invalidation_peek(
+                      device_manager, &invalidation) == UCN_V6_OK);
+            CHECK(security_session_event_matches(
+                      &invalidation, 1U, 7U, &authority,
+                      &authority_binding, 2U));
+            CHECK(ucn_v6_security_invalidation_ack(
+                      device_manager, &invalidation) == UCN_V6_OK);
+        }
         CHECK(ucn_v6_security_copy_view(device_manager, &view) == UCN_V6_OK);
         CHECK(view.admitted_sessions == 0U);
         CHECK(ucn_v6_security_commit_join(
@@ -1141,6 +1644,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     ucn_v6_frame_t budget_contract;
     ucn_v6_path_budget_request_t budget_request;
     ucn_v6_path_capability_t derived_path;
+    ucn_v6_capability_peer_ref_t destination_ref;
     ucn_v6_route_owner_t *route_owner = NULL;
     ucn_v6_route_domain_t route_domain;
     ucn_v6_route_path_t route_path;
@@ -1182,6 +1686,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
 
     memset(stores, 0, sizeof(stores));
     memset(cryptos, 0, sizeof(cryptos));
+    memset(gates, 0, sizeof(gates));
     for (index = 0U; index < 3U; ++index) {
         store_ops_array[index] = store_ops(&stores[index]);
         crypto_ops_array[index] = crypto_ops(&cryptos[index]);
@@ -1298,7 +1803,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
               sizeof(capability_encoded), &capability_encoded_length) ==
           UCN_V6_OK);
     CHECK(ucn_v6_security_open_frame(
-              managers[0], 91U, 6U, &c, capability_encoded,
+              managers[0], 91U, 1U, 6U, &c, capability_encoded,
               capability_encoded_length, NULL, 0U, &capability_opened) ==
           UCN_V6_OK);
     memset(&pipeline_capability_storage, 0,
@@ -1309,7 +1814,22 @@ static int test_independent_sequence_domains_and_verified_relay(void)
               ucn_v6_compiled_manifest(), &local_capability,
               10000U, 10000U, &capability_owner) == UCN_V6_OK);
     CHECK(ucn_v6_capability_ingest_advertise(
-              capability_owner, 91U, 2U, 6U, &capability_opened,
+              capability_owner, 91U, &capability_opened,
+              &destination_capability) == UCN_V6_OK);
+    /* The Route next hop has its own live Capability parent. */
+    capability_frame.source_address = 20U;
+    capability_frame.source_binding_generation = 2U;
+    CHECK(ucn_v6_security_protect_peer_discovery(
+              managers[1], 91U, &a, &capability_frame, capability_work,
+              sizeof(capability_work), capability_encoded,
+              sizeof(capability_encoded), &capability_encoded_length) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_open_frame(
+              managers[0], 92U, 1U, 6U, &b, capability_encoded,
+              capability_encoded_length, NULL, 0U, &capability_opened) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_capability_ingest_advertise(
+              capability_owner, 92U, &capability_opened,
               &destination_capability) == UCN_V6_OK);
     CHECK(ucn_v6_capability_digest(
               &destination_capability, capability_digest) == UCN_V6_OK);
@@ -1330,10 +1850,16 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     budget_request.destination_binding.realm_id = 1U;
     budget_request.destination_binding.node_address = 30U;
     budget_request.destination_binding.binding_generation = 3U;
-    budget_request.session_generation = 1U;
-    budget_request.destination_link_instance_generation = 6U;
+    budget_request.destination_session_generation = 1U;
+    budget_request.destination_capability_generation = 1U;
     memcpy(budget_request.destination_capability_digest, capability_digest,
            sizeof(capability_digest));
+    budget_request.destination_realtime_mode_bits =
+        destination_capability.peer.realtime_mode_bits;
+    budget_request.destination_clock_domain_id =
+        destination_capability.peer.clock_domain_id;
+    budget_request.destination_clock_domain_generation =
+        destination_capability.peer.clock_domain_generation;
     budget_request.route_generation = 1U;
     budget_request.path_id = 1U;
     budget_request.path_generation = 1U;
@@ -1353,10 +1879,40 @@ static int test_independent_sequence_domains_and_verified_relay(void)
         UCN_V6_TRANSFER_FRAGMENT_HEADER_BYTES;
     {
         ucn_v6_path_budget_accumulator_t accumulator;
+        ucn_v6_path_budget_accumulator_t downstream_accumulator;
+        ucn_v6_path_budget_request_t downstream_request = budget_request;
+        ucn_v6_path_capability_t downstream_path;
+        ucn_v6_capability_peer_ref_t next_hop_ref;
+        memset(&destination_ref, 0, sizeof(destination_ref));
+        destination_ref.principal = c;
+        destination_ref.binding = budget_request.destination_binding;
+        destination_ref.session_generation = 1U;
+        destination_ref.ingress_link_id = 1U;
+        destination_ref.ingress_link_generation = 6U;
+        downstream_request.route_generation = 2U;
+        downstream_request.path_id = 2U;
+        CHECK(ucn_v6_capability_path_reduce_begin(
+                  &downstream_request, &downstream_accumulator) == UCN_V6_OK);
+        CHECK(ucn_v6_capability_path_reduce_hop(
+                  capability_owner, 92U, &downstream_accumulator,
+                  &destination_ref) == UCN_V6_OK);
+        CHECK(ucn_v6_capability_path_reduce_finalize(
+                  &downstream_accumulator, &downstream_path) == UCN_V6_OK);
+        memset(&next_hop_ref, 0, sizeof(next_hop_ref));
+        next_hop_ref.principal = b;
+        next_hop_ref.binding.realm_id = 1U;
+        next_hop_ref.binding.node_address = 20U;
+        next_hop_ref.binding.binding_generation = 2U;
+        next_hop_ref.session_generation = 1U;
+        next_hop_ref.ingress_link_id = 1U;
+        next_hop_ref.ingress_link_generation = 6U;
         CHECK(ucn_v6_capability_path_reduce_begin(
                   &budget_request, &accumulator) == UCN_V6_OK);
+        CHECK(ucn_v6_capability_path_reduce_downstream(
+                  &accumulator, &downstream_path, 10000U) == UCN_V6_OK);
         CHECK(ucn_v6_capability_path_reduce_hop(
-                  &accumulator, &destination_capability) == UCN_V6_OK);
+                  capability_owner, 92U, &accumulator,
+                  &next_hop_ref) == UCN_V6_OK);
         CHECK(ucn_v6_capability_path_reduce_finalize(
                   &accumulator, &derived_path) == UCN_V6_OK);
     }
@@ -1365,8 +1921,8 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     memset(&pipeline_route_storage, 0, sizeof(pipeline_route_storage));
     CHECK(ucn_v6_route_owner_init_in_place(
               pipeline_route_storage.bytes, sizeof(pipeline_route_storage),
-              ucn_v6_compiled_manifest(), 1000U, 100U, 3U, 200U, 500U,
-              &route_owner) == UCN_V6_OK);
+              ucn_v6_compiled_manifest(), capability_owner,
+              1000U, 100U, 3U, 200U, 500U, &route_owner) == UCN_V6_OK);
     memset(&route_domain, 0, sizeof(route_domain));
     route_domain.origin_principal = a;
     route_domain.origin_binding.realm_id = 1U;
@@ -1375,6 +1931,8 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     route_domain.origin_session_generation = 1U;
     route_domain.destination_principal = c;
     route_domain.destination_binding = budget_request.destination_binding;
+    route_domain.destination_session_generation =
+        budget_request.destination_session_generation;
     CHECK(ucn_v6_route_candidate_begin(
               route_owner, 92U, 301U, &route_domain, 1U) == UCN_V6_OK);
     memset(&route_path, 0, sizeof(route_path));
@@ -1385,6 +1943,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     route_path.next_hop.binding.node_address = 20U;
     route_path.next_hop.binding.binding_generation = 2U;
     route_path.next_hop.session_generation = 1U;
+    route_path.next_hop_capability_generation = 1U;
     route_path.egress_link_id = 1U;
     route_path.egress_link_generation = 6U;
     route_path.hop_count = 2U;
@@ -1393,24 +1952,25 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     route_path.available = true;
     route_path.capability = derived_path;
     CHECK(ucn_v6_route_candidate_add_path(
-              route_owner, capability_owner, 93U, 301U, &route_domain,
-              &route_path) == UCN_V6_OK);
+              route_owner, 93U, 301U, &route_domain, &route_path) ==
+          UCN_V6_OK);
     CHECK(ucn_v6_route_candidate_record_probe(
-              route_owner, 94U, 301U, 1U, 1U) == UCN_V6_OK);
+              route_owner, 94U, 301U, &route_domain, 1U, 1U) == UCN_V6_OK);
     CHECK(ucn_v6_route_candidate_prepare_activation(
-              route_owner, 95U, 301U, &activation) == UCN_V6_OK);
+              route_owner, 95U, 301U, &route_domain,
+              &activation) == UCN_V6_OK);
     CHECK(ucn_v6_route_candidate_record_activation_send(
-              route_owner, 95U, 301U, true) == UCN_V6_OK);
+              route_owner, 95U, 301U, &route_domain, true) == UCN_V6_OK);
     CHECK(ucn_v6_route_candidate_commit_ack(
-              route_owner, capability_owner, 96U, &activation) == UCN_V6_OK);
+              route_owner, 96U, &activation) == UCN_V6_OK);
     memset(&select_request, 0, sizeof(select_request));
     select_request.domain = route_domain;
     select_request.flow_id = 201U;
     select_request.packet_sequence = 1U;
     select_request.policy = UCN_V6_ROUTE_POLICY_ACTIVE_STANDBY;
     CHECK(ucn_v6_route_select(
-              route_owner, capability_owner, 97U, &select_request,
-              &route_selection) == UCN_V6_OK);
+              route_owner, 97U, &select_request, &route_selection) ==
+          UCN_V6_OK);
     CHECK(route_selection.path.egress_link_id == 1U &&
           memcmp(route_selection.path.next_hop.principal.bytes, b.bytes,
                  sizeof(b.bytes)) == 0);
@@ -1450,7 +2010,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
         memset(&relayed, 0xC4, sizeof(relayed));
         frame_before = relayed;
         CHECK(ucn_v6_security_relay_frame(
-                  managers[1], 108U, 6U, &a, &c, 5U,
+                  managers[1], 108U, 1U, 6U, &a, &c, 5U,
                   encoded_c, encoded_c_length, encoded_c, sizeof(encoded_c),
                   relayed_encoded, sizeof(relayed_encoded), &length_before,
                   &relay_ingress, &relayed) == UCN_V6_ERR_ARGUMENT);
@@ -1491,7 +2051,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
         memset(&rejected_frame, 0xC3, sizeof(rejected_frame));
         frame_before = rejected_frame;
         CHECK(ucn_v6_security_relay_frame(
-                  managers[1], 109U, 6U, &a, &c, 5U,
+                  managers[1], 109U, 1U, 6U, &a, &c, 5U,
                   tampered, encoded_c_length, work_b, sizeof(work_b),
                   rejected_output, sizeof(rejected_output), &rejected_length,
                   &rejected_ingress, &rejected_frame) == UCN_V6_ERR_SECURITY);
@@ -1505,7 +2065,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     }
 
     CHECK(ucn_v6_security_relay_frame(
-              managers[1], 110U, 6U, &a, &c, 5U,
+              managers[1], 110U, 1U, 6U, &a, &c, 5U,
               encoded_c, encoded_c_length, work_b, sizeof(work_b),
               relayed_encoded, sizeof(relayed_encoded), &relayed_length,
               &relay_ingress, &relayed) == UCN_V6_OK);
@@ -1600,7 +2160,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
 #if UCN_V6_CONFIG_SECURITY_SESSIONS >= 3U
     b_submits_before = stores[1].submits;
     CHECK(ucn_v6_security_open_frame(
-              managers[1], 111U, 6U, &a, encoded_d, encoded_d_length,
+              managers[1], 111U, 1U, 6U, &a, encoded_d, encoded_d_length,
               NULL, 0U, &opened) == UCN_V6_OK);
     CHECK(stores[1].submits == b_submits_before);
     CHECK(!opened.endpoint_authorized && opened.hop_authenticated);
@@ -1616,7 +2176,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
 
     c_submits_before = stores[2].submits;
     CHECK(ucn_v6_security_open_frame(
-              managers[2], 120U, 6U, &b, delivered_frame, delivered_length,
+              managers[2], 120U, 1U, 6U, &b, delivered_frame, delivered_length,
               plaintext, sizeof(plaintext), &opened) == UCN_V6_OK);
     CHECK(stores[2].submits == c_submits_before);
     CHECK(opened.endpoint_authorized &&
@@ -1627,7 +2187,8 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     CHECK(ucn_v6_transfer_owner_init_in_place(
               pipeline_transfer_storage.bytes,
               sizeof(pipeline_transfer_storage),
-              ucn_v6_compiled_manifest(), 100U, 4U, 1000U, 2000U,
+              ucn_v6_compiled_manifest(), NULL,
+              100U, 4U, 1000U, 2000U,
               &transfer_rx) == UCN_V6_OK);
     CHECK(ucn_v6_transfer_receive_fragment(
               transfer_rx, 120U, &opened, &transfer_result) == UCN_V6_OK);
@@ -1659,15 +2220,17 @@ static int test_witness_rollback_fails_closed(void)
     fake_crypto_t crypto;
     ucn_v6_security_store_ops_t store_api;
     ucn_v6_security_crypto_ops_t crypto_api;
-    ucn_v6_callback_gate_t gate;
+    ucn_v6_callback_gate_t gate = {0};
     ucn_v6_security_manager_storage_t storage;
     ucn_v6_security_manager_t *manager = NULL;
+    ucn_v6_security_view_t view;
     ucn_v6_principal_t local = make_principal(0x20U);
     ucn_v6_principal_t admin = make_principal(0xA0U);
     ucn_v6_group_policy_slot_t group;
 
     memset(&store, 0, sizeof(store));
     memset(&crypto, 0, sizeof(crypto));
+    memset(&gate, 0, sizeof(gate));
     store_api = store_ops(&store);
     crypto_api = crypto_ops(&crypto);
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) == UCN_V6_OK);
@@ -1683,14 +2246,577 @@ static int test_witness_rollback_fails_closed(void)
     CHECK(ucn_v6_security_set_group_policy(
               manager, 0U, &group, &admin, admin_proof,
               sizeof(admin_proof)) == UCN_V6_ERR_STATE);
-    CHECK(store.witness_present && !store.present);
+    CHECK(store.witness_present && store.present &&
+          store.witness.committed_generation == 1U &&
+          store.witness.pending_generation == 2U &&
+          store.snapshot.snapshot_generation == 1U);
     memset(&storage, 0, sizeof(storage));
     manager = NULL;
     store.reject_submit = false;
     CHECK(ucn_v6_security_init_in_place(
               storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
               &local, &store_api, &crypto_api, &gate, &manager) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.snapshot_generation == 1U && view.active_groups == 0U &&
+          store.witness.committed_generation == 1U &&
+          store.witness.pending_generation == 0U);
+    return 0;
+}
+
+static int test_first_init_pending_witness_recovers_exact_generation(void)
+{
+    fake_store_t store;
+    fake_crypto_t crypto;
+    ucn_v6_security_store_ops_t store_api;
+    ucn_v6_security_crypto_ops_t crypto_api;
+    ucn_v6_callback_gate_t gate = {0};
+    ucn_v6_security_manager_storage_t storage;
+    ucn_v6_security_manager_t *manager = NULL;
+    ucn_v6_principal_t local = make_principal(0x21U);
+    ucn_v6_security_view_t view;
+
+    memset(&store, 0, sizeof(store));
+    memset(&crypto, 0, sizeof(crypto));
+    memset(&storage, 0, sizeof(storage));
+    store.witness_present = true;
+    store.witness.magic = UCN_V6_DURABLE_WITNESS_MAGIC;
+    store.witness.schema = UCN_V6_DURABLE_WITNESS_SCHEMA;
+    store.witness.flags = UCN_V6_DURABLE_WITNESS_COMMISSIONED;
+    store.witness.domain = (uint8_t)UCN_V6_DURABLE_WITNESS_SECURITY;
+    store.witness.witness_generation = 1U;
+    store.witness.pending_generation = 1U;
+    store_api = store_ops(&store);
+    crypto_api = crypto_ops(&crypto);
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
+          UCN_V6_OK);
+
+    store.reject_submit = true;
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
+              &local, &store_api, &crypto_api, &gate, &manager) ==
           UCN_V6_ERR_STATE);
+    CHECK(manager == NULL && !store.present && store.submits == 1U &&
+          store.witness.committed_generation == 0U &&
+          store.witness.pending_generation == 1U &&
+          store.witness.witness_generation == 1U);
+
+    store.reject_submit = false;
+    memset(&storage, 0, sizeof(storage));
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
+              &local, &store_api, &crypto_api, &gate, &manager) == UCN_V6_OK);
+    CHECK(store.submits == 2U && store.present &&
+          store.snapshot.snapshot_generation == 1U &&
+          store.witness.committed_generation == 1U &&
+          store.witness.pending_generation == 0U &&
+          store.witness.witness_generation == 2U);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.snapshot_generation == 1U && view.admitted_sessions == 0U);
+
+    /* A later restart consumes the committed pair without another write. */
+    memset(&storage, 0, sizeof(storage));
+    manager = NULL;
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
+              &local, &store_api, &crypto_api, &gate, &manager) == UCN_V6_OK);
+    CHECK(store.submits == 2U && store.witness.witness_generation == 2U);
+    return 0;
+}
+
+static int test_snapshot_padding_is_not_persistent_semantics(void)
+{
+    fake_store_t store;
+    fake_store_t corrupted;
+    fake_crypto_t crypto;
+    ucn_v6_security_store_ops_t store_api;
+    ucn_v6_security_store_ops_t corrupted_api;
+    ucn_v6_security_crypto_ops_t crypto_api;
+    ucn_v6_callback_gate_t gate = {0};
+    ucn_v6_security_manager_storage_t storage;
+    ucn_v6_security_manager_t *manager = NULL;
+    ucn_v6_principal_t local = make_principal(0x26U);
+
+    memset(&store, 0, sizeof(store));
+    memset(&crypto, 0, sizeof(crypto));
+    memset(&storage, 0, sizeof(storage));
+    store_api = store_ops(&store);
+    crypto_api = crypto_ops(&crypto);
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
+              &local, &store_api, &crypto_api, &gate, &manager) == UCN_V6_OK);
+
+    /* A Provider may deserialize into an ABI whose padding differs.  Every
+     * semantic empty field remains zero, so reload must still succeed. */
+    store.perturb_padding = true;
+    memset(&storage, 0, sizeof(storage));
+    manager = NULL;
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
+              &local, &store_api, &crypto_api, &gate, &manager) == UCN_V6_OK);
+
+    /* A nonzero semantic field in an empty slot is never padding and must be
+     * rejected independently of representation bytes. */
+    corrupted = store;
+    corrupted.perturb_padding = false;
+    corrupted.snapshot.sessions[0].admitted = true;
+    corrupted_api = store_ops(&corrupted);
+    memset(&storage, 0, sizeof(storage));
+    manager = NULL;
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
+              &local, &corrupted_api, &crypto_api, &gate, &manager) ==
+          UCN_V6_ERR_STATE);
+    CHECK(manager == NULL);
+    return 0;
+}
+
+static int test_authority_floor_transfer_and_old_authority_replay(void)
+{
+    const ucn_v6_bootstrap_config_t bootstrap_config = {
+        2U, 1U, 2U, 1U, UINT64_C(10000)
+    };
+    fake_store_t store;
+    fake_crypto_t crypto;
+    ucn_v6_security_store_ops_t store_api;
+    ucn_v6_security_crypto_ops_t crypto_api;
+    ucn_v6_callback_gate_t gate = {0};
+    ucn_v6_security_manager_storage_t manager_storage;
+    ucn_v6_security_manager_t *manager = NULL;
+    ucn_v6_bootstrap_owner_storage_t bootstrap_storage;
+    ucn_v6_bootstrap_owner_t *bootstrap = NULL;
+    ucn_v6_principal_t device = make_principal(0x18U);
+    ucn_v6_principal_t authority1 = make_principal(0x58U);
+    ucn_v6_principal_t authority2 = make_principal(0x78U);
+    ucn_v6_bootstrap_transcript_t next;
+    ucn_v6_bootstrap_transcript_t stale;
+    ucn_v6_bootstrap_key_t key;
+    ucn_v6_join_commit_t join;
+    ucn_v6_security_view_t view;
+    unsigned submits_before;
+
+    memset(&store, 0, sizeof(store));
+    memset(&crypto, 0, sizeof(crypto));
+    memset(&manager_storage, 0, sizeof(manager_storage));
+    store_api = store_ops(&store);
+    crypto_api = crypto_ops(&crypto);
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_init_in_place(
+              manager_storage.bytes, sizeof(manager_storage),
+              ucn_v6_compiled_manifest(), 1U, &device, &store_api,
+              &crypto_api, &gate, &manager) == UCN_V6_OK);
+    CHECK(install_pair_session(manager, &device, 7U, 3U, &authority1,
+                               8U, 4U, true, 700U, 1U) == 0);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.authority_floor_valid &&
+          view.authority_floor.authority_generation == 8U &&
+          memcmp(view.authority_floor.authority_principal.bytes,
+                 authority1.bytes, sizeof(authority1.bytes)) == 0);
+
+    /* The current Authority re-endorses the same Binding Generation.  A
+     * REAUTH under the higher fenced Authority atomically advances the floor.
+     * The already-admitted old Session keeps only its previously established
+     * local lease; the transfer cannot extend it. */
+    next = make_transcript_pair(&device, 7U, 3U, &authority2, 9U, 1U,
+                                701U, 7U);
+    next.flow = UCN_V6_BOOTSTRAP_FLOW_REAUTH;
+    next.selected_session_generation = 1U;
+    next.durable_fence_token[0] ^= UINT8_C(0x5A);
+    key = make_bootstrap_key(&next, 2U);
+    join = make_join(&next, true);
+    CHECK(ucn_v6_bootstrap_owner_init_in_place(
+              bootstrap_storage.bytes, sizeof(bootstrap_storage),
+              ucn_v6_compiled_manifest(), &bootstrap_config,
+              &bootstrap) == UCN_V6_OK);
+    CHECK(complete_bootstrap(bootstrap, &next, &key, 30U) == 0);
+    CHECK(ucn_v6_security_commit_join(
+              manager, bootstrap, &key, 40U, &join) == UCN_V6_OK);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.authority_floor_valid &&
+          view.authority_floor.authority_generation == 9U &&
+          memcmp(view.authority_floor.authority_principal.bytes,
+                 authority2.bytes, sizeof(authority2.bytes)) == 0 &&
+          view.admitted_sessions == 2U &&
+          view.pending_invalidations == 0U);
+
+    /* The floor is durable.  After restart, a completely self-consistent old
+     * Authority transcript/proof is still below the floor and is rejected
+     * before it can create a Session. */
+    memset(&manager_storage, 0, sizeof(manager_storage));
+    manager = NULL;
+    CHECK(ucn_v6_security_init_in_place(
+              manager_storage.bytes, sizeof(manager_storage),
+              ucn_v6_compiled_manifest(), 1U, &device, &store_api,
+              &crypto_api, &gate, &manager) == UCN_V6_OK);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.admitted_sessions == 0U && view.authority_floor_valid &&
+          view.authority_floor.authority_generation == 9U);
+    stale = make_transcript_pair(&device, 7U, 3U, &authority1, 8U, 4U,
+                                 702U, 8U);
+    stale.flow = UCN_V6_BOOTSTRAP_FLOW_REAUTH;
+    stale.selected_session_generation = 2U;
+    stale.selected_hop_key_generation = 4U;
+    key = make_bootstrap_key(&stale, 3U);
+    join = make_join(&stale, true);
+    bootstrap = NULL;
+    CHECK(ucn_v6_bootstrap_owner_init_in_place(
+              bootstrap_storage.bytes, sizeof(bootstrap_storage),
+              ucn_v6_compiled_manifest(), &bootstrap_config,
+              &bootstrap) == UCN_V6_OK);
+    CHECK(complete_bootstrap(bootstrap, &stale, &key, 50U) == 0);
+    submits_before = store.submits;
+    CHECK(ucn_v6_security_commit_join(
+              manager, bootstrap, &key, 60U, &join) == UCN_V6_ERR_REPLAY);
+    CHECK(store.submits == submits_before);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.authority_floor_valid &&
+          view.authority_floor.authority_generation == 9U);
+    return 0;
+}
+
+static int test_durable_session_transcript_and_link_generation_are_strict(void)
+{
+    fake_store_t store;
+    fake_store_t corrupted;
+    fake_crypto_t crypto;
+    ucn_v6_security_store_ops_t store_api;
+    ucn_v6_security_store_ops_t corrupted_api;
+    ucn_v6_security_crypto_ops_t crypto_api;
+    ucn_v6_callback_gate_t gate = {0};
+    ucn_v6_security_manager_storage_t storage;
+    ucn_v6_security_manager_t *manager = NULL;
+    ucn_v6_principal_t local = make_principal(0x24U);
+    ucn_v6_principal_t peer = make_principal(0x44U);
+
+    memset(&store, 0, sizeof(store));
+    memset(&crypto, 0, sizeof(crypto));
+    memset(&storage, 0, sizeof(storage));
+    store_api = store_ops(&store);
+    crypto_api = crypto_ops(&crypto);
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
+              &local, &store_api, &crypto_api, &gate, &manager) == UCN_V6_OK);
+    CHECK(install_pair_session(manager, &local, 7U, 3U, &peer, 8U, 4U,
+                               true, 901U, 1U) == 0);
+
+    corrupted = store;
+    ++corrupted.snapshot.sessions[0].bootstrap_transcript.device_nonce;
+    corrupted_api = store_ops(&corrupted);
+    memset(&storage, 0, sizeof(storage));
+    manager = NULL;
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
+              &local, &corrupted_api, &crypto_api, &gate, &manager) ==
+          UCN_V6_ERR_STATE);
+    CHECK(manager == NULL);
+
+    corrupted = store;
+    corrupted.snapshot.sessions[0].link_instance_generation =
+        UCN_V6_SERIAL_ROTATION_THRESHOLD + 1U;
+    corrupted.snapshot.sessions[0]
+        .bootstrap_transcript.selected_link_instance_generation =
+        UCN_V6_SERIAL_ROTATION_THRESHOLD + 1U;
+    corrupted_api = store_ops(&corrupted);
+    memset(&storage, 0, sizeof(storage));
+    manager = NULL;
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
+              &local, &corrupted_api, &crypto_api, &gate, &manager) ==
+          UCN_V6_ERR_STATE);
+    CHECK(manager == NULL);
+    return 0;
+}
+
+static int test_session_invalidation_queue_full_is_fail_closed(void)
+{
+    fake_store_t store;
+    fake_crypto_t crypto;
+    ucn_v6_security_store_ops_t store_api;
+    ucn_v6_security_crypto_ops_t crypto_api;
+    ucn_v6_callback_gate_t gate;
+    ucn_v6_security_manager_storage_t storage;
+    ucn_v6_security_manager_t *manager = NULL;
+    ucn_v6_principal_t local = make_principal(0x11U);
+    ucn_v6_principal_t peers[UCN_V6_CONFIG_SECURITY_SESSIONS];
+    ucn_v6_security_view_t view;
+    ucn_v6_stack_invalidation_t event;
+    ucn_v6_binding_key_t first_peer_binding = { 1U, 20U, 1U };
+    size_t index;
+
+    memset(&store, 0, sizeof(store));
+    memset(&crypto, 0, sizeof(crypto));
+    memset(&gate, 0, sizeof(gate));
+    store_api = store_ops(&store);
+    crypto_api = crypto_ops(&crypto);
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
+              1U, &local, &store_api, &crypto_api, &gate, &manager) ==
+          UCN_V6_OK);
+    for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
+        peers[index] = make_principal((uint8_t)(0x40U + index * 2U));
+        CHECK(install_pair_session(
+                  manager, &local, 7U, 3U, &peers[index],
+                  (uint32_t)(20U + index), 1U, true,
+                  (uint64_t)(100U + index), (uint32_t)(index + 1U)) == 0);
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
+        CHECK(ucn_v6_security_require_reauth(manager, &peers[index]) ==
+              UCN_V6_OK);
+    }
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.pending_invalidations == UCN_V6_SECURITY_INVALIDATION_DEPTH &&
+          view.admitted_sessions == 0U && !view.faulted);
+
+    /* The exact REAUTH reuses its already-pending old-session event.  A
+     * later distinct generation cannot be fenced while the queue is full. */
+    CHECK(reauth_pair_session(
+              manager, &local, 7U, 3U,
+              &peers[UCN_V6_CONFIG_SECURITY_SESSIONS - 1U],
+              (uint32_t)(20U + UCN_V6_CONFIG_SECURITY_SESSIONS - 1U),
+              1U, true, 500U, 100U) == 0);
+    CHECK(ucn_v6_security_require_reauth(
+              manager,
+              &peers[UCN_V6_CONFIG_SECURITY_SESSIONS - 1U]) ==
+          UCN_V6_ERR_NO_SPACE);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.pending_invalidations == UCN_V6_SECURITY_INVALIDATION_DEPTH &&
+          view.admitted_sessions == 1U && view.faulted);
+    CHECK(ucn_v6_security_invalidation_peek(manager, &event) == UCN_V6_OK);
+    CHECK(security_session_event_matches(
+              &event, 1U, 6U, &peers[0], &first_peer_binding, 1U));
+    return 0;
+}
+
+static int test_link_invalidation_is_exact_durable_and_atomic(void)
+{
+    fake_store_t store;
+    fake_crypto_t crypto;
+    ucn_v6_security_store_ops_t store_api;
+    ucn_v6_security_crypto_ops_t crypto_api;
+    ucn_v6_callback_gate_t gate = {0};
+    ucn_v6_security_manager_storage_t storage;
+    ucn_v6_security_manager_t *manager = NULL;
+    ucn_v6_principal_t local = make_principal(0x20U);
+    ucn_v6_principal_t peer_a = make_principal(0x40U);
+    ucn_v6_principal_t peer_b = make_principal(0x60U);
+    ucn_v6_binding_key_t peer_a_binding = { 1U, 20U, 1U };
+    ucn_v6_binding_key_t peer_b_binding = { 1U, 21U, 1U };
+    ucn_v6_stack_invalidation_t stale = link_invalidation(1U, 5U);
+    ucn_v6_stack_invalidation_t current = link_invalidation(1U, 6U);
+    ucn_v6_stack_invalidation_t event;
+    ucn_v6_security_view_t view;
+    unsigned submits_before;
+
+    memset(&store, 0, sizeof(store));
+    memset(&crypto, 0, sizeof(crypto));
+    store_api = store_ops(&store);
+    crypto_api = crypto_ops(&crypto);
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
+              &local, &store_api, &crypto_api, &gate, &manager) == UCN_V6_OK);
+    CHECK(install_pair_session(manager, &peer_a, 20U, 1U, &local, 7U, 3U,
+                               false, 100U, 1U) == 0);
+    CHECK(install_pair_session(manager, &peer_b, 21U, 1U, &local, 7U, 3U,
+                               false, 101U, 2U) == 0);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.admitted_sessions == 2U && view.pending_invalidations == 0U);
+
+    submits_before = store.submits;
+    CHECK(ucn_v6_security_apply_link_invalidation(manager, &stale) ==
+          UCN_V6_OK);
+    CHECK(store.submits == submits_before);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.admitted_sessions == 2U && view.pending_invalidations == 0U);
+
+    CHECK(ucn_v6_security_apply_link_invalidation(manager, &current) ==
+          UCN_V6_OK);
+    CHECK(store.submits == submits_before + 1U);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.admitted_sessions == 0U && view.pending_invalidations == 2U &&
+          !view.faulted);
+    CHECK(ucn_v6_security_invalidation_peek(manager, &event) == UCN_V6_OK);
+    CHECK(security_session_event_matches(
+              &event, 1U, 6U, &peer_a, &peer_a_binding, 1U));
+    CHECK(ucn_v6_security_invalidation_ack(manager, &event) == UCN_V6_OK);
+    CHECK(ucn_v6_security_invalidation_peek(manager, &event) == UCN_V6_OK);
+    CHECK(security_session_event_matches(
+              &event, 1U, 6U, &peer_b, &peer_b_binding, 1U));
+    CHECK(ucn_v6_security_invalidation_ack(manager, &event) == UCN_V6_OK);
+
+    /* Replaying the same Link generation cannot allocate another durable
+     * generation or recreate an already-consumed child event. */
+    submits_before = store.submits;
+    CHECK(ucn_v6_security_apply_link_invalidation(manager, &current) ==
+          UCN_V6_OK);
+    CHECK(store.submits == submits_before);
+    CHECK(ucn_v6_security_invalidation_peek(manager, &event) ==
+          UCN_V6_ERR_NOT_FOUND);
+    return 0;
+}
+
+static int test_link_invalidation_capacity_and_store_failure_are_atomic(void)
+{
+    fake_store_t store;
+    fake_crypto_t crypto;
+    ucn_v6_security_store_ops_t store_api;
+    ucn_v6_security_crypto_ops_t crypto_api;
+    ucn_v6_callback_gate_t gate = {0};
+    ucn_v6_security_manager_storage_t storage;
+    ucn_v6_security_manager_t *manager = NULL;
+    ucn_v6_principal_t local = make_principal(0x20U);
+    ucn_v6_principal_t peers[UCN_V6_CONFIG_SECURITY_SESSIONS];
+    ucn_v6_stack_invalidation_t link = link_invalidation(1U, 7U);
+    ucn_v6_security_view_t view;
+    unsigned submits_before;
+    size_t index;
+
+    memset(&store, 0, sizeof(store));
+    memset(&crypto, 0, sizeof(crypto));
+    store_api = store_ops(&store);
+    crypto_api = crypto_ops(&crypto);
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
+              &local, &store_api, &crypto_api, &gate, &manager) == UCN_V6_OK);
+    for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
+        peers[index] = make_principal((uint8_t)(0x40U + index * 3U));
+        CHECK(install_pair_session(
+                  manager, &peers[index], (uint32_t)(20U + index), 1U,
+                  &local, 7U, 3U, false, (uint64_t)(100U + index),
+                  (uint32_t)(index + 1U)) == 0);
+        CHECK(ucn_v6_security_require_reauth(manager, &peers[index]) ==
+              UCN_V6_OK);
+    }
+    CHECK(reauth_pair_session(manager, &peers[0], 20U, 1U, &local, 7U, 3U,
+                              false, 500U, 100U) == 0);
+    CHECK(reauth_pair_session(manager, &peers[1], 21U, 1U, &local, 7U, 3U,
+                              false, 501U, 101U) == 0);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.pending_invalidations == UCN_V6_SECURITY_INVALIDATION_DEPTH &&
+          view.admitted_sessions == 2U && !view.faulted);
+    submits_before = store.submits;
+    CHECK(ucn_v6_security_apply_link_invalidation(manager, &link) ==
+          UCN_V6_ERR_NO_SPACE);
+    CHECK(store.submits == submits_before);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.pending_invalidations == UCN_V6_SECURITY_INVALIDATION_DEPTH &&
+          view.admitted_sessions == 2U && !view.faulted);
+
+    /* A synchronous Provider failure cannot publish any child invalidation or
+     * install the candidate flags in RAM.  The Manager faults because its
+     * durable witness may now be pending and must be recovered on restart. */
+    memset(&store, 0, sizeof(store));
+    memset(&storage, 0, sizeof(storage));
+    memset(&gate, 0, sizeof(gate));
+    store_api = store_ops(&store);
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
+              &local, &store_api, &crypto_api, &gate, &manager) == UCN_V6_OK);
+    CHECK(install_pair_session(manager, &peers[0], 20U, 1U, &local, 7U, 3U,
+                               false, 600U, 1U) == 0);
+    link = link_invalidation(1U, 6U);
+    store.reject_submit = true;
+    submits_before = store.submits;
+    CHECK(ucn_v6_security_apply_link_invalidation(manager, &link) ==
+          UCN_V6_ERR_STATE);
+    CHECK(store.submits == submits_before + 1U);
+    CHECK(store.snapshot.sessions[0].admitted &&
+          !store.snapshot.sessions[0].requires_reauth);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.admitted_sessions == 1U && view.pending_invalidations == 0U &&
+          view.faulted);
+    return 0;
+}
+
+static int test_link_invalidation_skips_completed_fence_when_capacity_is_one(void)
+{
+#if UCN_V6_CONFIG_SECURITY_SESSIONS >= 3U
+    fake_store_t store = {0};
+    fake_crypto_t crypto = {0};
+    ucn_v6_security_store_ops_t store_api = store_ops(&store);
+    ucn_v6_security_crypto_ops_t crypto_api = crypto_ops(&crypto);
+    ucn_v6_callback_gate_t gate = UCN_V6_CALLBACK_GATE_INITIALIZER;
+    ucn_v6_security_manager_storage_t storage;
+    ucn_v6_security_manager_t *manager = NULL;
+    ucn_v6_principal_t local = make_principal(0x20U);
+    ucn_v6_principal_t fenced_peer = make_principal(0x40U);
+    ucn_v6_principal_t active_peer = make_principal(0x60U);
+    ucn_v6_principal_t filler_peer = make_principal(0x80U);
+    ucn_v6_binding_key_t active_binding = { 1U, 21U, 1U };
+    ucn_v6_stack_invalidation_t link = link_invalidation(1U, 6U);
+    ucn_v6_stack_invalidation_t event;
+    ucn_v6_security_view_t view;
+    uint32_t generation;
+
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(), 1U,
+              &local, &store_api, &crypto_api, &gate, &manager) == UCN_V6_OK);
+    CHECK(install_pair_session(manager, &fenced_peer, 20U, 1U, &local, 7U,
+                               3U, false, 100U, 1U) == 0);
+    CHECK(install_pair_session(manager, &active_peer, 21U, 1U, &local, 7U,
+                               3U, false, 101U, 2U) == 0);
+    CHECK(install_pair_session(manager, &filler_peer, 22U, 1U, &local, 7U,
+                               3U, false, 102U, 3U) == 0);
+
+    /* Complete and acknowledge the first child's fence. */
+    CHECK(ucn_v6_security_require_reauth(manager, &fenced_peer) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_invalidation_peek(manager, &event) == UCN_V6_OK);
+    CHECK(ucn_v6_security_invalidation_ack(manager, &event) == UCN_V6_OK);
+
+    /* One filler Session advances through exact-next generations while its
+     * older child events remain queued.  This leaves exactly one queue slot,
+     * without allocating unbounded test or production state. */
+    CHECK(ucn_v6_security_require_reauth(manager, &filler_peer) ==
+          UCN_V6_OK);
+    for (generation = 2U;
+         generation < UCN_V6_SECURITY_INVALIDATION_DEPTH;
+         ++generation) {
+        CHECK(reauth_pair_session_exact(
+                  manager, &filler_peer, 22U, 1U, &local, 7U, 3U, false,
+                  UINT64_C(200) + generation, 100U + generation,
+                  generation, generation + 5U, generation + 2U) == 0);
+        CHECK(ucn_v6_security_require_reauth(manager, &filler_peer) ==
+              UCN_V6_OK);
+    }
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.pending_invalidations ==
+              UCN_V6_SECURITY_INVALIDATION_DEPTH - 1U &&
+          view.admitted_sessions == 1U && !view.faulted);
+
+    /* The already-fenced sibling must not be counted or re-emitted.  The
+     * sole remaining slot belongs to the still-admitted sibling. */
+    CHECK(ucn_v6_security_apply_link_invalidation(manager, &link) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.pending_invalidations == UCN_V6_SECURITY_INVALIDATION_DEPTH &&
+          view.admitted_sessions == 0U && !view.faulted);
+    for (generation = 0U;
+         generation < UCN_V6_SECURITY_INVALIDATION_DEPTH - 1U;
+         ++generation) {
+        CHECK(ucn_v6_security_invalidation_peek(manager, &event) ==
+              UCN_V6_OK);
+        CHECK(ucn_v6_security_invalidation_ack(manager, &event) ==
+              UCN_V6_OK);
+    }
+    CHECK(ucn_v6_security_invalidation_peek(manager, &event) == UCN_V6_OK);
+    CHECK(security_session_event_matches(
+              &event, 1U, 6U, &active_peer, &active_binding, 1U));
+#endif
     return 0;
 }
 
@@ -1701,7 +2827,7 @@ static int test_group_fixed_slots_and_replay(void)
     fake_crypto_t crypto;
     ucn_v6_security_store_ops_t store_api;
     ucn_v6_security_crypto_ops_t crypto_api;
-    ucn_v6_callback_gate_t gate;
+    ucn_v6_callback_gate_t gate = {0};
     ucn_v6_security_manager_storage_t storage;
     ucn_v6_security_manager_t *manager = NULL;
     ucn_v6_principal_t local = make_principal(0x20U);
@@ -1717,6 +2843,7 @@ static int test_group_fixed_slots_and_replay(void)
 
     memset(&store, 0, sizeof(store));
     memset(&crypto, 0, sizeof(crypto));
+    memset(&gate, 0, sizeof(gate));
     store_api = store_ops(&store);
     crypto_api = crypto_ops(&crypto);
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) == UCN_V6_OK);
@@ -1774,12 +2901,22 @@ static int test_group_fixed_slots_and_replay(void)
              frame.link_tag);
     CHECK(ucn_v6_wire_encode(&frame, encoded, sizeof(encoded),
                              &encoded_length) == UCN_V6_OK);
+    memset(&opened, 0xA5, sizeof(opened));
+    {
+        ucn_v6_security_open_result_t before = opened;
+        CHECK(ucn_v6_security_open_frame(
+                  manager, 20U, 1U, 0U, NULL, encoded, encoded_length,
+                  NULL, 0U, &opened) == UCN_V6_ERR_ARGUMENT);
+        CHECK(memcmp(&opened, &before, sizeof(opened)) == 0);
+    }
     CHECK(ucn_v6_security_open_frame(
-              manager, 20U, 0U, NULL, encoded, encoded_length,
+              manager, 20U, 1U, 1U, NULL, encoded, encoded_length,
               NULL, 0U, &opened) == UCN_V6_OK);
-    CHECK(opened.group_discovery_only && !opened.endpoint_authorized);
+    CHECK(opened.group_discovery_only && !opened.endpoint_authorized &&
+          opened.ingress_link_instance_id == 1U &&
+          opened.ingress_link_instance_generation == 1U);
     CHECK(ucn_v6_security_open_frame(
-              manager, 21U, 0U, NULL, encoded, encoded_length,
+              manager, 21U, 1U, 1U, NULL, encoded, encoded_length,
               NULL, 0U, &opened) == UCN_V6_ERR_REPLAY);
 
     key.current_generation = 2U;
@@ -1798,7 +2935,7 @@ static int test_group_fixed_slots_and_replay(void)
     CHECK(ucn_v6_wire_encode(&frame, encoded, sizeof(encoded),
                              &encoded_length) == UCN_V6_OK);
     CHECK(ucn_v6_security_open_frame(
-              manager, 99U, 0U, NULL, encoded, encoded_length,
+              manager, 99U, 1U, 1U, NULL, encoded, encoded_length,
               NULL, 0U, &opened) == UCN_V6_OK);
     frame.origin_sequence = 3U;
     memset(frame.link_tag, 0, sizeof(frame.link_tag));
@@ -1809,7 +2946,7 @@ static int test_group_fixed_slots_and_replay(void)
     CHECK(ucn_v6_wire_encode(&frame, encoded, sizeof(encoded),
                              &encoded_length) == UCN_V6_OK);
     CHECK(ucn_v6_security_open_frame(
-              manager, 100U, 0U, NULL, encoded, encoded_length,
+              manager, 100U, 1U, 1U, NULL, encoded, encoded_length,
               NULL, 0U, &opened) == UCN_V6_ERR_SECURITY);
     key.state = UCN_V6_GROUP_KEY_RETIRED;
     CHECK(ucn_v6_security_set_group_key(
@@ -1854,6 +2991,7 @@ static int test_five_node_verified_relay_chain(void)
     memset(stores, 0, sizeof(stores));
     memset(storage, 0, sizeof(storage));
     memset(cryptos, 0, sizeof(cryptos));
+    memset(gates, 0, sizeof(gates));
     for (index = 0U; index < 5U; ++index) {
         principals[index] = make_principal((uint8_t)(0x10U + index * 0x20U));
         store_ops_array[index] = store_ops(&stores[index]);
@@ -1915,7 +3053,7 @@ static int test_five_node_verified_relay_chain(void)
 
     for (index = 1U; index <= 3U; ++index) {
         CHECK(ucn_v6_security_relay_frame(
-                  managers[index], 100U + index, 6U,
+                  managers[index], 100U + index, 1U, 6U,
                   &principals[index - 1U], &principals[index + 1U], 0U,
                   encoded[index - 1U], lengths[index - 1U], frame_work,
                   sizeof(frame_work), encoded[index], sizeof(encoded[index]),
@@ -1923,13 +3061,13 @@ static int test_five_node_verified_relay_chain(void)
         CHECK(verified.hop_authenticated &&
               !verified.endpoint_authorized &&
               relayed.origin_sequence == frame.origin_sequence &&
-              relayed.hop_limit == (uint8_t)(4U - index) &&
+              relayed.hop_limit == (uint16_t)(4U - index) &&
               memcmp(relayed.e2e_tag, original_e2e_tag,
                      sizeof(original_e2e_tag)) == 0);
     }
 
     CHECK(ucn_v6_security_open_frame(
-              managers[4], 110U, 6U, &principals[3], encoded[3], lengths[3],
+              managers[4], 110U, 1U, 6U, &principals[3], encoded[3], lengths[3],
               plaintext, sizeof(plaintext), &opened) == UCN_V6_OK);
     CHECK(opened.endpoint_authorized && opened.hop_authenticated &&
           memcmp(opened.authenticated_principal.bytes, principals[0].bytes,
@@ -1940,6 +3078,77 @@ static int test_five_node_verified_relay_chain(void)
     return 0;
 }
 
+static int test_callback_violations_fail_closed(void)
+{
+    static const uint8_t admin_proof[] = { UCN_V6_PROOF_REALM_ADMIN };
+    ucn_v6_security_manager_storage_t storage = {0};
+    fake_store_t store = {0};
+    fake_crypto_t crypto = {0};
+    ucn_v6_callback_gate_t gate = UCN_V6_CALLBACK_GATE_INITIALIZER;
+    ucn_v6_security_store_ops_t store_callbacks = store_ops(&store);
+    ucn_v6_security_crypto_ops_t crypto_callbacks = crypto_ops(&crypto);
+    ucn_v6_security_manager_t *manager = NULL;
+    ucn_v6_security_view_t view;
+    ucn_v6_principal_t local = make_principal(0x21U);
+    ucn_v6_principal_t peer = make_principal(0x61U);
+    ucn_v6_principal_t admin = make_principal(0xA1U);
+    ucn_v6_acl_entry_t acl = make_acl(
+        &local, 7U, 1U, 8U, 1U, UCN_V6_SECURITY_OUTBOUND);
+    unsigned submits_before;
+
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
+              1U, &local, &store_callbacks, &crypto_callbacks, &gate,
+              &manager) == UCN_V6_OK);
+    submits_before = store.submits;
+
+    crypto.reenter_on_proof = true;
+    crypto.reenter_manager = manager;
+    crypto.reenter_peer = peer;
+    CHECK(ucn_v6_security_set_acl(
+              manager, &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_ERR_STATE);
+    CHECK(crypto.reenter_result == UCN_V6_ERR_STATE);
+    CHECK(store.submits == submits_before);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.acl_entries == 0U && !view.faulted);
+    crypto.reenter_on_proof = false;
+
+    crypto.invalid_result_on_proof = true;
+    CHECK(ucn_v6_security_set_acl(
+              manager, &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_ERR_STATE);
+    CHECK(store.submits == submits_before);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.acl_entries == 0U && !view.faulted);
+    crypto.invalid_result_on_proof = false;
+
+    crypto.leave_gate_on_proof = true;
+    crypto.reenter_gate = &gate;
+    CHECK(ucn_v6_security_set_acl(
+              manager, &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_ERR_STATE);
+    CHECK(crypto.forced_leave_result == UCN_V6_OK);
+    CHECK(store.submits == submits_before);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.acl_entries == 0U && !view.faulted);
+    crypto.leave_gate_on_proof = false;
+
+    store.reenter_on_reserve = true;
+    store.reenter_manager = manager;
+    store.reenter_peer = peer;
+    CHECK(ucn_v6_security_set_acl(
+              manager, &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_ERR_STATE);
+    CHECK(store.reenter_result == UCN_V6_ERR_STATE);
+    CHECK(store.submits == submits_before);
+    CHECK(ucn_v6_security_copy_view(manager, &view) == UCN_V6_OK);
+    CHECK(view.acl_entries == 0U && view.faulted);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_join_acl_aead_replay() == 0);
@@ -1947,6 +3156,15 @@ int main(void)
     CHECK(test_five_node_verified_relay_chain() == 0);
     CHECK(test_group_fixed_slots_and_replay() == 0);
     CHECK(test_witness_rollback_fails_closed() == 0);
+    CHECK(test_first_init_pending_witness_recovers_exact_generation() == 0);
+    CHECK(test_snapshot_padding_is_not_persistent_semantics() == 0);
+    CHECK(test_authority_floor_transfer_and_old_authority_replay() == 0);
+    CHECK(test_durable_session_transcript_and_link_generation_are_strict() == 0);
+    CHECK(test_session_invalidation_queue_full_is_fail_closed() == 0);
+    CHECK(test_link_invalidation_is_exact_durable_and_atomic() == 0);
+    CHECK(test_link_invalidation_capacity_and_store_failure_are_atomic() == 0);
+    CHECK(test_link_invalidation_skips_completed_fence_when_capacity_is_one() == 0);
+    CHECK(test_callback_violations_fail_closed() == 0);
     puts("ucn v6 security tests passed");
     return 0;
 }

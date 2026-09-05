@@ -11,6 +11,100 @@ typedef char ucn_v6_operation_journal_storage_size_check[
     sizeof(ucn_v6_operation_journal_t) <=
             UCN_V6_OPERATION_JOURNAL_STORAGE_BYTES ? 1 : -1];
 
+static ucn_v6_result_t compute_result_digest_under_gate(
+    ucn_v6_operation_journal_t *journal,
+    const ucn_v6_message_digest_ops_t *ops,
+    const uint8_t request_digest[UCN_V6_OPERATION_DIGEST_BYTES],
+    int32_t result_code,
+    const uint8_t *result_bytes,
+    uint16_t result_length,
+    uint8_t digest[UCN_V6_OPERATION_DIGEST_BYTES]);
+
+static bool callback_gate_is_valid(const ucn_v6_callback_gate_t *gate)
+{
+    return gate != NULL && gate->initialized && gate->lock != NULL &&
+           gate->unlock != NULL;
+}
+
+static bool callback_result_is_declared(ucn_v6_result_t result)
+{
+    return result <= UCN_V6_OK && result >= UCN_V6_ERR_CANCELLED;
+}
+
+static ucn_v6_result_t callback_scope_enter(
+    ucn_v6_callback_gate_t *gate,
+    const void *owner,
+    uint64_t *violations_before)
+{
+    if (!callback_gate_is_valid(gate) || owner == NULL ||
+        violations_before == NULL) {
+        return UCN_V6_ERR_STATE;
+    }
+    *violations_before = ucn_v6_callback_gate_violation_count(gate);
+    if (*violations_before == UINT64_MAX ||
+        ucn_v6_callback_gate_try_enter(gate, owner) != UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
+    }
+    return UCN_V6_OK;
+}
+
+static bool callback_scope_is_clean(
+    ucn_v6_callback_gate_t *gate,
+    const void *owner,
+    uint64_t violations_before)
+{
+    bool clean;
+
+    if (!callback_gate_is_valid(gate) || owner == NULL ||
+        violations_before == UINT64_MAX) {
+        return false;
+    }
+    gate->lock(gate->context);
+    clean = gate->active && gate->active_owner == owner &&
+            gate->violation_count == violations_before &&
+            gate->violation_count != UINT64_MAX;
+    gate->unlock(gate->context);
+    return clean;
+}
+
+static ucn_v6_result_t callback_scope_finish(
+    ucn_v6_callback_gate_t *gate,
+    const void *owner,
+    uint64_t violations_before,
+    ucn_v6_result_t result)
+{
+    bool clean;
+
+    if (!callback_gate_is_valid(gate) || owner == NULL ||
+        violations_before == UINT64_MAX) {
+        return UCN_V6_ERR_STATE;
+    }
+    gate->lock(gate->context);
+    clean = gate->active && gate->active_owner == owner &&
+            gate->violation_count == violations_before &&
+            gate->violation_count != UINT64_MAX;
+    if (gate->active && gate->active_owner == owner) {
+        gate->active = false;
+        gate->active_owner = NULL;
+    }
+    gate->unlock(gate->context);
+    return clean && callback_result_is_declared(result) ? result :
+                                                         UCN_V6_ERR_STATE;
+}
+
+static bool callback_gate_probe(
+    ucn_v6_callback_gate_t *gate,
+    const void *owner)
+{
+    uint64_t violations_before;
+
+    if (callback_scope_enter(gate, owner, &violations_before) != UCN_V6_OK) {
+        return false;
+    }
+    return callback_scope_finish(gate, owner, violations_before,
+                                 UCN_V6_OK) == UCN_V6_OK;
+}
+
 static bool allocator_storage_is_valid(
     const ucn_v6_operation_id_allocator_t *allocator)
 {
@@ -168,6 +262,17 @@ static bool high_water_is_valid(
                UCN_V6_SERIAL64_ROTATION_THRESHOLD;
 }
 
+static bool high_water_equal(
+    const ucn_v6_operation_high_water_t *left,
+    const ucn_v6_operation_high_water_t *right)
+{
+    return left->occupied == right->occupied &&
+           principal_equal(&left->initiator_principal,
+                           &right->initiator_principal) &&
+           left->retired_through_operation_id ==
+               right->retired_through_operation_id;
+}
+
 static bool snapshot_is_valid(
     const ucn_v6_operation_journal_snapshot_t *snapshot,
     bool allow_factory_generation)
@@ -215,8 +320,16 @@ static bool snapshot_is_valid(
             }
         }
     }
+    /* Exact terminal slots remain authoritative even after the initiator's
+     * retirement floor advances beyond them.  A non-terminal slot at or below
+     * that floor is impossible: the trusted lifecycle owner may only advance
+     * through operations whose execution can no longer start or resume. */
     for (left = 0U; left < UCN_V6_OPERATION_JOURNAL_SLOTS; ++left) {
-        if (snapshot->slots[left].occupied) {
+        if (snapshot->slots[left].occupied &&
+            snapshot->slots[left].phase !=
+                UCN_V6_OPERATION_PHASE_COMMITTED_RESULT &&
+            snapshot->slots[left].phase !=
+                UCN_V6_OPERATION_PHASE_TOMBSTONED) {
             for (right = 0U;
                  right < UCN_V6_OPERATION_HIGH_WATER_SLOTS; ++right) {
                 if (snapshot->high_waters[right].occupied &&
@@ -441,6 +554,19 @@ static bool store_is_valid(const ucn_v6_message_store_ops_t *store)
            store->submit_journal != NULL;
 }
 
+static bool lifecycle_ops_is_valid(
+    const ucn_v6_message_lifecycle_ops_t *ops)
+{
+    return ops != NULL &&
+           ops->api_version ==
+               UCN_V6_MESSAGE_LIFECYCLE_PROVIDER_API_VERSION &&
+           ops->authorize_prepared_abort != NULL &&
+           ops->reconcile_in_doubt != NULL &&
+           ops->authorize_result_retirement != NULL &&
+           ops->authorize_tombstone_reclaim != NULL &&
+           ops->authorize_history_release != NULL;
+}
+
 static ucn_v6_result_t serial64_checked_next(
     uint64_t current,
     uint64_t *next)
@@ -457,25 +583,46 @@ static ucn_v6_result_t serial64_checked_next(
 
 static ucn_v6_result_t load_under_gate(
     const ucn_v6_message_store_ops_t *store,
-    ucn_v6_operation_journal_snapshot_t *snapshot)
+    ucn_v6_operation_journal_snapshot_t *snapshot,
+    ucn_v6_callback_gate_t *gate,
+    const void *callback_owner,
+    uint64_t violations_before)
 {
+    ucn_v6_result_t result;
+
     memset(snapshot, 0, sizeof(*snapshot));
-    return store->load_journal(store->context, snapshot);
+    result = store->load_journal(store->context, snapshot);
+    return callback_scope_is_clean(gate, callback_owner,
+                                   violations_before) &&
+                   callback_result_is_declared(result) ?
+               result : UCN_V6_ERR_STATE;
 }
 
 static ucn_v6_result_t load_witness_under_gate(
     const ucn_v6_message_store_ops_t *store,
-    ucn_v6_message_witness_t *witness)
+    ucn_v6_message_witness_t *witness,
+    ucn_v6_callback_gate_t *gate,
+    const void *callback_owner,
+    uint64_t violations_before)
 {
+    ucn_v6_result_t result;
+
     memset(witness, 0, sizeof(*witness));
-    return store->load_witness(store->context, witness);
+    result = store->load_witness(store->context, witness);
+    return callback_scope_is_clean(gate, callback_owner,
+                                   violations_before) &&
+                   callback_result_is_declared(result) ?
+               result : UCN_V6_ERR_STATE;
 }
 
 static ucn_v6_result_t reserve_witness_under_gate(
     const ucn_v6_message_store_ops_t *store,
     const ucn_v6_message_witness_t *previous,
     ucn_v6_message_witness_t *candidate,
-    ucn_v6_message_witness_t *verified)
+    ucn_v6_message_witness_t *verified,
+    ucn_v6_callback_gate_t *gate,
+    const void *callback_owner,
+    uint64_t violations_before)
 {
     uint64_t next_generation;
     ucn_v6_result_t result;
@@ -495,10 +642,16 @@ static ucn_v6_result_t reserve_witness_under_gate(
         return UCN_V6_ERR_STATE;
     }
     result = store->reserve_witness(store->context, candidate);
+    if (!callback_scope_is_clean(gate, callback_owner,
+                                 violations_before) ||
+        !callback_result_is_declared(result)) {
+        return UCN_V6_ERR_STATE;
+    }
     if (result != UCN_V6_OK) {
         return result;
     }
-    result = load_witness_under_gate(store, verified);
+    result = load_witness_under_gate(store, verified, gate, callback_owner,
+                                     violations_before);
     if (result != UCN_V6_OK || !witness_is_valid(verified, false) ||
         !witness_equal(candidate, verified)) {
         return UCN_V6_ERR_STATE;
@@ -509,14 +662,23 @@ static ucn_v6_result_t reserve_witness_under_gate(
 static ucn_v6_result_t submit_and_verify_under_gate(
     const ucn_v6_message_store_ops_t *store,
     const ucn_v6_operation_journal_snapshot_t *candidate,
-    ucn_v6_operation_journal_snapshot_t *verified)
+    ucn_v6_operation_journal_snapshot_t *verified,
+    ucn_v6_callback_gate_t *gate,
+    const void *callback_owner,
+    uint64_t violations_before)
 {
     ucn_v6_result_t result =
         store->submit_journal(store->context, candidate);
+    if (!callback_scope_is_clean(gate, callback_owner,
+                                 violations_before) ||
+        !callback_result_is_declared(result)) {
+        return UCN_V6_ERR_STATE;
+    }
     if (result != UCN_V6_OK) {
         return result;
     }
-    result = load_under_gate(store, verified);
+    result = load_under_gate(store, verified, gate, callback_owner,
+                             violations_before);
     if (result != UCN_V6_OK ||
         !snapshot_is_valid(verified, false) ||
         !snapshot_equal(candidate, verified)) {
@@ -529,7 +691,121 @@ static bool journal_is_ready(ucn_v6_operation_journal_t *journal)
 {
     return journal_storage_is_valid(journal) && !journal->faulted &&
            snapshot_is_valid(&journal->committed, true) &&
-           !ucn_v6_callback_gate_is_active(journal->callback_gate);
+           lifecycle_ops_is_valid(&journal->store.lifecycle) &&
+           callback_gate_probe(journal->callback_gate, journal);
+}
+
+static ucn_v6_result_t lifecycle_reconcile_under_gate(
+    ucn_v6_operation_journal_t *journal,
+    const ucn_v6_operation_slot_t *slot,
+    ucn_v6_operation_reconciliation_t *reconciliation)
+{
+    ucn_v6_result_t result;
+    uint64_t violations_before;
+
+    memset(reconciliation, 0, sizeof(*reconciliation));
+    result = callback_scope_enter(journal->callback_gate, journal,
+                                  &violations_before);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    result = journal->store.lifecycle.reconcile_in_doubt(
+        journal->store.lifecycle.context, slot, reconciliation);
+    result = callback_scope_finish(journal->callback_gate, journal,
+                                   violations_before, result);
+    if (result != UCN_V6_OK) {
+        memset(reconciliation, 0, sizeof(*reconciliation));
+    }
+    return result;
+}
+
+static ucn_v6_result_t lifecycle_authorize_prepared_abort_under_gate(
+    ucn_v6_operation_journal_t *journal,
+    const ucn_v6_operation_slot_t *slot,
+    int32_t *terminal_result_code,
+    uint8_t terminal_digest[UCN_V6_OPERATION_DIGEST_BYTES])
+{
+    ucn_v6_result_t result;
+    uint64_t violations_before;
+
+    *terminal_result_code = 0;
+    memset(terminal_digest, 0, UCN_V6_OPERATION_DIGEST_BYTES);
+    result = callback_scope_enter(journal->callback_gate, journal,
+                                  &violations_before);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    result = journal->store.lifecycle.authorize_prepared_abort(
+        journal->store.lifecycle.context, slot, terminal_result_code,
+        terminal_digest);
+    result = callback_scope_finish(journal->callback_gate, journal,
+                                   violations_before, result);
+    if (result != UCN_V6_OK) {
+        *terminal_result_code = 0;
+        memset(terminal_digest, 0, UCN_V6_OPERATION_DIGEST_BYTES);
+    }
+    return result;
+}
+
+static ucn_v6_result_t lifecycle_authorize_result_retirement_under_gate(
+    ucn_v6_operation_journal_t *journal,
+    const ucn_v6_operation_slot_t *slot)
+{
+    ucn_v6_result_t result;
+    uint64_t violations_before;
+
+    result = callback_scope_enter(journal->callback_gate, journal,
+                                  &violations_before);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    result = journal->store.lifecycle.authorize_result_retirement(
+        journal->store.lifecycle.context, slot);
+    return callback_scope_finish(journal->callback_gate, journal,
+                                 violations_before, result);
+}
+
+static ucn_v6_result_t lifecycle_authorize_tombstone_reclaim_under_gate(
+    ucn_v6_operation_journal_t *journal,
+    const ucn_v6_operation_slot_t *slot,
+    uint64_t *durable_initiator_high_water)
+{
+    ucn_v6_result_t result;
+    uint64_t violations_before;
+
+    *durable_initiator_high_water = 0U;
+    result = callback_scope_enter(journal->callback_gate, journal,
+                                  &violations_before);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    result = journal->store.lifecycle.authorize_tombstone_reclaim(
+        journal->store.lifecycle.context, slot,
+        durable_initiator_high_water);
+    result = callback_scope_finish(journal->callback_gate, journal,
+                                   violations_before, result);
+    if (result != UCN_V6_OK) {
+        *durable_initiator_high_water = 0U;
+    }
+    return result;
+}
+
+static ucn_v6_result_t lifecycle_authorize_history_release_under_gate(
+    ucn_v6_operation_journal_t *journal,
+    const ucn_v6_operation_high_water_t *high_water)
+{
+    ucn_v6_result_t result;
+    uint64_t violations_before;
+
+    result = callback_scope_enter(journal->callback_gate, journal,
+                                  &violations_before);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    result = journal->store.lifecycle.authorize_history_release(
+        journal->store.lifecycle.context, high_water);
+    return callback_scope_finish(journal->callback_gate, journal,
+                                 violations_before, result);
 }
 
 static ucn_v6_operation_slot_t *find_slot(
@@ -599,7 +875,7 @@ static ucn_v6_result_t persist_candidate(
     ucn_v6_message_witness_t committed_verified = {0};
     uint64_t next_generation;
     ucn_v6_result_t result;
-    ucn_v6_result_t leave_result;
+    uint64_t violations_before;
 
     result = serial64_checked_next(journal->committed.snapshot_generation,
                                    &next_generation);
@@ -611,11 +887,14 @@ static ucn_v6_result_t persist_candidate(
     if (!snapshot_is_valid(candidate, false)) {
         return UCN_V6_ERR_STATE;
     }
-    result = ucn_v6_callback_gate_try_enter(journal->callback_gate, journal);
+    result = callback_scope_enter(journal->callback_gate, journal,
+                                  &violations_before);
     if (result != UCN_V6_OK) {
         return result;
     }
-    result = load_witness_under_gate(&journal->store, &current);
+    result = load_witness_under_gate(&journal->store, &current,
+                                     journal->callback_gate, journal,
+                                     violations_before);
     if (result == UCN_V6_ERR_NOT_FOUND &&
         journal->witness.witness_generation == 0U) {
         witness_make_factory(&current);
@@ -632,26 +911,33 @@ static ucn_v6_result_t persist_candidate(
         pending.flags |= UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED;
         pending.journal_pending_generation = next_generation;
         result = reserve_witness_under_gate(&journal->store, &current,
-                                            &pending,
-                                            &pending_verified);
+                                             &pending,
+                                             &pending_verified,
+                                             journal->callback_gate, journal,
+                                             violations_before);
     }
     if (result == UCN_V6_OK) {
         result = submit_and_verify_under_gate(&journal->store, candidate,
-                                              &verified);
+                                              &verified,
+                                              journal->callback_gate, journal,
+                                              violations_before);
     }
     if (result == UCN_V6_OK) {
         committed_witness = pending_verified;
         committed_witness.journal_committed_generation = next_generation;
         committed_witness.journal_pending_generation = 0U;
         result = reserve_witness_under_gate(&journal->store,
-                                            &pending_verified,
-                                            &committed_witness,
-                                            &committed_verified);
+                                             &pending_verified,
+                                             &committed_witness,
+                                             &committed_verified,
+                                             journal->callback_gate, journal,
+                                             violations_before);
     }
-    leave_result = ucn_v6_callback_gate_leave(journal->callback_gate, journal);
-    if (result != UCN_V6_OK || leave_result != UCN_V6_OK) {
+    result = callback_scope_finish(journal->callback_gate, journal,
+                                   violations_before, result);
+    if (result != UCN_V6_OK) {
         journal->faulted = true;
-        return result != UCN_V6_OK ? result : leave_result;
+        return result;
     }
     journal->witness = committed_verified;
     journal->committed = verified;
@@ -727,7 +1013,7 @@ ucn_v6_result_t ucn_v6_operation_id_allocator_init_in_place(
     ucn_v6_operation_id_allocator_t *allocator;
     ucn_v6_message_witness_t witness;
     ucn_v6_result_t result;
-    ucn_v6_result_t leave_result;
+    uint64_t violations_before;
 
     if (allocator_out == NULL || !store_is_valid(store) ||
         callback_gate == NULL || reservation_block_size == 0U) {
@@ -745,14 +1031,13 @@ ucn_v6_result_t ucn_v6_operation_id_allocator_init_in_place(
         return result;
     }
     allocator = (ucn_v6_operation_id_allocator_t *)storage;
-    if (ucn_v6_callback_gate_is_active(callback_gate)) {
-        return UCN_V6_ERR_STATE;
-    }
-    result = ucn_v6_callback_gate_try_enter(callback_gate, allocator);
+    result = callback_scope_enter(callback_gate, allocator,
+                                  &violations_before);
     if (result != UCN_V6_OK) {
         return result;
     }
-    result = load_witness_under_gate(store, &witness);
+    result = load_witness_under_gate(store, &witness, callback_gate,
+                                     allocator, violations_before);
     if (result == UCN_V6_ERR_NOT_FOUND) {
         witness_make_factory(&witness);
         result = UCN_V6_OK;
@@ -760,9 +1045,10 @@ ucn_v6_result_t ucn_v6_operation_id_allocator_init_in_place(
                !witness_is_valid(&witness, false)) {
         result = UCN_V6_ERR_STATE;
     }
-    leave_result = ucn_v6_callback_gate_leave(callback_gate, allocator);
-    if (result != UCN_V6_OK || leave_result != UCN_V6_OK) {
-        return result != UCN_V6_OK ? result : leave_result;
+    result = callback_scope_finish(callback_gate, allocator,
+                                   violations_before, result);
+    if (result != UCN_V6_OK) {
+        return result;
     }
     if (witness.operation_id_high_water ==
         UCN_V6_SERIAL64_ROTATION_THRESHOLD) {
@@ -794,11 +1080,13 @@ ucn_v6_result_t ucn_v6_operation_id_take(
     ucn_v6_message_witness_t candidate = {0};
     ucn_v6_message_witness_t verified = {0};
     ucn_v6_result_t result;
-    ucn_v6_result_t leave_result;
+    uint64_t violations_before;
 
     if (!allocator_storage_is_valid(allocator) || operation_id == NULL ||
-        allocator->faulted ||
-        ucn_v6_callback_gate_is_active(allocator->callback_gate)) {
+        allocator->faulted) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (!callback_gate_probe(allocator->callback_gate, allocator)) {
         return UCN_V6_ERR_STATE;
     }
     if (allocator->next_id > allocator->reserved_through) {
@@ -810,12 +1098,14 @@ ucn_v6_result_t ucn_v6_operation_id_take(
         }
         new_high_water = allocator->reserved_through +
                          allocator->reservation_block_size;
-        result = ucn_v6_callback_gate_try_enter(allocator->callback_gate,
-                                                allocator);
+        result = callback_scope_enter(allocator->callback_gate, allocator,
+                                      &violations_before);
         if (result != UCN_V6_OK) {
             return result;
         }
-        result = load_witness_under_gate(&allocator->store, &current);
+        result = load_witness_under_gate(&allocator->store, &current,
+                                         allocator->callback_gate, allocator,
+                                         violations_before);
         if (result == UCN_V6_ERR_NOT_FOUND &&
             allocator->witness.witness_generation == 0U) {
             witness_make_factory(&current);
@@ -832,13 +1122,16 @@ ucn_v6_result_t ucn_v6_operation_id_take(
             candidate.operation_id_high_water = new_high_water;
             result = reserve_witness_under_gate(&allocator->store,
                                                 &current,
-                                                &candidate, &verified);
+                                                &candidate, &verified,
+                                                allocator->callback_gate,
+                                                allocator,
+                                                violations_before);
         }
-        leave_result = ucn_v6_callback_gate_leave(allocator->callback_gate,
-                                                  allocator);
-        if (result != UCN_V6_OK || leave_result != UCN_V6_OK) {
+        result = callback_scope_finish(allocator->callback_gate, allocator,
+                                       violations_before, result);
+        if (result != UCN_V6_OK) {
             allocator->faulted = true;
-            return result != UCN_V6_OK ? result : leave_result;
+            return result;
         }
         allocator->witness = verified;
         allocator->reserved_through = new_high_water;
@@ -859,6 +1152,9 @@ ucn_v6_result_t ucn_v6_operation_id_allocator_copy_view(
 {
     if (!allocator_storage_is_valid(allocator) || view == NULL) {
         return UCN_V6_ERR_ARGUMENT;
+    }
+    if (!callback_gate_probe(allocator->callback_gate, allocator)) {
+        return UCN_V6_ERR_STATE;
     }
     view->next_id = allocator->next_id;
     view->reserved_through = allocator->reserved_through;
@@ -889,9 +1185,10 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
     bool changed = false;
     bool journal_found = false;
     ucn_v6_result_t result;
-    ucn_v6_result_t leave_result;
+    uint64_t violations_before;
 
     if (journal_out == NULL || !store_is_valid(store) ||
+        !lifecycle_ops_is_valid(&store->lifecycle) ||
         callback_gate == NULL) {
         return UCN_V6_ERR_CONFIG;
     }
@@ -907,14 +1204,13 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
         return result;
     }
     journal = (ucn_v6_operation_journal_t *)storage;
-    if (ucn_v6_callback_gate_is_active(callback_gate)) {
-        return UCN_V6_ERR_STATE;
-    }
-    result = ucn_v6_callback_gate_try_enter(callback_gate, journal);
+    result = callback_scope_enter(callback_gate, journal,
+                                  &violations_before);
     if (result != UCN_V6_OK) {
         return result;
     }
-    result = load_witness_under_gate(store, &witness);
+    result = load_witness_under_gate(store, &witness, callback_gate, journal,
+                                     violations_before);
     if (result == UCN_V6_ERR_NOT_FOUND) {
         witness_make_factory(&witness);
         result = UCN_V6_OK;
@@ -923,7 +1219,8 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
         result = UCN_V6_ERR_STATE;
     }
     if (result == UCN_V6_OK) {
-        result = load_under_gate(store, &loaded);
+        result = load_under_gate(store, &loaded, callback_gate, journal,
+                                 violations_before);
         if (result == UCN_V6_ERR_NOT_FOUND) {
             snapshot_make_factory(&loaded);
             result = UCN_V6_OK;
@@ -963,7 +1260,9 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
         if (result == UCN_V6_OK) {
             result = reserve_witness_under_gate(store, &witness,
                                                 &witness_candidate,
-                                                &witness_verified);
+                                                &witness_verified,
+                                                callback_gate, journal,
+                                                violations_before);
             if (result == UCN_V6_OK) {
                 witness = witness_verified;
             }
@@ -996,12 +1295,16 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
                     next_generation;
                 result = reserve_witness_under_gate(store, &witness,
                                                     &witness_candidate,
-                                                    &witness_verified);
+                                                    &witness_verified,
+                                                    callback_gate, journal,
+                                                    violations_before);
             }
             if (result == UCN_V6_OK) {
                 witness = witness_verified;
                 result = submit_and_verify_under_gate(store, &migrated,
-                                                       &verified);
+                                                       &verified,
+                                                       callback_gate, journal,
+                                                       violations_before);
             }
             if (result == UCN_V6_OK) {
                 witness_candidate = witness;
@@ -1010,7 +1313,9 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
                 witness_candidate.journal_pending_generation = 0U;
                 result = reserve_witness_under_gate(store, &witness,
                                                     &witness_candidate,
-                                                    &witness_verified);
+                                                    &witness_verified,
+                                                    callback_gate, journal,
+                                                    violations_before);
                 if (result == UCN_V6_OK) {
                     loaded = verified;
                     witness = witness_verified;
@@ -1018,9 +1323,10 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
             }
         }
     }
-    leave_result = ucn_v6_callback_gate_leave(callback_gate, journal);
-    if (result != UCN_V6_OK || leave_result != UCN_V6_OK) {
-        return result != UCN_V6_OK ? result : leave_result;
+    result = callback_scope_finish(callback_gate, journal,
+                                   violations_before, result);
+    if (result != UCN_V6_OK) {
+        return result;
     }
     memset(&initialized, 0, sizeof(initialized));
     initialized.magic = UCN_V6_OPERATION_JOURNAL_OBJECT_MAGIC;
@@ -1060,18 +1366,9 @@ ucn_v6_result_t ucn_v6_operation_prepare(
     if (!journal_is_ready(journal)) {
         return UCN_V6_ERR_STATE;
     }
-    high_water = find_high_water_const(&journal->committed,
-                                       &key->initiator_principal);
-    if (high_water != NULL &&
-        key->operation_id <= high_water->retired_through_operation_id) {
-        return UCN_V6_ERR_REPLAY;
-    }
     candidate = journal->committed;
     slot = find_slot(&candidate, key, true);
-    if (slot == NULL) {
-        return UCN_V6_ERR_NO_SPACE;
-    }
-    if (slot->occupied) {
+    if (slot != NULL && slot->occupied) {
         if (slot->endpoint_id != endpoint_id ||
             slot->execution_contract != execution_contract ||
             memcmp(slot->request_digest, request_digest,
@@ -1099,6 +1396,15 @@ ucn_v6_result_t ucn_v6_operation_prepare(
         }
         *admission = duplicate;
         return UCN_V6_OK;
+    }
+    high_water = find_high_water_const(&journal->committed,
+                                       &key->initiator_principal);
+    if (high_water != NULL &&
+        key->operation_id <= high_water->retired_through_operation_id) {
+        return UCN_V6_ERR_REPLAY;
+    }
+    if (slot == NULL) {
+        return UCN_V6_ERR_NO_SPACE;
     }
     memset(slot, 0, sizeof(*slot));
     slot->occupied = true;
@@ -1137,6 +1443,34 @@ ucn_v6_result_t ucn_v6_operation_mark_executing(
         return UCN_V6_ERR_STATE;
     }
     slot->phase = UCN_V6_OPERATION_PHASE_EXECUTING;
+    return persist_candidate(journal, &candidate);
+}
+
+ucn_v6_result_t ucn_v6_operation_mark_in_doubt(
+    ucn_v6_operation_journal_t *journal,
+    const ucn_v6_operation_key_t *key)
+{
+    ucn_v6_operation_journal_snapshot_t candidate;
+    ucn_v6_operation_slot_t *slot;
+
+    if (journal == NULL || !operation_key_is_valid(key)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (!journal_is_ready(journal)) {
+        return UCN_V6_ERR_STATE;
+    }
+    candidate = journal->committed;
+    slot = find_slot(&candidate, key, false);
+    if (slot == NULL) {
+        return UCN_V6_ERR_NOT_FOUND;
+    }
+    if (slot->phase == UCN_V6_OPERATION_PHASE_IN_DOUBT) {
+        return UCN_V6_OK;
+    }
+    if (slot->phase != UCN_V6_OPERATION_PHASE_EXECUTING) {
+        return UCN_V6_ERR_STATE;
+    }
+    slot->phase = UCN_V6_OPERATION_PHASE_IN_DOUBT;
     return persist_candidate(journal, &candidate);
 }
 
@@ -1214,76 +1548,119 @@ ucn_v6_result_t ucn_v6_operation_commit_result(
 ucn_v6_result_t ucn_v6_operation_resolve_in_doubt(
     ucn_v6_operation_journal_t *journal,
     const ucn_v6_operation_key_t *key,
-    bool authenticated,
-    bool result_known,
-    int32_t result_code,
-    const uint8_t *result,
-    uint16_t result_length,
-    const uint8_t terminal_digest[UCN_V6_OPERATION_DIGEST_BYTES])
+    const ucn_v6_message_digest_ops_t *digest_ops)
 {
     ucn_v6_operation_journal_snapshot_t candidate;
+    ucn_v6_operation_slot_t durable_slot;
     ucn_v6_operation_slot_t *slot;
+    ucn_v6_operation_reconciliation_t reconciliation;
+    uint8_t result_digest[UCN_V6_OPERATION_DIGEST_BYTES];
+    ucn_v6_result_t result;
     ucn_v6_result_t result_set;
 
-    if (journal == NULL || !operation_key_is_valid(key) ||
-        !digest_is_valid(terminal_digest)) {
+    if (journal == NULL || !operation_key_is_valid(key)) {
         return UCN_V6_ERR_ARGUMENT;
     }
     if (!journal_is_ready(journal)) {
         return UCN_V6_ERR_STATE;
     }
-    if (!authenticated) {
-        return UCN_V6_ERR_ACCESS;
-    }
-    candidate = journal->committed;
-    slot = find_slot(&candidate, key, false);
+    slot = find_slot(&journal->committed, key, false);
     if (slot == NULL) {
         return UCN_V6_ERR_NOT_FOUND;
     }
     if (slot->phase != UCN_V6_OPERATION_PHASE_IN_DOUBT) {
         return UCN_V6_ERR_STATE;
     }
-    if (result_known) {
-        result_set = slot_set_committed_result(slot, result_code, result,
-                                               result_length,
-                                               terminal_digest);
+    durable_slot = *slot;
+    result = lifecycle_reconcile_under_gate(journal, &durable_slot,
+                                            &reconciliation);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    candidate = journal->committed;
+    slot = find_slot(&candidate, key, false);
+    if (slot == NULL || slot->phase != UCN_V6_OPERATION_PHASE_IN_DOUBT ||
+        !slot_equal(slot, &durable_slot)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (reconciliation.outcome == UCN_V6_OPERATION_RECONCILIATION_RESULT) {
+        if (reconciliation.result_length > UCN_V6_OPERATION_RESULT_MAX_BYTES ||
+            !bytes_are_zero(
+                reconciliation.result + reconciliation.result_length,
+                sizeof(reconciliation.result) -
+                    reconciliation.result_length) ||
+            !bytes_are_zero(reconciliation.terminal_digest,
+                            sizeof(reconciliation.terminal_digest))) {
+            return UCN_V6_ERR_STATE;
+        }
+        result = compute_result_digest_under_gate(
+            journal, digest_ops, slot->request_digest,
+            reconciliation.result_code, reconciliation.result,
+            reconciliation.result_length, result_digest);
+        if (result != UCN_V6_OK) {
+            return result;
+        }
+        result_set = slot_set_committed_result(
+            slot, reconciliation.result_code, reconciliation.result,
+            reconciliation.result_length, result_digest);
         if (result_set != UCN_V6_OK) {
             return result_set;
         }
-    } else {
-        if (result_length != 0U || result != NULL) {
-            return UCN_V6_ERR_ARGUMENT;
+    } else if (reconciliation.outcome ==
+               UCN_V6_OPERATION_RECONCILIATION_TOMBSTONE) {
+        if (reconciliation.result_length != 0U ||
+            !bytes_are_zero(reconciliation.result,
+                            sizeof(reconciliation.result)) ||
+            !digest_is_valid(reconciliation.terminal_digest)) {
+            return UCN_V6_ERR_STATE;
         }
         slot->phase = UCN_V6_OPERATION_PHASE_TOMBSTONED;
-        slot->result_code = result_code;
-        memcpy(slot->result_digest, terminal_digest,
+        slot->result_code = reconciliation.result_code;
+        memcpy(slot->result_digest, reconciliation.terminal_digest,
                sizeof(slot->result_digest));
+    } else {
+        return UCN_V6_ERR_STATE;
     }
     return persist_candidate(journal, &candidate);
 }
 
 ucn_v6_result_t ucn_v6_operation_abort_prepared(
     ucn_v6_operation_journal_t *journal,
-    const ucn_v6_operation_key_t *key,
-    int32_t result_code,
-    const uint8_t terminal_digest[UCN_V6_OPERATION_DIGEST_BYTES])
+    const ucn_v6_operation_key_t *key)
 {
     ucn_v6_operation_journal_snapshot_t candidate;
+    ucn_v6_operation_slot_t durable_slot;
     ucn_v6_operation_slot_t *slot;
+    int32_t result_code = 0;
+    uint8_t terminal_digest[UCN_V6_OPERATION_DIGEST_BYTES];
+    ucn_v6_result_t result;
 
-    if (journal == NULL || !operation_key_is_valid(key) ||
-        !digest_is_valid(terminal_digest)) {
+    if (journal == NULL || !operation_key_is_valid(key)) {
         return UCN_V6_ERR_ARGUMENT;
     }
     if (!journal_is_ready(journal)) {
         return UCN_V6_ERR_STATE;
     }
-    candidate = journal->committed;
-    slot = find_slot(&candidate, key, false);
+    slot = find_slot(&journal->committed, key, false);
     if (slot == NULL) {
         return UCN_V6_ERR_NOT_FOUND;
     }
     if (slot->phase != UCN_V6_OPERATION_PHASE_PREPARED) {
+        return UCN_V6_ERR_STATE;
+    }
+    durable_slot = *slot;
+    result = lifecycle_authorize_prepared_abort_under_gate(
+        journal, &durable_slot, &result_code, terminal_digest);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    if (!digest_is_valid(terminal_digest)) {
+        return UCN_V6_ERR_STATE;
+    }
+    candidate = journal->committed;
+    slot = find_slot(&candidate, key, false);
+    if (slot == NULL || slot->phase != UCN_V6_OPERATION_PHASE_PREPARED ||
+        !slot_equal(slot, &durable_slot)) {
         return UCN_V6_ERR_STATE;
     }
     slot->phase = UCN_V6_OPERATION_PHASE_TOMBSTONED;
@@ -1295,12 +1672,12 @@ ucn_v6_result_t ucn_v6_operation_abort_prepared(
 
 ucn_v6_result_t ucn_v6_operation_tombstone_result(
     ucn_v6_operation_journal_t *journal,
-    const ucn_v6_operation_key_t *key,
-    bool authenticated_result_ack,
-    bool minimum_retention_elapsed)
+    const ucn_v6_operation_key_t *key)
 {
     ucn_v6_operation_journal_snapshot_t candidate;
+    ucn_v6_operation_slot_t durable_slot;
     ucn_v6_operation_slot_t *slot;
+    ucn_v6_result_t result;
 
     if (journal == NULL || !operation_key_is_valid(key)) {
         return UCN_V6_ERR_ARGUMENT;
@@ -1308,15 +1685,24 @@ ucn_v6_result_t ucn_v6_operation_tombstone_result(
     if (!journal_is_ready(journal)) {
         return UCN_V6_ERR_STATE;
     }
-    if (!authenticated_result_ack || !minimum_retention_elapsed) {
-        return UCN_V6_ERR_ACCESS;
-    }
-    candidate = journal->committed;
-    slot = find_slot(&candidate, key, false);
+    slot = find_slot(&journal->committed, key, false);
     if (slot == NULL) {
         return UCN_V6_ERR_NOT_FOUND;
     }
     if (slot->phase != UCN_V6_OPERATION_PHASE_COMMITTED_RESULT) {
+        return UCN_V6_ERR_STATE;
+    }
+    durable_slot = *slot;
+    result = lifecycle_authorize_result_retirement_under_gate(
+        journal, &durable_slot);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    candidate = journal->committed;
+    slot = find_slot(&candidate, key, false);
+    if (slot == NULL ||
+        slot->phase != UCN_V6_OPERATION_PHASE_COMMITTED_RESULT ||
+        !slot_equal(slot, &durable_slot)) {
         return UCN_V6_ERR_STATE;
     }
     slot->phase = UCN_V6_OPERATION_PHASE_TOMBSTONED;
@@ -1327,25 +1713,20 @@ ucn_v6_result_t ucn_v6_operation_tombstone_result(
 
 ucn_v6_result_t ucn_v6_operation_reclaim_tombstone(
     ucn_v6_operation_journal_t *journal,
-    const ucn_v6_operation_key_t *key,
-    uint64_t durable_initiator_high_water,
-    bool maximum_replay_lifetime_elapsed)
+    const ucn_v6_operation_key_t *key)
 {
     ucn_v6_operation_journal_snapshot_t candidate;
+    ucn_v6_operation_slot_t durable_slot;
     ucn_v6_operation_slot_t *slot;
     ucn_v6_operation_high_water_t *high_water;
+    uint64_t durable_initiator_high_water = 0U;
+    ucn_v6_result_t result;
 
     if (journal == NULL || !operation_key_is_valid(key)) {
         return UCN_V6_ERR_ARGUMENT;
     }
     if (!journal_is_ready(journal)) {
         return UCN_V6_ERR_STATE;
-    }
-    if (!maximum_replay_lifetime_elapsed ||
-        durable_initiator_high_water <= key->operation_id ||
-        durable_initiator_high_water >
-            UCN_V6_SERIAL64_ROTATION_THRESHOLD) {
-        return UCN_V6_ERR_ACCESS;
     }
     candidate = journal->committed;
     slot = find_slot(&candidate, key, false);
@@ -1359,15 +1740,84 @@ ucn_v6_result_t ucn_v6_operation_reclaim_tombstone(
     if (high_water == NULL) {
         return UCN_V6_ERR_NO_SPACE;
     }
+    durable_slot = *slot;
+    result = lifecycle_authorize_tombstone_reclaim_under_gate(
+        journal, &durable_slot, &durable_initiator_high_water);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    if (durable_initiator_high_water <= key->operation_id ||
+        durable_initiator_high_water >
+            UCN_V6_SERIAL64_ROTATION_THRESHOLD) {
+        return UCN_V6_ERR_STATE;
+    }
+    candidate = journal->committed;
+    slot = find_slot(&candidate, key, false);
+    if (slot == NULL || slot->phase != UCN_V6_OPERATION_PHASE_TOMBSTONED ||
+        !slot_equal(slot, &durable_slot)) {
+        return UCN_V6_ERR_STATE;
+    }
+    high_water = find_high_water(&candidate, &key->initiator_principal, true);
+    if (high_water == NULL) {
+        return UCN_V6_ERR_STATE;
+    }
     if (!high_water->occupied) {
         memset(high_water, 0, sizeof(*high_water));
         high_water->occupied = true;
         high_water->initiator_principal = key->initiator_principal;
     }
-    if (key->operation_id > high_water->retired_through_operation_id) {
-        high_water->retired_through_operation_id = key->operation_id;
+    if (durable_initiator_high_water >
+        high_water->retired_through_operation_id) {
+        high_water->retired_through_operation_id =
+            durable_initiator_high_water;
     }
     memset(slot, 0, sizeof(*slot));
+    return persist_candidate(journal, &candidate);
+}
+
+ucn_v6_result_t ucn_v6_operation_release_principal_history(
+    ucn_v6_operation_journal_t *journal,
+    const ucn_v6_principal_t *initiator_principal)
+{
+    ucn_v6_operation_journal_snapshot_t candidate;
+    ucn_v6_operation_high_water_t durable_high_water;
+    ucn_v6_operation_high_water_t *high_water;
+    ucn_v6_result_t result;
+    size_t index;
+
+    if (journal == NULL ||
+        !ucn_v6_principal_is_valid(initiator_principal)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (!journal_is_ready(journal)) {
+        return UCN_V6_ERR_STATE;
+    }
+    high_water = find_high_water(&journal->committed,
+                                 initiator_principal, false);
+    if (high_water == NULL) {
+        return UCN_V6_ERR_NOT_FOUND;
+    }
+    for (index = 0U; index < UCN_V6_OPERATION_JOURNAL_SLOTS; ++index) {
+        if (journal->committed.slots[index].occupied &&
+            principal_equal(
+                &journal->committed.slots[index].key.initiator_principal,
+                initiator_principal)) {
+            return UCN_V6_ERR_STATE;
+        }
+    }
+    durable_high_water = *high_water;
+    result = lifecycle_authorize_history_release_under_gate(
+        journal, &durable_high_water);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    candidate = journal->committed;
+    high_water = find_high_water(&candidate, initiator_principal, false);
+    if (high_water == NULL ||
+        !high_water_equal(high_water, &durable_high_water)) {
+        return UCN_V6_ERR_STATE;
+    }
+    memset(high_water, 0, sizeof(*high_water));
     return persist_candidate(journal, &candidate);
 }
 
@@ -1382,6 +1832,9 @@ ucn_v6_result_t ucn_v6_operation_copy_slot(
         journal->faulted || !operation_key_is_valid(key) ||
         !snapshot_is_valid(&journal->committed, true)) {
         return UCN_V6_ERR_ARGUMENT;
+    }
+    if (!callback_gate_probe(journal->callback_gate, journal)) {
+        return UCN_V6_ERR_STATE;
     }
     for (index = 0U; index < UCN_V6_OPERATION_JOURNAL_SLOTS; ++index) {
         if (journal->committed.slots[index].occupied &&
@@ -1404,6 +1857,9 @@ ucn_v6_result_t ucn_v6_operation_journal_copy_view(
         !snapshot_is_valid(&journal->committed, true)) {
         return UCN_V6_ERR_ARGUMENT;
     }
+    if (!callback_gate_probe(journal->callback_gate, journal)) {
+        return UCN_V6_ERR_STATE;
+    }
     memset(&next, 0, sizeof(next));
     next.committed_generation = journal->committed.snapshot_generation;
     next.witness_generation = journal->witness.witness_generation;
@@ -1414,6 +1870,396 @@ ucn_v6_result_t ucn_v6_operation_journal_copy_view(
             ++next.occupied_slots;
         }
     }
+    for (index = 0U; index < UCN_V6_OPERATION_HIGH_WATER_SLOTS; ++index) {
+        if (journal->committed.high_waters[index].occupied) {
+            ++next.occupied_high_waters;
+        }
+    }
     *view = next;
+    return UCN_V6_OK;
+}
+
+static bool execution_result_is_valid(
+    const ucn_v6_endpoint_execution_result_t *result,
+    const ucn_v6_endpoint_contract_t *endpoint)
+{
+    return result != NULL && endpoint != NULL &&
+           result->result_length <= endpoint->max_result_bytes &&
+           result->result_length <= UCN_V6_OPERATION_RESULT_MAX_BYTES;
+}
+
+static bool digest_ops_is_valid(const ucn_v6_message_digest_ops_t *ops)
+{
+    return ops != NULL &&
+           ops->api_version == UCN_V6_MESSAGE_DIGEST_PROVIDER_API_VERSION &&
+           ops->algorithm_id == UCN_V6_MESSAGE_DIGEST_SHA256 &&
+           ops->digest_bytes == UCN_V6_OPERATION_DIGEST_BYTES &&
+           ops->compute != NULL;
+}
+
+static void canonical_put_u16(uint8_t *bytes, size_t *offset, uint16_t value)
+{
+    bytes[(*offset)++] = (uint8_t)(value >> 8U);
+    bytes[(*offset)++] = (uint8_t)value;
+}
+
+static void canonical_put_u32(uint8_t *bytes, size_t *offset, uint32_t value)
+{
+    bytes[(*offset)++] = (uint8_t)(value >> 24U);
+    bytes[(*offset)++] = (uint8_t)(value >> 16U);
+    bytes[(*offset)++] = (uint8_t)(value >> 8U);
+    bytes[(*offset)++] = (uint8_t)value;
+}
+
+static void canonical_put_u64(uint8_t *bytes, size_t *offset, uint64_t value)
+{
+    bytes[(*offset)++] = (uint8_t)(value >> 56U);
+    bytes[(*offset)++] = (uint8_t)(value >> 48U);
+    bytes[(*offset)++] = (uint8_t)(value >> 40U);
+    bytes[(*offset)++] = (uint8_t)(value >> 32U);
+    bytes[(*offset)++] = (uint8_t)(value >> 24U);
+    bytes[(*offset)++] = (uint8_t)(value >> 16U);
+    bytes[(*offset)++] = (uint8_t)(value >> 8U);
+    bytes[(*offset)++] = (uint8_t)value;
+}
+
+static ucn_v6_result_t compute_request_digest(
+    const ucn_v6_message_digest_ops_t *ops,
+    const ucn_v6_endpoint_contract_t *endpoint,
+    const ucn_v6_message_descriptor_t *message,
+    const ucn_v6_principal_t *authenticated_initiator,
+    const uint8_t *payload,
+    uint16_t payload_length,
+    uint8_t digest[UCN_V6_OPERATION_DIGEST_BYTES])
+{
+    static const uint8_t domain[8] = {
+        'U', 'C', 'N', '6', 'R', 'E', 'Q', 1U
+    };
+    uint8_t prefix[51];
+    size_t offset = 0U;
+    ucn_v6_result_t result;
+
+    if (!digest_ops_is_valid(ops) || endpoint == NULL || message == NULL ||
+        authenticated_initiator == NULL || digest == NULL ||
+        payload_length != message->payload_length ||
+        (payload_length != 0U && payload == NULL)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memcpy(&prefix[offset], domain, sizeof(domain));
+    offset += sizeof(domain);
+    memcpy(&prefix[offset], authenticated_initiator->bytes,
+           sizeof(authenticated_initiator->bytes));
+    offset += sizeof(authenticated_initiator->bytes);
+    canonical_put_u16(prefix, &offset, endpoint->endpoint_id);
+    prefix[offset++] = endpoint->traffic_class_mask;
+    prefix[offset++] = endpoint->delivery_guarantee_mask;
+    prefix[offset++] = endpoint->interaction_role_mask;
+    canonical_put_u16(prefix, &offset, endpoint->max_payload_bytes);
+    canonical_put_u16(prefix, &offset, endpoint->max_result_bytes);
+    prefix[offset++] = (uint8_t)endpoint->execution_contract;
+    prefix[offset++] = (uint8_t)message->traffic_class;
+    prefix[offset++] = (uint8_t)message->delivery_guarantee;
+    prefix[offset++] = (uint8_t)message->interaction_role;
+    canonical_put_u16(prefix, &offset, message->source_endpoint);
+    canonical_put_u16(prefix, &offset, message->destination_endpoint);
+    canonical_put_u64(prefix, &offset, message->operation_id);
+    canonical_put_u16(prefix, &offset, payload_length);
+    if (offset != sizeof(prefix)) {
+        return UCN_V6_ERR_STATE;
+    }
+    memset(digest, 0, UCN_V6_OPERATION_DIGEST_BYTES);
+    result = ops->compute(ops->context, prefix, sizeof(prefix), payload,
+                          payload_length, digest);
+    return result == UCN_V6_OK && digest_is_valid(digest) ? UCN_V6_OK :
+           (result == UCN_V6_OK ? UCN_V6_ERR_STATE : result);
+}
+
+static ucn_v6_result_t compute_result_digest(
+    const ucn_v6_message_digest_ops_t *ops,
+    const uint8_t request_digest[UCN_V6_OPERATION_DIGEST_BYTES],
+    int32_t result_code,
+    const uint8_t *result_bytes,
+    uint16_t result_length,
+    uint8_t digest[UCN_V6_OPERATION_DIGEST_BYTES])
+{
+    static const uint8_t domain[8] = {
+        'U', 'C', 'N', '6', 'R', 'E', 'S', 1U
+    };
+    uint8_t prefix[46];
+    size_t offset = 0U;
+    ucn_v6_result_t result;
+
+    if (!digest_ops_is_valid(ops) || !digest_is_valid(request_digest) ||
+        digest == NULL ||
+        (result_length != 0U && result_bytes == NULL)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memcpy(&prefix[offset], domain, sizeof(domain));
+    offset += sizeof(domain);
+    memcpy(&prefix[offset], request_digest, UCN_V6_OPERATION_DIGEST_BYTES);
+    offset += UCN_V6_OPERATION_DIGEST_BYTES;
+    canonical_put_u32(prefix, &offset, (uint32_t)result_code);
+    canonical_put_u16(prefix, &offset, result_length);
+    if (offset != sizeof(prefix)) {
+        return UCN_V6_ERR_STATE;
+    }
+    memset(digest, 0, UCN_V6_OPERATION_DIGEST_BYTES);
+    result = ops->compute(ops->context, prefix, sizeof(prefix), result_bytes,
+                          result_length, digest);
+    return result == UCN_V6_OK && digest_is_valid(digest) ? UCN_V6_OK :
+           (result == UCN_V6_OK ? UCN_V6_ERR_STATE : result);
+}
+
+static ucn_v6_result_t compute_request_digest_under_gate(
+    ucn_v6_operation_journal_t *journal,
+    const ucn_v6_message_digest_ops_t *ops,
+    const ucn_v6_endpoint_contract_t *endpoint,
+    const ucn_v6_message_descriptor_t *message,
+    const ucn_v6_principal_t *authenticated_initiator,
+    const uint8_t *payload,
+    uint16_t payload_length,
+    uint8_t digest[UCN_V6_OPERATION_DIGEST_BYTES])
+{
+    ucn_v6_result_t result;
+    uint64_t violations_before;
+
+    if (!journal_is_ready(journal) ||
+        callback_scope_enter(journal->callback_gate, journal,
+                             &violations_before) != UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
+    }
+    result = compute_request_digest(ops, endpoint, message,
+                                    authenticated_initiator, payload,
+                                    payload_length, digest);
+    result = callback_scope_finish(journal->callback_gate, journal,
+                                   violations_before, result);
+    if (result != UCN_V6_OK) {
+        memset(digest, 0, UCN_V6_OPERATION_DIGEST_BYTES);
+    }
+    return result;
+}
+
+static ucn_v6_result_t compute_result_digest_under_gate(
+    ucn_v6_operation_journal_t *journal,
+    const ucn_v6_message_digest_ops_t *ops,
+    const uint8_t request_digest[UCN_V6_OPERATION_DIGEST_BYTES],
+    int32_t result_code,
+    const uint8_t *result_bytes,
+    uint16_t result_length,
+    uint8_t digest[UCN_V6_OPERATION_DIGEST_BYTES])
+{
+    ucn_v6_result_t result;
+    uint64_t violations_before;
+
+    if (!journal_is_ready(journal) ||
+        callback_scope_enter(journal->callback_gate, journal,
+                             &violations_before) != UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
+    }
+    result = compute_result_digest(ops, request_digest, result_code,
+                                   result_bytes, result_length, digest);
+    result = callback_scope_finish(journal->callback_gate, journal,
+                                   violations_before, result);
+    if (result != UCN_V6_OK) {
+        memset(digest, 0, UCN_V6_OPERATION_DIGEST_BYTES);
+    }
+    return result;
+}
+
+static ucn_v6_result_t execute_under_gate(
+    ucn_v6_operation_journal_t *journal,
+    ucn_v6_endpoint_execute_fn execute,
+    void *execute_context,
+    const ucn_v6_message_descriptor_t *message,
+    const uint8_t *payload,
+    uint16_t payload_length,
+    ucn_v6_endpoint_execution_result_t *execution)
+{
+    ucn_v6_result_t result;
+    uint64_t violations_before;
+
+    if (!journal_is_ready(journal) || execute == NULL || execution == NULL ||
+        callback_scope_enter(journal->callback_gate, journal,
+                             &violations_before) != UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
+    }
+    memset(execution, 0, sizeof(*execution));
+    result = execute(execute_context, message, payload, payload_length,
+                     execution);
+    result = callback_scope_finish(journal->callback_gate, journal,
+                                   violations_before, result);
+    if (result != UCN_V6_OK) {
+        memset(execution, 0, sizeof(*execution));
+    }
+    return result;
+}
+
+static void dispatch_result_from_execution(
+    ucn_v6_endpoint_dispatch_action_t action,
+    const ucn_v6_endpoint_execution_result_t *execution,
+    const uint8_t *result_digest,
+    ucn_v6_endpoint_dispatch_result_t *result)
+{
+    memset(result, 0, sizeof(*result));
+    result->action = action;
+    result->result_code = execution->result_code;
+    result->result_length = execution->result_length;
+    if (execution->result_length != 0U) {
+        memcpy(result->result, execution->result,
+               execution->result_length);
+    }
+    if (result_digest != NULL) {
+        memcpy(result->result_digest, result_digest,
+               sizeof(result->result_digest));
+    }
+}
+
+static void dispatch_result_from_slot(
+    ucn_v6_endpoint_dispatch_action_t action,
+    const ucn_v6_operation_slot_t *slot,
+    ucn_v6_endpoint_dispatch_result_t *result)
+{
+    memset(result, 0, sizeof(*result));
+    result->action = action;
+    result->result_code = slot->result_code;
+    result->result_length = slot->result_length;
+    if (slot->result_length != 0U) {
+        memcpy(result->result, slot->result, slot->result_length);
+    }
+    memcpy(result->result_digest, slot->result_digest,
+           sizeof(result->result_digest));
+}
+
+ucn_v6_result_t ucn_v6_endpoint_dispatch_request(
+    ucn_v6_operation_journal_t *journal,
+    const ucn_v6_endpoint_contract_t *endpoint,
+    const ucn_v6_message_descriptor_t *message,
+    const ucn_v6_principal_t *authenticated_initiator,
+    const uint8_t *payload,
+    uint16_t payload_length,
+    const ucn_v6_message_digest_ops_t *digest_ops,
+    ucn_v6_endpoint_execute_fn execute,
+    void *execute_context,
+    ucn_v6_endpoint_dispatch_result_t *dispatch_result)
+{
+    ucn_v6_endpoint_execution_result_t execution;
+    ucn_v6_operation_key_t key;
+    ucn_v6_operation_slot_t slot;
+    ucn_v6_operation_admission_t admission;
+    ucn_v6_result_t result;
+    ucn_v6_result_t uncertain_result;
+    uint8_t request_digest[UCN_V6_OPERATION_DIGEST_BYTES];
+    uint8_t result_digest[UCN_V6_OPERATION_DIGEST_BYTES];
+
+    if (endpoint == NULL || message == NULL || execute == NULL ||
+        dispatch_result == NULL || payload_length != message->payload_length ||
+        (payload_length != 0U && payload == NULL) ||
+        (message->interaction_role != UCN_V6_INTERACTION_ONE_WAY &&
+         message->interaction_role != UCN_V6_INTERACTION_REQUEST)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    result = ucn_v6_message_validate(message, endpoint);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    if (endpoint->execution_contract !=
+        UCN_V6_ENDPOINT_DURABLE_AT_MOST_ONCE) {
+        memset(&execution, 0, sizeof(execution));
+        result = execute(execute_context, message, payload, payload_length,
+                         &execution);
+        if (result != UCN_V6_OK ||
+            !execution_result_is_valid(&execution, endpoint)) {
+            return result != UCN_V6_OK ? result : UCN_V6_ERR_STATE;
+        }
+        dispatch_result_from_execution(UCN_V6_ENDPOINT_DISPATCH_EXECUTED,
+                                       &execution, NULL, dispatch_result);
+        return UCN_V6_OK;
+    }
+    if (journal == NULL || authenticated_initiator == NULL ||
+        message->interaction_role != UCN_V6_INTERACTION_REQUEST ||
+        !digest_ops_is_valid(digest_ops)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(&key, 0, sizeof(key));
+    key.initiator_principal = *authenticated_initiator;
+    key.operation_id = message->operation_id;
+    if (!operation_key_is_valid(&key)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    result = compute_request_digest_under_gate(
+        journal, digest_ops, endpoint, message, authenticated_initiator,
+        payload, payload_length, request_digest);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    result = ucn_v6_operation_prepare(
+        journal, &key, endpoint->endpoint_id, endpoint->execution_contract,
+        request_digest, &admission);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    if (admission == UCN_V6_OPERATION_ADMISSION_RESULT_REPLAY) {
+        result = ucn_v6_operation_copy_slot(journal, &key, &slot);
+        if (result != UCN_V6_OK ||
+            slot.phase != UCN_V6_OPERATION_PHASE_COMMITTED_RESULT) {
+            return result != UCN_V6_OK ? result : UCN_V6_ERR_STATE;
+        }
+        result = compute_result_digest_under_gate(
+            journal, digest_ops, slot.request_digest, slot.result_code,
+            slot.result, slot.result_length, result_digest);
+        if (result != UCN_V6_OK ||
+            memcmp(result_digest, slot.result_digest,
+                   sizeof(result_digest)) != 0) {
+            journal->faulted = true;
+            return result != UCN_V6_OK ? result : UCN_V6_ERR_STATE;
+        }
+        dispatch_result_from_slot(UCN_V6_ENDPOINT_DISPATCH_RESULT_REPLAY,
+                                  &slot, dispatch_result);
+        return UCN_V6_OK;
+    }
+    if (admission == UCN_V6_OPERATION_ADMISSION_EXECUTING ||
+        admission == UCN_V6_OPERATION_ADMISSION_IN_DOUBT) {
+        memset(dispatch_result, 0, sizeof(*dispatch_result));
+        dispatch_result->action = UCN_V6_ENDPOINT_DISPATCH_IN_DOUBT;
+        return UCN_V6_OK;
+    }
+    if (admission == UCN_V6_OPERATION_ADMISSION_TOMBSTONED) {
+        memset(dispatch_result, 0, sizeof(*dispatch_result));
+        dispatch_result->action = UCN_V6_ENDPOINT_DISPATCH_TOMBSTONED;
+        return UCN_V6_OK;
+    }
+    if (admission != UCN_V6_OPERATION_ADMISSION_NEW &&
+        admission != UCN_V6_OPERATION_ADMISSION_PREPARED) {
+        return UCN_V6_ERR_STATE;
+    }
+    result = ucn_v6_operation_mark_executing(journal, &key);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    memset(&execution, 0, sizeof(execution));
+    result = execute_under_gate(journal, execute, execute_context, message,
+                                payload, payload_length, &execution);
+    if (result != UCN_V6_OK ||
+        !execution_result_is_valid(&execution, endpoint)) {
+        uncertain_result = ucn_v6_operation_mark_in_doubt(journal, &key);
+        return uncertain_result != UCN_V6_OK ? uncertain_result :
+               (result != UCN_V6_OK ? result : UCN_V6_ERR_STATE);
+    }
+    result = compute_result_digest_under_gate(
+        journal, digest_ops, request_digest, execution.result_code,
+        execution.result, execution.result_length, result_digest);
+    if (result != UCN_V6_OK) {
+        uncertain_result = ucn_v6_operation_mark_in_doubt(journal, &key);
+        return uncertain_result != UCN_V6_OK ? uncertain_result : result;
+    }
+    result = ucn_v6_operation_commit_result(
+        journal, &key, execution.result_code, execution.result,
+        execution.result_length, result_digest);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    dispatch_result_from_execution(UCN_V6_ENDPOINT_DISPATCH_EXECUTED,
+                                   &execution, result_digest,
+                                   dispatch_result);
     return UCN_V6_OK;
 }

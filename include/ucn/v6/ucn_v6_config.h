@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 #define UCN_V6_API_VERSION UINT16_C(1)
-#define UCN_V6_STORAGE_LAYOUT UINT16_C(4)
+#define UCN_V6_STORAGE_LAYOUT UINT16_C(6)
 #define UCN_V6_STORAGE_ALIGNMENT ((size_t)8U)
 
 #define UCN_V6_PROFILE_NANO 1U
@@ -85,7 +85,7 @@ extern "C" {
 #define UCN_V6_CONFIG_GROUP_KEY_SLOTS UCN_V6_PROFILE_DEFAULT(1U, 2U, 4U)
 #endif
 #ifndef UCN_V6_CONFIG_OWNER_EVENT_DEPTH
-#define UCN_V6_CONFIG_OWNER_EVENT_DEPTH UCN_V6_PROFILE_DEFAULT(32U, 128U, 255U)
+#define UCN_V6_CONFIG_OWNER_EVENT_DEPTH 5U
 #endif
 #ifndef UCN_V6_CONFIG_SECURITY_SESSIONS
 #define UCN_V6_CONFIG_SECURITY_SESSIONS UCN_V6_PROFILE_DEFAULT(2U, 4U, 8U)
@@ -235,9 +235,8 @@ extern "C" {
     UCN_V6_CONFIG_GROUP_KEY_SLOTS > 255U
 #error "UCN_V6_CONFIG_GROUP_KEY_SLOTS must be 1..255"
 #endif
-#if UCN_V6_CONFIG_OWNER_EVENT_DEPTH < 1U || \
-    UCN_V6_CONFIG_OWNER_EVENT_DEPTH > 65535U
-#error "UCN_V6_CONFIG_OWNER_EVENT_DEPTH must be 1..65535"
+#if UCN_V6_CONFIG_OWNER_EVENT_DEPTH != 5U
+#error "UCN_V6_CONFIG_OWNER_EVENT_DEPTH is the five canonical event latches"
 #endif
 #if UCN_V6_CONFIG_SECURITY_SESSIONS < 1U || \
     UCN_V6_CONFIG_SECURITY_SESSIONS > 255U
@@ -414,7 +413,7 @@ enum {
      UCN_V6_ADAPTER_FEATURE_BIT)
 
 #define UCN_V6_COMPILED_LAYOUT_HASH                                        \
-    (UINT64_C(0xD65A000400000000) ^                                       \
+    (UINT64_C(0xD65A000600000000) ^                                       \
      ((uint64_t)UCN_V6_PROFILE * UINT64_C(0x9E3779B97F4A7C15)) ^           \
      ((uint64_t)UCN_V6_COMPILED_FEATURE_BITS *                            \
       UINT64_C(0xD6E8FEB86659FD93)) ^                                     \
@@ -542,7 +541,9 @@ enum {
     ((size_t)(1024U + UCN_V6_CONFIG_CAPABILITY_PEERS * 256U +            \
               UCN_V6_CONFIG_CAPABILITY_PATHS * 160U +                    \
               UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS * 136U +               \
-              UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS * 32U))
+              UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS * 32U +                \
+              (UCN_V6_CONFIG_CAPABILITY_PEERS +                          \
+               UCN_V6_CONFIG_CAPABILITY_PATHS) * 64U))
 #define UCN_V6_ROUTE_OWNER_STORAGE_BYTES                                  \
     ((size_t)(1024U + UCN_V6_CONFIG_ROUTE_SETS * 128U +                   \
               UCN_V6_CONFIG_ROUTE_SETS *                                  \
@@ -569,19 +570,22 @@ enum {
               UCN_V6_CONFIG_TRANSFER_CREDIT_RESERVATIONS * 128U))
 #define UCN_V6_REALTIME_OWNER_STORAGE_BYTES                               \
     ((size_t)(2048U + UCN_V6_CONFIG_REALTIME_ENDPOINTS * 96U +            \
-              UCN_V6_CONFIG_TIME_DOMAINS * 512U))
+              UCN_V6_CONFIG_TIME_DOMAINS * (512U + 4U * 96U)))
 #define UCN_V6_CLUSTER_OWNER_STORAGE_BYTES                                \
     ((size_t)(8192U + UCN_V6_CONFIG_CLUSTER_MEMBERS * 192U +              \
               UCN_V6_CONFIG_CLUSTER_VOTERS * 160U * 2U +                 \
               UCN_V6_CONFIG_CLUSTER_TOMBSTONES * 96U +                   \
               UCN_V6_CONFIG_CLUSTER_DIRECTORY * 192U +                   \
-              UCN_V6_CONFIG_CLUSTER_TUNNELS * 256U))
+              UCN_V6_CONFIG_CLUSTER_TUNNELS * 256U +                     \
+              (UCN_V6_CONFIG_CLUSTER_MEMBERS +                           \
+               UCN_V6_CONFIG_CLUSTER_DIRECTORY +                         \
+               UCN_V6_CONFIG_CLUSTER_TUNNELS) * 64U))
 #define UCN_V6_ADAPTER_OWNER_STORAGE_BYTES                                \
     ((size_t)(4096U + UCN_V6_CONFIG_ADAPTER_LINKS * 384U +                \
               (UCN_V6_CONFIG_ADAPTER_RX_SLOTS +                          \
                UCN_V6_CONFIG_ADAPTER_TX_SLOTS) *                         \
                   (UCN_V6_CONFIG_ADAPTER_FRAME_BYTES + 128U)))
-#define UCN_V6_FREERTOS_PORT_STORAGE_BYTES ((size_t)2048U)
+#define UCN_V6_FREERTOS_PORT_STORAGE_BYTES ((size_t)3072U)
 
 #define UCN_V6_DECLARE_STORAGE_TYPE(name_, bytes_) \
     typedef union name_ {                         \

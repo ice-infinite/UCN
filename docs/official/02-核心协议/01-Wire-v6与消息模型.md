@@ -7,9 +7,13 @@ Flags、Header/Extension 长度、保留位和总长度；任一条件错误时�
 作为负向 fixture 被拒绝，但旧 codec 不属于发布产物。
 
 A0～A3 是地址编码档，不是节点权限和算力等级。四档共享同一 canonical semantic frame；
-所有 Profile 都必须解析四档。当前基础长度分别为 `40/42/44/46 B`，之后再叠加已声明的
+所有 Profile 都必须解析四档。当前基础长度分别为 `41/43/45/47 B`，之后再叠加已声明的
 扩展、Payload 与 Tag。应用仍应通过 Wire 长度 API 计算，不能把该表或历史 32 B/40 B 写死
 到 Driver。
+
+Hop Limit 使用 16-bit 网络序，与 Capability/Route/QoS 的累计跳数共用
+`1..65534` 域；`0` 和 `65535` 必须拒绝。这只是编码能力上限，产品
+Manifest 应根据端到端时延和控制面开销收窄实际最大跳数。
 
 ## 2. 可见字段与扩展
 

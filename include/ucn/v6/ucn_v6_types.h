@@ -5,6 +5,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* EN: Canonical cumulative path-hop domain shared by Capability, Route and
+ * Metric. Zero means no valid path and UINT16_MAX is a reserved invalid /
+ * exhausted sentinel; neither value may become an installed path cost.
+ * 中文：Capability、Route 与 Metric 共享的规范累计跳数域。0 表示无有效
+ * 路径，UINT16_MAX 保留为无效/耗尽哨兵，二者均不得成为已安装路径代价。 */
+#define UCN_V6_HOP_COUNT_MAX UINT16_C(65534)
+
 /* EN: Dependency-free public result codes shared by Config and every v6
  * module. Keeping this type outside Identity breaks the former Config <-
  * Identity <- Config include cycle, so profile capacity macros are resolved

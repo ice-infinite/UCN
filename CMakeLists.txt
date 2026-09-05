@@ -131,7 +131,8 @@ if(UCN_FEATURE_REALTIME)
     add_library(ucn_v6_realtime STATIC src/v6/realtime/ucn_v6_realtime.c)
     ucn_target_defaults(ucn_v6_realtime)
     target_link_libraries(ucn_v6_realtime PUBLIC
-        ucn_v6_config ucn_v6_wire ucn_v6_security ucn_v6_capability)
+        ucn_v6_config ucn_v6_wire ucn_v6_security ucn_v6_capability
+        ucn_v6_route)
     list(APPEND UCN_EXPORT_TARGETS ucn_v6_realtime)
 endif()
 

@@ -27,8 +27,8 @@ CHECK_STORAGE(ucn_v6_operation_id_allocator_storage_t,
               UCN_V6_OPERATION_ID_ALLOCATOR_STORAGE_BYTES);
 CHECK_STORAGE(ucn_v6_operation_journal_storage_t,
               UCN_V6_OPERATION_JOURNAL_STORAGE_BYTES);
-CHECK_STORAGE(ucn_v6_protocol_owner_storage_t,
-              UCN_V6_PROTOCOL_OWNER_STORAGE_BYTES);
+CHECK_STORAGE(ucn_v6_stack_owner_storage_t,
+              UCN_V6_STACK_OWNER_STORAGE_BYTES);
 CHECK_STORAGE(ucn_v6_security_manager_storage_t,
               UCN_V6_SECURITY_MANAGER_STORAGE_BYTES);
 CHECK_STORAGE(ucn_v6_capability_owner_storage_t,
@@ -77,7 +77,7 @@ int main(void)
                   sizeof(ucn_v6_operation_id_allocator_storage_t));
     print_storage("operation_journal",
                   sizeof(ucn_v6_operation_journal_storage_t));
-    print_storage("protocol_owner", sizeof(ucn_v6_protocol_owner_storage_t));
+    print_storage("stack_owner", sizeof(ucn_v6_stack_owner_storage_t));
     print_storage("security", sizeof(ucn_v6_security_manager_storage_t));
     print_storage("capability", sizeof(ucn_v6_capability_owner_storage_t));
     print_storage("route", sizeof(ucn_v6_route_owner_storage_t));

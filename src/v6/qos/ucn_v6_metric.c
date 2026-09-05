@@ -34,6 +34,9 @@ static bool domain_is_valid(const ucn_v6_route_domain_t *domain)
                domain->destination_binding.realm_id &&
            domain->origin_session_generation != 0U &&
            domain->origin_session_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           domain->destination_session_generation != 0U &&
+           domain->destination_session_generation <=
                UCN_V6_SERIAL_ROTATION_THRESHOLD;
 }
 
@@ -50,7 +53,9 @@ static bool domain_equal(const ucn_v6_route_domain_t *left,
            principal_equal(&left->destination_principal,
                            &right->destination_principal) &&
            ucn_v6_binding_key_equal(&left->destination_binding,
-                                    &right->destination_binding);
+                                    &right->destination_binding) &&
+           left->destination_session_generation ==
+               right->destination_session_generation;
 }
 
 static bool key_is_valid(const ucn_v6_metric_key_t *key)
@@ -516,8 +521,10 @@ ucn_v6_result_t ucn_v6_metric_cost_accumulate(
         prefix->algorithm_id > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         hop->algorithm_id > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         prefix->algorithm_id != hop->algorithm_id ||
-        prefix->hop_count == 0U || hop->hop_count == 0U ||
-        UINT16_MAX - prefix->hop_count < hop->hop_count ||
+        prefix->hop_count == 0U ||
+        prefix->hop_count > UCN_V6_HOP_COUNT_MAX ||
+        hop->hop_count == 0U || hop->hop_count > UCN_V6_HOP_COUNT_MAX ||
+        UCN_V6_HOP_COUNT_MAX - prefix->hop_count < hop->hop_count ||
         UINT64_MAX - prefix->total_cost < hop->total_cost) {
         return UCN_V6_ERR_ARGUMENT;
     }

@@ -24,15 +24,21 @@ typedef struct ucn_v6_time_domain_slot {
     uint64_t last_sample_local_us;
     uint64_t last_output_local_us;
     uint64_t last_output_domain_us;
+    ucn_v6_route_path_ref_t route_ref;
+    ucn_v6_stack_invalidation_t route_dependency;
+    ucn_v6_realtime_path_proof_t path_proof;
+    uint64_t dependency_deadline_us;
     uint32_t base_uncertainty_us;
     bool has_sample_high_water;
     bool has_output_high_water;
+    bool dependency_invalidated;
 } ucn_v6_time_domain_slot_t;
 
 struct ucn_v6_realtime_owner {
     uint32_t magic;
     uint16_t schema;
     uint64_t layout_hash;
+    const ucn_v6_route_owner_t *route_owner;
     ucn_v6_realtime_generation_store_ops_t generation_store;
     ucn_v6_callback_gate_t *callback_gate;
     ucn_v6_realtime_policy_slot_t
@@ -41,6 +47,7 @@ struct ucn_v6_realtime_owner {
     ucn_v6_realtime_view_t stats;
     bool initialized;
     bool io_active;
+    bool io_faulted;
     uint64_t canary;
 };
 

@@ -12,11 +12,16 @@ extern "C" {
 #define UCN_V6_HEADER_CONTRACT_1 ((uint8_t)1U)
 #define UCN_V6_SECURITY_TAG_BYTES ((size_t)16U)
 #define UCN_V6_CANONICAL_AAD_BYTES ((size_t)80U)
-#define UCN_V6_BASE_FRAME_BYTES_A0 ((size_t)40U)
-#define UCN_V6_BASE_FRAME_BYTES_A1 ((size_t)42U)
-#define UCN_V6_BASE_FRAME_BYTES_A2 ((size_t)44U)
-#define UCN_V6_BASE_FRAME_BYTES_A3 ((size_t)46U)
-#define UCN_V6_WIRE_MAX_FRAME_BYTES ((size_t)65673U)
+#define UCN_V6_BASE_FRAME_BYTES_A0 ((size_t)41U)
+#define UCN_V6_BASE_FRAME_BYTES_A1 ((size_t)43U)
+#define UCN_V6_BASE_FRAME_BYTES_A2 ((size_t)45U)
+#define UCN_V6_BASE_FRAME_BYTES_A3 ((size_t)47U)
+/* EN: Conservative upper bound for A3 plus every canonical fixed extension,
+ * both authentication tags and the largest 16-bit Payload.  Some Frame-Type
+ * contracts deliberately admit less than this bound.
+ * 中文：A3、全部规范固定扩展、两个认证 Tag 与最大 16-bit Payload 的保守
+ * 上界；具体 Frame Type 合同可以允许更小的实际最大值。 */
+#define UCN_V6_WIRE_MAX_FRAME_BYTES ((size_t)65678U)
 #define UCN_V6_PROTOCOL_OPCODE_GROUP_HELLO UINT16_C(1)
 #define UCN_V6_PROTOCOL_OPCODE_PEER_HELLO UINT16_C(2)
 #define UCN_V6_PROTOCOL_OPCODE_CAPABILITY_QUERY UINT16_C(3)
@@ -129,7 +134,11 @@ typedef struct ucn_v6_frame {
     uint8_t flags;
     ucn_v6_traffic_class_t traffic_class;
     ucn_v6_delivery_guarantee_t delivery_guarantee;
-    uint8_t hop_limit;
+    /* EN: Remaining forwarding scope.  It shares the 1..65534 domain used by
+     * Route/Capability hop_count; zero is invalid and UINT16_MAX is reserved.
+     * 中文：剩余转发范围，与 Route/Capability hop_count 共用 1..65534 域；
+     * 0 非法，UINT16_MAX 保留。 */
+    uint16_t hop_limit;
     uint8_t header_contract;
     uint32_t realm_id;
     uint32_t source_address;

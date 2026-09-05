@@ -36,8 +36,10 @@ V6-01～V6-15 首轮连续实现建立了单一 v6 发布面，但外部审计�
 - `hop_sequence`：由当前发送节点到下一跳的 Peer Session 分配，每跳重新生成，只参与该
   Link/Peer 的 Hop Tag 与 Replay。
 
-因此 A0～A3 的基础开销由原草案的 `36/38/40/42 B` 调整为实际冻结的
-`40/42/44/46 B`。这是 v6 尚未发布阶段的破坏性修正，不提供旧 v6 草案解码。
+因此 A0～A3 的基础开销先由原草案的 `36/38/40/42 B` 调整为
+`40/42/44/46 B`。后续统一架构自审为消除 16-bit 累计跳数与 8-bit
+Wire Hop Limit 之间的不可达路径，再升级为当前 `41/43/45/47 B`。这是 v6
+尚未发布阶段的破坏性修正，不提供任何旧 v6 草案解码。
 
 ### 2.2 中继验证与重新认证
 
@@ -93,6 +95,16 @@ Group Key 必须 Rekey，因此旧易失 RX Replay Window 不会在原安全上�
 | V6X-S03 | P1 | Protocol Owner 在退出 `run()` 时若 task try-lock 失败，会遗留 `running=true` | task lock 改为 acquire-before-return，只有 ISR 使用 try-lock；所有退出路径都能清理运行门，FreeRTOS Port API 同步破坏性升级 |
 | V6X-S04 | P1 | Cluster Handover 没有证明目标 Head 属于目标 Config VoterSet | `begin_handover()` 在写事务前精确匹配 Principal+Binding 的 Voter；非成员和错 Binding 零写拒绝 |
 | V6X-S05 | P2 | Capability Path 归约一次接收调用方任意 hop 数组，Owner 单次预算不可证明 | 改为 begin→one-hop reduce→finalize 流式接口，单次 O(1)，总跳数上限 65534，溢出零写返回 EXHAUSTED |
+| V6X-S06 | P0 | Identity/Bootstrap/Security 仍存在由调用方声明 trusted、父代际未完整持久绑定和 commissioning 撕裂状态可被误接纳的交叉入口 | 所有证明改由验证 Owner 产生；记录逐字段绑定 Authority/Link/Session 和 reload 结果，pending witness、首次/续期/换主序列均以反例钉住 |
+| V6X-S07 | P0 | Link 重开后上层缓存可能继续消费旧 Peer Session，或宽泛失效误伤新代际 | Security 提供精确 `{link_id,generation}` 失效并输出统一 invalidation；Stack Owner 固定顺序扇出到 Capability/Route/QoS/Transfer/Realtime/Cluster |
+| V6X-S08 | P0 | Capability、Route、Path 与上层模块各自保留父链，可能在部分失效后形成互相矛盾的“当前路径” | 只保留 Route Owner 的 canonical dependency 和稳定 Route Ref；late event、Capability 到期、Route/Path 换代均先撤销上层资格 |
+| V6X-S09 | P0 | Cluster 的成员/Directory/Tunnel 路径可把 last-hop 当 origin，或在成员依赖过期后保留 Backup/Joint 权威 | Cluster 入口绑定已认证 origin 与来源序号；成员依赖到期同步撤销 Backup/Joint/Tunnel，Directory 必须带当前 Authority proof |
+| V6X-S10 | P0 | Durable Message 对请求内容、Provider 恢复结果和回调重入的约束不足，存在同 ID 异请求或掉电后重复副作用风险 | Journal 绑定 request digest，Provider reconcile 和真实结果终态逐字段核对；回调前建门，EXECUTING 不可证明时进入 IN_DOUBT，retired floor 拒绝重放 |
+| V6X-S11 | P1 | Owner 在零进度 backlog、阶段失败或事件风暴下可能无限自唤醒或越过失败阶段 | 预检总预算、合并事件、固定阶段顺序；`has_more && work_done==0` 直接 Fault，失败不运行后继阶段且锁/运行门完整释放 |
+| V6X-S12 | P1 | QoS 的 Q0 热流、公平游标、Link 代际和多跳来源配额存在饥饿、ABA 或 last-hop 冒充 origin 的组合风险 | arrival 序号 no-wrap、per-flow Q0 公平、已认证 origin 配额、精确 Link invalidation、失败选择零写和闲置流安全回收均加入回归 |
+| V6X-S13 | P0 | Realtime 可在旧 Session/Capability/Path、same-generation 重绑定或故障恢复后发布不再受当前父链支持的时间 | 持久 Proposal 与运行父链逐字段 exact；Capability/Route 当前性、same-domain 高水位、Holdover/rebind 和 fault→LOCKED 计数全部失败关闭 |
+| V6X-S14 | P1 | Credit 到期清槽可让同 Session/Link 重建旧 Generation 扩容；完成重组又会被内部 timeout 提前回收 | 过期 Credit 保留高水位直至精确 Session/Link 失效；完成 RX 归应用所有并显式释放，仅未完成槽按重组超时回收 |
+| V6X-S15 | P1 | 累计 Hop 是 16 位而 Wire Hop Limit 曾为 8 位；Route/Path 可共存但 AAD 只编码一个 Context Kind | Wire Hop Limit 升为 16 位有界域 `1..65534`，65535 拒绝；AAD 改为 Route/Path presence mask，Both=3 并以逐字节测试冻结 |
 
 严格 MSVC Release 构建还发现局部 Witness/Snapshot 临时对象未显式初始化；现已统一 `{0}` 初始化。
 Message Witness 定向复核同时发现内部预检曾把 candidate 当成 previous，现已让 helper 显式接收
@@ -127,17 +139,18 @@ union”的静默布局错配。
 
 由于受保护 Transfer 帧在 Nano 下也可能超过 128 B，而项目要求所有 Profile 能解析全部 v6
 Frame Contract，Nano Adapter Frame 上限调整为 256 B。该阶段曾把 Storage Layout 从 2 升到 3；
-本次追加的 Message Witness、Realtime Domain Record、Owner task/ISR 锁合同和 Capability 流式
-接口再次改变公共持久化/ABI/布局合同，因此统一升级为 Layout 4，固定基代为
-`0xD65A000400000000`。旧 Layout 只能明确拒绝，不能混用。
+Message Witness、Realtime Domain Record、Owner task/ISR 锁合同和 Capability 流式接口曾把
+布局推进到 4；本轮可信父代际、Stack Owner、Capability/Realtime/Cluster/FreeRTOS 公开存储
+再次变化，最终统一升级为 Layout 6，固定基代为 `0xD65A000600000000`。中间 Layout 5 与所有
+旧 Layout 都只能明确拒绝，不能混用。
 
 本轮最终资源报告：
 
 | Profile | Layout Hash | Security | Route | Transfer | Realtime | Cluster | Adapter |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Full | 5678675412437068165 | 16384 | 70656 | 79872 | 3840 | 22272 | 48128 |
-| Lite | 11663958577359470770 | 7680 | 29696 | 29696 | 2944 | 14912 | 17920 |
-| Nano | 2034670768200357958 | 4288 | 11776 | 14592 | 2752 | 11392 | 7936 |
+| Full | 14760542101407088479 | 16384 | 70656 | 79872 | 4608 | 24832 | 48128 |
+| Lite | 12642647491480237841 | 7680 | 29696 | 29696 | 3328 | 16192 | 17920 |
+| Nano | 9093659346181745797 | 4288 | 11776 | 14592 | 3136 | 12032 | 7936 |
 
 单位均为编译期公开 storage 上界字节数，不等于运行时堆用量，也不表示单个产品必须同时实例化
 所有可选对象。
@@ -154,6 +167,7 @@ Frame Contract，Nano Adapter Frame 上限调整为 256 B。该阶段曾把 Stor
 | WSL GCC ASan/UBSan | 27/27 |
 | WSL GCC `-fanalyzer` | 27/27 |
 | WSL Clang 18.1.3 Release `-Wall -Wextra -Werror` | 27/27 |
+| Windows GCC ISO C99 `-pedantic-errors` | 26/26 |
 | WSL GCC TSan | 当前源码编译通过；4 个定向 CTest 中 Owner/Adapter 2 个通过，Identity 遇到 `unexpected memory mapping`，Message 首轮异常退出但隔离重跑通过，表现为运行时地址映射不稳定，**整体不计为通过** |
 | Cluster Scale | 1,000 / 10,000 节点均通过 |
 | 当前文档、API 索引、archive、旧 CMake surface、安装 consumer | 全部通过 |
@@ -162,15 +176,17 @@ Frame Contract，Nano Adapter Frame 上限调整为 256 B。该阶段曾把 Stor
 
 | 文件 | SHA256 |
 | --- | --- |
-| `src/v6/wire/ucn_v6_wire.c` | `3EA63099F101C4A4B920E99FB5ED08A6810F8F156E38CCE18F360F57B57BCCF2` |
-| `src/v6/security/ucn_v6_security.c` | `CEC722962EB0AEE69D3F1C5B58F0879B730A79BD49F30417796F8ECACCC07D00` |
-| `src/v6/identity/ucn_v6_identity.c` | `8483C5CDA155AD562C2431FE7B198739AEFE6F8D1F0ED6365FCBECF43AC20FDA` |
-| `src/v6/message/ucn_v6_message.c` | `35C204B24B21474455D6C102DDE2D48076E090E341D5B2AFCDE0D7FCC99E8564` |
-| `src/v6/owner/ucn_v6_owner.c` | `8247FDDBC81AC5B7C4A4C8C380CC7C310DA632482CCFE90D075E2C8C47A34289` |
-| `src/v6/capability/ucn_v6_capability.c` | `5DC04A2296214C8AD9504971A0C2789A2453F471DAA58AF1085A7E61622339A1` |
-| `src/v6/cluster/ucn_v6_cluster.c` | `1D2ACE1ED376AF06F3F2FC31E5498627F3C2BD15E409319D06DF5EB0CD05805A` |
-| `src/v6/realtime/ucn_v6_realtime.c` | `476F54448DFCAAC08891F6894A371A98C4246795DA0DFB0EF2059E7D8FC97324` |
-| `src/v6/transfer/ucn_v6_transfer.c` | `4DA321AD5C57D13673FDAE98ED385CC6D04F99C21EC59DDD9CD1509E944FC6BB` |
+| `src/v6/wire/ucn_v6_wire.c` | `63B929BAD35DB1DF4F7A21A4D1805C42A1AE4A6331FBF64A1B01797FAB31F38E` |
+| `src/v6/security/ucn_v6_security.c` | `F8374FA5CCE6E2512520DFAEA4FBC5956C36B55A80A0834EAF0038C4F271C909` |
+| `src/v6/identity/ucn_v6_identity.c` | `254DB09C26DB1E8EEB1DA4DFCFC72BE325ACA0146DCF797E97A82224F5655B57` |
+| `src/v6/message/ucn_v6_message.c` | `3694CAA2FED9EC671A0A283BDD51B53E7E2B2B5BAA2AE03D136340A12C547FB3` |
+| `src/v6/owner/ucn_v6_owner.c` | `F3551039D6851943B53905D20EAB4EC09D48097688508409B3D247F1E9BD876D` |
+| `src/v6/capability/ucn_v6_capability.c` | `11EEF832D5FD2A19F4CFF367C3AC2D6D1670823A08A67D6FC8EA1B8A2E015A5B` |
+| `src/v6/route/ucn_v6_route.c` | `CE4792A075DA449C85B2E1526FE599D06CB6E76976498005719D86C4B1535E99` |
+| `src/v6/qos/ucn_v6_qos.c` | `81DBC1C9D79755886D98F3A84D3BB15ECB4D569D62F8574B455AE6391153E186` |
+| `src/v6/cluster/ucn_v6_cluster.c` | `F44634E1AC32FA10C9F78316C3C7F4DB2BEF2792ED93BE85DF542FA725FF2B63` |
+| `src/v6/realtime/ucn_v6_realtime.c` | `473A524106A2FAC6C5925F2AFCF2B7E164A3F64ABB2AD29DD75A1BFB6682C576` |
+| `src/v6/transfer/ucn_v6_transfer.c` | `B19527D9F1D9C26BA3BA98728C3B995CBD06BCA0D844B2B1F2A29A0D80ACC39E` |
 
 上述哈希只标识当前未提交外审候选工作树；不代表 Git commit 或发布 Tag。
 
@@ -211,7 +227,7 @@ TSan 继续保留为发布阻断。
 ### 第六轮：发布表面、文档与证据一致性
 
 复核安装消费者、公共聚合头、archive/旧 CMake surface denylist、API 索引、当前文档链接、
-Profile 资源报告和 `git diff --check`。确认发布面只包含 v6；资源数字、Layout 4 和 API 索引
+Profile 资源报告和 `git diff --check`。确认发布面只包含 v6；资源数字、Layout 6 和 241 项 API 索引
 均来自同一轮当前源码构建，报告明确区分 Host 软件证明、不可用工具链和待完成硬件证据。
 
 ### 第七轮：全所有者与反回退复审
@@ -228,7 +244,21 @@ Transfer→Realtime→Cluster→Adapter 的合同、失败原子性、Profile �
 错位均在本轮关闭；最后用 GCC/MSVC/Clang、Sanitizer、Analyzer 和八种 Profile/Feature 组合
 重新验证，不沿用整改前的测试结果。
 
-当前自审未发现仍开放的软件 P0/P1。该结论是送外审的候选结论，不替代外部签字。
+### 第九轮：精确失效、父代际与失败原子性复审
+
+从 Link→Session 开始逐层注入重开、过期、迟到完成、容量满和 Provider/Driver 失败，核对
+Security 产生的统一 invalidation 是否以固定顺序到达 Capability、Route、QoS、Transfer、
+Realtime 与 Cluster。该轮发现并关闭 V6X-S06～S14；同时确认失败入口不删除旧可用状态、
+不消耗序号/Token、不留下半提交事务。
+
+### 第十轮：Wire 数值域与 canonical 认证复审
+
+逐项核对 Header 字段宽度、累计算术、shift、Deadline、Sentinel 与 RFC。该轮发现累计 Hop
+支持 65534 而 Wire 只能表达 255，以及 Route/Path 同时存在时 AAD 只声明 Route 两项矛盾；
+现已统一为 16-bit Hop Limit 和 Route/Path presence mask，并补精确上界、65535 反例和 Both=3
+逐字节 AAD 回归。GCC 深度告警、MSVC、Clang、Sanitizer 和 Analyzer 均使用修正后源码重跑。
+
+当前十轮自审未发现仍开放的软件 P0/P1。该结论是送外审的候选结论，不替代外部签字。
 
 ## 8. 明确保留的发布阻断
 

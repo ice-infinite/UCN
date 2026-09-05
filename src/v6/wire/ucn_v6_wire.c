@@ -4,7 +4,7 @@
 #include <string.h>
 
 enum {
-    UCN_V6_PREFIX_BYTES = 8,
+    UCN_V6_PREFIX_BYTES = 9,
     UCN_V6_FIXED_AFTER_PREFIX_BYTES = 4 + 8 + 4 + 4 + 4 + 2,
     UCN_V6_CRC_BYTES = 4,
     UCN_V6_PEER_CONTEXT_BYTES = 7,
@@ -195,7 +195,8 @@ static bool frame_contract_is_valid(const ucn_v6_frame_t *frame)
         (uint32_t)frame->delivery_guarantee >
             (uint32_t)UCN_V6_DELIVERY_RELIABLE ||
         frame->header_contract != UCN_V6_HEADER_CONTRACT_1 ||
-        frame->hop_limit == 0U || frame->realm_id == 0U ||
+        frame->hop_limit == 0U ||
+        frame->hop_limit > UCN_V6_HOP_COUNT_MAX || frame->realm_id == 0U ||
         frame->realm_id == UINT32_MAX ||
         (frame->payload_length != 0U && frame->payload == NULL) ||
         !absent_contexts_are_canonical(frame)) {
@@ -443,7 +444,8 @@ ucn_v6_result_t ucn_v6_wire_encode(
     output[offset++] = frame->flags;
     output[offset++] = (uint8_t)((uint8_t)frame->traffic_class |
         ((uint8_t)frame->delivery_guarantee << 2U));
-    output[offset++] = frame->hop_limit;
+    write_u16_be(output + offset, frame->hop_limit);
+    offset += 2U;
     output[offset++] = frame->header_contract;
     write_u32_be(output + offset, frame->realm_id);
     offset += 4U;
@@ -556,7 +558,8 @@ ucn_v6_result_t ucn_v6_wire_decode(
     uint8_t traffic_delivery;
     uint32_t received_crc;
 
-    if (input == NULL || frame == NULL || input_length < 40U ||
+    if (input == NULL || frame == NULL ||
+        input_length < UCN_V6_BASE_FRAME_BYTES_A0 ||
         input_length > UCN_V6_WIRE_MAX_FRAME_BYTES ||
         input[0] != UCN_V6_WIRE_MAGIC_0 ||
         input[1] != UCN_V6_WIRE_MAGIC_1) {
@@ -588,7 +591,8 @@ ucn_v6_result_t ucn_v6_wire_decode(
         (ucn_v6_traffic_class_t)(traffic_delivery & 0x03U);
     decoded.delivery_guarantee =
         (ucn_v6_delivery_guarantee_t)((traffic_delivery >> 2U) & 0x03U);
-    decoded.hop_limit = input[offset++];
+    decoded.hop_limit = read_u16_be(input + offset);
+    offset += 2U;
     decoded.header_contract = input[offset++];
     if (!range_fits(offset, UCN_V6_FIXED_AFTER_PREFIX_BYTES +
                                 address_bytes * 2U,
@@ -762,9 +766,10 @@ ucn_v6_result_t ucn_v6_wire_write_canonical_aad(
     write_u64_be(aad + offset, frame->message.operation_id);
     offset += 8U;
     if ((frame->flags & UCN_V6_FLAG_ROUTE_CONTEXT) != 0U) {
-        context_kind = 1U;
-    } else if ((frame->flags & UCN_V6_FLAG_PATH_CONTEXT) != 0U) {
-        context_kind = 2U;
+        context_kind |= 1U;
+    }
+    if ((frame->flags & UCN_V6_FLAG_PATH_CONTEXT) != 0U) {
+        context_kind |= 2U;
     }
     aad[offset++] = context_kind;
     write_u32_be(aad + offset, frame->route_generation);

@@ -44,6 +44,10 @@ struct ucn_v6_capability_owner {
         hint_links[UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS];
     ucn_v6_group_hint_group_budget_t
         hint_groups[UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS];
+    ucn_v6_stack_invalidation_t
+        invalidations[UCN_V6_CAPABILITY_INVALIDATION_DEPTH];
+    uint16_t invalidation_head;
+    uint16_t invalidation_count;
     ucn_v6_capability_view_t stats;
     bool initialized;
     bool faulted;

@@ -1,6 +1,7 @@
 #ifndef UCN_V6_CLUSTER_H
 #define UCN_V6_CLUSTER_H
 
+#include "ucn/v6/ucn_v6_owner.h"
 #include "ucn/v6/ucn_v6_transfer.h"
 
 #ifdef __cplusplus
@@ -12,7 +13,8 @@ extern "C" {
 #define UCN_V6_CLUSTER_CONTROL_VERSION ((uint8_t)1U)
 #define UCN_V6_CLUSTER_CONTROL_BYTES ((size_t)112U)
 #define UCN_V6_CLUSTER_DIRECTORY_VERSION ((uint8_t)1U)
-#define UCN_V6_CLUSTER_DIRECTORY_BYTES ((size_t)100U)
+#define UCN_V6_CLUSTER_DIRECTORY_BYTES ((size_t)108U)
+#define UCN_V6_CLUSTER_AUTHORITY_PROOF_DIGEST_BYTES ((size_t)16U)
 
 typedef enum ucn_v6_cluster_role {
     UCN_V6_CLUSTER_OBSERVER = 0,
@@ -144,10 +146,14 @@ typedef struct ucn_v6_cluster_snapshot {
 typedef struct ucn_v6_cluster_member {
     bool occupied;
     ucn_v6_session_key_t session;
+    uint16_t ingress_link_id;
+    uint32_t ingress_link_generation;
     uint32_t capability_generation;
     uint32_t capability_feature_bits;
     bool voter;
     bool backup_eligible;
+    uint64_t discovery_deadline_us;
+    uint64_t capability_deadline_us;
     uint64_t lease_deadline_us;
 } ucn_v6_cluster_member_t;
 
@@ -164,6 +170,57 @@ typedef struct ucn_v6_cluster_control {
     uint32_t new_voter_bitmap;
 } ucn_v6_cluster_control_t;
 
+typedef struct ucn_v6_cluster_authority_proof_ref {
+    /* EN: Wire-visible certificate identity.  This is not a local array
+     * index.  proof_id is stable within one remote Epoch and generation is
+     * strictly non-decreasing; the verifier resolves both in the
+     * authenticated remote-Cluster proof namespace.
+     * 中文：Wire 可见的证书身份；它不是本地数组下标。同一远端 Epoch 内
+     * proof_id 固定且 generation 严格不回退，验证器在经过认证的远端
+     * Cluster 证明命名空间中解析二者。 */
+    uint32_t proof_id;
+    uint32_t generation;
+} ucn_v6_cluster_authority_proof_ref_t;
+
+/* EN: A trusted proof Owner returns this complete, immutable verification
+ * result only after checking the voter evidence/signatures for both Stable
+ * and (when present) Joint Config.  It is an in-process view, never Wire data.
+ * 中文：可信 Proof Owner 仅在校验 Stable 及（存在时）Joint Config 的投票
+ * 证据/签名后返回此完整且不可变的验证结果；它是进程内视图，不是 Wire 数据。 */
+typedef struct ucn_v6_cluster_authority_proof_view {
+    bool valid;
+    ucn_v6_cluster_authority_proof_ref_t ref;
+    ucn_v6_cluster_epoch_t epoch;
+    uint32_t stable_config_id;
+    uint32_t stable_config_generation;
+    bool joint_valid;
+    uint32_t joint_config_id;
+    uint32_t joint_config_generation;
+    bool stable_quorum_verified;
+    bool joint_quorum_verified;
+    uint32_t route_generation;
+    uint16_t path_id;
+    uint32_t path_generation;
+    uint8_t evidence_digest[UCN_V6_CLUSTER_AUTHORITY_PROOF_DIGEST_BYTES];
+    uint64_t lease_deadline_us;
+} ucn_v6_cluster_authority_proof_view_t;
+
+typedef struct ucn_v6_cluster_authority_proof_owner_ops {
+    void *context;
+    /* EN: The resolved certificate must be immutable for its ref and remain
+     * valid until lease_deadline_us.  The Provider owns voter/signature
+     * evidence, restart recovery and no-ABA generation history; NOT_FOUND is
+     * fail-closed and never authorizes a cached Directory fallback.
+     * 中文：同一证明引用的解析结果必须不可变，并持续有效到 lease_deadline_us。
+     * Provider 负责投票/签名证据、重启恢复及防 ABA 代际历史；NOT_FOUND 必须
+     * 失败关闭，绝不能授权回退到缓存 Directory。 */
+    ucn_v6_result_t (*resolve_verified)(
+        void *context,
+        const ucn_v6_cluster_authority_proof_ref_t *ref,
+        uint64_t now_us,
+        ucn_v6_cluster_authority_proof_view_t *view);
+} ucn_v6_cluster_authority_proof_owner_ops_t;
+
 typedef struct ucn_v6_cluster_directory_entry {
     bool occupied;
     uint32_t remote_cluster_id;
@@ -172,7 +229,10 @@ typedef struct ucn_v6_cluster_directory_entry {
     uint32_t route_generation;
     uint16_t path_id;
     uint32_t path_generation;
-    uint64_t deadline_us;
+    ucn_v6_cluster_authority_proof_ref_t authority_proof;
+    /* Authenticated relative lease; receiver derives its own monotonic
+     * deadline and never compares another node's uptime directly. */
+    uint64_t lease_duration_us;
 } ucn_v6_cluster_directory_entry_t;
 
 typedef struct ucn_v6_cluster_tunnel {
@@ -180,10 +240,17 @@ typedef struct ucn_v6_cluster_tunnel {
     uint64_t tunnel_id;
     uint32_t source_cluster_id;
     uint32_t destination_cluster_id;
-    ucn_v6_route_domain_t route_domain;
-    ucn_v6_path_capability_t path;
+    ucn_v6_route_path_ref_t route_ref;
     uint64_t deadline_us;
 } ucn_v6_cluster_tunnel_t;
+
+typedef struct ucn_v6_cluster_tunnel_request {
+    uint64_t tunnel_id;
+    uint32_t source_cluster_id;
+    uint32_t destination_cluster_id;
+    ucn_v6_route_path_ref_t route_ref;
+    uint64_t deadline_us;
+} ucn_v6_cluster_tunnel_request_t;
 
 typedef struct ucn_v6_cluster_store_ops {
     void *context;
@@ -261,6 +328,9 @@ ucn_v6_result_t ucn_v6_cluster_owner_init_in_place(
     const ucn_v6_principal_t *local_principal,
     const ucn_v6_binding_key_t *local_binding,
     uint32_t local_session_generation,
+    const ucn_v6_capability_owner_t *capability_owner,
+    const ucn_v6_route_owner_t *route_owner,
+    const ucn_v6_cluster_authority_proof_owner_ops_t *authority_proof_owner,
     const ucn_v6_cluster_store_ops_t *store,
     ucn_v6_callback_gate_t *callback_gate,
     ucn_v6_cluster_owner_t **owner);
@@ -274,7 +344,7 @@ ucn_v6_result_t ucn_v6_cluster_create(
 ucn_v6_result_t ucn_v6_cluster_admit_member(
     ucn_v6_cluster_owner_t *owner,
     const ucn_v6_security_open_result_t *opened,
-    const ucn_v6_cached_peer_capability_t *capability,
+    const ucn_v6_capability_peer_ref_t *peer_ref,
     uint64_t now_us, uint64_t lease_duration_us);
 /* EN: Assigns a committed voter as the durable Backup.
  * 中文：把已提交投票者指定为持久 Backup。 */
@@ -286,7 +356,8 @@ ucn_v6_result_t ucn_v6_cluster_assign_backup(
  * 中文：记录指定 Backup 对 Config 事务的 staging 与确认。 */
 ucn_v6_result_t ucn_v6_cluster_backup_ack_config(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened);
+    const ucn_v6_security_open_result_t *opened,
+    uint64_t now_us);
 /* EN: Persists entry into C_old/C_new Joint Config before any acknowledgement.
  * 中文：在任何确认前持久进入 C_old/C_new Joint Config。 */
 ucn_v6_result_t ucn_v6_cluster_prepare_joint(
@@ -312,7 +383,8 @@ ucn_v6_result_t ucn_v6_cluster_begin_takeover(
  * 中文：加入一个经过认证的已提交投票者证书位。 */
 ucn_v6_result_t ucn_v6_cluster_record_transition_vote(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened);
+    const ucn_v6_security_open_result_t *opened,
+    uint64_t now_us);
 /* EN: Persists the takeover Epoch before activating local Head authority.
  * 中文：激活本地 Head 权威前先持久提交接管 Epoch。 */
 ucn_v6_result_t ucn_v6_cluster_commit_takeover(
@@ -351,17 +423,27 @@ ucn_v6_result_t ucn_v6_cluster_rekey(
     ucn_v6_cluster_owner_t *owner, uint64_t transaction_id,
     uint32_t successor_cluster_id, uint64_t now_us);
 
-/* EN: Installs an authenticated bounded Directory entry.
- * 中文：安装经过认证的有界 Directory 条目。 */
+/* EN: Installs a bounded Directory authority result only after the trusted
+ * proof Owner validates the complete Epoch, Config quorum, Route, Path and
+ * lease binding. ingress_peer_ref names the live last-Hop Peer; the remote
+ * Head is independently bound to the immutable Wire Source and proof.  A
+ * missing verifier or proof is fail-closed; this API never creates a
+ * non-authoritative routing hint.
+ * 中文：仅在可信 Proof Owner 校验完整 Epoch、Config 法定人数、Route、Path
+ * 与租约绑定后安装有界 Directory 权威结果。ingress_peer_ref 表示最后一跳
+ * 活跃 Peer；远端 Head 由不可变 Wire Source 和证明独立绑定。缺少验证器或
+ * 证明必须失败关闭；本接口绝不创建非权威路由提示。 */
 ucn_v6_result_t ucn_v6_cluster_directory_install(
     ucn_v6_cluster_owner_t *owner,
     const ucn_v6_security_open_result_t *opened,
+    const ucn_v6_capability_peer_ref_t *ingress_peer_ref,
     uint64_t now_us);
 /* EN: Installs a local-authority bounded inter-cluster Tunnel.
  * 中文：安装由本地权威许可的有界跨簇 Tunnel。 */
 ucn_v6_result_t ucn_v6_cluster_tunnel_install(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_cluster_tunnel_t *tunnel, uint64_t now_us);
+    const ucn_v6_cluster_tunnel_request_t *request,
+    uint64_t now_us);
 /* EN: Copies an unexpired Tunnel as the exact cross-cluster Transfer path.
  * 中文：复制未过期 Tunnel，作为精确的跨簇 Transfer 路径。 */
 ucn_v6_result_t ucn_v6_cluster_copy_tunnel(
@@ -371,6 +453,12 @@ ucn_v6_result_t ucn_v6_cluster_copy_tunnel(
  * 中文：在产生副作用前过期租约/缓存并重新计算权威。 */
 ucn_v6_result_t ucn_v6_cluster_step(
     ucn_v6_cluster_owner_t *owner, uint64_t now_us);
+/* EN: Immediately revokes Cluster state derived from an invalidated Link,
+ * Session, Capability or Path generation.
+ * 中文：立即撤销依赖已失效 Link、Session、Capability 或 Path 代际的簇状态。 */
+ucn_v6_result_t ucn_v6_cluster_apply_invalidation(
+    ucn_v6_cluster_owner_t *owner,
+    const ucn_v6_stack_invalidation_t *invalidation);
 /* EN: Copies durable state or diagnostics without exposing mutable storage.
  * 中文：复制持久状态或诊断，不暴露可变内部存储。 */
 ucn_v6_result_t ucn_v6_cluster_copy_snapshot(

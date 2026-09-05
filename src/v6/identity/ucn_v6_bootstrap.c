@@ -8,13 +8,67 @@ typedef char ucn_v6_bootstrap_storage_size_check[
     sizeof(ucn_v6_bootstrap_owner_t) <= UCN_V6_BOOTSTRAP_OWNER_STORAGE_BYTES ?
         1 : -1];
 
+static bool callback_result_is_declared(ucn_v6_result_t result)
+{
+    return result <= UCN_V6_OK && result >= UCN_V6_ERR_CANCELLED;
+}
+
 static bool owner_is_valid(const ucn_v6_bootstrap_owner_t *owner)
 {
     return owner != NULL && owner->initialized &&
            owner->magic == UCN_V6_BOOTSTRAP_OWNER_MAGIC &&
            owner->schema == UCN_V6_STORAGE_LAYOUT &&
            owner->layout_hash == UCN_V6_COMPILED_LAYOUT_HASH &&
+           owner->verifier.authorize_event != NULL &&
+           owner->callback_gate != NULL &&
+           ucn_v6_callback_gate_violation_count(owner->callback_gate) !=
+               UINT64_MAX &&
            owner->canary == UCN_V6_BOOTSTRAP_OWNER_CANARY;
+}
+
+static ucn_v6_result_t callback_scope_finish(
+    ucn_v6_callback_gate_t *gate,
+    const void *owner,
+    uint64_t violations_before,
+    ucn_v6_result_t result)
+{
+    bool clean;
+
+    if (gate == NULL || owner == NULL || !gate->initialized ||
+        gate->lock == NULL || gate->unlock == NULL ||
+        violations_before == UINT64_MAX) {
+        return UCN_V6_ERR_STATE;
+    }
+    gate->lock(gate->context);
+    clean = gate->active && gate->active_owner == owner &&
+            gate->violation_count == violations_before &&
+            gate->violation_count != UINT64_MAX;
+    if (gate->active && gate->active_owner == owner) {
+        gate->active = false;
+        gate->active_owner = NULL;
+    }
+    gate->unlock(gate->context);
+    return clean && callback_result_is_declared(result) ? result :
+                                                         UCN_V6_ERR_STATE;
+}
+
+static bool callback_reentry_is_blocked(
+    const ucn_v6_bootstrap_owner_t *owner)
+{
+    ucn_v6_result_t result;
+
+    if (!ucn_v6_callback_gate_is_active(owner->callback_gate)) {
+        return false;
+    }
+    /* Record the violation in the shared Gate so an outer verifier call
+     * cannot hide a nested API attempt by discarding its return code. */
+    result = ucn_v6_callback_gate_try_enter(owner->callback_gate, owner);
+    if (result == UCN_V6_OK &&
+        ucn_v6_callback_gate_leave(owner->callback_gate, owner) !=
+            UCN_V6_OK) {
+        return true;
+    }
+    return true;
 }
 
 static bool principal_equal(
@@ -33,6 +87,28 @@ static bool bytes_nonzero(const uint8_t *bytes, size_t length)
         }
     }
     return false;
+}
+
+static bool bytes_zero(const uint8_t *bytes, size_t length)
+{
+    size_t index;
+    for (index = 0U; index < length; ++index) {
+        if (bytes[index] != 0U) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool evidence_is_valid(
+    const ucn_v6_bootstrap_evidence_t *evidence)
+{
+    return evidence != NULL && evidence->length != 0U &&
+           evidence->length <= UCN_V6_BOOTSTRAP_EVIDENCE_MAX_BYTES &&
+           bytes_nonzero(evidence->bytes, evidence->length) &&
+           bytes_zero(evidence->bytes + evidence->length,
+                      UCN_V6_BOOTSTRAP_EVIDENCE_MAX_BYTES -
+                          evidence->length);
 }
 
 static bool flow_is_valid(ucn_v6_bootstrap_flow_t flow)
@@ -95,12 +171,36 @@ static bool transcript_is_valid(
            transcript->authority_binding_generation != 0U &&
            transcript->authority_binding_generation <=
                UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           transcript->selected_link_instance_id != 0U &&
            bytes_nonzero(transcript->binding_lease_id,
                          sizeof(transcript->binding_lease_id)) &&
            transcript->binding_lease_duration_us != 0U &&
            transcript->authority_lease_sequence != 0U &&
            transcript->authority_lease_sequence <=
                UCN_V6_SERIAL64_ROTATION_THRESHOLD &&
+           transcript->authority_lease_duration_us != 0U &&
+           transcript->freshness_max_remaining_lease_us != 0U &&
+           transcript->freshness_max_remaining_lease_us <=
+               transcript->authority_lease_duration_us &&
+           bytes_nonzero(transcript->durable_fence_token,
+                         sizeof(transcript->durable_fence_token)) &&
+           bytes_nonzero(transcript->allocation_high_water_digest,
+                         sizeof(transcript->allocation_high_water_digest)) &&
+           bytes_nonzero(transcript->quorum_config_digest,
+                         sizeof(transcript->quorum_config_digest)) &&
+           bytes_nonzero(transcript->signer_set_digest,
+                         sizeof(transcript->signer_set_digest)) &&
+           bytes_nonzero(transcript->threshold_proof_digest,
+                         sizeof(transcript->threshold_proof_digest)) &&
+           bytes_nonzero(transcript->freshness_proof_transcript_hash,
+                         sizeof(transcript->freshness_proof_transcript_hash)) &&
+           transcript->authority_signer_count != 0U &&
+           transcript->authority_quorum_threshold != 0U &&
+           transcript->authority_quorum_threshold <=
+               transcript->authority_signer_count &&
+           (transcript->binding_mode == UCN_V6_ADDRESS_STATIC ||
+            transcript->binding_mode == UCN_V6_ADDRESS_LEASED ||
+            transcript->binding_mode == UCN_V6_ADDRESS_SELF_PROPOSED) &&
            transcript->selected_hop_suite != 0U &&
            transcript->selected_hop_key_id != 0U &&
            transcript->selected_hop_key_generation != 0U &&
@@ -150,12 +250,37 @@ static bool transcript_equal(
            left->authority_address == right->authority_address &&
            left->authority_binding_generation ==
                right->authority_binding_generation &&
+           left->selected_link_instance_id ==
+               right->selected_link_instance_id &&
            memcmp(left->binding_lease_id, right->binding_lease_id,
                   sizeof(left->binding_lease_id)) == 0 &&
            left->binding_lease_duration_us ==
                right->binding_lease_duration_us &&
            left->authority_lease_sequence ==
                right->authority_lease_sequence &&
+           left->authority_lease_duration_us ==
+               right->authority_lease_duration_us &&
+           left->freshness_max_remaining_lease_us ==
+               right->freshness_max_remaining_lease_us &&
+           memcmp(left->durable_fence_token, right->durable_fence_token,
+                  sizeof(left->durable_fence_token)) == 0 &&
+           memcmp(left->allocation_high_water_digest,
+                  right->allocation_high_water_digest,
+                  sizeof(left->allocation_high_water_digest)) == 0 &&
+           memcmp(left->quorum_config_digest, right->quorum_config_digest,
+                  sizeof(left->quorum_config_digest)) == 0 &&
+           memcmp(left->signer_set_digest, right->signer_set_digest,
+                  sizeof(left->signer_set_digest)) == 0 &&
+           memcmp(left->threshold_proof_digest,
+                  right->threshold_proof_digest,
+                  sizeof(left->threshold_proof_digest)) == 0 &&
+           memcmp(left->freshness_proof_transcript_hash,
+                  right->freshness_proof_transcript_hash,
+                  sizeof(left->freshness_proof_transcript_hash)) == 0 &&
+           left->authority_signer_count == right->authority_signer_count &&
+           left->authority_quorum_threshold ==
+               right->authority_quorum_threshold &&
+           left->binding_mode == right->binding_mode &&
            left->selected_hop_suite == right->selected_hop_suite &&
            left->selected_hop_key_id == right->selected_hop_key_id &&
            left->selected_hop_key_generation ==
@@ -171,6 +296,63 @@ static bool transcript_equal(
                right->selected_link_instance_generation &&
            memcmp(left->prior_messages_hash, right->prior_messages_hash,
                   sizeof(left->prior_messages_hash)) == 0;
+}
+
+static bool optional_binding_equal(
+    const ucn_v6_binding_key_t *left,
+    const ucn_v6_binding_key_t *right)
+{
+    if (left == NULL || right == NULL) {
+        return left == right;
+    }
+    return ucn_v6_binding_key_equal(left, right);
+}
+
+static ucn_v6_result_t authorize_event(
+    ucn_v6_bootstrap_owner_t *owner,
+    ucn_v6_bootstrap_event_t event,
+    ucn_v6_bootstrap_flow_t flow,
+    const ucn_v6_bootstrap_key_t *key,
+    const ucn_v6_bootstrap_transcript_t *transcript,
+    const ucn_v6_binding_key_t *existing_binding,
+    uint64_t now_us,
+    const ucn_v6_bootstrap_evidence_t *evidence)
+{
+    ucn_v6_bootstrap_key_t key_copy;
+    ucn_v6_bootstrap_transcript_t transcript_copy;
+    ucn_v6_binding_key_t binding_copy;
+    ucn_v6_bootstrap_evidence_t evidence_copy;
+    const ucn_v6_binding_key_t *binding_argument = NULL;
+    uint64_t violations_before;
+    ucn_v6_result_t result;
+    ucn_v6_result_t leave_result;
+
+    if (!evidence_is_valid(evidence)) {
+        return UCN_V6_ERR_SECURITY;
+    }
+    key_copy = *key;
+    transcript_copy = *transcript;
+    evidence_copy = *evidence;
+    if (existing_binding != NULL) {
+        binding_copy = *existing_binding;
+        binding_argument = &binding_copy;
+    }
+    violations_before = ucn_v6_callback_gate_violation_count(
+        owner->callback_gate);
+    if (violations_before == UINT64_MAX ||
+        ucn_v6_callback_gate_try_enter(owner->callback_gate, owner) !=
+            UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
+    }
+    result = owner->verifier.authorize_event(
+        owner->verifier.context, event, flow, &key_copy, &transcript_copy,
+        binding_argument, now_us, &evidence_copy);
+    leave_result = callback_scope_finish(
+        owner->callback_gate, owner, violations_before, result);
+    if (leave_result == UCN_V6_ERR_STATE && result == UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
+    }
+    return leave_result == UCN_V6_OK ? UCN_V6_OK : UCN_V6_ERR_SECURITY;
 }
 
 static ucn_v6_bootstrap_pending_t *pending_array(
@@ -298,12 +480,18 @@ ucn_v6_result_t ucn_v6_bootstrap_owner_init_in_place(
     size_t storage_bytes,
     const struct ucn_v6_feature_manifest *manifest,
     const ucn_v6_bootstrap_config_t *config,
+    const ucn_v6_bootstrap_verifier_ops_t *verifier,
+    ucn_v6_callback_gate_t *callback_gate,
     ucn_v6_bootstrap_owner_t **owner_out)
 {
     ucn_v6_bootstrap_owner_t *owner;
     ucn_v6_result_t result;
 
-    if (owner_out == NULL || config == NULL || config->max_pending == 0U ||
+    if (owner_out == NULL || config == NULL || verifier == NULL ||
+        verifier->authorize_event == NULL || callback_gate == NULL ||
+        ucn_v6_callback_gate_violation_count(callback_gate) == UINT64_MAX ||
+        ucn_v6_callback_gate_is_active(callback_gate) ||
+        config->max_pending == 0U ||
         config->max_pending > UCN_V6_BOOTSTRAP_MAX_PENDING ||
         config->max_pending_per_link == 0U ||
         config->max_pending_per_link > config->max_pending ||
@@ -328,6 +516,8 @@ ucn_v6_result_t ucn_v6_bootstrap_owner_init_in_place(
     owner->schema = UCN_V6_STORAGE_LAYOUT;
     owner->layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
     owner->config = *config;
+    owner->verifier = *verifier;
+    owner->callback_gate = callback_gate;
     owner->initialized = true;
     owner->canary = UCN_V6_BOOTSTRAP_OWNER_CANARY;
     *owner_out = owner;
@@ -347,7 +537,13 @@ ucn_v6_result_t ucn_v6_bootstrap_admit_initial_hello(
     uint64_t missing_tokens;
     uint64_t seconds_to_full;
 
-    if (!owner_is_valid(owner) || ingress_link_id == 0U ||
+    if (!owner_is_valid(owner)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (callback_reentry_is_blocked(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (ingress_link_id == 0U ||
         ingress_link_generation == 0U ||
         ingress_link_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         request_bytes == 0U ||
@@ -406,7 +602,7 @@ ucn_v6_result_t ucn_v6_bootstrap_open_after_cookie(
     const ucn_v6_bootstrap_key_t *key,
     const ucn_v6_bootstrap_transcript_t *transcript,
     const ucn_v6_binding_key_t *existing_binding,
-    bool cookie_verified,
+    const ucn_v6_bootstrap_evidence_t *cookie_evidence,
     uint64_t now_us)
 {
     ucn_v6_bootstrap_pending_t *slots;
@@ -417,14 +613,23 @@ ucn_v6_result_t ucn_v6_bootstrap_open_after_cookie(
     size_t peer_count;
     ucn_v6_bootstrap_pending_t *empty = NULL;
     uint64_t deadline;
+    ucn_v6_result_t result;
 
-    if (!owner_is_valid(owner) || !flow_is_valid(flow) ||
+    if (!owner_is_valid(owner)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (callback_reentry_is_blocked(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (!flow_is_valid(flow) ||
         !key_is_valid(key) || !transcript_is_valid(transcript) ||
         transcript->flow != flow ||
-        !cookie_verified ||
         !principal_equal(&key->identity_digest,
                          &transcript->joining_device_identity_digest) ||
-        key->transaction_id != transcript->transaction_id) {
+        key->transaction_id != transcript->transaction_id ||
+        key->ingress_link_id != transcript->selected_link_instance_id ||
+        key->ingress_link_generation !=
+            transcript->selected_link_instance_generation) {
         return UCN_V6_ERR_SECURITY;
     }
     if (flow == UCN_V6_BOOTSTRAP_FLOW_JOIN) {
@@ -444,8 +649,16 @@ ucn_v6_result_t ucn_v6_bootstrap_open_after_cookie(
 
     duplicate = find_pending(owner, flow, key);
     if (duplicate != NULL) {
-        return transcript_equal(&duplicate->transcript, transcript) ?
-                   UCN_V6_OK : UCN_V6_ERR_REPLAY;
+        if (!transcript_equal(&duplicate->transcript, transcript) ||
+            !optional_binding_equal(
+                flow == UCN_V6_BOOTSTRAP_FLOW_REAUTH ?
+                    &duplicate->existing_binding : NULL,
+                existing_binding)) {
+            return UCN_V6_ERR_REPLAY;
+        }
+        return authorize_event(
+            owner, UCN_V6_BOOTSTRAP_EVENT_COOKIE, flow, key, transcript,
+            existing_binding, now_us, cookie_evidence);
     }
     if (now_us > UINT64_MAX - owner->config.pending_timeout_us) {
         return UCN_V6_ERR_EXHAUSTED;
@@ -473,6 +686,13 @@ ucn_v6_result_t ucn_v6_bootstrap_open_after_cookie(
         return UCN_V6_ERR_NO_SPACE;
     }
 
+    result = authorize_event(owner, UCN_V6_BOOTSTRAP_EVENT_COOKIE, flow, key,
+                             transcript, existing_binding, now_us,
+                             cookie_evidence);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+
     memset(empty, 0, sizeof(*empty));
     empty->occupied = true;
     empty->flow = flow;
@@ -492,13 +712,20 @@ ucn_v6_result_t ucn_v6_bootstrap_advance(
     const ucn_v6_bootstrap_key_t *key,
     const ucn_v6_bootstrap_transcript_t *transcript,
     ucn_v6_bootstrap_event_t event,
-    bool proof_verified,
+    const ucn_v6_bootstrap_evidence_t *evidence,
     uint64_t now_us)
 {
     ucn_v6_bootstrap_pending_t *pending;
     ucn_v6_bootstrap_phase_t next_phase;
+    ucn_v6_result_t result;
 
-    if (!owner_is_valid(owner) || !flow_is_valid(flow) ||
+    if (!owner_is_valid(owner)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (callback_reentry_is_blocked(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (!flow_is_valid(flow) ||
         !key_is_valid(key) || !transcript_is_valid(transcript) ||
         transcript->flow != flow) {
         return UCN_V6_ERR_ARGUMENT;
@@ -518,11 +745,16 @@ ucn_v6_result_t ucn_v6_bootstrap_advance(
             pending->phase == UCN_V6_BOOTSTRAP_ABORTED) {
             return UCN_V6_ERR_STATE;
         }
+        result = authorize_event(
+            owner, event, flow, key, transcript,
+            flow == UCN_V6_BOOTSTRAP_FLOW_REAUTH ?
+                &pending->existing_binding : NULL,
+            now_us, evidence);
+        if (result != UCN_V6_OK) {
+            return result;
+        }
         pending->phase = UCN_V6_BOOTSTRAP_ABORTED;
         return UCN_V6_OK;
-    }
-    if (!proof_verified) {
-        return UCN_V6_ERR_SECURITY;
     }
 
     next_phase = pending->phase;
@@ -558,9 +790,17 @@ ucn_v6_result_t ucn_v6_bootstrap_advance(
                 pending->phase == UCN_V6_BOOTSTRAP_DEVICE_COMMITTED) ||
                (event == UCN_V6_BOOTSTRAP_EVENT_FINAL_DURABLE &&
                 pending->phase == UCN_V6_BOOTSTRAP_FINAL_DURABLE)) {
-        return UCN_V6_OK;
+        next_phase = pending->phase;
     } else {
         return UCN_V6_ERR_STATE;
+    }
+    result = authorize_event(
+        owner, event, flow, key, transcript,
+        flow == UCN_V6_BOOTSTRAP_FLOW_REAUTH ?
+            &pending->existing_binding : NULL,
+        now_us, evidence);
+    if (result != UCN_V6_OK) {
+        return result;
     }
     pending->phase = next_phase;
     return UCN_V6_OK;
@@ -575,7 +815,13 @@ ucn_v6_result_t ucn_v6_bootstrap_copy_pending(
     const ucn_v6_bootstrap_pending_t *slots;
     size_t index;
 
-    if (!owner_is_valid(owner) || !flow_is_valid(flow) ||
+    if (!owner_is_valid(owner)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (callback_reentry_is_blocked(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (!flow_is_valid(flow) ||
         !key_is_valid(key) || pending == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
@@ -599,7 +845,13 @@ ucn_v6_result_t ucn_v6_bootstrap_validate_final(
     const ucn_v6_bootstrap_pending_t *slots;
     size_t index;
 
-    if (!owner_is_valid(owner) || !flow_is_valid(flow) ||
+    if (!owner_is_valid(owner)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (callback_reentry_is_blocked(owner)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (!flow_is_valid(flow) ||
         !key_is_valid(key) || !transcript_is_valid(transcript) ||
         transcript->flow != flow) {
         return UCN_V6_ERR_ARGUMENT;
@@ -630,7 +882,7 @@ size_t ucn_v6_bootstrap_expire(
     size_t slot_index;
     size_t expired = 0U;
 
-    if (!owner_is_valid(owner)) {
+    if (!owner_is_valid(owner) || callback_reentry_is_blocked(owner)) {
         return 0U;
     }
     arrays[0] = owner->join_pending;
@@ -651,10 +903,20 @@ size_t ucn_v6_bootstrap_expire(
          ++slot_index) {
         ucn_v6_bootstrap_link_budget_t *budget =
             &owner->budgets[slot_index];
+        uint64_t seconds_to_full =
+            ((uint64_t)owner->config.token_burst +
+             (uint64_t)owner->config.tokens_per_second - 1U) /
+            (uint64_t)owner->config.tokens_per_second;
+        uint64_t refill_idle_us =
+            seconds_to_full > UINT64_MAX / UINT64_C(1000000) ?
+                UINT64_MAX : seconds_to_full * UINT64_C(1000000);
+        uint64_t reclaim_idle_us =
+            owner->config.pending_timeout_us > refill_idle_us ?
+                owner->config.pending_timeout_us : refill_idle_us;
         if (budget->occupied && !budget_has_pending(owner, budget) &&
             now_us >= budget->last_activity_us &&
             now_us - budget->last_activity_us >=
-                owner->config.pending_timeout_us) {
+                reclaim_idle_us) {
             memset(budget, 0, sizeof(*budget));
         }
     }

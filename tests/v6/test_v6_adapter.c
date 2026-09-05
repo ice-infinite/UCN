@@ -24,6 +24,7 @@ typedef struct fake_environment {
     unsigned wait_calls;
     bool wait_notified;
     uint64_t now_us;
+    uint64_t last_wait_us;
 } fake_environment_t;
 
 typedef struct fake_driver {
@@ -42,9 +43,14 @@ typedef struct fake_driver {
 } fake_driver_t;
 
 typedef struct fake_handler {
-    ucn_v6_owner_event_t seen[16];
-    size_t seen_count;
+    ucn_v6_adapter_owner_t *adapter;
+    unsigned phase_calls;
+    unsigned timer_calls;
     unsigned retired_rx;
+    bool publish_deadline;
+    uint64_t deadline_us;
+    bool backlog_timer_once;
+    bool backlog_emitted;
 } fake_handler_t;
 
 static ucn_v6_adapter_owner_storage_t adapter_storage;
@@ -106,6 +112,7 @@ static ucn_v6_result_t fake_wait(
     fake_environment_t *environment = (fake_environment_t *)context;
     if (max_wait_us == 0U || notified == NULL) return UCN_V6_ERR_ARGUMENT;
     ++environment->wait_calls;
+    environment->last_wait_us = max_wait_us;
     *notified = environment->wait_notified;
     return UCN_V6_OK;
 }
@@ -481,29 +488,194 @@ static int test_tx_lifecycle_and_reopen(void)
     return 0;
 }
 
-static ucn_v6_result_t port_handler(
-    void *context,
-    ucn_v6_owner_event_t event,
-    uint64_t now_us,
-    ucn_v6_adapter_owner_t *adapter)
+static ucn_v6_result_t port_noop_phase(
+    void *context, uint64_t now_us, uint16_t budget,
+    ucn_v6_stack_phase_result_t *result)
 {
     fake_handler_t *handler = (fake_handler_t *)context;
-    if (handler->seen_count < sizeof(handler->seen) / sizeof(handler->seen[0])) {
-        handler->seen[handler->seen_count] = event;
+    if (handler == NULL || result == NULL || now_us == 0U || budget == 0U) {
+        return UCN_V6_ERR_ARGUMENT;
     }
-    ++handler->seen_count;
-    if (now_us == 0U) return UCN_V6_ERR_STATE;
-    if (event == UCN_V6_OWNER_EVENT_RX) {
-        uint8_t frame[64];
-        ucn_v6_driver_rx_view_t view;
-        ucn_v6_result_t result = ucn_v6_adapter_peek_rx(
-            adapter, frame, sizeof(frame), &view);
-        if (result != UCN_V6_OK) return result;
-        result = ucn_v6_adapter_retire_rx(adapter, &view.key);
-        if (result == UCN_V6_OK) ++handler->retired_rx;
-        return result;
-    }
+    ++handler->phase_calls;
+    memset(result, 0, sizeof(*result));
     return UCN_V6_OK;
+}
+
+static ucn_v6_result_t port_timer_phase(
+    void *context, uint64_t now_us, uint16_t budget,
+    ucn_v6_stack_phase_result_t *result)
+{
+    fake_handler_t *handler = (fake_handler_t *)context;
+    ucn_v6_result_t rc = port_noop_phase(
+        context, now_us, budget, result);
+    if (rc == UCN_V6_OK) {
+        ++handler->timer_calls;
+        if (handler->publish_deadline) {
+            result->has_deadline = true;
+            result->next_deadline_us = handler->deadline_us;
+        }
+        if (handler->backlog_timer_once && !handler->backlog_emitted) {
+            handler->backlog_emitted = true;
+            result->work_done = 1U;
+            result->has_more = true;
+        }
+    }
+    return rc;
+}
+
+static ucn_v6_result_t port_rx_phase(
+    void *context, uint64_t now_us, uint16_t budget,
+    ucn_v6_stack_phase_result_t *phase_result)
+{
+    fake_handler_t *handler = (fake_handler_t *)context;
+    uint8_t frame[64];
+    ucn_v6_driver_rx_view_t view;
+    ucn_v6_result_t result;
+    result = port_noop_phase(context, now_us, budget, phase_result);
+    if (result != UCN_V6_OK || handler->adapter == NULL) return result;
+    result = ucn_v6_adapter_peek_rx(
+        handler->adapter, frame, sizeof(frame), &view);
+    if (result == UCN_V6_ERR_NOT_FOUND) return UCN_V6_OK;
+    if (result != UCN_V6_OK) return result;
+    result = ucn_v6_adapter_retire_rx(handler->adapter, &view.key);
+    if (result == UCN_V6_OK) {
+        ++handler->retired_rx;
+        phase_result->work_done = 1U;
+    }
+    return result;
+}
+
+static ucn_v6_result_t port_invalidate(
+    void *context, const ucn_v6_stack_invalidation_t *invalidation)
+{
+    return context != NULL && invalidation != NULL ?
+        UCN_V6_OK : UCN_V6_ERR_ARGUMENT;
+}
+
+static ucn_v6_stack_hooks_t port_stack_hooks(fake_handler_t *handler)
+{
+    ucn_v6_stack_hooks_t hooks;
+    memset(&hooks, 0, sizeof(hooks));
+    hooks.context = handler;
+    hooks.rx_ingress = port_rx_phase;
+    hooks.tx_completion = port_noop_phase;
+    hooks.timer_expiry = port_timer_phase;
+    hooks.persistence = port_noop_phase;
+    hooks.hop_security = port_noop_phase;
+    hooks.e2e_security = port_noop_phase;
+    hooks.capability = port_noop_phase;
+    hooks.route_authority = port_noop_phase;
+#if UCN_V6_FEATURE_REALTIME_ENABLED
+    hooks.realtime = port_noop_phase;
+    hooks.invalidate_realtime = port_invalidate;
+#endif
+    hooks.operation = port_noop_phase;
+    hooks.endpoint = port_noop_phase;
+#if UCN_V6_FEATURE_CLUSTER_ENABLED
+    hooks.cluster = port_noop_phase;
+    hooks.invalidate_cluster = port_invalidate;
+#endif
+    hooks.qos_tx = port_noop_phase;
+#if UCN_V6_FEATURE_ADAPTER_ENABLED
+    hooks.invalidate_adapter = port_invalidate;
+#endif
+    hooks.invalidate_security = port_invalidate;
+    hooks.invalidate_capability = port_invalidate;
+    hooks.invalidate_transfer = port_invalidate;
+    hooks.invalidate_route = port_invalidate;
+    hooks.invalidate_qos = port_invalidate;
+    hooks.invalidate_endpoint = port_invalidate;
+    return hooks;
+}
+
+static ucn_v6_stack_budget_t port_stack_budget(void)
+{
+    ucn_v6_stack_budget_t budget;
+    size_t phase;
+    memset(&budget, 0, sizeof(budget));
+    for (phase = 0U; phase < UCN_V6_STACK_PHASE_COUNT; ++phase) {
+        budget.phase_work[phase] = 1U;
+        ++budget.max_total_work;
+    }
+#if !UCN_V6_FEATURE_REALTIME_ENABLED
+    budget.phase_work[UCN_V6_STACK_PHASE_REALTIME] = 0U;
+    --budget.max_total_work;
+#endif
+#if !UCN_V6_FEATURE_CLUSTER_ENABLED
+    budget.phase_work[UCN_V6_STACK_PHASE_CLUSTER] = 0U;
+    --budget.max_total_work;
+#endif
+    return budget;
+}
+
+static int test_freertos_budget_preflight_is_non_destructive(void)
+{
+    ucn_v6_freertos_port_storage_t storage;
+    ucn_v6_freertos_port_storage_t before;
+    fake_environment_t environment;
+    fake_handler_t handler;
+    ucn_v6_freertos_port_ops_t port_ops;
+    ucn_v6_stack_hooks_t stack_hooks;
+    ucn_v6_stack_budget_t budget;
+    ucn_v6_freertos_port_t *port;
+
+    memset(&environment, 0, sizeof(environment));
+    memset(&handler, 0, sizeof(handler));
+    memset(&port_ops, 0, sizeof(port_ops));
+    port_ops.struct_size = sizeof(port_ops);
+    port_ops.api_version = UCN_V6_FREERTOS_PORT_API_VERSION;
+    port_ops.context = &environment;
+    port_ops.lock_task = fake_port_lock_task;
+    port_ops.try_lock_from_isr = fake_try_lock_from_isr;
+    port_ops.unlock_task = fake_unlock_task;
+    port_ops.unlock_from_isr = fake_unlock_from_isr;
+    port_ops.notify_owner_task = fake_notify;
+    port_ops.wait_for_notification = fake_wait;
+    port_ops.read_monotonic_time_us = fake_now;
+    stack_hooks = port_stack_hooks(&handler);
+
+    memset(&storage, 0xA5, sizeof(storage));
+    before = storage;
+    memset(&budget, 0, sizeof(budget));
+    port = (ucn_v6_freertos_port_t *)(void *)storage.bytes;
+    CHECK(ucn_v6_freertos_port_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
+              &port_ops, &stack_hooks, &budget, &port) == UCN_V6_ERR_CONFIG);
+    CHECK(port == NULL && memcmp(&storage, &before, sizeof(storage)) == 0);
+
+    memset(&storage, 0x5A, sizeof(storage));
+    before = storage;
+    budget = port_stack_budget();
+    --budget.max_total_work;
+    port = (ucn_v6_freertos_port_t *)(void *)storage.bytes;
+    CHECK(ucn_v6_freertos_port_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
+              &port_ops, &stack_hooks, &budget, &port) == UCN_V6_ERR_CONFIG);
+    CHECK(port == NULL && memcmp(&storage, &before, sizeof(storage)) == 0);
+
+#if !UCN_V6_FEATURE_REALTIME_ENABLED
+    memset(&storage, 0x3C, sizeof(storage));
+    before = storage;
+    budget = port_stack_budget();
+    budget.phase_work[UCN_V6_STACK_PHASE_REALTIME] = 1U;
+    port = (ucn_v6_freertos_port_t *)(void *)storage.bytes;
+    CHECK(ucn_v6_freertos_port_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
+              &port_ops, &stack_hooks, &budget, &port) == UCN_V6_ERR_CONFIG);
+    CHECK(port == NULL && memcmp(&storage, &before, sizeof(storage)) == 0);
+#endif
+#if !UCN_V6_FEATURE_CLUSTER_ENABLED
+    memset(&storage, 0xC3, sizeof(storage));
+    before = storage;
+    budget = port_stack_budget();
+    budget.phase_work[UCN_V6_STACK_PHASE_CLUSTER] = 1U;
+    port = (ucn_v6_freertos_port_t *)(void *)storage.bytes;
+    CHECK(ucn_v6_freertos_port_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
+              &port_ops, &stack_hooks, &budget, &port) == UCN_V6_ERR_CONFIG);
+    CHECK(port == NULL && memcmp(&storage, &before, sizeof(storage)) == 0);
+#endif
+    return 0;
 }
 
 static int test_freertos_notification_owner(void)
@@ -512,6 +684,9 @@ static int test_freertos_notification_owner(void)
     fake_driver_t driver;
     fake_handler_t handler;
     ucn_v6_freertos_port_ops_t port_ops;
+    ucn_v6_stack_hooks_t stack_hooks;
+    ucn_v6_stack_budget_t stack_budget;
+    ucn_v6_stack_run_result_t run_result;
     ucn_v6_freertos_port_t *port = NULL;
     ucn_v6_driver_runtime_ops_t runtime;
     ucn_v6_adapter_owner_t *adapter = NULL;
@@ -519,7 +694,6 @@ static int test_freertos_notification_owner(void)
     ucn_v6_driver_link_config_t config;
     ucn_v6_driver_event_key_t key;
     uint8_t frame[36];
-    uint16_t processed = 0U;
     memset(&environment, 0, sizeof(environment));
     memset(&driver, 0, sizeof(driver));
     memset(&handler, 0, sizeof(handler));
@@ -536,16 +710,19 @@ static int test_freertos_notification_owner(void)
     port_ops.notify_owner_task = fake_notify;
     port_ops.wait_for_notification = fake_wait;
     port_ops.read_monotonic_time_us = fake_now;
+    stack_hooks = port_stack_hooks(&handler);
+    stack_budget = port_stack_budget();
     CHECK(ucn_v6_freertos_port_init_in_place(
               port_storage.bytes, sizeof(port_storage),
-              ucn_v6_compiled_manifest(), &port_ops, port_handler,
-              &handler, &port) == UCN_V6_OK);
+              ucn_v6_compiled_manifest(), &port_ops, &stack_hooks,
+              &stack_budget, &port) == UCN_V6_OK);
     CHECK(ucn_v6_freertos_port_make_adapter_runtime(
               port, &runtime) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_init_in_place(
               adapter_storage.bytes, sizeof(adapter_storage),
               ucn_v6_compiled_manifest(), &runtime, &adapter) == UCN_V6_OK);
     CHECK(ucn_v6_freertos_port_bind_adapter(port, adapter) == UCN_V6_OK);
+    handler.adapter = adapter;
     driver.owner = adapter;
     driver.submit_result = UCN_V6_OK;
     driver.cancel_result = UCN_V6_OK;
@@ -562,15 +739,39 @@ static int test_freertos_notification_owner(void)
               adapter, 4U, 1U, frame, sizeof(frame), NULL,
               true, &key) == UCN_V6_OK);
     CHECK(environment.isr_notifications == 1U);
-    CHECK(ucn_v6_freertos_port_run(port, 4U, &processed) == UCN_V6_OK);
-    CHECK(processed == 2U && handler.retired_rx == 1U &&
-          handler.seen[0] == UCN_V6_OWNER_EVENT_RX);
+    CHECK(ucn_v6_freertos_port_run(port, &run_result) == UCN_V6_OK);
+    CHECK(run_result.work_done == 1U && handler.retired_rx == 1U);
 
+    CHECK(ucn_v6_freertos_port_post_timer(port, false) == UCN_V6_OK);
+    CHECK(ucn_v6_freertos_port_wait_and_run(
+              port, 1000U, &run_result) == UCN_V6_OK);
+    CHECK(environment.wait_calls == 0U);
+
+    handler.publish_deadline = true;
+    handler.deadline_us = 5500U;
+    CHECK(ucn_v6_freertos_port_post_timer(port, false) == UCN_V6_OK);
+    CHECK(ucn_v6_freertos_port_run(port, &run_result) == UCN_V6_OK);
     environment.wait_notified = false;
     CHECK(ucn_v6_freertos_port_wait_and_run(
-              port, 1000U, 1U, &processed) == UCN_V6_OK);
-    CHECK(environment.wait_calls == 1U && processed == 1U &&
-          handler.seen[2] == UCN_V6_OWNER_EVENT_TIMER);
+              port, 1000U, &run_result) == UCN_V6_OK);
+    CHECK(environment.wait_calls == 1U &&
+          environment.last_wait_us == 500U);
+
+    handler.publish_deadline = false;
+    handler.backlog_timer_once = true;
+    environment.now_us = 5001U;
+    CHECK(ucn_v6_freertos_port_post_timer(port, false) == UCN_V6_OK);
+    CHECK(ucn_v6_freertos_port_run(port, &run_result) == UCN_V6_OK);
+    CHECK(run_result.more_work);
+    CHECK(ucn_v6_freertos_port_wait_and_run(
+              port, 1000U, &run_result) == UCN_V6_OK);
+    CHECK(environment.wait_calls == 1U && !run_result.more_work);
+
+    CHECK(ucn_v6_freertos_port_wait_and_run(
+              port, 1000U, &run_result) == UCN_V6_OK);
+    CHECK(environment.wait_calls == 2U &&
+          environment.last_wait_us == 1000U &&
+          handler.timer_calls >= 6U);
     return 0;
 }
 
@@ -579,6 +780,7 @@ int main(void)
     CHECK(test_reference_profiles_and_rx() == 0);
     CHECK(test_esp32s3_reference_configuration() == 0);
     CHECK(test_tx_lifecycle_and_reopen() == 0);
+    CHECK(test_freertos_budget_preflight_is_non_destructive() == 0);
     CHECK(test_freertos_notification_owner() == 0);
     printf("ucn v6 adapter and FreeRTOS port tests passed "
            "(adapter_storage=%zu, freertos_storage=%zu)\n",

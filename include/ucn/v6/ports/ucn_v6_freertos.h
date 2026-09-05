@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-#define UCN_V6_FREERTOS_PORT_API_VERSION UINT16_C(2)
+#define UCN_V6_FREERTOS_PORT_API_VERSION UINT16_C(3)
 
 typedef struct ucn_v6_freertos_port_ops {
     size_t struct_size;
@@ -29,12 +29,6 @@ typedef struct ucn_v6_freertos_port_ops {
         void *context, uint64_t *now_us);
 } ucn_v6_freertos_port_ops_t;
 
-typedef ucn_v6_result_t (*ucn_v6_freertos_event_handler_t)(
-    void *context,
-    ucn_v6_owner_event_t event,
-    uint64_t now_us,
-    ucn_v6_adapter_owner_t *adapter);
-
 typedef struct ucn_v6_freertos_port ucn_v6_freertos_port_t;
 typedef union ucn_v6_freertos_port_storage {
     uint64_t alignment_u64;
@@ -49,8 +43,8 @@ ucn_v6_result_t ucn_v6_freertos_port_init_in_place(
     size_t storage_bytes,
     const ucn_v6_feature_manifest_t *manifest,
     const ucn_v6_freertos_port_ops_t *ops,
-    ucn_v6_freertos_event_handler_t handler,
-    void *handler_context,
+    const ucn_v6_stack_hooks_t *stack_hooks,
+    const ucn_v6_stack_budget_t *stack_budget,
     ucn_v6_freertos_port_t **port);
 
 /* EN: Produces the exact Adapter runtime callbacks bound to this port.
@@ -65,12 +59,11 @@ ucn_v6_result_t ucn_v6_freertos_port_bind_adapter(
     ucn_v6_freertos_port_t *port,
     ucn_v6_adapter_owner_t *adapter);
 
-/* EN: Runs at most budget events in Owner-task context.
- * 中文：在 Owner 任务上下文中最多处理 budget 个事件。 */
+/* EN: Reads one monotonic timestamp and runs the canonical stack once.
+ * 中文：读取一次单调时间并执行一轮标准协议栈。 */
 ucn_v6_result_t ucn_v6_freertos_port_run(
     ucn_v6_freertos_port_t *port,
-    uint16_t budget,
-    uint16_t *processed);
+    ucn_v6_stack_run_result_t *run_result);
 
 /* EN: Blocks only when no event is pending. Timeout becomes one TIMER event,
  * preserving polling as a bounded fallback rather than the primary path.
@@ -79,8 +72,7 @@ ucn_v6_result_t ucn_v6_freertos_port_run(
 ucn_v6_result_t ucn_v6_freertos_port_wait_and_run(
     ucn_v6_freertos_port_t *port,
     uint64_t max_wait_us,
-    uint16_t budget,
-    uint16_t *processed);
+    ucn_v6_stack_run_result_t *run_result);
 
 ucn_v6_result_t ucn_v6_freertos_port_post_timer(
     ucn_v6_freertos_port_t *port,

@@ -43,8 +43,10 @@ Feature OFF 时对应目标不进入聚合接口。
 Profile 不是三套协议，而是同一 Wire/安全/语义下的容量预设：Nano 默认最大 256 B Transfer，
 Lite 为 2 KiB，Full 为 8 KiB。Realtime、Cluster、Adapter 可在编译期独立裁剪。
 
-自审：Manifest API=1；首次发布面收敛时 Storage Layout 为 2，V6X-A01～A11 后为 3，本次
-Message Witness、Realtime Domain Record、Owner 锁和 Capability 流式接口整改后为 4。
+自审：Manifest API=1；首次发布面收敛时 Storage Layout 为 2，V6X-A01～A11 后为 3，
+Message Witness、Realtime Domain Record、Owner 锁和 Capability 流式接口整改后为 4；
+本轮可信父代际、Stack Owner、Capability/Realtime/Cluster/FreeRTOS 公开存储变更后为 6。
+中间 Layout 5 与所有旧 Layout 一样只允许明确拒绝。
 Profile、Feature bits 与容量进入 Layout Hash；非法
 Profile、跨 Translation Unit 配置失配、对象容量/对齐错误均由编译或初始化门禁拒绝。
 
@@ -69,7 +71,7 @@ Profile、跨 Translation Unit 配置失配、对象容量/对齐错误均由编
 ### 2.6 V6-15-06：当前文档重写
 
 重写根 README、文档导航、13 个官方主题、6 个用户手册入口、6 个源码阅读入口，并机械生成
-公共函数签名索引；本次整改后的当前索引为 218 项。历史建议和 v5 说明不再充当当前用户入口。
+公共函数签名索引；本次整改后的当前索引为 241 项。历史建议和 v5 说明不再充当当前用户入口。
 
 自审：当前文档链接检查通过；API 索引加入 CTest 漂移门禁；发生冲突时以公共头/实现、CMake/
 测试、官方文档、提交绑定报告、任务记录、历史文档的顺序裁决。
@@ -116,7 +118,7 @@ TSan、真实密码 Provider、Flash 掉电、性能和最终外审列为阻断�
 - 旧源码/头/测试/工具目录：`0`；
 - 安装包旧头/库/target：`0`；
 - 公共 umbrella：`PASS`；
-- API 索引：218 个函数，`CURRENT`；
+- API 索引：241 个函数，`CURRENT`；
 - 当前文档本地链接：`PASS`；
 - Compatibility Manifest：28/28 `REPLACED`；
 - `git diff --check`：`PASS`（CRLF 提示不属于空白错误）。
@@ -225,22 +227,27 @@ Message 在整组 CTest 中异常退出且隔离重跑通过，运行环境仍�
 ## 11. 首轮统一外审后的整改状态
 
 外审提出的 V6X-A01～A11 已全部完成软件整改与逐项自审。Wire 基础长度因拆分
-Origin/Hop Sequence 固定为 `40/42/44/46 B`；Storage Layout 因 Security/Identity/Cluster
+Origin/Hop Sequence 先固定为 `40/42/44/46 B`；后续统一架构自审为使 Wire Hop
+Limit 与 16-bit 累计跳数域唯一一致，当前已破坏性更新为 `41/43/45/47 B`。Storage Layout 因 Security/Identity/Cluster
 持久合同、Profile 头边界与 Nano Frame 容量变更先升级为 3，随后因 Message Witness、Realtime
-完整 Domain Proposal Record、Owner task/ISR 锁合同和 Capability 流式归约升级为 4。当前发布面仍只有 v6，不新增旧版
+完整 Domain Proposal Record、Owner task/ISR 锁合同和 Capability 流式归约升级为 4；本轮
+可信父代际、统一 Stack Owner 和上层精确失效合同最终升级为 6。当前发布面仍只有 v6，不新增旧版
 解码、运行期 fallback 或兼容桥。
 
-本轮累计执行八轮全局自审：序号与安全所有权、持久化与重启、跨模块认证语义、Profile/资源/
+本轮累计执行十轮全局自审：序号与安全所有权、持久化与重启、跨模块认证语义、Profile/资源/
 编译器/发布面、并发门禁/工具链反证、发布表面/文档/证据一致性、全所有者反回退复审，以及
-追加整改后从 Identity 到 Adapter 的从头复审。软件矩阵、MSVC/GCC/Clang、ASan/UBSan 和
+追加整改后从 Identity 到 Adapter 的从头复审、精确失效/父代际/失败原子性复审、Wire 数值域与
+canonical 认证复审。软件矩阵、MSVC/GCC/Clang、ASan/UBSan 和
 Analyzer 全部通过；TSan 只获得 Owner/Adapter 定向通过，整体仍因当前 WSL runtime 不稳定而 HOLD。
 当前没有已知开放的软件 P0/P1；正式状态仍是 `WAIT EXTERNAL RE-REVIEW`。硬件与掉电门禁保持
 原样，不能据此生成 1.0 RC。
 
-## 12. V6X-S01～S05 追加整改后的最终软件门禁
+## 12. V6X-S01～S15 追加整改后的最终软件门禁
 
-追加全体自审关闭 Message Journal 独立反回退 Witness、Realtime Proposal Identity ABA、Owner
-退出锁失败、Handover 非 Voter 目标和无界 hop 数组五项问题。最新矩阵为：Windows GCC Full
+追加全体自审先关闭 Message Journal 独立反回退 Witness、Realtime Proposal Identity ABA、Owner
+退出锁失败、Handover 非 Voter 目标和无界 hop 数组，再关闭可信父代际、精确 Link→Session
+失效、单一 Route Owner、Message/Transfer 生命周期、QoS 公平、Realtime/Cluster 权威撤销、
+16-bit Hop 域与 Route/Path 双上下文 AAD。最新矩阵为：Windows GCC Full
 Debug/Release、Lite/Nano Debug 均 `26/26`；Nano Feature-Off `21/21`，Realtime-only/
 Cluster-only/Adapter-only 分别 `22/22`、`24/24`、`22/22`；MSVC 19.29 Release `26/26`；
 WSL ASan/UBSan、`-fanalyzer`、Clang 18 Werror 均 `27/27`。完整反例、资源和源码哈希见

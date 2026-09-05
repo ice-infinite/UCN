@@ -15,6 +15,8 @@ struct ucn_v6_bootstrap_owner {
     ucn_v6_bootstrap_pending_t join_pending[UCN_V6_BOOTSTRAP_MAX_PENDING];
     ucn_v6_bootstrap_pending_t reauth_pending[UCN_V6_BOOTSTRAP_MAX_PENDING];
     ucn_v6_bootstrap_link_budget_t budgets[UCN_V6_BOOTSTRAP_MAX_BUDGET_LINKS];
+    ucn_v6_bootstrap_verifier_ops_t verifier;
+    ucn_v6_callback_gate_t *callback_gate;
     bool initialized;
     uint64_t canary;
 };

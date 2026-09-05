@@ -2,7 +2,9 @@
 
 #include <string.h>
 
-#define UCN_V6_BOOTSTRAP_CANONICAL_BYTES ((size_t)196U)
+#define UCN_V6_BOOTSTRAP_CANONICAL_BYTES ((size_t)379U)
+#define UCN_V6_JOIN_RECEIPT_CANONICAL_BYTES \
+    UCN_V6_SECURITY_JOIN_RECEIPT_BYTES
 #define UCN_V6_ACL_CANONICAL_BYTES ((size_t)92U)
 
 typedef char ucn_v6_security_storage_size_check[
@@ -63,6 +65,74 @@ static bool buffer_ranges_overlap(
     return left_address - right_address < right_length;
 }
 
+static bool callback_result_is_declared(ucn_v6_result_t result)
+{
+    return result <= UCN_V6_OK && result >= UCN_V6_ERR_CANCELLED;
+}
+
+static bool callback_scope_is_clean(
+    ucn_v6_callback_gate_t *gate,
+    const void *owner,
+    uint64_t violations_before)
+{
+    bool clean;
+
+    if (gate == NULL || owner == NULL || !gate->initialized ||
+        gate->lock == NULL || gate->unlock == NULL ||
+        violations_before == UINT64_MAX) {
+        return false;
+    }
+    gate->lock(gate->context);
+    clean = gate->active && gate->active_owner == owner &&
+            gate->violation_count == violations_before &&
+            gate->violation_count != UINT64_MAX;
+    gate->unlock(gate->context);
+    return clean;
+}
+
+static ucn_v6_result_t callback_scope_finish(
+    ucn_v6_callback_gate_t *gate,
+    const void *owner,
+    uint64_t violations_before,
+    ucn_v6_result_t result)
+{
+    bool clean;
+
+    if (gate == NULL || owner == NULL || !gate->initialized ||
+        gate->lock == NULL || gate->unlock == NULL ||
+        violations_before == UINT64_MAX) {
+        return UCN_V6_ERR_STATE;
+    }
+    gate->lock(gate->context);
+    clean = gate->active && gate->active_owner == owner &&
+            gate->violation_count == violations_before &&
+            gate->violation_count != UINT64_MAX;
+    if (gate->active && gate->active_owner == owner) {
+        gate->active = false;
+        gate->active_owner = NULL;
+    }
+    gate->unlock(gate->context);
+    return clean && callback_result_is_declared(result) ? result :
+                                                         UCN_V6_ERR_STATE;
+}
+
+static bool callback_reentry_is_blocked(
+    ucn_v6_security_manager_t *manager)
+{
+    ucn_v6_result_t result;
+
+    if (!ucn_v6_callback_gate_is_active(manager->callback_gate)) {
+        return false;
+    }
+    result = ucn_v6_callback_gate_try_enter(manager->callback_gate, manager);
+    if (result == UCN_V6_OK &&
+        ucn_v6_callback_gate_leave(manager->callback_gate, manager) !=
+            UCN_V6_OK) {
+        return true;
+    }
+    return true;
+}
+
 static bool principal_equal(
     const ucn_v6_principal_t *left,
     const ucn_v6_principal_t *right)
@@ -77,6 +147,82 @@ static bool binding_equal(
     return left->realm_id == right->realm_id &&
            left->node_address == right->node_address &&
            left->binding_generation == right->binding_generation;
+}
+
+static bool authority_freshness_equal(
+    const ucn_v6_authority_freshness_t *left,
+    const ucn_v6_authority_freshness_t *right);
+static bool authority_epoch_equal(
+    const ucn_v6_authority_epoch_t *left,
+    const ucn_v6_authority_epoch_t *right);
+
+static bool authority_epoch_is_valid(
+    const ucn_v6_authority_epoch_t *epoch,
+    uint32_t realm_id)
+{
+    return epoch != NULL && epoch->realm_id == realm_id &&
+           ucn_v6_principal_is_valid(&epoch->authority_principal) &&
+           epoch->authority_generation != 0U &&
+           epoch->authority_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           !bytes_are_zero(epoch->durable_fence_token,
+                           sizeof(epoch->durable_fence_token)) &&
+           epoch->lease_sequence != 0U &&
+           epoch->lease_sequence <= UCN_V6_SERIAL64_ROTATION_THRESHOLD &&
+           epoch->lease_duration_us != 0U &&
+           !bytes_are_zero(epoch->allocation_high_water_digest,
+                           sizeof(epoch->allocation_high_water_digest)) &&
+           !bytes_are_zero(epoch->quorum_config_digest,
+                           sizeof(epoch->quorum_config_digest)) &&
+           !bytes_are_zero(epoch->signer_set_digest,
+                           sizeof(epoch->signer_set_digest)) &&
+           !bytes_are_zero(epoch->threshold_proof_digest,
+                           sizeof(epoch->threshold_proof_digest)) &&
+           epoch->signer_count != 0U && epoch->quorum_threshold != 0U &&
+           epoch->quorum_threshold <= epoch->signer_count;
+}
+
+static bool authority_epoch_is_zero(
+    const ucn_v6_authority_epoch_t *epoch)
+{
+    return epoch->realm_id == 0U &&
+           bytes_are_zero(epoch->authority_principal.bytes,
+                          sizeof(epoch->authority_principal.bytes)) &&
+           epoch->authority_generation == 0U &&
+           bytes_are_zero(epoch->durable_fence_token,
+                          sizeof(epoch->durable_fence_token)) &&
+           epoch->lease_sequence == 0U && epoch->lease_duration_us == 0U &&
+           bytes_are_zero(epoch->allocation_high_water_digest,
+                          sizeof(epoch->allocation_high_water_digest)) &&
+           bytes_are_zero(epoch->quorum_config_digest,
+                          sizeof(epoch->quorum_config_digest)) &&
+           bytes_are_zero(epoch->signer_set_digest,
+                          sizeof(epoch->signer_set_digest)) &&
+           bytes_are_zero(epoch->threshold_proof_digest,
+                          sizeof(epoch->threshold_proof_digest)) &&
+           epoch->signer_count == 0U && epoch->quorum_threshold == 0U;
+}
+
+static bool authority_freshness_is_valid(
+    const ucn_v6_authority_freshness_t *freshness,
+    const ucn_v6_authority_epoch_t *epoch,
+    const ucn_v6_binding_certificate_t *binding,
+    const ucn_v6_principal_t *verifier,
+    uint64_t transaction_id)
+{
+    return freshness != NULL && authority_epoch_is_valid(epoch, epoch->realm_id) &&
+           ucn_v6_principal_is_valid(verifier) &&
+           principal_equal(&freshness->verifier_device_principal, verifier) &&
+           freshness->challenge_nonce != 0U &&
+           freshness->transaction_id == transaction_id &&
+           freshness->authority_lease_sequence == epoch->lease_sequence &&
+           freshness->max_remaining_lease_us != 0U &&
+           freshness->max_remaining_lease_us <= epoch->lease_duration_us &&
+           freshness->max_remaining_lease_us <= binding->lease_duration_us &&
+           freshness->binding_generation == binding->binding.binding_generation &&
+           memcmp(freshness->binding_lease_id, binding->lease_id,
+                  sizeof(freshness->binding_lease_id)) == 0 &&
+           !bytes_are_zero(freshness->proof_transcript_hash,
+                           sizeof(freshness->proof_transcript_hash));
 }
 
 static bool bootstrap_transcript_is_valid(
@@ -111,12 +257,36 @@ static bool bootstrap_transcript_is_valid(
            transcript->authority_binding_generation != 0U &&
            transcript->authority_binding_generation <=
                UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           transcript->selected_link_instance_id != 0U &&
            !bytes_are_zero(transcript->binding_lease_id,
                            sizeof(transcript->binding_lease_id)) &&
            transcript->binding_lease_duration_us != 0U &&
            transcript->authority_lease_sequence != 0U &&
            transcript->authority_lease_sequence <=
                UCN_V6_SERIAL64_ROTATION_THRESHOLD &&
+           transcript->authority_lease_duration_us != 0U &&
+           transcript->freshness_max_remaining_lease_us != 0U &&
+           transcript->freshness_max_remaining_lease_us <=
+               transcript->authority_lease_duration_us &&
+           !bytes_are_zero(transcript->durable_fence_token,
+                           sizeof(transcript->durable_fence_token)) &&
+           !bytes_are_zero(transcript->allocation_high_water_digest,
+                           sizeof(transcript->allocation_high_water_digest)) &&
+           !bytes_are_zero(transcript->quorum_config_digest,
+                           sizeof(transcript->quorum_config_digest)) &&
+           !bytes_are_zero(transcript->signer_set_digest,
+                           sizeof(transcript->signer_set_digest)) &&
+           !bytes_are_zero(transcript->threshold_proof_digest,
+                           sizeof(transcript->threshold_proof_digest)) &&
+           !bytes_are_zero(transcript->freshness_proof_transcript_hash,
+                           sizeof(transcript->freshness_proof_transcript_hash)) &&
+           transcript->authority_signer_count != 0U &&
+           transcript->authority_quorum_threshold != 0U &&
+           transcript->authority_quorum_threshold <=
+               transcript->authority_signer_count &&
+           (transcript->binding_mode == UCN_V6_ADDRESS_STATIC ||
+            transcript->binding_mode == UCN_V6_ADDRESS_LEASED ||
+            transcript->binding_mode == UCN_V6_ADDRESS_SELF_PROPOSED) &&
            transcript->selected_hop_suite != 0U &&
            transcript->selected_hop_key_id != 0U &&
            transcript->selected_hop_key_generation != 0U &&
@@ -137,6 +307,156 @@ static bool bootstrap_transcript_is_valid(
                UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            !bytes_are_zero(transcript->prior_messages_hash,
                            sizeof(transcript->prior_messages_hash));
+}
+
+static bool bootstrap_transcript_equal(
+    const ucn_v6_bootstrap_transcript_t *left,
+    const ucn_v6_bootstrap_transcript_t *right)
+{
+    return left->protocol_version == right->protocol_version &&
+           left->bootstrap_header_contract ==
+               right->bootstrap_header_contract &&
+           left->flow == right->flow &&
+           principal_equal(&left->joining_device_principal,
+                           &right->joining_device_principal) &&
+           principal_equal(&left->joining_device_identity_digest,
+                           &right->joining_device_identity_digest) &&
+           principal_equal(&left->authority_principal,
+                           &right->authority_principal) &&
+           left->authority_generation == right->authority_generation &&
+           left->device_nonce == right->device_nonce &&
+           left->authority_nonce == right->authority_nonce &&
+           left->transaction_id == right->transaction_id &&
+           left->lease_freshness_challenge_nonce ==
+               right->lease_freshness_challenge_nonce &&
+           left->realm_id == right->realm_id &&
+           left->proposed_address == right->proposed_address &&
+           left->address_binding_generation ==
+               right->address_binding_generation &&
+           left->authority_address == right->authority_address &&
+           left->authority_binding_generation ==
+               right->authority_binding_generation &&
+           left->selected_link_instance_id ==
+               right->selected_link_instance_id &&
+           memcmp(left->binding_lease_id, right->binding_lease_id,
+                  sizeof(left->binding_lease_id)) == 0 &&
+           left->binding_lease_duration_us ==
+               right->binding_lease_duration_us &&
+           left->authority_lease_sequence ==
+               right->authority_lease_sequence &&
+           left->authority_lease_duration_us ==
+               right->authority_lease_duration_us &&
+           left->freshness_max_remaining_lease_us ==
+               right->freshness_max_remaining_lease_us &&
+           memcmp(left->durable_fence_token, right->durable_fence_token,
+                  sizeof(left->durable_fence_token)) == 0 &&
+           memcmp(left->allocation_high_water_digest,
+                  right->allocation_high_water_digest,
+                  sizeof(left->allocation_high_water_digest)) == 0 &&
+           memcmp(left->quorum_config_digest, right->quorum_config_digest,
+                  sizeof(left->quorum_config_digest)) == 0 &&
+           memcmp(left->signer_set_digest, right->signer_set_digest,
+                  sizeof(left->signer_set_digest)) == 0 &&
+           memcmp(left->threshold_proof_digest,
+                  right->threshold_proof_digest,
+                  sizeof(left->threshold_proof_digest)) == 0 &&
+           memcmp(left->freshness_proof_transcript_hash,
+                  right->freshness_proof_transcript_hash,
+                  sizeof(left->freshness_proof_transcript_hash)) == 0 &&
+           left->authority_signer_count == right->authority_signer_count &&
+           left->authority_quorum_threshold ==
+               right->authority_quorum_threshold &&
+           left->binding_mode == right->binding_mode &&
+           left->selected_hop_suite == right->selected_hop_suite &&
+           left->selected_hop_key_id == right->selected_hop_key_id &&
+           left->selected_hop_key_generation ==
+               right->selected_hop_key_generation &&
+           left->selected_e2e_mode == right->selected_e2e_mode &&
+           left->selected_e2e_suite == right->selected_e2e_suite &&
+           left->selected_e2e_key_id == right->selected_e2e_key_id &&
+           left->selected_e2e_key_generation ==
+               right->selected_e2e_key_generation &&
+           left->selected_session_generation ==
+               right->selected_session_generation &&
+           left->selected_link_instance_generation ==
+               right->selected_link_instance_generation &&
+           memcmp(left->prior_messages_hash, right->prior_messages_hash,
+                  sizeof(left->prior_messages_hash)) == 0;
+}
+
+static bool authority_epoch_matches_transcript(
+    const ucn_v6_authority_epoch_t *epoch,
+    const ucn_v6_bootstrap_transcript_t *transcript)
+{
+    return authority_epoch_is_valid(epoch, transcript->realm_id) &&
+           principal_equal(&epoch->authority_principal,
+                           &transcript->authority_principal) &&
+           epoch->authority_generation == transcript->authority_generation &&
+           memcmp(epoch->durable_fence_token,
+                  transcript->durable_fence_token,
+                  sizeof(epoch->durable_fence_token)) == 0 &&
+           memcmp(epoch->allocation_high_water_digest,
+                  transcript->allocation_high_water_digest,
+                  sizeof(epoch->allocation_high_water_digest)) == 0 &&
+           memcmp(epoch->quorum_config_digest,
+                  transcript->quorum_config_digest,
+                  sizeof(epoch->quorum_config_digest)) == 0 &&
+           memcmp(epoch->signer_set_digest,
+                  transcript->signer_set_digest,
+                  sizeof(epoch->signer_set_digest)) == 0 &&
+           memcmp(epoch->threshold_proof_digest,
+                  transcript->threshold_proof_digest,
+                  sizeof(epoch->threshold_proof_digest)) == 0 &&
+           epoch->signer_count == transcript->authority_signer_count &&
+           epoch->quorum_threshold ==
+               transcript->authority_quorum_threshold &&
+           epoch->lease_sequence == transcript->authority_lease_sequence &&
+           epoch->lease_duration_us ==
+               transcript->authority_lease_duration_us &&
+           epoch->lease_duration_us >= transcript->binding_lease_duration_us;
+}
+
+static bool binding_certificate_matches_transcript(
+    const ucn_v6_binding_certificate_t *certificate,
+    const ucn_v6_bootstrap_transcript_t *transcript)
+{
+    return principal_equal(&certificate->device_principal,
+                           &transcript->joining_device_principal) &&
+           principal_equal(&certificate->authority_principal,
+                           &transcript->authority_principal) &&
+           certificate->binding.realm_id == transcript->realm_id &&
+           certificate->binding.node_address == transcript->proposed_address &&
+           certificate->binding.binding_generation ==
+               transcript->address_binding_generation &&
+           certificate->authority_generation ==
+               transcript->authority_generation &&
+           memcmp(certificate->lease_id, transcript->binding_lease_id,
+                  sizeof(certificate->lease_id)) == 0 &&
+           certificate->lease_duration_us ==
+               transcript->binding_lease_duration_us &&
+           certificate->authority_lease_sequence ==
+               transcript->authority_lease_sequence &&
+           certificate->mode ==
+               (ucn_v6_address_mode_t)transcript->binding_mode;
+}
+
+static bool authority_freshness_matches_transcript(
+    const ucn_v6_authority_freshness_t *freshness,
+    const ucn_v6_authority_epoch_t *epoch,
+    const ucn_v6_binding_certificate_t *certificate,
+    const ucn_v6_bootstrap_transcript_t *transcript)
+{
+    return authority_freshness_is_valid(
+               freshness, epoch, certificate,
+               &transcript->joining_device_principal,
+               transcript->transaction_id) &&
+           freshness->challenge_nonce ==
+               transcript->lease_freshness_challenge_nonce &&
+           freshness->max_remaining_lease_us ==
+               transcript->freshness_max_remaining_lease_us &&
+           memcmp(freshness->proof_transcript_hash,
+                  transcript->freshness_proof_transcript_hash,
+                  sizeof(freshness->proof_transcript_hash)) == 0;
 }
 
 static bool suite_is_valid(uint8_t suite_id, ucn_v6_e2e_mode_t mode)
@@ -183,6 +503,104 @@ static bool manager_storage_is_valid(
            manager->canary == UCN_V6_SECURITY_MANAGER_CANARY;
 }
 
+static bool invalidation_equal(
+    const ucn_v6_stack_invalidation_t *left,
+    const ucn_v6_stack_invalidation_t *right)
+{
+    return left->type == right->type && left->link_id == right->link_id &&
+           left->link_generation == right->link_generation &&
+           binding_equal(&left->session.binding,
+                         &right->session.binding) &&
+           principal_equal(&left->session.principal,
+                           &right->session.principal) &&
+           left->session.session_generation ==
+               right->session.session_generation &&
+           left->capability_generation == right->capability_generation &&
+           left->path_id == right->path_id &&
+           left->path_generation == right->path_generation;
+}
+
+static bool session_invalidation_build(
+    const ucn_v6_security_session_record_t *session,
+    ucn_v6_stack_invalidation_t *invalidation)
+{
+    ucn_v6_stack_invalidation_t next;
+    if (session == NULL || invalidation == NULL || !session->occupied ||
+        !ucn_v6_principal_is_valid(&session->peer_principal) ||
+        !ucn_v6_binding_key_is_valid(&session->peer_binding) ||
+        session->session_generation == 0U ||
+        session->session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        session->link_instance_id == 0U ||
+        session->link_instance_id == UINT16_MAX ||
+        session->link_instance_generation == 0U ||
+        session->link_instance_generation >
+            UCN_V6_SERIAL_ROTATION_THRESHOLD) {
+        return false;
+    }
+    memset(&next, 0, sizeof(next));
+    next.type = UCN_V6_STACK_INVALIDATE_SESSION;
+    next.link_id = session->link_instance_id;
+    next.link_generation = session->link_instance_generation;
+    next.session.binding = session->peer_binding;
+    next.session.principal = session->peer_principal;
+    next.session.session_generation = session->session_generation;
+    if (!ucn_v6_stack_invalidation_is_valid(&next)) {
+        return false;
+    }
+    *invalidation = next;
+    return true;
+}
+
+static bool invalidation_is_pending(
+    const ucn_v6_security_manager_t *manager,
+    const ucn_v6_stack_invalidation_t *invalidation)
+{
+    size_t index;
+    for (index = 0U; index < manager->invalidation_count; ++index) {
+        size_t slot = ((size_t)manager->invalidation_head + index) %
+                      UCN_V6_SECURITY_INVALIDATION_DEPTH;
+        if (invalidation_equal(&manager->invalidations[slot], invalidation)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static ucn_v6_result_t invalidation_prepare(
+    ucn_v6_security_manager_t *manager,
+    const ucn_v6_security_session_record_t *session,
+    ucn_v6_stack_invalidation_t *invalidation,
+    bool *needs_push)
+{
+    if (!session_invalidation_build(session, invalidation) ||
+        needs_push == NULL) {
+        manager->faulted = true;
+        return UCN_V6_ERR_STATE;
+    }
+    if (invalidation_is_pending(manager, invalidation)) {
+        *needs_push = false;
+        return UCN_V6_OK;
+    }
+    if ((size_t)manager->invalidation_count >=
+        UCN_V6_SECURITY_INVALIDATION_DEPTH) {
+        manager->faulted = true;
+        return UCN_V6_ERR_NO_SPACE;
+    }
+    *needs_push = true;
+    return UCN_V6_OK;
+}
+
+static void invalidation_push(
+    ucn_v6_security_manager_t *manager,
+    const ucn_v6_stack_invalidation_t *invalidation)
+{
+    size_t tail = ((size_t)manager->invalidation_head +
+                   manager->invalidation_count) %
+                  UCN_V6_SECURITY_INVALIDATION_DEPTH;
+    manager->invalidations[tail] = *invalidation;
+    ++manager->invalidation_count;
+}
+
 static bool crypto_ops_are_valid(const ucn_v6_security_crypto_ops_t *crypto)
 {
     return crypto != NULL && crypto->verify_proof != NULL &&
@@ -193,9 +611,105 @@ static bool crypto_ops_are_valid(const ucn_v6_security_crypto_ops_t *crypto)
 
 static bool store_ops_are_valid(const ucn_v6_security_store_ops_t *store)
 {
-    return store != NULL && store->load_generation_witness != NULL &&
-           store->reserve_generation_witness != NULL &&
+    return store != NULL && store->load_witness != NULL &&
+           store->reserve_witness != NULL &&
            store->load != NULL && store->submit != NULL;
+}
+
+static void witness_make_factory(
+    ucn_v6_durable_generation_witness_t *witness)
+{
+    memset(witness, 0, sizeof(*witness));
+    witness->magic = UCN_V6_DURABLE_WITNESS_MAGIC;
+    witness->schema = UCN_V6_DURABLE_WITNESS_SCHEMA;
+    witness->domain = (uint8_t)UCN_V6_DURABLE_WITNESS_SECURITY;
+}
+
+static bool witness_is_valid(
+    const ucn_v6_durable_generation_witness_t *witness,
+    bool allow_factory)
+{
+    uint8_t zero[sizeof(witness->reserved)] = {0};
+    bool commissioned;
+
+    if (witness == NULL || witness->magic != UCN_V6_DURABLE_WITNESS_MAGIC ||
+        witness->schema != UCN_V6_DURABLE_WITNESS_SCHEMA ||
+        witness->domain != (uint8_t)UCN_V6_DURABLE_WITNESS_SECURITY ||
+        memcmp(witness->reserved, zero, sizeof(zero)) != 0 ||
+        (witness->flags &
+         (uint16_t)~UCN_V6_DURABLE_WITNESS_COMMISSIONED) != 0U ||
+        witness->witness_generation > UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
+        witness->committed_generation > UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
+        witness->pending_generation > UCN_V6_SERIAL64_ROTATION_THRESHOLD) {
+        return false;
+    }
+    commissioned = (witness->flags &
+                    UCN_V6_DURABLE_WITNESS_COMMISSIONED) != 0U;
+    if (!commissioned) {
+        return allow_factory && witness->witness_generation == 0U &&
+               witness->committed_generation == 0U &&
+               witness->pending_generation == 0U;
+    }
+    return witness->witness_generation != 0U &&
+           (witness->pending_generation == 0U ||
+            (witness->pending_generation ==
+                 witness->committed_generation + 1U &&
+             witness->pending_generation != 0U));
+}
+
+static bool witness_equal(
+    const ucn_v6_durable_generation_witness_t *left,
+    const ucn_v6_durable_generation_witness_t *right)
+{
+    return left->magic == right->magic && left->schema == right->schema &&
+           left->flags == right->flags && left->domain == right->domain &&
+           memcmp(left->reserved, right->reserved,
+                  sizeof(left->reserved)) == 0 &&
+           left->witness_generation == right->witness_generation &&
+           left->committed_generation == right->committed_generation &&
+           left->pending_generation == right->pending_generation;
+}
+
+static ucn_v6_result_t reserve_witness_transition(
+    const ucn_v6_security_store_ops_t *store,
+    const ucn_v6_durable_generation_witness_t *previous,
+    ucn_v6_durable_generation_witness_t *candidate,
+    ucn_v6_callback_gate_t *callback_gate,
+    const void *callback_owner,
+    uint64_t violations_before)
+{
+    ucn_v6_durable_generation_witness_t loaded;
+    ucn_v6_result_t result;
+
+    if (!witness_is_valid(previous, true) ||
+        previous->witness_generation >= UCN_V6_SERIAL64_ROTATION_THRESHOLD) {
+        return UCN_V6_ERR_STATE;
+    }
+    candidate->witness_generation = previous->witness_generation + 1U;
+    if (!witness_is_valid(candidate, false)) {
+        return UCN_V6_ERR_STATE;
+    }
+    result = store->reserve_witness(store->context, candidate);
+    if (!callback_scope_is_clean(callback_gate, callback_owner,
+                                 violations_before)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (result != UCN_V6_OK) {
+        return callback_result_is_declared(result) ? result :
+                                                    UCN_V6_ERR_STATE;
+    }
+    memset(&loaded, 0, sizeof(loaded));
+    result = store->load_witness(store->context, &loaded);
+    if (!callback_scope_is_clean(callback_gate, callback_owner,
+                                 violations_before)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (result != UCN_V6_OK || !witness_equal(&loaded, candidate)) {
+        return result == UCN_V6_OK ? UCN_V6_ERR_STATE :
+               callback_result_is_declared(result) ? result :
+                                                     UCN_V6_ERR_STATE;
+    }
+    return UCN_V6_OK;
 }
 
 static bool replay_is_valid(const ucn_v6_replay_window_t *window)
@@ -208,13 +722,86 @@ static bool replay_is_valid(const ucn_v6_replay_window_t *window)
            (window->seen_bitmap & UINT64_C(1)) != 0U;
 }
 
+static bool session_transcript_is_valid(
+    const ucn_v6_security_session_record_t *session,
+    uint32_t realm_id,
+    const ucn_v6_principal_t *local_principal)
+{
+    const ucn_v6_bootstrap_transcript_t *transcript =
+        &session->bootstrap_transcript;
+    bool local_is_joining;
+
+    if (!bootstrap_transcript_is_valid(transcript) ||
+        transcript->realm_id != realm_id ||
+        transcript->flow != session->bootstrap_flow ||
+        transcript->transaction_id != session->bootstrap_transaction_id ||
+        transcript->device_nonce != session->bootstrap_device_nonce ||
+        transcript->authority_nonce != session->bootstrap_authority_nonce ||
+        transcript->lease_freshness_challenge_nonce !=
+            session->bootstrap_freshness_nonce ||
+        memcmp(transcript->prior_messages_hash,
+               session->bootstrap_prior_messages_hash,
+               sizeof(transcript->prior_messages_hash)) != 0 ||
+        transcript->selected_session_generation !=
+            session->session_generation ||
+        transcript->selected_link_instance_id != session->link_instance_id ||
+        transcript->selected_link_instance_generation !=
+            session->link_instance_generation ||
+        transcript->selected_e2e_mode != (uint8_t)session->e2e_mode ||
+        !authority_epoch_matches_transcript(&session->authority_epoch,
+                                            transcript) ||
+        !binding_certificate_matches_transcript(
+            &session->joining_binding_certificate, transcript) ||
+        !authority_freshness_matches_transcript(
+            &session->authority_freshness, &session->authority_epoch,
+            &session->joining_binding_certificate, transcript)) {
+        return false;
+    }
+
+    local_is_joining = principal_equal(
+        local_principal, &transcript->joining_device_principal);
+    if (local_is_joining) {
+        return principal_equal(&session->peer_principal,
+                               &transcript->authority_principal) &&
+               binding_equal(&session->local_binding,
+                             &session->joining_binding_certificate.binding) &&
+               session->peer_binding.node_address ==
+                   transcript->authority_address &&
+               session->peer_binding.binding_generation ==
+                   transcript->authority_binding_generation;
+    }
+    return principal_equal(local_principal,
+                           &transcript->authority_principal) &&
+           principal_equal(&session->peer_principal,
+                           &transcript->joining_device_principal) &&
+           binding_equal(&session->peer_binding,
+                         &session->joining_binding_certificate.binding) &&
+           session->local_binding.node_address == transcript->authority_address &&
+           session->local_binding.binding_generation ==
+               transcript->authority_binding_generation;
+}
+
+static bool session_equal(
+    const ucn_v6_security_session_record_t *left,
+    const ucn_v6_security_session_record_t *right);
+static bool acl_key_fields_equal(
+    const ucn_v6_acl_key_t *left,
+    const ucn_v6_acl_key_t *right);
+static bool group_policy_equal(
+    const ucn_v6_group_policy_slot_t *left,
+    const ucn_v6_group_policy_slot_t *right);
+static bool group_key_equal(
+    const ucn_v6_group_key_slot_t *left,
+    const ucn_v6_group_key_slot_t *right);
+
 static bool session_is_valid(
     const ucn_v6_security_session_record_t *session,
     uint32_t realm_id,
     const ucn_v6_principal_t *local_principal)
 {
     if (!session->occupied) {
-        return bytes_are_zero((const uint8_t *)session, sizeof(*session));
+        const ucn_v6_security_session_record_t empty = {0};
+        return session_equal(session, &empty);
     }
     return ((session->admitted && !session->revoked &&
              !session->requires_reauth) ||
@@ -229,7 +816,11 @@ static bool session_is_valid(
            session->peer_binding.realm_id == realm_id &&
             session->session_generation != 0U &&
             session->session_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+            session->link_instance_id != 0U &&
+            session->link_instance_id != UINT16_MAX &&
             session->link_instance_generation != 0U &&
+            session->link_instance_generation <=
+                UCN_V6_SERIAL_ROTATION_THRESHOLD &&
             (session->bootstrap_flow == UCN_V6_BOOTSTRAP_FLOW_JOIN ||
              session->bootstrap_flow == UCN_V6_BOOTSTRAP_FLOW_REAUTH) &&
             session->bootstrap_transaction_id != 0U &&
@@ -240,14 +831,8 @@ static bool session_is_valid(
             session->bootstrap_freshness_nonce != 0U &&
             !bytes_are_zero(session->bootstrap_prior_messages_hash,
                             sizeof(session->bootstrap_prior_messages_hash)) &&
-            session->authority_epoch.authority_generation != 0U &&
-           session->authority_epoch.quorum_proven &&
-           session->authority_epoch.durable &&
-           !bytes_are_zero(session->authority_epoch.durable_fence_token,
-                           sizeof(session->authority_epoch.durable_fence_token)) &&
-           !bytes_are_zero(
-               session->authority_epoch.allocation_high_water_digest,
-               sizeof(session->authority_epoch.allocation_high_water_digest)) &&
+           session_transcript_is_valid(session, realm_id, local_principal) &&
+           authority_epoch_is_valid(&session->authority_epoch, realm_id) &&
            ucn_v6_binding_key_is_valid(
                &session->joining_binding_certificate.binding) &&
            session->joining_binding_certificate.binding.realm_id == realm_id &&
@@ -261,6 +846,11 @@ static bool session_is_valid(
            principal_equal(
                &session->joining_binding_certificate.authority_principal,
                &session->authority_epoch.authority_principal) &&
+           authority_freshness_is_valid(
+               &session->authority_freshness, &session->authority_epoch,
+               &session->joining_binding_certificate,
+               &session->joining_binding_certificate.device_principal,
+               session->bootstrap_transaction_id) &&
            ((principal_equal(
                   &session->joining_binding_certificate.device_principal,
                   local_principal) &&
@@ -306,7 +896,8 @@ static bool group_policy_is_valid(
     const ucn_v6_group_policy_slot_t *group)
 {
     if (group->state == UCN_V6_GROUP_SLOT_NEVER_ACTIVATED) {
-        return bytes_are_zero((const uint8_t *)group, sizeof(*group));
+        const ucn_v6_group_policy_slot_t empty = {0};
+        return group_policy_equal(group, &empty);
     }
     return (group->state == UCN_V6_GROUP_SLOT_ACTIVE ||
             group->state == UCN_V6_GROUP_SLOT_RETIRED) &&
@@ -322,7 +913,8 @@ static bool group_key_is_valid(
     const ucn_v6_group_policy_slot_t *group)
 {
     if (key->state == UCN_V6_GROUP_KEY_NEVER_ACTIVATED) {
-        return bytes_are_zero((const uint8_t *)key, sizeof(*key));
+        const ucn_v6_group_key_slot_t empty = {0};
+        return group_key_equal(key, &empty);
     }
     if ((key->state != UCN_V6_GROUP_KEY_ACTIVE &&
          key->state != UCN_V6_GROUP_KEY_RETIRED) ||
@@ -387,7 +979,15 @@ static bool group_replay_source_is_valid(
     const ucn_v6_security_snapshot_t *snapshot)
 {
     if (!source->occupied) {
-        return bytes_are_zero((const uint8_t *)source, sizeof(*source));
+        return source->group_id == 0U && source->group_generation == 0U &&
+               source->key_id == 0U && source->key_generation == 0U &&
+               source->claimed_source.realm_id == 0U &&
+               source->claimed_source.node_address == 0U &&
+               source->claimed_source.binding_generation == 0U &&
+               source->claimed_session_generation == 0U &&
+               source->replay.highest_sequence == 0U &&
+               source->replay.seen_bitmap == 0U &&
+               !source->replay.initialized;
     }
     return ucn_v6_binding_key_is_valid(&source->claimed_source) &&
            source->claimed_source.realm_id == snapshot->realm_id &&
@@ -484,7 +1084,11 @@ static bool snapshot_is_valid(
             UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
         (!allow_factory && snapshot->snapshot_generation == 0U) ||
         snapshot->realm_id != realm_id ||
-        !principal_equal(&snapshot->local_principal, local_principal)) {
+        !principal_equal(&snapshot->local_principal, local_principal) ||
+        (snapshot->authority_floor_valid &&
+         !authority_epoch_is_valid(&snapshot->authority_floor, realm_id)) ||
+        (!snapshot->authority_floor_valid &&
+         !authority_epoch_is_zero(&snapshot->authority_floor))) {
         return false;
     }
     for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
@@ -494,6 +1098,26 @@ static bool snapshot_is_valid(
         }
         if (snapshot->sessions[index].occupied) {
             ++occupied_sessions;
+            if (snapshot->authority_floor_valid &&
+                (snapshot->sessions[index].authority_epoch
+                         .authority_generation >
+                     snapshot->authority_floor.authority_generation ||
+                 (snapshot->sessions[index].authority_epoch
+                          .authority_generation ==
+                      snapshot->authority_floor.authority_generation &&
+                  (snapshot->sessions[index].authority_epoch.lease_sequence >
+                       snapshot->authority_floor.lease_sequence ||
+                   !principal_equal(
+                       &snapshot->sessions[index].authority_epoch
+                            .authority_principal,
+                       &snapshot->authority_floor.authority_principal) ||
+                   memcmp(snapshot->sessions[index].authority_epoch
+                              .durable_fence_token,
+                          snapshot->authority_floor.durable_fence_token,
+                          sizeof(snapshot->authority_floor
+                                     .durable_fence_token)) != 0)))) {
+                return false;
+            }
             if (!snapshot->local_binding_valid ||
                 !binding_equal(&snapshot->sessions[index].local_binding,
                                &snapshot->local_binding)) {
@@ -515,15 +1139,18 @@ static bool snapshot_is_valid(
          (!ucn_v6_binding_key_is_valid(&snapshot->local_binding) ||
           snapshot->local_binding.realm_id != realm_id)) ||
         (!snapshot->local_binding_valid &&
-         !bytes_are_zero((const uint8_t *)&snapshot->local_binding,
-                         sizeof(snapshot->local_binding))) ||
+         (snapshot->local_binding.realm_id != 0U ||
+          snapshot->local_binding.node_address != 0U ||
+          snapshot->local_binding.binding_generation != 0U)) ||
         (occupied_sessions != 0U && !snapshot->local_binding_valid)) {
         return false;
     }
     for (index = 0U; index < UCN_V6_CONFIG_ACL_ENTRIES; ++index) {
         const ucn_v6_acl_entry_t *entry = &snapshot->acl_entries[index];
         if (!entry->occupied) {
-            if (!bytes_are_zero((const uint8_t *)entry, sizeof(*entry))) {
+            const ucn_v6_acl_entry_t empty = {0};
+            if (entry->revoked ||
+                !acl_key_fields_equal(&entry->key, &empty.key)) {
                 return false;
             }
         } else if (!acl_key_is_valid(&entry->key, realm_id)) {
@@ -584,6 +1211,7 @@ static bool session_equal(
            binding_equal(&left->local_binding, &right->local_binding) &&
            binding_equal(&left->peer_binding, &right->peer_binding) &&
            left->session_generation == right->session_generation &&
+           left->link_instance_id == right->link_instance_id &&
            left->link_instance_generation ==
                right->link_instance_generation &&
            left->bootstrap_flow == right->bootstrap_flow &&
@@ -597,16 +1225,16 @@ static bool session_equal(
            memcmp(left->bootstrap_prior_messages_hash,
                   right->bootstrap_prior_messages_hash,
                   sizeof(left->bootstrap_prior_messages_hash)) == 0 &&
+           bootstrap_transcript_equal(&left->bootstrap_transcript,
+                                      &right->bootstrap_transcript) &&
            left->e2e_mode == right->e2e_mode &&
+           left->authority_epoch.realm_id == right->authority_epoch.realm_id &&
            left->authority_epoch.authority_generation ==
                right->authority_epoch.authority_generation &&
            left->authority_epoch.lease_sequence ==
                right->authority_epoch.lease_sequence &&
            left->authority_epoch.lease_duration_us ==
                right->authority_epoch.lease_duration_us &&
-           left->authority_epoch.quorum_proven ==
-               right->authority_epoch.quorum_proven &&
-           left->authority_epoch.durable == right->authority_epoch.durable &&
            principal_equal(&left->authority_epoch.authority_principal,
                            &right->authority_epoch.authority_principal) &&
            memcmp(left->authority_epoch.durable_fence_token,
@@ -616,6 +1244,21 @@ static bool session_equal(
                   right->authority_epoch.allocation_high_water_digest,
                   sizeof(left->authority_epoch.allocation_high_water_digest)) ==
                0 &&
+           memcmp(left->authority_epoch.quorum_config_digest,
+                  right->authority_epoch.quorum_config_digest,
+                  sizeof(left->authority_epoch.quorum_config_digest)) == 0 &&
+           memcmp(left->authority_epoch.signer_set_digest,
+                  right->authority_epoch.signer_set_digest,
+                  sizeof(left->authority_epoch.signer_set_digest)) == 0 &&
+           memcmp(left->authority_epoch.threshold_proof_digest,
+                  right->authority_epoch.threshold_proof_digest,
+                  sizeof(left->authority_epoch.threshold_proof_digest)) == 0 &&
+           left->authority_epoch.signer_count ==
+               right->authority_epoch.signer_count &&
+           left->authority_epoch.quorum_threshold ==
+               right->authority_epoch.quorum_threshold &&
+           authority_freshness_equal(&left->authority_freshness,
+                                     &right->authority_freshness) &&
            principal_equal(
                &left->joining_binding_certificate.device_principal,
                &right->joining_binding_certificate.device_principal) &&
@@ -720,7 +1363,10 @@ static bool snapshot_equal(
         left->realm_id != right->realm_id ||
         !principal_equal(&left->local_principal, &right->local_principal) ||
         left->local_binding_valid != right->local_binding_valid ||
-        !binding_equal(&left->local_binding, &right->local_binding)) {
+        !binding_equal(&left->local_binding, &right->local_binding) ||
+        left->authority_floor_valid != right->authority_floor_valid ||
+        !authority_epoch_equal(&left->authority_floor,
+                               &right->authority_floor)) {
         return false;
     }
     for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
@@ -790,7 +1436,10 @@ static ucn_v6_result_t persist_candidate(
     ucn_v6_security_snapshot_t verified;
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
-    uint64_t verified_generation = 0U;
+    ucn_v6_durable_generation_witness_t witness = {0};
+    ucn_v6_durable_generation_witness_t pending = {0};
+    ucn_v6_durable_generation_witness_t committed = {0};
+    uint64_t violations_before;
 
     if (manager->committed.snapshot_generation >=
         UCN_V6_SERIAL64_ROTATION_THRESHOLD) {
@@ -803,34 +1452,72 @@ static ucn_v6_result_t persist_candidate(
                            &manager->committed.local_principal, false)) {
         return UCN_V6_ERR_STATE;
     }
-    result = ucn_v6_callback_gate_try_enter(manager->callback_gate, manager);
-    if (result != UCN_V6_OK) {
-        return result;
+    violations_before = ucn_v6_callback_gate_violation_count(
+        manager->callback_gate);
+    if (violations_before == UINT64_MAX ||
+        ucn_v6_callback_gate_try_enter(manager->callback_gate, manager) !=
+            UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
     }
-    result = manager->store.reserve_generation_witness(
-        manager->store.context, candidate->snapshot_generation);
+    memset(&witness, 0, sizeof(witness));
+    result = manager->store.load_witness(manager->store.context, &witness);
+    if (!callback_scope_is_clean(manager->callback_gate, manager,
+                                 violations_before)) {
+        result = UCN_V6_ERR_STATE;
+    } else if (!callback_result_is_declared(result)) {
+        result = UCN_V6_ERR_STATE;
+    }
+    if (result == UCN_V6_OK &&
+        (!witness_is_valid(&witness, false) ||
+         witness.committed_generation !=
+             manager->committed.snapshot_generation ||
+         witness.pending_generation != 0U)) {
+        result = UCN_V6_ERR_STATE;
+    }
+    if (result == UCN_V6_OK) {
+        pending = witness;
+        pending.flags |= UCN_V6_DURABLE_WITNESS_COMMISSIONED;
+        pending.pending_generation = candidate->snapshot_generation;
+        result = reserve_witness_transition(
+            &manager->store, &witness, &pending, manager->callback_gate,
+            manager, violations_before);
+    }
     if (result == UCN_V6_OK) {
         result = manager->store.submit(manager->store.context, candidate);
+        if (!callback_scope_is_clean(manager->callback_gate, manager,
+                                     violations_before) ||
+            !callback_result_is_declared(result)) {
+            result = UCN_V6_ERR_STATE;
+        }
     }
     if (result == UCN_V6_OK) {
         memset(&verified, 0, sizeof(verified));
         result = manager->store.load(manager->store.context, &verified);
-        if (result == UCN_V6_OK) {
-            result = manager->store.load_generation_witness(
-                manager->store.context, &verified_generation);
+        if (!callback_scope_is_clean(manager->callback_gate, manager,
+                                     violations_before) ||
+            !callback_result_is_declared(result)) {
+            result = UCN_V6_ERR_STATE;
         }
         if (result != UCN_V6_OK ||
-            verified_generation != candidate->snapshot_generation ||
             !snapshot_is_valid(&verified, manager->committed.realm_id,
                                &manager->committed.local_principal, false) ||
             !snapshot_equal(candidate, &verified)) {
             result = UCN_V6_ERR_STATE;
         }
     }
-    leave_result = ucn_v6_callback_gate_leave(manager->callback_gate, manager);
-    if (result != UCN_V6_OK || leave_result != UCN_V6_OK) {
+    if (result == UCN_V6_OK) {
+        committed = pending;
+        committed.committed_generation = candidate->snapshot_generation;
+        committed.pending_generation = 0U;
+        result = reserve_witness_transition(
+            &manager->store, &pending, &committed, manager->callback_gate,
+            manager, violations_before);
+    }
+    leave_result = callback_scope_finish(
+        manager->callback_gate, manager, violations_before, result);
+    if (leave_result != UCN_V6_OK) {
         manager->faulted = true;
-        return result != UCN_V6_OK ? result : leave_result;
+        return leave_result;
     }
     manager->committed = verified;
     return UCN_V6_OK;
@@ -852,9 +1539,12 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
     ucn_v6_security_manager_t *manager;
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
+    uint64_t violations_before;
     size_t index;
     size_t key_index;
-    uint64_t generation_witness = 0U;
+    ucn_v6_durable_generation_witness_t witness = {0};
+    ucn_v6_durable_generation_witness_t pending = {0};
+    ucn_v6_durable_generation_witness_t committed = {0};
     ucn_v6_result_t witness_result;
 
     if (manager_out == NULL || realm_id == 0U || realm_id == UINT32_MAX ||
@@ -874,27 +1564,155 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
         return result;
     }
     manager = (ucn_v6_security_manager_t *)storage;
-    result = ucn_v6_callback_gate_try_enter(callback_gate, manager);
-    if (result != UCN_V6_OK) {
-        return result;
+    violations_before = ucn_v6_callback_gate_violation_count(callback_gate);
+    if (violations_before == UINT64_MAX ||
+        ucn_v6_callback_gate_try_enter(callback_gate, manager) != UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
     }
     memset(&loaded, 0, sizeof(loaded));
+    memset(&witness, 0, sizeof(witness));
     result = store->load(store->context, &loaded);
-    witness_result = store->load_generation_witness(
-        store->context, &generation_witness);
+    if (!callback_scope_is_clean(callback_gate, manager,
+                                 violations_before) ||
+        !callback_result_is_declared(result)) {
+        result = UCN_V6_ERR_STATE;
+        witness_result = UCN_V6_ERR_STATE;
+        goto callback_done;
+    }
+    witness_result = store->load_witness(store->context, &witness);
+    if (!callback_scope_is_clean(callback_gate, manager,
+                                 violations_before) ||
+        !callback_result_is_declared(witness_result)) {
+        result = UCN_V6_ERR_STATE;
+        goto callback_done;
+    }
     if (result == UCN_V6_ERR_NOT_FOUND &&
         witness_result == UCN_V6_ERR_NOT_FOUND) {
         snapshot_make_factory(&loaded, realm_id, local_principal);
-        result = UCN_V6_OK;
-    } else if (result != UCN_V6_OK || witness_result != UCN_V6_OK ||
-               generation_witness != loaded.snapshot_generation ||
+        loaded.snapshot_generation = 1U;
+        witness_make_factory(&witness);
+        pending = witness;
+        pending.flags = UCN_V6_DURABLE_WITNESS_COMMISSIONED;
+        pending.pending_generation = 1U;
+        result = reserve_witness_transition(
+            store, &witness, &pending, callback_gate, manager,
+            violations_before);
+        if (result == UCN_V6_OK) {
+            result = store->submit(store->context, &loaded);
+            if (!callback_scope_is_clean(callback_gate, manager,
+                                         violations_before) ||
+                !callback_result_is_declared(result)) {
+                result = UCN_V6_ERR_STATE;
+            }
+        }
+        if (result == UCN_V6_OK) {
+            memset(&loaded, 0, sizeof(loaded));
+            result = store->load(store->context, &loaded);
+            if (!callback_scope_is_clean(callback_gate, manager,
+                                         violations_before) ||
+                !callback_result_is_declared(result)) {
+                result = UCN_V6_ERR_STATE;
+            }
+        }
+        if (result == UCN_V6_OK &&
+            (!snapshot_is_valid(&loaded, realm_id, local_principal, false) ||
+             loaded.snapshot_generation != 1U)) {
+            result = UCN_V6_ERR_STATE;
+        }
+        if (result == UCN_V6_OK) {
+            committed = pending;
+            committed.committed_generation = 1U;
+            committed.pending_generation = 0U;
+            result = reserve_witness_transition(
+                store, &pending, &committed, callback_gate, manager,
+                violations_before);
+        }
+        if (result == UCN_V6_OK) {
+            witness = committed;
+        }
+    } else if (witness_result != UCN_V6_OK ||
+               !witness_is_valid(&witness, false)) {
+        result = UCN_V6_ERR_STATE;
+    } else if (witness.pending_generation != 0U) {
+        if (result == UCN_V6_OK &&
+            snapshot_is_valid(&loaded, realm_id, local_principal, false) &&
+            loaded.snapshot_generation == witness.pending_generation) {
+            committed = witness;
+            committed.committed_generation = witness.pending_generation;
+            committed.pending_generation = 0U;
+            result = reserve_witness_transition(
+                store, &witness, &committed, callback_gate, manager,
+                violations_before);
+            witness = committed;
+        } else if (result == UCN_V6_OK &&
+                   snapshot_is_valid(&loaded, realm_id, local_principal,
+                                     false) &&
+                   loaded.snapshot_generation ==
+                       witness.committed_generation) {
+            committed = witness;
+            committed.pending_generation = 0U;
+            result = reserve_witness_transition(
+                store, &witness, &committed, callback_gate, manager,
+                violations_before);
+            witness = committed;
+        } else if (witness.committed_generation == 0U &&
+                   witness.pending_generation == 1U &&
+                   result == UCN_V6_ERR_NOT_FOUND) {
+            /* EN: A first-init snapshot may tear after the independent
+             * pending witness is durable.  Re-submit the one canonical
+             * generation-1 factory snapshot and do not allocate generation 2
+             * or clear the witness before exact reload succeeds.
+             * 中文：首次初始化快照可能在独立 pending witness 落盘后撕裂。
+             * 此时只能重交同一个规范 generation-1 工厂快照；精确回读成功
+             * 前不得分配 generation 2，也不得清除 witness。 */
+            snapshot_make_factory(&loaded, realm_id, local_principal);
+            loaded.snapshot_generation = 1U;
+            result = store->submit(store->context, &loaded);
+            if (!callback_scope_is_clean(callback_gate, manager,
+                                         violations_before) ||
+                !callback_result_is_declared(result)) {
+                result = UCN_V6_ERR_STATE;
+            }
+            if (result == UCN_V6_OK) {
+                memset(&loaded, 0, sizeof(loaded));
+                result = store->load(store->context, &loaded);
+                if (!callback_scope_is_clean(callback_gate, manager,
+                                             violations_before) ||
+                    !callback_result_is_declared(result)) {
+                    result = UCN_V6_ERR_STATE;
+                }
+            }
+            if (result == UCN_V6_OK &&
+                (!snapshot_is_valid(&loaded, realm_id, local_principal,
+                                    false) ||
+                 loaded.snapshot_generation != 1U)) {
+                result = UCN_V6_ERR_STATE;
+            }
+            if (result == UCN_V6_OK) {
+                committed = witness;
+                committed.committed_generation = 1U;
+                committed.pending_generation = 0U;
+                result = reserve_witness_transition(
+                    store, &witness, &committed, callback_gate, manager,
+                    violations_before);
+            }
+            if (result == UCN_V6_OK) {
+                witness = committed;
+            }
+        } else {
+            result = UCN_V6_ERR_STATE;
+        }
+    } else if (result != UCN_V6_OK ||
                !snapshot_is_valid(&loaded, realm_id, local_principal,
-                                  false)) {
+                                  false) ||
+               loaded.snapshot_generation != witness.committed_generation) {
         result = UCN_V6_ERR_STATE;
     }
-    leave_result = ucn_v6_callback_gate_leave(callback_gate, manager);
-    if (result != UCN_V6_OK || leave_result != UCN_V6_OK) {
-        return result != UCN_V6_OK ? result : leave_result;
+callback_done:
+    leave_result = callback_scope_finish(
+        callback_gate, manager, violations_before, result);
+    if (leave_result != UCN_V6_OK) {
+        return leave_result;
     }
     for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
         ucn_v6_security_session_record_t *session = &loaded.sessions[index];
@@ -1014,12 +1832,39 @@ ucn_v6_result_t ucn_v6_security_write_bootstrap_transcript(
     offset += 4U;
     put_u32(&encoded[offset], transcript->authority_binding_generation);
     offset += 4U;
+    put_u16(&encoded[offset], transcript->selected_link_instance_id);
+    offset += 2U;
     memcpy(&encoded[offset], transcript->binding_lease_id, 16U);
     offset += 16U;
     put_u64(&encoded[offset], transcript->binding_lease_duration_us);
     offset += 8U;
     put_u64(&encoded[offset], transcript->authority_lease_sequence);
     offset += 8U;
+    put_u64(&encoded[offset], transcript->authority_lease_duration_us);
+    offset += 8U;
+    put_u64(&encoded[offset], transcript->freshness_max_remaining_lease_us);
+    offset += 8U;
+    memcpy(&encoded[offset], transcript->durable_fence_token, 16U);
+    offset += 16U;
+    memcpy(&encoded[offset], transcript->allocation_high_water_digest, 16U);
+    offset += 16U;
+    memcpy(&encoded[offset], transcript->quorum_config_digest,
+           UCN_V6_AUTHORITY_DIGEST_BYTES);
+    offset += UCN_V6_AUTHORITY_DIGEST_BYTES;
+    memcpy(&encoded[offset], transcript->signer_set_digest,
+           UCN_V6_AUTHORITY_DIGEST_BYTES);
+    offset += UCN_V6_AUTHORITY_DIGEST_BYTES;
+    memcpy(&encoded[offset], transcript->threshold_proof_digest,
+           UCN_V6_AUTHORITY_DIGEST_BYTES);
+    offset += UCN_V6_AUTHORITY_DIGEST_BYTES;
+    memcpy(&encoded[offset], transcript->freshness_proof_transcript_hash,
+           UCN_V6_AUTHORITY_DIGEST_BYTES);
+    offset += UCN_V6_AUTHORITY_DIGEST_BYTES;
+    put_u16(&encoded[offset], transcript->authority_signer_count);
+    offset += 2U;
+    put_u16(&encoded[offset], transcript->authority_quorum_threshold);
+    offset += 2U;
+    encoded[offset++] = transcript->binding_mode;
     encoded[offset++] = transcript->selected_hop_suite;
     put_u16(&encoded[offset], transcript->selected_hop_key_id);
     offset += 2U;
@@ -1045,54 +1890,118 @@ ucn_v6_result_t ucn_v6_security_write_bootstrap_transcript(
     return UCN_V6_OK;
 }
 
-static bool authority_epoch_matches(
-    const ucn_v6_join_commit_t *commit,
-    uint64_t now_us)
+static ucn_v6_result_t write_join_durable_receipt_canonical(
+    const ucn_v6_bootstrap_transcript_t *transcript,
+    uint64_t durable_record_generation,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_length)
 {
-    const ucn_v6_authority_epoch_t *epoch = &commit->authority_epoch;
-    const ucn_v6_bootstrap_transcript_t *transcript = &commit->transcript;
-    return ucn_v6_principal_is_valid(&epoch->authority_principal) &&
-           principal_equal(&epoch->authority_principal,
-                           &transcript->authority_principal) &&
-           epoch->authority_generation == transcript->authority_generation &&
-           epoch->authority_generation != 0U && epoch->quorum_proven &&
-           epoch->durable &&
-           !bytes_are_zero(epoch->durable_fence_token,
-                           sizeof(epoch->durable_fence_token)) &&
-           !bytes_are_zero(epoch->allocation_high_water_digest,
-                           sizeof(epoch->allocation_high_water_digest)) &&
-           epoch->lease_sequence ==
-               transcript->authority_lease_sequence &&
-           epoch->lease_duration_us >= transcript->binding_lease_duration_us &&
-           ucn_v6_lease_deadline_is_live(
-               now_us, commit->authority_local_lease_deadline_us);
+    uint8_t canonical[UCN_V6_BOOTSTRAP_CANONICAL_BYTES];
+    size_t canonical_length = 0U;
+    ucn_v6_result_t result;
+
+    if (transcript == NULL ||
+        transcript->flow != UCN_V6_BOOTSTRAP_FLOW_JOIN ||
+        durable_record_generation == 0U ||
+        durable_record_generation > UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
+        output == NULL || output_length == NULL ||
+        output_capacity < UCN_V6_JOIN_RECEIPT_CANONICAL_BYTES) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    result = ucn_v6_security_write_bootstrap_transcript(
+        transcript, canonical, sizeof(canonical), &canonical_length);
+    if (result != UCN_V6_OK || canonical_length != sizeof(canonical)) {
+        return result != UCN_V6_OK ? result : UCN_V6_ERR_STATE;
+    }
+    output[0] = UINT8_C(0xD1);
+    memcpy(&output[1], canonical, sizeof(canonical));
+    put_u64(&output[1U + sizeof(canonical)], durable_record_generation);
+    *output_length = UCN_V6_JOIN_RECEIPT_CANONICAL_BYTES;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_security_export_join_durable_receipt(
+    const ucn_v6_security_manager_t *manager,
+    const ucn_v6_principal_t *peer_principal,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_length,
+    uint64_t *durable_record_generation)
+{
+    uint8_t encoded[UCN_V6_JOIN_RECEIPT_CANONICAL_BYTES];
+    size_t encoded_length = 0U;
+    size_t index;
+    ucn_v6_result_t result;
+
+    if (!ucn_v6_principal_is_valid(peer_principal) || output == NULL ||
+        output_length == NULL || durable_record_generation == NULL ||
+        output_capacity < sizeof(encoded)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (!manager_storage_is_valid(manager) || manager->faulted ||
+        !snapshot_is_valid(&manager->committed,
+                           manager->committed.realm_id,
+                           &manager->committed.local_principal, false)) {
+        return UCN_V6_ERR_STATE;
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
+        const ucn_v6_security_session_record_t *session =
+            &manager->committed.sessions[index];
+        if (!session->occupied ||
+            !principal_equal(&session->peer_principal, peer_principal)) {
+            continue;
+        }
+        if (!session->admitted || session->revoked || session->requires_reauth ||
+            session->bootstrap_transcript.flow != UCN_V6_BOOTSTRAP_FLOW_JOIN ||
+            session->bootstrap_transcript.selected_hop_suite !=
+                session->hop_current.suite_id ||
+            session->bootstrap_transcript.selected_hop_key_id !=
+                session->hop_current.key_id ||
+            session->bootstrap_transcript.selected_hop_key_generation !=
+                session->hop_current.key_generation ||
+            session->bootstrap_transcript.selected_e2e_suite !=
+                session->e2e_current.suite_id ||
+            session->bootstrap_transcript.selected_e2e_key_id !=
+                session->e2e_current.key_id ||
+            session->bootstrap_transcript.selected_e2e_key_generation !=
+                session->e2e_current.key_generation) {
+            return UCN_V6_ERR_STATE;
+        }
+        result = write_join_durable_receipt_canonical(
+            &session->bootstrap_transcript,
+            manager->committed.snapshot_generation,
+            encoded, sizeof(encoded), &encoded_length);
+        if (result != UCN_V6_OK || encoded_length != sizeof(encoded)) {
+            return result != UCN_V6_OK ? result : UCN_V6_ERR_STATE;
+        }
+        memcpy(output, encoded, sizeof(encoded));
+        *output_length = sizeof(encoded);
+        *durable_record_generation = manager->committed.snapshot_generation;
+        return UCN_V6_OK;
+    }
+    return UCN_V6_ERR_NOT_FOUND;
+}
+
+static bool authority_epoch_matches(
+    const ucn_v6_join_commit_t *commit)
+{
+    return authority_epoch_matches_transcript(&commit->authority_epoch,
+                                              &commit->transcript);
+}
+
+static bool authority_freshness_matches(
+    const ucn_v6_join_commit_t *commit)
+{
+    return authority_freshness_matches_transcript(
+        &commit->authority_freshness, &commit->authority_epoch,
+        &commit->joining_binding_certificate, &commit->transcript);
 }
 
 static bool binding_certificate_matches(const ucn_v6_join_commit_t *commit)
 {
-    const ucn_v6_binding_certificate_t *certificate =
-        &commit->joining_binding_certificate;
-    const ucn_v6_bootstrap_transcript_t *transcript = &commit->transcript;
-    return principal_equal(&certificate->device_principal,
-                           &transcript->joining_device_principal) &&
-           principal_equal(&certificate->authority_principal,
-                           &transcript->authority_principal) &&
-           certificate->binding.realm_id == transcript->realm_id &&
-           certificate->binding.node_address ==
-               transcript->proposed_address &&
-           certificate->binding.binding_generation ==
-               transcript->address_binding_generation &&
-           certificate->authority_generation ==
-               transcript->authority_generation &&
-           memcmp(certificate->lease_id, transcript->binding_lease_id,
-                  sizeof(certificate->lease_id)) == 0 &&
-           certificate->lease_duration_us ==
-               transcript->binding_lease_duration_us &&
-           certificate->authority_lease_sequence ==
-               transcript->authority_lease_sequence &&
-           (certificate->mode == UCN_V6_ADDRESS_STATIC ||
-            certificate->mode == UCN_V6_ADDRESS_LEASED ||
-            certificate->mode == UCN_V6_ADDRESS_SELF_PROPOSED);
+    return binding_certificate_matches_transcript(
+        &commit->joining_binding_certificate, &commit->transcript);
 }
 
 static bool binding_certificate_equal(
@@ -1117,7 +2026,8 @@ static bool authority_epoch_equal(
     const ucn_v6_authority_epoch_t *left,
     const ucn_v6_authority_epoch_t *right)
 {
-    return principal_equal(&left->authority_principal,
+    return left->realm_id == right->realm_id &&
+           principal_equal(&left->authority_principal,
                            &right->authority_principal) &&
            left->authority_generation == right->authority_generation &&
            memcmp(left->durable_fence_token, right->durable_fence_token,
@@ -1127,14 +2037,97 @@ static bool authority_epoch_equal(
                   sizeof(left->allocation_high_water_digest)) == 0 &&
            left->lease_sequence == right->lease_sequence &&
            left->lease_duration_us == right->lease_duration_us &&
-           left->quorum_proven == right->quorum_proven &&
-           left->durable == right->durable;
+           memcmp(left->quorum_config_digest,
+                  right->quorum_config_digest,
+                  sizeof(left->quorum_config_digest)) == 0 &&
+           memcmp(left->signer_set_digest, right->signer_set_digest,
+                  sizeof(left->signer_set_digest)) == 0 &&
+           memcmp(left->threshold_proof_digest,
+                  right->threshold_proof_digest,
+                  sizeof(left->threshold_proof_digest)) == 0 &&
+           left->signer_count == right->signer_count &&
+           left->quorum_threshold == right->quorum_threshold;
+}
+
+typedef enum authority_floor_relation {
+    AUTHORITY_FLOOR_REJECT = 0,
+    AUTHORITY_FLOOR_EXACT = 1,
+    AUTHORITY_FLOOR_INITIAL = 2,
+    AUTHORITY_FLOOR_RENEWAL = 3,
+    AUTHORITY_FLOOR_TRANSFER = 4
+} authority_floor_relation_t;
+
+static authority_floor_relation_t authority_floor_compare(
+    const ucn_v6_security_snapshot_t *snapshot,
+    const ucn_v6_authority_epoch_t *epoch)
+{
+    const ucn_v6_authority_epoch_t *floor;
+
+    if (!snapshot->authority_floor_valid) {
+        return AUTHORITY_FLOOR_INITIAL;
+    }
+    floor = &snapshot->authority_floor;
+    if (epoch->authority_generation < floor->authority_generation ||
+        epoch->lease_sequence < floor->lease_sequence) {
+        return AUTHORITY_FLOOR_REJECT;
+    }
+    if (epoch->authority_generation == floor->authority_generation) {
+        if (!principal_equal(&epoch->authority_principal,
+                             &floor->authority_principal) ||
+            memcmp(epoch->durable_fence_token,
+                   floor->durable_fence_token,
+                   sizeof(epoch->durable_fence_token)) != 0 ||
+            epoch->lease_sequence < floor->lease_sequence) {
+            return AUTHORITY_FLOOR_REJECT;
+        }
+        if (epoch->lease_sequence == floor->lease_sequence) {
+            return authority_epoch_equal(epoch, floor) ?
+                       AUTHORITY_FLOOR_EXACT : AUTHORITY_FLOOR_REJECT;
+        }
+        return AUTHORITY_FLOOR_RENEWAL;
+    }
+    if (memcmp(epoch->durable_fence_token, floor->durable_fence_token,
+               sizeof(epoch->durable_fence_token)) == 0 ||
+        epoch->lease_sequence == floor->lease_sequence) {
+        return AUTHORITY_FLOOR_REJECT;
+    }
+    return AUTHORITY_FLOOR_TRANSFER;
+}
+
+static bool binding_certificate_has_same_binding(
+    const ucn_v6_binding_certificate_t *left,
+    const ucn_v6_binding_certificate_t *right)
+{
+    return principal_equal(&left->device_principal,
+                           &right->device_principal) &&
+           binding_equal(&left->binding, &right->binding) &&
+           left->mode == right->mode;
+}
+
+static bool authority_freshness_equal(
+    const ucn_v6_authority_freshness_t *left,
+    const ucn_v6_authority_freshness_t *right)
+{
+    return principal_equal(&left->verifier_device_principal,
+                           &right->verifier_device_principal) &&
+           left->challenge_nonce == right->challenge_nonce &&
+           left->transaction_id == right->transaction_id &&
+           left->authority_lease_sequence ==
+               right->authority_lease_sequence &&
+           left->max_remaining_lease_us == right->max_remaining_lease_us &&
+           memcmp(left->binding_lease_id, right->binding_lease_id,
+                  sizeof(left->binding_lease_id)) == 0 &&
+           left->binding_generation == right->binding_generation &&
+           memcmp(left->proof_transcript_hash,
+                  right->proof_transcript_hash,
+                  sizeof(left->proof_transcript_hash)) == 0;
 }
 
 static bool session_matches_commit_exact(
     const ucn_v6_security_session_record_t *session,
     const ucn_v6_join_commit_t *commit,
-    const ucn_v6_principal_t *peer)
+    const ucn_v6_principal_t *peer,
+    uint64_t local_lease_deadline_us)
 {
     const ucn_v6_bootstrap_transcript_t *transcript = &commit->transcript;
     return session->occupied && session->admitted && !session->revoked &&
@@ -1143,6 +2136,7 @@ static bool session_matches_commit_exact(
            binding_equal(&session->local_binding, &commit->local_binding) &&
            binding_equal(&session->peer_binding, &commit->peer_binding) &&
            session->session_generation == commit->session_generation &&
+           session->link_instance_id == commit->link_instance_id &&
            session->link_instance_generation ==
                commit->link_instance_generation &&
            session->bootstrap_flow == transcript->flow &&
@@ -1152,17 +2146,20 @@ static bool session_matches_commit_exact(
            session->bootstrap_freshness_nonce ==
                transcript->lease_freshness_challenge_nonce &&
            memcmp(session->bootstrap_prior_messages_hash,
-                  transcript->prior_messages_hash,
-                  sizeof(session->bootstrap_prior_messages_hash)) == 0 &&
+                   transcript->prior_messages_hash,
+                   sizeof(session->bootstrap_prior_messages_hash)) == 0 &&
+           bootstrap_transcript_equal(&session->bootstrap_transcript,
+                                      transcript) &&
            session->e2e_mode ==
                (ucn_v6_e2e_mode_t)transcript->selected_e2e_mode &&
            authority_epoch_equal(&session->authority_epoch,
                                  &commit->authority_epoch) &&
+           authority_freshness_equal(&session->authority_freshness,
+                                     &commit->authority_freshness) &&
            binding_certificate_equal(
                &session->joining_binding_certificate,
                &commit->joining_binding_certificate) &&
-           session->local_lease_deadline_us ==
-               commit->authority_local_lease_deadline_us &&
+           session->local_lease_deadline_us == local_lease_deadline_us &&
            selector_equal(&session->hop_current, &commit->hop_selector) &&
            selector_equal(&session->e2e_current, &commit->e2e_selector);
 }
@@ -1194,23 +2191,33 @@ ucn_v6_result_t ucn_v6_security_commit_join(
     const ucn_v6_join_commit_t *commit)
 {
     uint8_t canonical[UCN_V6_BOOTSTRAP_CANONICAL_BYTES];
+    uint8_t receipt_canonical[UCN_V6_JOIN_RECEIPT_CANONICAL_BYTES];
     size_t canonical_length = 0U;
+    size_t receipt_canonical_length = 0U;
     ucn_v6_security_snapshot_t candidate;
     ucn_v6_security_session_record_t *slot;
     const ucn_v6_principal_t *peer;
     bool local_is_joining;
+    bool bootstrap_final = false;
+    bool recovery_receipt = false;
+    bool emit_invalidation = false;
+    bool invalidation_needs_push = false;
+    authority_floor_relation_t floor_relation;
+    uint64_t local_lease_deadline_us = 0U;
+    ucn_v6_stack_invalidation_t invalidation;
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
+    uint64_t violations_before;
 
     if (!manager_storage_is_valid(manager) || manager->faulted ||
-        bootstrap_owner == NULL || bootstrap_key == NULL ||
         commit == NULL || commit->device_proof == NULL ||
         commit->device_proof_length == 0U ||
         commit->device_proof_length > UCN_V6_SECURITY_PROOF_MAX_BYTES ||
         commit->authority_proof == NULL ||
         commit->authority_proof_length == 0U ||
         commit->authority_proof_length > UCN_V6_SECURITY_PROOF_MAX_BYTES ||
-        !authority_epoch_matches(commit, now_us) ||
+        !authority_epoch_matches(commit) ||
+        !authority_freshness_matches(commit) ||
         !binding_certificate_matches(commit) ||
         !ucn_v6_binding_key_is_valid(&commit->local_binding) ||
         !ucn_v6_binding_key_is_valid(&commit->peer_binding) ||
@@ -1218,11 +2225,15 @@ ucn_v6_result_t ucn_v6_security_commit_join(
         commit->peer_binding.realm_id != manager->committed.realm_id ||
         commit->session_generation == 0U ||
         commit->session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        commit->link_instance_id == 0U ||
+        commit->link_instance_id == UINT16_MAX ||
         commit->link_instance_generation == 0U ||
         commit->link_instance_generation >
             UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         commit->session_generation !=
             commit->transcript.selected_session_generation ||
+        commit->link_instance_id !=
+            commit->transcript.selected_link_instance_id ||
         commit->link_instance_generation !=
             commit->transcript.selected_link_instance_generation ||
         !selector_is_valid(&commit->hop_selector, UCN_V6_E2E_NONE) ||
@@ -1239,14 +2250,41 @@ ucn_v6_result_t ucn_v6_security_commit_join(
         commit->transcript.selected_e2e_key_id !=
             commit->e2e_selector.key_id ||
         commit->transcript.selected_e2e_key_generation !=
-            commit->e2e_selector.key_generation) {
+            commit->e2e_selector.key_generation ||
+        commit->authority_challenge_started_local_us > now_us) {
         return UCN_V6_ERR_SECURITY;
     }
-    result = ucn_v6_bootstrap_validate_final(
-        bootstrap_owner, commit->transcript.flow, bootstrap_key,
-        &commit->transcript, now_us);
-    if (result != UCN_V6_OK) {
-        return result;
+    floor_relation = authority_floor_compare(&manager->committed,
+                                             &commit->authority_epoch);
+    if (floor_relation == AUTHORITY_FLOOR_REJECT) {
+        return UCN_V6_ERR_REPLAY;
+    }
+    result = ucn_v6_lease_deadline_build(
+        commit->authority_challenge_started_local_us,
+        commit->authority_freshness.max_remaining_lease_us,
+        &commit->authority_lease_policy, &local_lease_deadline_us);
+    if (result != UCN_V6_OK ||
+        !ucn_v6_lease_deadline_is_live(now_us, local_lease_deadline_us)) {
+        return result == UCN_V6_OK ? UCN_V6_ERR_TIMEOUT : result;
+    }
+    if (bootstrap_owner != NULL && bootstrap_key != NULL) {
+        result = ucn_v6_bootstrap_validate_final(
+            bootstrap_owner, commit->transcript.flow, bootstrap_key,
+            &commit->transcript, now_us);
+        bootstrap_final = result == UCN_V6_OK;
+    }
+    recovery_receipt =
+        commit->peer_durable_receipt_proof != NULL &&
+        commit->peer_durable_receipt_proof_length != 0U &&
+        commit->peer_durable_receipt_proof_length <=
+            UCN_V6_SECURITY_PROOF_MAX_BYTES &&
+        commit->peer_durable_receipt_generation != 0U &&
+        commit->peer_durable_receipt_generation <=
+            UCN_V6_SERIAL64_ROTATION_THRESHOLD;
+    if (!bootstrap_final &&
+        (commit->transcript.flow != UCN_V6_BOOTSTRAP_FLOW_JOIN ||
+         !recovery_receipt)) {
+        return UCN_V6_ERR_STATE;
     }
     local_is_joining = principal_equal(
         &manager->committed.local_principal,
@@ -1279,28 +2317,76 @@ ucn_v6_result_t ucn_v6_security_commit_join(
     if (result != UCN_V6_OK) {
         return result;
     }
-    result = ucn_v6_callback_gate_try_enter(manager->callback_gate, manager);
-    if (result != UCN_V6_OK) {
-        return result;
+    if (recovery_receipt) {
+        result = write_join_durable_receipt_canonical(
+            &commit->transcript, commit->peer_durable_receipt_generation,
+            receipt_canonical, sizeof(receipt_canonical),
+            &receipt_canonical_length);
+        if (result != UCN_V6_OK) {
+            return result;
+        }
+    }
+    violations_before = ucn_v6_callback_gate_violation_count(
+        manager->callback_gate);
+    if (violations_before == UINT64_MAX ||
+        ucn_v6_callback_gate_try_enter(manager->callback_gate, manager) !=
+            UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
     }
     result = manager->crypto.verify_proof(
         manager->crypto.context, UCN_V6_PROOF_ADDRESS_AUTHORITY,
         &commit->transcript.authority_principal,
         canonical, canonical_length, commit->authority_proof,
         commit->authority_proof_length);
+    if (!callback_scope_is_clean(manager->callback_gate, manager,
+                                 violations_before) ||
+        !callback_result_is_declared(result)) {
+        result = UCN_V6_ERR_STATE;
+    }
     if (result == UCN_V6_OK) {
         result = manager->crypto.verify_proof(
             manager->crypto.context, UCN_V6_PROOF_JOINING_DEVICE,
             &commit->transcript.joining_device_principal,
             canonical, canonical_length, commit->device_proof,
             commit->device_proof_length);
+        if (!callback_scope_is_clean(manager->callback_gate, manager,
+                                     violations_before) ||
+            !callback_result_is_declared(result)) {
+            result = UCN_V6_ERR_STATE;
+        }
     }
-    leave_result = ucn_v6_callback_gate_leave(manager->callback_gate, manager);
-    if (result != UCN_V6_OK || leave_result != UCN_V6_OK) {
-        return result != UCN_V6_OK ? result : leave_result;
+    if (result == UCN_V6_OK && recovery_receipt) {
+        result = manager->crypto.verify_proof(
+            manager->crypto.context,
+            UCN_V6_PROOF_SESSION_DURABLE_RECEIPT, peer,
+            receipt_canonical, receipt_canonical_length,
+            commit->peer_durable_receipt_proof,
+            commit->peer_durable_receipt_proof_length);
+        if (!callback_scope_is_clean(manager->callback_gate, manager,
+                                     violations_before) ||
+            !callback_result_is_declared(result)) {
+            result = UCN_V6_ERR_STATE;
+        }
+    }
+    leave_result = callback_scope_finish(
+        manager->callback_gate, manager, violations_before, result);
+    if (leave_result != UCN_V6_OK) {
+        return leave_result;
     }
 
     candidate = manager->committed;
+    /* EN: An Authority transfer advances the durable admission floor, but it
+     * does not retroactively shorten an already admitted Session's local,
+     * conservative lease.  Existing Sessions may run until that deadline.
+     * Restart already fences every loaded Session for REAUTH, and every new
+     * JOIN/REAUTH is compared with this floor before crypto or Provider I/O.
+     * 中文：Authority 换主只推进持久化准入高水位，不追溯缩短已准入 Session
+     * 的本地保守租期。既有 Session 可运行到该截止期；重启会统一要求
+     * REAUTH，所有新 JOIN/REAUTH 也会在密码和 Provider I/O 前先核对高水位。 */
+    if (floor_relation != AUTHORITY_FLOOR_EXACT) {
+        candidate.authority_floor_valid = true;
+        candidate.authority_floor = commit->authority_epoch;
+    }
     if (candidate.local_binding_valid &&
         !binding_equal(&candidate.local_binding, &commit->local_binding)) {
         return UCN_V6_ERR_STATE;
@@ -1315,29 +2401,58 @@ ucn_v6_result_t ucn_v6_security_commit_join(
         if (slot->revoked) {
             return UCN_V6_ERR_ACCESS;
         }
-        if (session_matches_commit_exact(slot, commit, peer)) {
+        if (session_matches_commit_exact(slot, commit, peer,
+                                         local_lease_deadline_us)) {
             return UCN_V6_OK;
         }
         if (commit->transcript.flow != UCN_V6_BOOTSTRAP_FLOW_REAUTH ||
             !slot->requires_reauth ||
-            !binding_certificate_equal(
+            !binding_certificate_has_same_binding(
                 &slot->joining_binding_certificate,
                 &commit->joining_binding_certificate)) {
             return UCN_V6_ERR_STATE;
         }
         if (!binding_equal(&slot->local_binding, &commit->local_binding) ||
-            !binding_equal(&slot->peer_binding, &commit->peer_binding)) {
+            !principal_equal(&slot->peer_principal, peer) ||
+            !binding_equal(&slot->peer_binding,
+                           &commit->peer_binding)) {
             return UCN_V6_ERR_REPLAY;
         }
         if (slot->session_generation >= commit->session_generation ||
-            slot->session_generation == UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-            commit->session_generation != slot->session_generation + 1U) {
+            slot->session_generation == UCN_V6_SERIAL_ROTATION_THRESHOLD) {
+            return slot->session_generation ==
+                       UCN_V6_SERIAL_ROTATION_THRESHOLD ?
+                       UCN_V6_ERR_EXHAUSTED : UCN_V6_ERR_REPLAY;
+        }
+        if (commit->session_generation != slot->session_generation + 1U ||
+            slot->link_instance_generation ==
+                UCN_V6_SERIAL_ROTATION_THRESHOLD) {
+            return slot->link_instance_generation ==
+                       UCN_V6_SERIAL_ROTATION_THRESHOLD ?
+                       UCN_V6_ERR_EXHAUSTED : UCN_V6_ERR_REPLAY;
+        }
+        if (commit->link_instance_generation !=
+                slot->link_instance_generation + 1U ||
+            commit->hop_selector.key_id != slot->hop_current.key_id ||
+            commit->hop_selector.key_generation !=
+                slot->hop_current.key_generation + 1U) {
             return UCN_V6_ERR_REPLAY;
+        }
+        if (floor_relation != AUTHORITY_FLOOR_TRANSFER) {
+            result = invalidation_prepare(manager, slot, &invalidation,
+                                          &invalidation_needs_push);
+            if (result != UCN_V6_OK) {
+                return result;
+            }
+            emit_invalidation = true;
         }
     }
     if (!slot->occupied &&
-        (commit->transcript.flow != UCN_V6_BOOTSTRAP_FLOW_JOIN ||
-         commit->session_generation != 1U)) {
+        !((commit->transcript.flow == UCN_V6_BOOTSTRAP_FLOW_JOIN &&
+           commit->session_generation == 1U) ||
+          (commit->transcript.flow == UCN_V6_BOOTSTRAP_FLOW_REAUTH &&
+           floor_relation == AUTHORITY_FLOOR_TRANSFER && local_is_joining &&
+           commit->session_generation == 1U))) {
         return UCN_V6_ERR_REPLAY;
     }
     memset(slot, 0, sizeof(*slot));
@@ -1348,6 +2463,7 @@ ucn_v6_result_t ucn_v6_security_commit_join(
     slot->local_binding = commit->local_binding;
     slot->peer_binding = commit->peer_binding;
     slot->session_generation = commit->session_generation;
+    slot->link_instance_id = commit->link_instance_id;
     slot->link_instance_generation = commit->link_instance_generation;
     slot->bootstrap_flow = commit->transcript.flow;
     slot->bootstrap_transaction_id = commit->transcript.transaction_id;
@@ -1358,18 +2474,27 @@ ucn_v6_result_t ucn_v6_security_commit_join(
     memcpy(slot->bootstrap_prior_messages_hash,
            commit->transcript.prior_messages_hash,
            sizeof(slot->bootstrap_prior_messages_hash));
+    slot->bootstrap_transcript = commit->transcript;
     slot->e2e_mode =
         (ucn_v6_e2e_mode_t)commit->transcript.selected_e2e_mode;
     slot->authority_epoch = commit->authority_epoch;
+    slot->authority_freshness = commit->authority_freshness;
     slot->joining_binding_certificate =
         commit->joining_binding_certificate;
-    slot->local_lease_deadline_us =
-        commit->authority_local_lease_deadline_us;
+    slot->local_lease_deadline_us = local_lease_deadline_us;
     slot->hop_current = commit->hop_selector;
     slot->e2e_current = commit->e2e_selector;
     slot->hop_tx_next_sequence = 1U;
     slot->e2e_tx_next_sequence = 1U;
-    return persist_candidate(manager, &candidate);
+    result = persist_candidate(manager, &candidate);
+    if (emit_invalidation && invalidation_needs_push) {
+        /* Capacity was reserved before Provider I/O.  The push itself cannot
+         * fail, so durable replacement and old-session fencing have no
+         * externally observable success window.  A failed/uncertain write is
+         * fenced conservatively as well. */
+        invalidation_push(manager, &invalidation);
+    }
+    return result;
 }
 
 ucn_v6_result_t ucn_v6_security_require_reauth(
@@ -1377,17 +2502,140 @@ ucn_v6_result_t ucn_v6_security_require_reauth(
     const ucn_v6_principal_t *peer_principal)
 {
     ucn_v6_security_session_record_t *session;
+    ucn_v6_stack_invalidation_t invalidation;
+    bool needs_push = false;
+    ucn_v6_result_t result;
     if (!manager_storage_is_valid(manager) || manager->faulted ||
-        !ucn_v6_principal_is_valid(peer_principal) ||
-        ucn_v6_callback_gate_is_active(manager->callback_gate)) {
+        !ucn_v6_principal_is_valid(peer_principal)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (callback_reentry_is_blocked(manager)) {
         return UCN_V6_ERR_STATE;
     }
     session = find_session_slot(&manager->committed, peer_principal, false);
     if (session == NULL || session->revoked) {
         return UCN_V6_ERR_NOT_FOUND;
     }
+    if (!session->admitted && session->requires_reauth) {
+        return UCN_V6_OK;
+    }
+    result = invalidation_prepare(manager, session, &invalidation,
+                                  &needs_push);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
     session->admitted = false;
     session->requires_reauth = true;
+    if (needs_push) {
+        invalidation_push(manager, &invalidation);
+    }
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_security_apply_link_invalidation(
+    ucn_v6_security_manager_t *manager,
+    const ucn_v6_stack_invalidation_t *link_invalidation)
+{
+    ucn_v6_security_snapshot_t candidate;
+    ucn_v6_stack_invalidation_t child;
+    uint8_t changed_bitmap[
+        (UCN_V6_CONFIG_SECURITY_SESSIONS + 7U) / 8U];
+    size_t child_count = 0U;
+    size_t additional_count = 0U;
+    size_t index;
+    ucn_v6_result_t result;
+
+    if (!manager_storage_is_valid(manager) || manager->faulted ||
+        link_invalidation == NULL ||
+        !ucn_v6_stack_invalidation_is_valid(link_invalidation) ||
+        link_invalidation->type != UCN_V6_STACK_INVALIDATE_LINK) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (callback_reentry_is_blocked(manager)) {
+        return UCN_V6_ERR_STATE;
+    }
+
+    candidate = manager->committed;
+    memset(changed_bitmap, 0, sizeof(changed_bitmap));
+    for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
+        ucn_v6_security_session_record_t *session =
+            &candidate.sessions[index];
+        if (!session->occupied || session->revoked ||
+            session->link_instance_id != link_invalidation->link_id ||
+            session->link_instance_generation !=
+                link_invalidation->link_generation) {
+            continue;
+        }
+        /* A Session that is already fully fenced has already emitted (and
+         * possibly had acknowledged) its child invalidation.  Counting it
+         * again would let an old, completed child consume capacity needed to
+         * fence a still-admitted sibling on the same Link generation. */
+        if (!session->admitted && session->requires_reauth) {
+            continue;
+        }
+        if (!session_invalidation_build(session, &child)) {
+            return UCN_V6_ERR_STATE;
+        }
+        if (!invalidation_is_pending(manager, &child)) {
+            ++additional_count;
+        }
+        session->admitted = false;
+        session->requires_reauth = true;
+        changed_bitmap[index / 8U] |= (uint8_t)(UINT8_C(1) << (index % 8U));
+        ++child_count;
+    }
+
+    /* A stale/already-retired Link generation cannot affect a successor
+     * generation and does not consume a durable snapshot generation. */
+    if (child_count == 0U) {
+        return UCN_V6_OK;
+    }
+    if ((size_t)manager->invalidation_count >
+            UCN_V6_SECURITY_INVALIDATION_DEPTH ||
+        additional_count >
+        UCN_V6_SECURITY_INVALIDATION_DEPTH - manager->invalidation_count) {
+        return UCN_V6_ERR_NO_SPACE;
+    }
+    if (snapshot_equal(&candidate, &manager->committed)) {
+        return UCN_V6_OK;
+    }
+
+    result = persist_candidate(manager, &candidate);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    /* Validate the committed child set before publishing any element, then
+     * rebuild it again while pushing.  This avoids a sessions-sized MCU stack
+     * array without creating a partially published cascade. */
+    for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
+        const ucn_v6_security_session_record_t *session =
+            &manager->committed.sessions[index];
+        if ((changed_bitmap[index / 8U] &
+             (uint8_t)(UINT8_C(1) << (index % 8U))) != 0U &&
+            session->occupied && !session->revoked &&
+            session->link_instance_id == link_invalidation->link_id &&
+            session->link_instance_generation ==
+                link_invalidation->link_generation &&
+            !session_invalidation_build(session, &child)) {
+            manager->faulted = true;
+            return UCN_V6_ERR_STATE;
+        }
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
+        const ucn_v6_security_session_record_t *session =
+            &manager->committed.sessions[index];
+        if ((changed_bitmap[index / 8U] &
+             (uint8_t)(UINT8_C(1) << (index % 8U))) != 0U &&
+            session->occupied && !session->revoked &&
+            session->link_instance_id == link_invalidation->link_id &&
+            session->link_instance_generation ==
+                link_invalidation->link_generation) {
+            (void)session_invalidation_build(session, &child);
+            if (!invalidation_is_pending(manager, &child)) {
+                invalidation_push(manager, &child);
+            }
+        }
+    }
     return UCN_V6_OK;
 }
 
@@ -1452,6 +2700,7 @@ ucn_v6_result_t ucn_v6_security_set_acl(
     size_t index;
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
+    uint64_t violations_before;
 
     if (!manager_storage_is_valid(manager) || manager->faulted ||
         entry == NULL || !ucn_v6_principal_is_valid(admin_principal) ||
@@ -1465,17 +2714,26 @@ ucn_v6_result_t ucn_v6_security_set_acl(
     if (result != UCN_V6_OK) {
         return result;
     }
-    result = ucn_v6_callback_gate_try_enter(manager->callback_gate, manager);
-    if (result != UCN_V6_OK) {
-        return result;
+    violations_before = ucn_v6_callback_gate_violation_count(
+        manager->callback_gate);
+    if (violations_before == UINT64_MAX ||
+        ucn_v6_callback_gate_try_enter(manager->callback_gate, manager) !=
+            UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
     }
     result = manager->crypto.verify_proof(
         manager->crypto.context, UCN_V6_PROOF_REALM_ADMIN,
         admin_principal, canonical, sizeof(canonical),
         admin_proof, admin_proof_length);
-    leave_result = ucn_v6_callback_gate_leave(manager->callback_gate, manager);
-    if (result != UCN_V6_OK || leave_result != UCN_V6_OK) {
-        return result != UCN_V6_OK ? result : leave_result;
+    if (!callback_scope_is_clean(manager->callback_gate, manager,
+                                 violations_before) ||
+        !callback_result_is_declared(result)) {
+        result = UCN_V6_ERR_STATE;
+    }
+    leave_result = callback_scope_finish(
+        manager->callback_gate, manager, violations_before, result);
+    if (leave_result != UCN_V6_OK) {
+        return leave_result;
     }
     candidate = manager->committed;
     for (index = 0U; index < UCN_V6_CONFIG_ACL_ENTRIES; ++index) {
@@ -1506,20 +2764,30 @@ static ucn_v6_result_t verify_admin_change(
 {
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
+    uint64_t violations_before;
     if (!ucn_v6_principal_is_valid(admin_principal) || canonical == NULL ||
         canonical_length == 0U || proof == NULL || proof_length == 0U ||
         proof_length > UCN_V6_SECURITY_PROOF_MAX_BYTES) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    result = ucn_v6_callback_gate_try_enter(manager->callback_gate, manager);
-    if (result != UCN_V6_OK) {
-        return result;
+    violations_before = ucn_v6_callback_gate_violation_count(
+        manager->callback_gate);
+    if (violations_before == UINT64_MAX ||
+        ucn_v6_callback_gate_try_enter(manager->callback_gate, manager) !=
+            UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
     }
     result = manager->crypto.verify_proof(
         manager->crypto.context, UCN_V6_PROOF_REALM_ADMIN,
         admin_principal, canonical, canonical_length, proof, proof_length);
-    leave_result = ucn_v6_callback_gate_leave(manager->callback_gate, manager);
-    return result != UCN_V6_OK ? result : leave_result;
+    if (!callback_scope_is_clean(manager->callback_gate, manager,
+                                 violations_before) ||
+        !callback_result_is_declared(result)) {
+        result = UCN_V6_ERR_STATE;
+    }
+    leave_result = callback_scope_finish(
+        manager->callback_gate, manager, violations_before, result);
+    return leave_result;
 }
 
 static void clear_group_replay_sources(
@@ -1826,6 +3094,8 @@ ucn_v6_result_t ucn_v6_security_revoke_session(
     uint8_t canonical[32U];
     ucn_v6_security_snapshot_t candidate;
     ucn_v6_security_session_record_t *session;
+    ucn_v6_stack_invalidation_t invalidation;
+    bool needs_push = false;
     ucn_v6_result_t result;
     if (!manager_storage_is_valid(manager) || manager->faulted ||
         !ucn_v6_principal_is_valid(peer_principal)) {
@@ -1846,9 +3116,61 @@ ucn_v6_result_t ucn_v6_security_revoke_session(
     if (result != UCN_V6_OK) {
         return result;
     }
+    result = invalidation_prepare(manager, session, &invalidation,
+                                  &needs_push);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
     session->admitted = false;
     session->revoked = true;
-    return persist_candidate(manager, &candidate);
+    session->requires_reauth = false;
+    result = persist_candidate(manager, &candidate);
+    if (needs_push) {
+        invalidation_push(manager, &invalidation);
+    }
+    return result;
+}
+
+ucn_v6_result_t ucn_v6_security_invalidation_peek(
+    const ucn_v6_security_manager_t *manager,
+    ucn_v6_stack_invalidation_t *invalidation)
+{
+    if (!manager_storage_is_valid(manager) || invalidation == NULL) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (manager->invalidation_count == 0U) {
+        return UCN_V6_ERR_NOT_FOUND;
+    }
+    *invalidation = manager->invalidations[manager->invalidation_head];
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_security_invalidation_ack(
+    ucn_v6_security_manager_t *manager,
+    const ucn_v6_stack_invalidation_t *invalidation)
+{
+    if (!manager_storage_is_valid(manager) || invalidation == NULL ||
+        !ucn_v6_stack_invalidation_is_valid(invalidation)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (callback_reentry_is_blocked(manager)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (manager->invalidation_count == 0U) {
+        return UCN_V6_ERR_NOT_FOUND;
+    }
+    if (!invalidation_equal(
+            &manager->invalidations[manager->invalidation_head],
+            invalidation)) {
+        return UCN_V6_ERR_STATE;
+    }
+    memset(&manager->invalidations[manager->invalidation_head], 0,
+           sizeof(manager->invalidations[manager->invalidation_head]));
+    manager->invalidation_head = (uint16_t)(
+        ((size_t)manager->invalidation_head + 1U) %
+        UCN_V6_SECURITY_INVALIDATION_DEPTH);
+    --manager->invalidation_count;
+    return UCN_V6_OK;
 }
 
 static ucn_v6_security_session_record_t *find_session_by_principal(
@@ -2056,15 +3378,24 @@ static ucn_v6_result_t crypto_verify_tag(
 {
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
-    result = ucn_v6_callback_gate_try_enter(manager->callback_gate, manager);
-    if (result != UCN_V6_OK) {
-        return result;
+    uint64_t violations_before = ucn_v6_callback_gate_violation_count(
+        manager->callback_gate);
+    if (violations_before == UINT64_MAX ||
+        ucn_v6_callback_gate_try_enter(manager->callback_gate, manager) !=
+            UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
     }
     result = manager->crypto.verify_tag(
         manager->crypto.context, selector, aad, aad_length, payload,
         payload_length, tag);
-    leave_result = ucn_v6_callback_gate_leave(manager->callback_gate, manager);
-    return result != UCN_V6_OK ? result : leave_result;
+    if (!callback_scope_is_clean(manager->callback_gate, manager,
+                                 violations_before) ||
+        !callback_result_is_declared(result)) {
+        result = UCN_V6_ERR_STATE;
+    }
+    leave_result = callback_scope_finish(
+        manager->callback_gate, manager, violations_before, result);
+    return leave_result;
 }
 
 static ucn_v6_result_t crypto_compute_tag(
@@ -2078,15 +3409,29 @@ static ucn_v6_result_t crypto_compute_tag(
 {
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
-    result = ucn_v6_callback_gate_try_enter(manager->callback_gate, manager);
-    if (result != UCN_V6_OK) {
-        return result;
+    uint8_t computed[UCN_V6_SECURITY_TAG_BYTES];
+    uint64_t violations_before = ucn_v6_callback_gate_violation_count(
+        manager->callback_gate);
+    if (violations_before == UINT64_MAX ||
+        ucn_v6_callback_gate_try_enter(manager->callback_gate, manager) !=
+            UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
     }
+    memset(computed, 0, sizeof(computed));
     result = manager->crypto.compute_tag(
         manager->crypto.context, selector, aad, aad_length, payload,
-        payload_length, tag);
-    leave_result = ucn_v6_callback_gate_leave(manager->callback_gate, manager);
-    return result != UCN_V6_OK ? result : leave_result;
+        payload_length, computed);
+    if (!callback_scope_is_clean(manager->callback_gate, manager,
+                                 violations_before) ||
+        !callback_result_is_declared(result)) {
+        result = UCN_V6_ERR_STATE;
+    }
+    leave_result = callback_scope_finish(
+        manager->callback_gate, manager, violations_before, result);
+    if (leave_result == UCN_V6_OK) {
+        memcpy(tag, computed, sizeof(computed));
+    }
+    return leave_result;
 }
 
 static ucn_v6_result_t crypto_open_aead(
@@ -2101,15 +3446,24 @@ static ucn_v6_result_t crypto_open_aead(
 {
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
-    result = ucn_v6_callback_gate_try_enter(manager->callback_gate, manager);
-    if (result != UCN_V6_OK) {
-        return result;
+    uint64_t violations_before = ucn_v6_callback_gate_violation_count(
+        manager->callback_gate);
+    if (violations_before == UINT64_MAX ||
+        ucn_v6_callback_gate_try_enter(manager->callback_gate, manager) !=
+            UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
     }
     result = manager->crypto.open_aead(
         manager->crypto.context, selector, aad, aad_length, ciphertext,
         ciphertext_length, tag, plaintext);
-    leave_result = ucn_v6_callback_gate_leave(manager->callback_gate, manager);
-    return result != UCN_V6_OK ? result : leave_result;
+    if (!callback_scope_is_clean(manager->callback_gate, manager,
+                                 violations_before) ||
+        !callback_result_is_declared(result)) {
+        result = UCN_V6_ERR_STATE;
+    }
+    leave_result = callback_scope_finish(
+        manager->callback_gate, manager, violations_before, result);
+    return leave_result;
 }
 
 static ucn_v6_result_t crypto_seal_aead(
@@ -2124,15 +3478,24 @@ static ucn_v6_result_t crypto_seal_aead(
 {
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
-    result = ucn_v6_callback_gate_try_enter(manager->callback_gate, manager);
-    if (result != UCN_V6_OK) {
-        return result;
+    uint64_t violations_before = ucn_v6_callback_gate_violation_count(
+        manager->callback_gate);
+    if (violations_before == UINT64_MAX ||
+        ucn_v6_callback_gate_try_enter(manager->callback_gate, manager) !=
+            UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
     }
     result = manager->crypto.seal_aead(
         manager->crypto.context, selector, aad, aad_length, plaintext,
         plaintext_length, ciphertext, tag);
-    leave_result = ucn_v6_callback_gate_leave(manager->callback_gate, manager);
-    return result != UCN_V6_OK ? result : leave_result;
+    if (!callback_scope_is_clean(manager->callback_gate, manager,
+                                 violations_before) ||
+        !callback_result_is_declared(result)) {
+        result = UCN_V6_ERR_STATE;
+    }
+    leave_result = callback_scope_finish(
+        manager->callback_gate, manager, violations_before, result);
+    return leave_result;
 }
 
 static ucn_v6_group_replay_source_t *find_group_replay_source(
@@ -2200,6 +3563,7 @@ static ucn_v6_result_t reserve_session_tx_sequence(
 ucn_v6_result_t ucn_v6_security_open_frame(
     ucn_v6_security_manager_t *manager,
     uint64_t now_us,
+    uint16_t ingress_link_instance_id,
     uint32_t ingress_link_instance_generation,
     const ucn_v6_principal_t *authenticated_peer_principal,
     const uint8_t *encoded_frame,
@@ -2229,10 +3593,17 @@ ucn_v6_result_t ucn_v6_security_open_frame(
     ucn_v6_result_t rc;
 
     if (!manager_storage_is_valid(manager) || manager->faulted ||
+        ingress_link_instance_id == 0U ||
+        ingress_link_instance_id == UINT16_MAX ||
+        ingress_link_instance_generation == 0U ||
+        ingress_link_instance_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         encoded_frame == NULL || result_out == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
     memset(&opened, 0, sizeof(opened));
+    opened.ingress_link_instance_id = ingress_link_instance_id;
+    opened.ingress_link_instance_generation =
+        ingress_link_instance_generation;
     rc = ucn_v6_wire_decode(encoded_frame, encoded_length, &opened.frame);
     if (rc != UCN_V6_OK || opened.frame.frame_type == UCN_V6_FRAME_BOOTSTRAP ||
         encoded_length < UCN_V6_SECURITY_TAG_BYTES + 4U) {
@@ -2307,6 +3678,7 @@ ucn_v6_result_t ucn_v6_security_open_frame(
     wire_hop_selector.key_generation = opened.frame.peer_hop.key_generation;
     if (hop_session == NULL || !hop_session->admitted || hop_session->revoked ||
         now_us >= hop_session->local_lease_deadline_us ||
+        hop_session->link_instance_id != ingress_link_instance_id ||
         hop_session->link_instance_generation !=
             ingress_link_instance_generation ||
         !selector_matches_with_grace(
@@ -2351,6 +3723,10 @@ ucn_v6_result_t ucn_v6_security_open_frame(
     if (local_target) {
         if ((opened.frame.flags & UCN_V6_FLAG_E2E_CONTEXT) == 0U &&
             peer_discovery_contract_is_valid(&opened.frame)) {
+            if (opened.frame.session_generation !=
+                hop_session->session_generation) {
+                return UCN_V6_ERR_REPLAY;
+            }
             manager->committed = candidate;
             *result_out = opened;
             return UCN_V6_OK;
@@ -2718,6 +4094,7 @@ ucn_v6_result_t ucn_v6_security_protect_frame(
 ucn_v6_result_t ucn_v6_security_relay_frame(
     ucn_v6_security_manager_t *manager,
     uint64_t now_us,
+    uint16_t ingress_link_instance_id,
     uint32_t ingress_link_instance_generation,
     const ucn_v6_principal_t *authenticated_peer_principal,
     const ucn_v6_principal_t *next_hop_principal,
@@ -2755,7 +4132,8 @@ ucn_v6_result_t ucn_v6_security_relay_frame(
         return UCN_V6_ERR_ARGUMENT;
     }
     rc = ucn_v6_security_open_frame(
-        manager, now_us, ingress_link_instance_generation,
+        manager, now_us, ingress_link_instance_id,
+        ingress_link_instance_generation,
         authenticated_peer_principal, encoded_frame, encoded_length,
         NULL, 0U, &opened);
     if (rc != UCN_V6_OK) {
@@ -2982,6 +4360,9 @@ ucn_v6_result_t ucn_v6_security_copy_view(
     }
     memset(&next, 0, sizeof(next));
     next.snapshot_generation = manager->committed.snapshot_generation;
+    next.pending_invalidations = manager->invalidation_count;
+    next.authority_floor_valid = manager->committed.authority_floor_valid;
+    next.authority_floor = manager->committed.authority_floor;
     next.faulted = manager->faulted;
     for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
         if (manager->committed.sessions[index].occupied &&

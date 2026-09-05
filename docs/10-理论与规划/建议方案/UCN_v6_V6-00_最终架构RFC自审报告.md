@@ -77,35 +77,38 @@ Transfer v2 都是目标合同，不是当前实现状态。
 | C99 Opaque State + caller-owned storage | PASS | 编译期 Storage 常量/union/声明宏解决文件作用域静态分配，对齐与 Manifest 启动复核。 |
 | Realtime、Cluster 为正交可选模块 | PASS | 两者互不链接、互不依赖，只复用 v6 Identity、Generation、Security、Capability、Owner 和 Persistence。 |
 
-## 4. Wire 候选长度算术复核
+## 4. Wire 最终基础长度算术复核
 
-RFC 仅提出无扩展、无认证 Tag、含 CRC32C 的候选基础长度。按字段逐项计算：
+V6-03 及后续统一自审已经冻结无扩展、无 Payload、无认证 Tag、含 CRC32C 的基础长度。
+按当前精确字段逐项计算：
 
 ```text
-Common Prefix               8 B
+Common Prefix               9 B
 Realm                       4 B
 Source + Destination        2 × AddressBytes
 Source + Destination Binding 8 B
 Session Generation          4 B
-Packet Sequence             4 B
+Origin Sequence             4 B
+Hop Sequence                4 B
 Payload Length              2 B
 CRC32C                      4 B
 ------------------------------------------------
-Total                       34 + 2 × AddressBytes
+Total                       39 + 2 × AddressBytes
 ```
 
 因此：
 
-| Address Class | 单地址宽度 | 候选基础帧头+CRC |
+| Address Class | 单地址宽度 | 最终基础帧头+CRC |
 | --- | ---: | ---: |
-| A0 | 1 B | 36 B |
-| A1 | 2 B | 38 B |
-| A2 | 3 B | 40 B |
-| A3 | 4 B | 42 B |
+| A0 | 1 B | 41 B |
+| A1 | 2 B | 43 B |
+| A2 | 3 B | 45 B |
+| A3 | 4 B | 47 B |
 
-算术一致。这里的 36/38/40/42 B 不是最终 Golden；Endpoint、Route、Path、Hop Tag、
-E2E Tag 和未来可选扩展会增加长度。精确 Flag、Offset、保留位、AAD 和非法组合必须由
-V6-03 单独冻结并接受外审。
+这里的基础长度已由 v6 Golden 固定；Endpoint、Route、Path、Hop Tag、E2E Tag 和可选扩展
+继续按精确合同增加长度。Common Prefix 使用 16-bit Hop Limit，Origin/Hop Sequence 分属
+端到端与逐跳安全域；精确 Flag、Offset、保留位、AAD 和非法组合以
+[Core Wire 精确格式 RFC](UCN_v6_Core_Wire_精确格式_RFC.md)为准。
 
 ## 5. 安全边界自审
 
