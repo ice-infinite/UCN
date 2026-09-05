@@ -79,7 +79,6 @@ struct ucn_v6_transfer_owner {
     uint8_t fragment_max_attempts;
     uint64_t receive_timeout_us;
     uint64_t recent_completion_us;
-    uint64_t tx_message_high_water;
     uint64_t next_credit_reservation_id;
     ucn_v6_transfer_tx_slot_t tx[UCN_V6_CONFIG_TRANSFER_TX_SLOTS];
     ucn_v6_transfer_rx_slot_t rx[UCN_V6_CONFIG_TRANSFER_RX_SLOTS];

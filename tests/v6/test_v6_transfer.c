@@ -12,6 +12,20 @@
         }                                                                       \
     } while (0)
 
+#if UCN_V6_TRANSFER_MAX_MESSAGE_BYTES >= 512U
+#define TEST_SELECTIVE_BYTES 512U
+#define TEST_SELECTIVE_BUDGET 100U
+#define TEST_SELECTIVE_CLASS UCN_V6_MESSAGE_T512
+#else
+#define TEST_SELECTIVE_BYTES 256U
+#define TEST_SELECTIVE_BUDGET 50U
+#define TEST_SELECTIVE_CLASS UCN_V6_MESSAGE_T256
+#endif
+#define TEST_SELECTIVE_FINAL_OFFSET \
+    ((TEST_SELECTIVE_BYTES / TEST_SELECTIVE_BUDGET) * TEST_SELECTIVE_BUDGET)
+#define TEST_SELECTIVE_FINAL_BYTES \
+    (TEST_SELECTIVE_BYTES - TEST_SELECTIVE_FINAL_OFFSET)
+
 typedef struct transfer_fixture {
     ucn_v6_transfer_owner_storage_t tx_storage;
     ucn_v6_transfer_owner_storage_t rx_storage;
@@ -109,8 +123,11 @@ static ucn_v6_transfer_send_request_t request_for(
     request.message.destination_endpoint = 20U;
     request.message.operation_id = message_id;
     request.message.payload_length = payload_length;
-    request.message_class = payload_length <= 512U ?
-                                UCN_V6_MESSAGE_T512 : UCN_V6_MESSAGE_T8K;
+    request.message_class = payload_length <= 64U ? UCN_V6_MESSAGE_T64 :
+                            payload_length <= 128U ? UCN_V6_MESSAGE_T128 :
+                            payload_length <= 256U ? UCN_V6_MESSAGE_T256 :
+                            payload_length <= 512U ? UCN_V6_MESSAGE_T512 :
+                            UCN_V6_MESSAGE_T8K;
     request.message_id = message_id;
     request.buffer_token = message_id + 100U;
     request.payload = fixture->payload;
@@ -323,10 +340,11 @@ static int test_selective_repeat_and_recent(void)
     ucn_v6_transfer_completed_t completed;
     ucn_v6_transfer_stats_t stats;
     ucn_v6_session_key_t origin;
-    uint8_t output[512];
+    uint8_t output[UCN_V6_TRANSFER_MAX_MESSAGE_BYTES];
     uint64_t token = 0U;
     CHECK(fixture_init(&fixture) == 0);
-    request = request_for(&fixture, 1U, 512U, 100U, 4U);
+    request = request_for(&fixture, 1U, TEST_SELECTIVE_BYTES,
+                          TEST_SELECTIVE_BUDGET, 4U);
     CHECK(ucn_v6_transfer_send_begin(fixture.tx, 0U, &request) == UCN_V6_OK);
 
     /* Four fragments enter the pipe before any SACK: this is not stop/wait. */
@@ -359,8 +377,8 @@ static int test_selective_repeat_and_recent(void)
     CHECK(ucn_v6_transfer_copy_completed(
               fixture.rx, &origin, 1U, 1U, output, sizeof(output),
               &completed) == UCN_V6_OK);
-    CHECK(completed.payload_length == 512U &&
-          memcmp(output, fixture.payload, 512U) == 0);
+    CHECK(completed.payload_length == TEST_SELECTIVE_BYTES &&
+          memcmp(output, fixture.payload, TEST_SELECTIVE_BYTES) == 0);
 
     /* Final SACK loss is recoverable both before and after application retire. */
     {
@@ -369,15 +387,15 @@ static int test_selective_repeat_and_recent(void)
         size_t encoded_length = 0U;
         ucn_v6_security_open_result_t opened;
         memset(&final_fragment, 0, sizeof(final_fragment));
-        final_fragment.message_class = UCN_V6_MESSAGE_T512;
+        final_fragment.message_class = TEST_SELECTIVE_CLASS;
         final_fragment.message_id = 1U;
-        final_fragment.total_length = 512U;
+        final_fragment.total_length = TEST_SELECTIVE_BYTES;
         final_fragment.fragment_index = 5U;
         final_fragment.fragment_count = 6U;
-        final_fragment.fragment_data_budget = 100U;
-        final_fragment.data_length = 12U;
+        final_fragment.fragment_data_budget = TEST_SELECTIVE_BUDGET;
+        final_fragment.data_length = TEST_SELECTIVE_FINAL_BYTES;
         final_fragment.message_crc32c = completed.message_crc32c;
-        final_fragment.data = &fixture.payload[500];
+        final_fragment.data = &fixture.payload[TEST_SELECTIVE_FINAL_OFFSET];
         CHECK(ucn_v6_transfer_fragment_encode(
                   &final_fragment, encoded, sizeof(encoded),
                   &encoded_length) == UCN_V6_OK);
@@ -505,6 +523,13 @@ static int test_timeout_rebind_and_atomic_invalidation(void)
     fixture.path.max_concurrency = 1U;
     request = request_for(&fixture, 1U, 64U, 32U, 2U);
     request.path = fixture.path;
+    {
+        ucn_v6_transfer_send_request_t invalid = request;
+        invalid.path.session_generation =
+            UCN_V6_SERIAL_ROTATION_THRESHOLD + UINT32_C(1);
+        CHECK(ucn_v6_transfer_send_begin(fixture.tx, 0U, &invalid) ==
+              UCN_V6_ERR_ARGUMENT);
+    }
     CHECK(ucn_v6_transfer_send_begin(fixture.tx, 0U, &request) == UCN_V6_OK);
     request.message_id = 2U;
     request.message.operation_id = 2U;
@@ -539,12 +564,46 @@ static int test_timeout_rebind_and_atomic_invalidation(void)
     return 0;
 }
 
+static int test_operation_id_gaps_and_restart_independence(void)
+{
+    transfer_fixture_t fixture;
+    transfer_fixture_t restarted;
+    ucn_v6_transfer_send_request_t request;
+    ucn_v6_transfer_rx_result_t received;
+    uint64_t retired_token = 0U;
+
+    CHECK(fixture_init(&fixture) == 0);
+    request = request_for(&fixture, UINT64_C(1000), 32U, 32U, 1U);
+    CHECK(ucn_v6_transfer_send_begin(fixture.tx, 0U, &request) == UCN_V6_OK);
+    CHECK(ucn_v6_transfer_send_begin(fixture.tx, 0U, &request) ==
+          UCN_V6_ERR_REPLAY);
+    CHECK(deliver_selected(&fixture, 0U, UINT64_C(1000), 0U, true, true,
+                           &received) == 0);
+    CHECK(received.complete);
+    CHECK(apply_sack(&fixture, UINT64_C(1000), &received.sack) == 0);
+    CHECK(ucn_v6_transfer_retire_tx(
+              fixture.tx, UINT64_C(1000), &retired_token) == UCN_V6_OK);
+
+    /* Transfer is not the durable operation-ID allocator. A lower, still
+     * valid ID from the Message layer is legal when no active transfer owns
+     * that exact ID; gaps and restart never require replaying IDs 1..N. */
+    request = request_for(&fixture, UINT64_C(7), 32U, 32U, 1U);
+    CHECK(ucn_v6_transfer_send_begin(fixture.tx, 1U, &request) == UCN_V6_OK);
+
+    CHECK(fixture_init(&restarted) == 0);
+    request = request_for(&restarted, UINT64_C(9000000), 32U, 32U, 1U);
+    CHECK(ucn_v6_transfer_send_begin(restarted.tx, 0U, &request) ==
+          UCN_V6_OK);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_codec_and_message_classes() == 0);
     CHECK(test_selective_repeat_and_recent() == 0);
     CHECK(test_credit_and_session_fence() == 0);
     CHECK(test_timeout_rebind_and_atomic_invalidation() == 0);
+    CHECK(test_operation_id_gaps_and_restart_independence() == 0);
     puts("v6 transfer tests passed");
     return 0;
 }

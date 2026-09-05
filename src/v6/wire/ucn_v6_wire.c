@@ -5,7 +5,7 @@
 
 enum {
     UCN_V6_PREFIX_BYTES = 8,
-    UCN_V6_FIXED_AFTER_PREFIX_BYTES = 4 + 8 + 4 + 4 + 2,
+    UCN_V6_FIXED_AFTER_PREFIX_BYTES = 4 + 8 + 4 + 4 + 4 + 2,
     UCN_V6_CRC_BYTES = 4,
     UCN_V6_PEER_CONTEXT_BYTES = 7,
     UCN_V6_GROUP_CONTEXT_BYTES = 15,
@@ -258,10 +258,6 @@ static bool frame_contract_is_valid(const ucn_v6_frame_t *frame)
         return false;
     }
     if ((frame->flags & UCN_V6_FLAG_ROUTE_CONTEXT) != 0U &&
-        (frame->flags & UCN_V6_FLAG_PATH_CONTEXT) != 0U) {
-        return false;
-    }
-    if ((frame->flags & UCN_V6_FLAG_ROUTE_CONTEXT) != 0U &&
         !serial_is_valid(frame->route_generation)) {
         return false;
     }
@@ -289,7 +285,8 @@ static bool frame_contract_is_valid(const ucn_v6_frame_t *frame)
                frame->source_binding_generation == 0U &&
                frame->destination_binding_generation == 0U &&
                frame->session_generation == 0U &&
-               frame->packet_sequence == 0U && frame->hop_limit == 1U &&
+                frame->origin_sequence == 0U && frame->hop_sequence == 0U &&
+                frame->hop_limit == 1U &&
                frame->traffic_class == UCN_V6_TRAFFIC_Q0 &&
                frame->delivery_guarantee == UCN_V6_DELIVERY_BEST_EFFORT;
     }
@@ -300,7 +297,8 @@ static bool frame_contract_is_valid(const ucn_v6_frame_t *frame)
                serial_is_valid(frame->source_binding_generation) &&
                frame->destination_binding_generation == 0U &&
                serial_is_valid(frame->session_generation) &&
-               serial_is_valid(frame->packet_sequence) &&
+                serial_is_valid(frame->origin_sequence) &&
+                frame->hop_sequence == 0U &&
                frame->hop_limit == 1U &&
                frame->traffic_class == UCN_V6_TRAFFIC_Q1 &&
                frame->delivery_guarantee == UCN_V6_DELIVERY_LATEST &&
@@ -317,7 +315,11 @@ static bool frame_contract_is_valid(const ucn_v6_frame_t *frame)
            serial_is_valid(frame->source_binding_generation) &&
            serial_is_valid(frame->destination_binding_generation) &&
            serial_is_valid(frame->session_generation) &&
-           serial_is_valid(frame->packet_sequence);
+           serial_is_valid(frame->hop_sequence) &&
+           (((frame->flags & UCN_V6_FLAG_E2E_CONTEXT) != 0U &&
+             serial_is_valid(frame->origin_sequence)) ||
+            ((frame->flags & UCN_V6_FLAG_E2E_CONTEXT) == 0U &&
+             frame->origin_sequence == 0U));
 }
 
 static bool size_add(size_t *value, size_t increment)
@@ -455,7 +457,9 @@ ucn_v6_result_t ucn_v6_wire_encode(
     offset += 4U;
     write_u32_be(output + offset, frame->session_generation);
     offset += 4U;
-    write_u32_be(output + offset, frame->packet_sequence);
+    write_u32_be(output + offset, frame->origin_sequence);
+    offset += 4U;
+    write_u32_be(output + offset, frame->hop_sequence);
     offset += 4U;
     write_u16_be(output + offset, frame->payload_length);
     offset += 2U;
@@ -552,7 +556,7 @@ ucn_v6_result_t ucn_v6_wire_decode(
     uint8_t traffic_delivery;
     uint32_t received_crc;
 
-    if (input == NULL || frame == NULL || input_length < 36U ||
+    if (input == NULL || frame == NULL || input_length < 40U ||
         input_length > UCN_V6_WIRE_MAX_FRAME_BYTES ||
         input[0] != UCN_V6_WIRE_MAGIC_0 ||
         input[1] != UCN_V6_WIRE_MAGIC_1) {
@@ -603,7 +607,9 @@ ucn_v6_result_t ucn_v6_wire_decode(
     offset += 4U;
     decoded.session_generation = read_u32_be(input + offset);
     offset += 4U;
-    decoded.packet_sequence = read_u32_be(input + offset);
+    decoded.origin_sequence = read_u32_be(input + offset);
+    offset += 4U;
+    decoded.hop_sequence = read_u32_be(input + offset);
     offset += 4U;
     decoded.payload_length = read_u16_be(input + offset);
     offset += 2U;
@@ -747,7 +753,7 @@ ucn_v6_result_t ucn_v6_wire_write_canonical_aad(
     offset += 4U;
     write_u32_be(aad + offset, frame->session_generation);
     offset += 4U;
-    write_u32_be(aad + offset, frame->packet_sequence);
+    write_u32_be(aad + offset, frame->origin_sequence);
     offset += 4U;
     write_u16_be(aad + offset, frame->message.source_endpoint);
     offset += 2U;

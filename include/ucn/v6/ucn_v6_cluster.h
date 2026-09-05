@@ -11,6 +11,8 @@ extern "C" {
 #define UCN_V6_CLUSTER_RECORD_BYTES ((size_t)4096U)
 #define UCN_V6_CLUSTER_CONTROL_VERSION ((uint8_t)1U)
 #define UCN_V6_CLUSTER_CONTROL_BYTES ((size_t)112U)
+#define UCN_V6_CLUSTER_DIRECTORY_VERSION ((uint8_t)1U)
+#define UCN_V6_CLUSTER_DIRECTORY_BYTES ((size_t)100U)
 
 typedef enum ucn_v6_cluster_role {
     UCN_V6_CLUSTER_OBSERVER = 0,
@@ -185,6 +187,10 @@ typedef struct ucn_v6_cluster_tunnel {
 
 typedef struct ucn_v6_cluster_store_ops {
     void *context;
+    ucn_v6_result_t (*load_generation_witness)(void *context,
+                                                uint64_t *generation);
+    ucn_v6_result_t (*reserve_generation_witness)(void *context,
+                                                   uint64_t generation);
     ucn_v6_result_t (*load)(void *context, uint8_t *record,
                             size_t record_capacity, size_t *record_length);
     ucn_v6_result_t (*submit)(void *context, const uint8_t *record,
@@ -240,6 +246,12 @@ ucn_v6_result_t ucn_v6_cluster_control_encode(
 ucn_v6_result_t ucn_v6_cluster_control_decode(
     const uint8_t *input, size_t input_length,
     ucn_v6_cluster_control_t *control);
+ucn_v6_result_t ucn_v6_cluster_directory_encode(
+    const ucn_v6_cluster_directory_entry_t *entry,
+    uint8_t output[UCN_V6_CLUSTER_DIRECTORY_BYTES]);
+ucn_v6_result_t ucn_v6_cluster_directory_decode(
+    const uint8_t *input, size_t input_length,
+    ucn_v6_cluster_directory_entry_t *entry);
 
 /* EN: Loads v6-only durable state and advances boot incarnation before use.
  * 中文：只加载 v6 持久状态，并在使用前持久推进启动代际。 */
@@ -274,9 +286,7 @@ ucn_v6_result_t ucn_v6_cluster_assign_backup(
  * 中文：记录指定 Backup 对 Config 事务的 staging 与确认。 */
 ucn_v6_result_t ucn_v6_cluster_backup_ack_config(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened,
-    uint64_t transaction_id, uint32_t config_id,
-    uint32_t config_generation);
+    const ucn_v6_security_open_result_t *opened);
 /* EN: Persists entry into C_old/C_new Joint Config before any acknowledgement.
  * 中文：在任何确认前持久进入 C_old/C_new Joint Config。 */
 ucn_v6_result_t ucn_v6_cluster_prepare_joint(
@@ -302,8 +312,7 @@ ucn_v6_result_t ucn_v6_cluster_begin_takeover(
  * 中文：加入一个经过认证的已提交投票者证书位。 */
 ucn_v6_result_t ucn_v6_cluster_record_transition_vote(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened,
-    const ucn_v6_cluster_control_t *vote);
+    const ucn_v6_security_open_result_t *opened);
 /* EN: Persists the takeover Epoch before activating local Head authority.
  * 中文：激活本地 Head 权威前先持久提交接管 Epoch。 */
 ucn_v6_result_t ucn_v6_cluster_commit_takeover(
@@ -320,8 +329,7 @@ ucn_v6_result_t ucn_v6_cluster_begin_handover(
  * 中文：记录来自精确目标权威的认证 READY。 */
 ucn_v6_result_t ucn_v6_cluster_handover_ready(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened,
-    const ucn_v6_cluster_control_t *ready);
+    const ucn_v6_security_open_result_t *opened);
 /* EN: Commits handover and permanently fences the old local authority.
  * 中文：提交 Handover，并永久围栏旧本地权威。 */
 ucn_v6_result_t ucn_v6_cluster_commit_handover(
@@ -348,7 +356,7 @@ ucn_v6_result_t ucn_v6_cluster_rekey(
 ucn_v6_result_t ucn_v6_cluster_directory_install(
     ucn_v6_cluster_owner_t *owner,
     const ucn_v6_security_open_result_t *opened,
-    const ucn_v6_cluster_directory_entry_t *entry, uint64_t now_us);
+    uint64_t now_us);
 /* EN: Installs a local-authority bounded inter-cluster Tunnel.
  * 中文：安装由本地权威许可的有界跨簇 Tunnel。 */
 ucn_v6_result_t ucn_v6_cluster_tunnel_install(

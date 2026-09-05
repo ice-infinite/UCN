@@ -1,17 +1,12 @@
-# 实验组件
+# 实验与未放行能力
 
-这里记录“已有源码/RFC，但默认产品未启用或生产接线未完成”的能力。实验文档必须回链[官方当前边界](../official/07-Cluster簇/README.md)，不得单独声明为生产功能。
+当前发布树只有 v6 源码；“实验”不再表示另有一套可编译旧协议。以下边界仍未获得生产证据：
 
-| 组件 | 当前边界 |
-| --- | --- |
-| Cluster Wire v4 | 40 B Codec/semantic；encoder 默认关 |
-| M07 Config/Joint | 受限实验软件范围 |
-| M08 Authority/Fence | 受限组件，生产接线受 M05 限制 |
-| M09 Backup Mirror/Coverage | 模型，未接旧生产 handler |
-| M10 Majority Takeover | 默认关闭 Archive |
-| M11 Merge/Handover | 默认关闭 Archive |
-| M12 Recovery/Lineage | Target 模型与 Current 边界并存 |
-| M13 Rekey/No-wrap | 默认关闭 Archive |
-| Federation | 可选 Archive，完整生产跨簇能力未放行 |
+- Realtime 的真实硬件时间戳、asymmetry 和 uncertainty；
+- Cluster 的真实 Flash 掉电、分区与多簇长稳；
+- ESP32-S3、CAN/CAN-FD、USB、混合 Bearer 的 v6 驱动实测；
+- 目标 MCU 的资源、P99/P999、功耗与 24 小时稳定性；
+- MSVC 与可运行 TSan 工具链。
 
-详细设计和阶段自审目前仍保留在旧 `07-Cluster簇`/`09-审计与整改` 主题树，迁移时保持原日期和审计上下文。
+模块源码和 Host 测试可以存在，但上述能力在证据完成前仍是产品验证 HOLD。旧 v5 实验组件
+列表已归档到 `docs/archive/v5-user-facing-20260905/experimental/`。

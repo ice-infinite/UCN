@@ -43,19 +43,23 @@ Path 和 Route Proposal Digest。Time Domain 只接受以下全部成立的 Path
 ## 4. Generation 与持久化
 
 Domain Generation 使用统一的 1..`UCN_V6_SERIAL_ROTATION_THRESHOLD` no-wrap serial。Owner
-要求产品提供按 `{Master Principal, Clock Domain}` 持久保存 high-water 的同步 Provider。
-绑定新 Domain 前执行：
+要求产品提供按 `{Master Principal, Clock Domain}` 持久保存完整 Domain Proposal Record 的同步
+Provider。Record 不只包含 generation，还包含 Binding、Session、Route/Path Generation、认证
+Capability 身份和所有会改变同步语义的固定配置。绑定新 Domain 前执行：
 
 ```text
-load high-water
-  -> reject rollback
-  -> reserve presented generation
-  -> reload exact generation
+load full proposal record
+  -> reject generation rollback or same-generation identity mismatch
+  -> reserve full presented proposal record
+  -> reload exact full record
   -> install RAM domain
 ```
 
-Provider 返回成功但没有真正写入时，reload 会失败并禁止 Domain 生效。整个回调动态范围由
-V6-05 共享 callback gate 围栏，任何递归或跨 Owner Provider 调用都失败关闭。
+同 generation 只有逐字段完全相同的 Proposal 才能幂等重放；即使 generation 数值相同，切换
+Master Binding、Session、Route/Path 或 Capability 也必须拒绝，防止 Proposal Identity ABA。
+Provider 返回成功但没有真正写入时，reload 会失败并禁止 Domain 生效。Provider 一旦 commissioned，
+后续 `NOT_FOUND` 视为 anti-rollback 证据丢失而失败关闭。整个回调动态范围由 V6-05 共享 callback
+gate 围栏，任何递归或跨 Owner Provider 调用都失败关闭。
 
 ## 5. uncertainty 与 Time Domain
 
@@ -92,10 +96,16 @@ HOLDOVER 在当前 v6 REQUIRED/PREFERRED 首版均拒绝，因为 Envelope 没�
 |---|---|
 | 11-01 Codec | 固定 16 B、网络序、保留位、语义组合与失败不写回已覆盖 |
 | 11-02 Capability | 68 B 精确字段、Realtime/Domain 条件和 Path immutable 位已覆盖 |
-| 11-03 Persistence | high-water rollback、Provider 假成功 reload、callback 重入已覆盖 |
+| 11-03 Persistence | 完整 Proposal Record rollback/ABA、Provider 假成功 reload、callback 重入已覆盖 |
 | 11-04 Domain | 连续锁定、旧样本、跳变、单调 high-water、HOLDOVER 和溢出已覆盖 |
 | 11-05 Endpoint | NONE 零开销、REQUIRED E2E+ACL、硬件采样和双 Deadline 已覆盖 |
 | 11-06 隔离 | Realtime 不链接 Cluster；default-OFF Core 不含 v6 符号 |
+
+V6-15 第三轮交叉自审进一步把 `bind_domain()` 的所有本地可判定条件移到 Provider I/O 之前：
+相同/回退 Domain Generation、无本地空槽或本地状态冲突均以零 `load/reserve` 调用返回。这样
+容量失败不会无意义推进 durable high-water；定向回归同时覆盖 exact replay 和满表两条路径。
+后续全局自审又把持久对象从“只保存 generation high-water”升级为“保存完整 Proposal Identity”；
+同 generation 但 Path Generation、Session 或其他绑定字段变化的记录会在发布 Domain 前拒绝。
 
 ## 8. 验证
 
@@ -116,3 +126,15 @@ Host 测试不能给出 UART、RS-485、ESP-NOW、CAN/CAN-FD 或 USB 的真实�
 链路非对称、晶振漂移和最坏 uncertainty。V6-13 必须把统一 Timed Link 事件接到参考产品，
 V6-14 必须保存不同 Bearer/负载/温度下的原始证据；在此之前不得宣称分布式时间精度或绝对
 Deadline 的硬件验收完成。
+
+## 10. V6X-A04 外审整改补充
+
+Time Domain 不再接收调用方单独构造的采样结构。`TIME_FOLLOW_UP` 使用固定 48 B canonical
+Payload，完整承载 Clock Domain、Domain Generation、本地采样时刻、Offset 与全部 uncertainty
+分量。`ucn_v6_realtime_ingest_sample()` 只从 `ucn_v6_security_open_result_t.frame.payload`
+严格解码，并同时匹配 Frame Type、Protocol Opcode、认证 Principal、Binding、Session、Route
+和固定 Path。
+
+错误 Opcode、非规范保留字节、旧采样、错误安全或 Path 上下文均在修改 Domain 前拒绝。
+新增测试在失败前后比较 Domain/统计 View，证明这两类语义错绑不会增加样本、进入 LOCKED 或
+污染故障状态。

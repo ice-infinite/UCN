@@ -11,6 +11,7 @@ struct ucn_v6_identity_authority {
     uint16_t schema;
     uint16_t reserved;
     uint64_t layout_hash;
+    uint64_t record_generation;
     uint32_t realm_id;
     ucn_v6_authority_epoch_t epoch;
     uint64_t local_lease_deadline_us;

@@ -159,7 +159,9 @@ void ucn_v6_qos_default_policy(ucn_v6_qos_policy_t *policy)
         policy->max_hop_budget_us[1] = UINT64_C(250000);
         policy->max_hop_budget_us[2] = UINT64_C(1000000);
         policy->max_hop_budget_us[3] = UINT64_C(5000000);
-        policy->max_flows_per_session = 8U;
+        policy->max_flows_per_session =
+            UCN_V6_CONFIG_QOS_FLOW_SLOTS < 8U ?
+                UCN_V6_CONFIG_QOS_FLOW_SLOTS : 8U;
         policy->q2_quantum_bytes = 512U;
         policy->q3_quantum_bytes = 256U;
     }

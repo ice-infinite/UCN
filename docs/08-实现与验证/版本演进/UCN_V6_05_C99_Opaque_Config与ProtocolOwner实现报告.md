@@ -64,9 +64,11 @@ declare aligned storage union
 
 ## 4. 唯一 Protocol Owner
 
-Owner 接受五类事件：RX、TX、Completion、Timer 与 Provider。公开 `post()` 只在调用方提供的
-task/ISR-safe 锁下增加固定计数并执行通知，不调用 Codec、Route、业务或 Provider。每个产品的通知
-实现可以对应裸机 pending flag、FreeRTOS task notification、Zephyr semaphore 等。
+Owner 接受五类事件：RX、TX、Completion、Timer 与 Provider。任务上下文与 ISR 使用两个明确
+不同的锁合同：`lock_task()` 必须阻塞或以其他方式保证返回时已经持锁，只有
+`try_lock_from_isr()` 可以失败并要求调用方重试。公开 `post()` 只在对应锁下增加固定计数并执行
+通知，不调用 Codec、Route、业务或 Provider。每个产品的通知实现可以对应裸机 pending flag、
+FreeRTOS task notification、Zephyr semaphore 等。
 
 协议任务调用：
 
@@ -76,7 +78,8 @@ ucn_v6_protocol_owner_run(owner, budget, handler, context, &processed)
 
 Owner 在五类事件间 round-robin，单次最多处理 `budget` 个事件。Handler 返回成功后才确认出队；
 失败则事件保持 pending，供下一次唤醒重试。运行期间第二次 `run()` 返回 STATE，避免两个执行上下文
-同时推进协议。总 pending 达到 Manifest 固定深度时返回 NO_SPACE，不覆盖旧事件。
+同时推进协议。任务锁不可失败，因此 `run()` 的所有退出路径都能重新持锁并清除 `running`；不会因
+尾部 try-lock 失败留下永久忙状态。总 pending 达到 Manifest 固定深度时返回 NO_SPACE，不覆盖旧事件。
 
 本阶段只冻结 Owner 模型，不声称 Host fake lock 等同真实 RTOS/ISR 锁。V6-13 必须为每个 Port
 验证相应的 task/ISR/SMP 临界区与通知实现。
@@ -104,6 +107,8 @@ Owner 在五类事件间 round-robin，单次最多处理 `budget` 个事件。H
 - Handler 首次失败时 pending 数量和类别保持；后续成功可继续处理；
 - Handler 内递归 `run()` 被拒绝且不改外层结果；
 - 深度耗尽零覆盖，magic 损坏后所有操作失败关闭。
+- 任务锁采用 acquire-before-return 合同，ISR 独占 try-lock 合同；FreeRTOS Port API 已随破坏性
+  合同升级，Host 回归验证 Handler 成功、失败和递归路径都能恢复 `running=false`。
 
 ### 5.4 隔离与工具链
 

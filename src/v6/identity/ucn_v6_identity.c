@@ -80,6 +80,15 @@ static bool authority_epoch_identity_equal(
                   sizeof(left->allocation_high_water_digest)) == 0;
 }
 
+static bool authority_epoch_semantic_equal(
+    const ucn_v6_authority_epoch_t *left,
+    const ucn_v6_authority_epoch_t *right)
+{
+    return authority_epoch_identity_equal(left, right) &&
+           left->quorum_proven == right->quorum_proven &&
+           left->durable == right->durable;
+}
+
 static bool callback_gate_is_valid(const ucn_v6_callback_gate_t *gate)
 {
     return gate != NULL && gate->initialized && gate->lock != NULL &&
@@ -129,6 +138,267 @@ static ucn_v6_binding_slot_t *find_binding_slot(
         }
     }
     return allow_empty ? empty : NULL;
+}
+
+static bool identity_store_is_valid(const ucn_v6_identity_store_ops_t *store)
+{
+    return store != NULL && store->load_generation_witness != NULL &&
+           store->reserve_generation_witness != NULL && store->load != NULL &&
+           store->submit != NULL;
+}
+
+static bool binding_certificate_is_valid(
+    const ucn_v6_binding_certificate_t *certificate,
+    uint32_t realm_id)
+{
+    return certificate != NULL &&
+           ucn_v6_principal_is_valid(&certificate->device_principal) &&
+           ucn_v6_principal_is_valid(&certificate->authority_principal) &&
+           ucn_v6_binding_key_is_valid(&certificate->binding) &&
+           certificate->binding.realm_id == realm_id &&
+           certificate->authority_generation != 0U &&
+           certificate->authority_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           bytes_are_nontrivial(certificate->lease_id,
+                                sizeof(certificate->lease_id)) &&
+           certificate->lease_duration_us != 0U &&
+           certificate->authority_lease_sequence != 0U &&
+           certificate->authority_lease_sequence <=
+               UCN_V6_SERIAL64_ROTATION_THRESHOLD &&
+           address_mode_is_valid(certificate->mode);
+}
+
+static bool binding_certificate_semantic_equal(
+    const ucn_v6_binding_certificate_t *left,
+    const ucn_v6_binding_certificate_t *right)
+{
+    return memcmp(left->device_principal.bytes,
+                  right->device_principal.bytes,
+                  sizeof(left->device_principal.bytes)) == 0 &&
+           memcmp(left->authority_principal.bytes,
+                  right->authority_principal.bytes,
+                  sizeof(left->authority_principal.bytes)) == 0 &&
+           ucn_v6_binding_key_equal(&left->binding, &right->binding) &&
+           left->authority_generation == right->authority_generation &&
+           memcmp(left->lease_id, right->lease_id,
+                  sizeof(left->lease_id)) == 0 &&
+           left->lease_duration_us == right->lease_duration_us &&
+           left->authority_lease_sequence ==
+               right->authority_lease_sequence &&
+           left->mode == right->mode;
+}
+
+static bool binding_slot_semantic_equal(
+    const ucn_v6_binding_slot_t *left,
+    const ucn_v6_binding_slot_t *right)
+{
+    return left->occupied == right->occupied &&
+           left->active == right->active &&
+           left->node_address == right->node_address &&
+           left->generation_high_water == right->generation_high_water &&
+           binding_certificate_semantic_equal(&left->certificate,
+                                              &right->certificate);
+}
+
+static bool group_allocator_is_valid(
+    const ucn_v6_group_allocator_t *groups)
+{
+    size_t left;
+    size_t right;
+
+    if (groups == NULL || groups->dynamic_group_id_high_water >
+                              UCN_V6_SERIAL_ROTATION_THRESHOLD) {
+        return false;
+    }
+    for (left = 0U; left < UCN_V6_MAX_ACTIVE_GROUPS; ++left) {
+        const uint32_t group_id = groups->active_group_ids[left];
+        if (group_id == 0U) {
+            continue;
+        }
+        if (!address_is_valid(group_id) ||
+            group_id > groups->dynamic_group_id_high_water) {
+            return false;
+        }
+        for (right = left + 1U; right < UCN_V6_MAX_ACTIVE_GROUPS; ++right) {
+            if (groups->active_group_ids[right] == group_id) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool identity_snapshot_semantic_equal(
+    const ucn_v6_identity_snapshot_t *left,
+    const ucn_v6_identity_snapshot_t *right)
+{
+    size_t index;
+
+    if (left->magic != right->magic || left->schema != right->schema ||
+        left->reserved != right->reserved ||
+        left->record_generation != right->record_generation ||
+        left->realm_id != right->realm_id ||
+        left->epoch_valid != right->epoch_valid ||
+        !authority_epoch_semantic_equal(&left->epoch, &right->epoch) ||
+        left->groups.dynamic_group_id_high_water !=
+            right->groups.dynamic_group_id_high_water) {
+        return false;
+    }
+    for (index = 0U; index < UCN_V6_MAX_BINDING_SLOTS; ++index) {
+        if (!binding_slot_semantic_equal(&left->bindings[index],
+                                         &right->bindings[index])) {
+            return false;
+        }
+    }
+    for (index = 0U; index < UCN_V6_MAX_ACTIVE_GROUPS; ++index) {
+        if (left->groups.active_group_ids[index] !=
+            right->groups.active_group_ids[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool identity_snapshot_is_valid(
+    const ucn_v6_identity_snapshot_t *snapshot,
+    uint32_t realm_id,
+    bool allow_factory_empty)
+{
+    size_t left;
+    size_t right;
+    ucn_v6_identity_snapshot_t empty;
+
+    if (snapshot == NULL || snapshot->magic != UCN_V6_IDENTITY_SNAPSHOT_MAGIC ||
+        snapshot->schema != UCN_V6_IDENTITY_SNAPSHOT_SCHEMA ||
+        snapshot->reserved != 0U || snapshot->realm_id != realm_id ||
+        snapshot->record_generation > UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
+        !group_allocator_is_valid(&snapshot->groups)) {
+        return false;
+    }
+    if (snapshot->record_generation == 0U) {
+        if (!allow_factory_empty) {
+            return false;
+        }
+        memset(&empty, 0, sizeof(empty));
+        empty.magic = UCN_V6_IDENTITY_SNAPSHOT_MAGIC;
+        empty.schema = UCN_V6_IDENTITY_SNAPSHOT_SCHEMA;
+        empty.realm_id = realm_id;
+        return identity_snapshot_semantic_equal(snapshot, &empty);
+    }
+    if (snapshot->epoch_valid) {
+        if (!authority_epoch_is_valid(&snapshot->epoch)) {
+            return false;
+        }
+    } else {
+        ucn_v6_authority_epoch_t empty_epoch;
+        memset(&empty_epoch, 0, sizeof(empty_epoch));
+        if (!authority_epoch_semantic_equal(&snapshot->epoch,
+                                            &empty_epoch)) {
+            return false;
+        }
+    }
+    for (left = 0U; left < UCN_V6_MAX_BINDING_SLOTS; ++left) {
+        const ucn_v6_binding_slot_t *slot = &snapshot->bindings[left];
+        ucn_v6_binding_slot_t empty_slot;
+
+        memset(&empty_slot, 0, sizeof(empty_slot));
+        if (!slot->occupied) {
+            if (!binding_slot_semantic_equal(slot, &empty_slot)) {
+                return false;
+            }
+            continue;
+        }
+        if (!address_is_valid(slot->node_address) ||
+            slot->generation_high_water == 0U ||
+            slot->generation_high_water > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+            !binding_certificate_is_valid(&slot->certificate, realm_id) ||
+            slot->certificate.binding.node_address != slot->node_address ||
+            slot->certificate.binding.binding_generation !=
+                slot->generation_high_water ||
+            (slot->active && !snapshot->epoch_valid)) {
+            return false;
+        }
+        for (right = left + 1U; right < UCN_V6_MAX_BINDING_SLOTS; ++right) {
+            if (snapshot->bindings[right].occupied &&
+                snapshot->bindings[right].node_address == slot->node_address) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static void snapshot_from_authority(
+    const ucn_v6_identity_authority_t *authority,
+    ucn_v6_identity_snapshot_t *snapshot)
+{
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->magic = UCN_V6_IDENTITY_SNAPSHOT_MAGIC;
+    snapshot->schema = UCN_V6_IDENTITY_SNAPSHOT_SCHEMA;
+    snapshot->record_generation = authority->record_generation;
+    snapshot->realm_id = authority->realm_id;
+    snapshot->epoch_valid = authority->epoch_valid;
+    snapshot->epoch = authority->epoch;
+    memcpy(snapshot->bindings, authority->bindings,
+           sizeof(snapshot->bindings));
+    snapshot->groups = authority->groups;
+}
+
+static void authority_apply_snapshot(
+    ucn_v6_identity_authority_t *authority,
+    const ucn_v6_identity_snapshot_t *snapshot)
+{
+    authority->record_generation = snapshot->record_generation;
+    authority->realm_id = snapshot->realm_id;
+    authority->epoch_valid = snapshot->epoch_valid;
+    authority->epoch = snapshot->epoch;
+    memcpy(authority->bindings, snapshot->bindings,
+           sizeof(authority->bindings));
+    authority->groups = snapshot->groups;
+}
+
+static ucn_v6_result_t persist_snapshot(
+    ucn_v6_identity_authority_t *authority,
+    ucn_v6_identity_snapshot_t *candidate)
+{
+    ucn_v6_identity_snapshot_t loaded;
+    uint64_t witness = 0U;
+    ucn_v6_result_t result;
+
+    if (authority->record_generation >=
+        UCN_V6_SERIAL64_ROTATION_THRESHOLD) {
+        authority->faulted = true;
+        return UCN_V6_ERR_EXHAUSTED;
+    }
+    candidate->record_generation = authority->record_generation + 1U;
+    if (!identity_snapshot_is_valid(candidate, authority->realm_id, false) ||
+        !callback_enter(authority)) {
+        return UCN_V6_ERR_STATE;
+    }
+
+    result = authority->store.reserve_generation_witness(
+        authority->store.context, candidate->record_generation);
+    if (result == UCN_V6_OK) {
+        result = authority->store.submit(authority->store.context, candidate);
+    }
+    if (result == UCN_V6_OK) {
+        memset(&loaded, 0, sizeof(loaded));
+        result = authority->store.load_generation_witness(
+            authority->store.context, &witness);
+    }
+    if (result == UCN_V6_OK) {
+        result = authority->store.load(authority->store.context, &loaded);
+    }
+    callback_exit(authority);
+
+    if (result != UCN_V6_OK || witness != candidate->record_generation ||
+        !identity_snapshot_is_valid(&loaded, authority->realm_id, false) ||
+        !identity_snapshot_semantic_equal(&loaded, candidate)) {
+        authority->faulted = true;
+        return result == UCN_V6_OK ? UCN_V6_ERR_STATE : result;
+    }
+    authority_apply_snapshot(authority, &loaded);
+    return UCN_V6_OK;
 }
 
 bool ucn_v6_principal_is_valid(const ucn_v6_principal_t *principal)
@@ -311,13 +581,15 @@ ucn_v6_result_t ucn_v6_identity_authority_init_in_place(
     ucn_v6_callback_gate_t *callback_gate,
     ucn_v6_identity_authority_t **authority_out)
 {
-    ucn_v6_identity_authority_t *authority;
+    ucn_v6_identity_authority_t initialized;
+    ucn_v6_identity_snapshot_t loaded;
+    uint64_t witness = 0U;
+    ucn_v6_result_t witness_result;
+    ucn_v6_result_t load_result;
     ucn_v6_result_t result;
 
     if (authority_out == NULL || realm_id == 0U || realm_id == UINT32_MAX ||
-        store == NULL || store->persist_authority_epoch == NULL ||
-        store->persist_binding_slot == NULL ||
-        store->persist_group_high_water == NULL ||
+        !identity_store_is_valid(store) ||
         !callback_gate_is_valid(callback_gate)) {
         return UCN_V6_ERR_CONFIG;
     }
@@ -327,27 +599,42 @@ ucn_v6_result_t ucn_v6_identity_authority_init_in_place(
         return result;
     }
     result = ucn_v6_storage_validate(storage, storage_bytes,
-                                     sizeof(*authority),
+                                     sizeof(initialized),
                                      UCN_V6_STORAGE_ALIGNMENT);
     if (result != UCN_V6_OK) {
         return result;
     }
-    callback_gate->lock(callback_gate->context);
-    if (callback_gate->active) {
-        callback_gate->unlock(callback_gate->context);
+    if (ucn_v6_callback_gate_try_enter(callback_gate, storage) != UCN_V6_OK) {
         return UCN_V6_ERR_STATE;
     }
-    authority = (ucn_v6_identity_authority_t *)storage;
-    memset(authority, 0, sizeof(*authority));
-    authority->magic = UCN_V6_IDENTITY_AUTHORITY_MAGIC;
-    authority->schema = UCN_V6_STORAGE_LAYOUT;
-    authority->layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
-    authority->realm_id = realm_id;
-    authority->store = *store;
-    authority->callback_gate = callback_gate;
-    authority->canary = UCN_V6_IDENTITY_AUTHORITY_CANARY;
-    *authority_out = authority;
-    callback_gate->unlock(callback_gate->context);
+    memset(&loaded, 0, sizeof(loaded));
+    witness_result = store->load_generation_witness(store->context, &witness);
+    load_result = store->load(store->context, &loaded);
+    (void)ucn_v6_callback_gate_leave(callback_gate, storage);
+
+    if (witness_result == UCN_V6_ERR_NOT_FOUND &&
+        load_result == UCN_V6_ERR_NOT_FOUND) {
+        memset(&loaded, 0, sizeof(loaded));
+        loaded.magic = UCN_V6_IDENTITY_SNAPSHOT_MAGIC;
+        loaded.schema = UCN_V6_IDENTITY_SNAPSHOT_SCHEMA;
+        loaded.realm_id = realm_id;
+    } else if (witness_result != UCN_V6_OK || load_result != UCN_V6_OK ||
+               witness == 0U || witness != loaded.record_generation ||
+               !identity_snapshot_is_valid(&loaded, realm_id, false)) {
+        return UCN_V6_ERR_STATE;
+    }
+
+    memset(&initialized, 0, sizeof(initialized));
+    initialized.magic = UCN_V6_IDENTITY_AUTHORITY_MAGIC;
+    initialized.schema = UCN_V6_STORAGE_LAYOUT;
+    initialized.layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
+    initialized.store = *store;
+    initialized.callback_gate = callback_gate;
+    initialized.canary = UCN_V6_IDENTITY_AUTHORITY_CANARY;
+    authority_apply_snapshot(&initialized, &loaded);
+    initialized.local_lease_deadline_us = 0U;
+    memcpy(storage, &initialized, sizeof(initialized));
+    *authority_out = (ucn_v6_identity_authority_t *)storage;
     return UCN_V6_OK;
 }
 
@@ -356,6 +643,7 @@ ucn_v6_result_t ucn_v6_identity_authority_install_epoch(
     const ucn_v6_authority_epoch_t *epoch,
     uint64_t local_lease_deadline_us)
 {
+    ucn_v6_identity_snapshot_t candidate;
     uint32_t expected_generation;
     ucn_v6_result_t result;
 
@@ -367,8 +655,14 @@ ucn_v6_result_t ucn_v6_identity_authority_install_epoch(
     }
     if (authority->epoch_valid) {
         if (authority_epoch_identity_equal(&authority->epoch, epoch)) {
-            return authority->local_lease_deadline_us == local_lease_deadline_us ?
-                       UCN_V6_OK : UCN_V6_ERR_REPLAY;
+            if (authority->local_lease_deadline_us == 0U) {
+                authority->local_lease_deadline_us = local_lease_deadline_us;
+                return UCN_V6_OK;
+            }
+            return authority->local_lease_deadline_us ==
+                           local_lease_deadline_us ?
+                       UCN_V6_OK :
+                       UCN_V6_ERR_REPLAY;
         }
         result = ucn_v6_serial_checked_next(
             authority->epoch.authority_generation, &expected_generation);
@@ -384,19 +678,14 @@ ucn_v6_result_t ucn_v6_identity_authority_install_epoch(
         return UCN_V6_ERR_STATE;
     }
 
-    if (!callback_enter(authority)) {
-        return UCN_V6_ERR_STATE;
-    }
-    result = authority->store.persist_authority_epoch(authority->store.context,
-                                                       epoch);
-    callback_exit(authority);
+    snapshot_from_authority(authority, &candidate);
+    candidate.epoch = *epoch;
+    candidate.epoch_valid = true;
+    result = persist_snapshot(authority, &candidate);
     if (result != UCN_V6_OK) {
-        authority->faulted = true;
         return result;
     }
-    authority->epoch = *epoch;
     authority->local_lease_deadline_us = local_lease_deadline_us;
-    authority->epoch_valid = true;
     return UCN_V6_OK;
 }
 
@@ -411,6 +700,8 @@ ucn_v6_result_t ucn_v6_identity_authority_allocate_binding(
     ucn_v6_binding_certificate_t *certificate)
 {
     ucn_v6_binding_slot_t *slot;
+    size_t slot_index;
+    ucn_v6_identity_snapshot_t candidate;
     ucn_v6_binding_slot_t next_slot;
     uint32_t generation;
     ucn_v6_result_t result;
@@ -430,6 +721,7 @@ ucn_v6_result_t ucn_v6_identity_authority_allocate_binding(
     if (slot == NULL) {
         return UCN_V6_ERR_NO_SPACE;
     }
+    slot_index = (size_t)(slot - authority->bindings);
     if (slot->occupied && slot->active) {
         return UCN_V6_ERR_STATE;
     }
@@ -463,17 +755,12 @@ ucn_v6_result_t ucn_v6_identity_authority_allocate_binding(
         authority->epoch.lease_sequence;
     next_slot.certificate.mode = mode;
 
-    if (!callback_enter(authority)) {
-        return UCN_V6_ERR_STATE;
-    }
-    result = authority->store.persist_binding_slot(authority->store.context,
-                                                    &next_slot);
-    callback_exit(authority);
+    snapshot_from_authority(authority, &candidate);
+    candidate.bindings[slot_index] = next_slot;
+    result = persist_snapshot(authority, &candidate);
     if (result != UCN_V6_OK) {
-        authority->faulted = true;
         return result;
     }
-    *slot = next_slot;
     *certificate = next_slot.certificate;
     return UCN_V6_OK;
 }
@@ -485,8 +772,9 @@ ucn_v6_result_t ucn_v6_identity_authority_retire_binding(
     uint32_t binding_generation)
 {
     ucn_v6_binding_slot_t *slot;
+    size_t slot_index;
+    ucn_v6_identity_snapshot_t candidate;
     ucn_v6_binding_slot_t retired;
-    ucn_v6_result_t result;
 
     if (!authority_can_write(authority, now_us)) {
         return UCN_V6_ERR_ACCESS;
@@ -495,23 +783,15 @@ ucn_v6_result_t ucn_v6_identity_authority_retire_binding(
     if (slot == NULL) {
         return UCN_V6_ERR_NOT_FOUND;
     }
+    slot_index = (size_t)(slot - authority->bindings);
     if (!slot->active || slot->generation_high_water != binding_generation) {
         return UCN_V6_ERR_REPLAY;
     }
     retired = *slot;
     retired.active = false;
-    if (!callback_enter(authority)) {
-        return UCN_V6_ERR_STATE;
-    }
-    result = authority->store.persist_binding_slot(authority->store.context,
-                                                    &retired);
-    callback_exit(authority);
-    if (result != UCN_V6_OK) {
-        authority->faulted = true;
-        return result;
-    }
-    *slot = retired;
-    return UCN_V6_OK;
+    snapshot_from_authority(authority, &candidate);
+    candidate.bindings[slot_index] = retired;
+    return persist_snapshot(authority, &candidate);
 }
 
 ucn_v6_result_t ucn_v6_identity_authority_allocate_dynamic_group(
@@ -520,6 +800,7 @@ ucn_v6_result_t ucn_v6_identity_authority_allocate_dynamic_group(
     uint32_t *group_id)
 {
     size_t index;
+    ucn_v6_identity_snapshot_t candidate;
     uint32_t next;
     ucn_v6_result_t result;
 
@@ -542,35 +823,36 @@ ucn_v6_result_t ucn_v6_identity_authority_allocate_dynamic_group(
     if (result != UCN_V6_OK || !address_is_valid(next)) {
         return result == UCN_V6_OK ? UCN_V6_ERR_EXHAUSTED : result;
     }
-    if (!callback_enter(authority)) {
-        return UCN_V6_ERR_STATE;
-    }
-    result = authority->store.persist_group_high_water(authority->store.context,
-                                                        next);
-    callback_exit(authority);
+    snapshot_from_authority(authority, &candidate);
+    candidate.groups.dynamic_group_id_high_water = next;
+    candidate.groups.active_group_ids[index] = next;
+    result = persist_snapshot(authority, &candidate);
     if (result != UCN_V6_OK) {
-        authority->faulted = true;
         return result;
     }
-    authority->groups.dynamic_group_id_high_water = next;
-    authority->groups.active_group_ids[index] = next;
     *group_id = next;
     return UCN_V6_OK;
 }
 
 ucn_v6_result_t ucn_v6_identity_authority_retire_dynamic_group(
     ucn_v6_identity_authority_t *authority,
+    uint64_t now_us,
     uint32_t group_id)
 {
     size_t index;
+    ucn_v6_identity_snapshot_t candidate;
 
-    if (!authority_storage_is_valid(authority) || group_id == 0U) {
+    if (!authority_can_write(authority, now_us)) {
+        return UCN_V6_ERR_ACCESS;
+    }
+    if (group_id == 0U) {
         return UCN_V6_ERR_ARGUMENT;
     }
     for (index = 0U; index < UCN_V6_MAX_ACTIVE_GROUPS; ++index) {
         if (authority->groups.active_group_ids[index] == group_id) {
-            authority->groups.active_group_ids[index] = 0U;
-            return UCN_V6_OK;
+            snapshot_from_authority(authority, &candidate);
+            candidate.groups.active_group_ids[index] = 0U;
+            return persist_snapshot(authority, &candidate);
         }
     }
     return UCN_V6_ERR_NOT_FOUND;
@@ -587,6 +869,7 @@ ucn_v6_result_t ucn_v6_identity_authority_copy_view(
         return UCN_V6_ERR_ARGUMENT;
     }
     memset(&next, 0, sizeof(next));
+    next.record_generation = authority->record_generation;
     next.realm_id = authority->realm_id;
     next.epoch = authority->epoch;
     next.local_lease_deadline_us = authority->local_lease_deadline_us;

@@ -18,8 +18,11 @@ typedef enum ucn_v6_owner_event {
 
 typedef struct ucn_v6_owner_lock_ops {
     void *context;
-    bool (*try_lock)(void *context, bool from_isr);
-    void (*unlock)(void *context, bool from_isr);
+    /* Task context must acquire this lock before returning. */
+    void (*lock_task)(void *context);
+    bool (*try_lock_from_isr)(void *context);
+    void (*unlock_task)(void *context);
+    void (*unlock_from_isr)(void *context);
     void (*notify)(void *context, bool from_isr);
 } ucn_v6_owner_lock_ops_t;
 

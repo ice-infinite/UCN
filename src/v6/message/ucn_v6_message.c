@@ -284,6 +284,147 @@ static bool snapshot_equal(
     return true;
 }
 
+static void witness_make_factory(ucn_v6_message_witness_t *witness)
+{
+    memset(witness, 0, sizeof(*witness));
+    witness->magic = UCN_V6_MESSAGE_WITNESS_MAGIC;
+    witness->schema = UCN_V6_MESSAGE_WITNESS_SCHEMA;
+}
+
+static bool witness_is_valid(const ucn_v6_message_witness_t *witness,
+                             bool allow_factory)
+{
+    const uint16_t known_flags =
+        UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED |
+        UCN_V6_MESSAGE_WITNESS_ALLOCATOR_COMMISSIONED;
+    bool journal_commissioned;
+    bool allocator_commissioned;
+
+    if (witness == NULL || witness->magic != UCN_V6_MESSAGE_WITNESS_MAGIC ||
+        witness->schema != UCN_V6_MESSAGE_WITNESS_SCHEMA ||
+        (witness->flags & (uint16_t)~known_flags) != 0U ||
+        witness->witness_generation > UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
+        witness->journal_committed_generation >
+            UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
+        witness->journal_pending_generation >
+            UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
+        witness->operation_id_high_water >
+            UCN_V6_SERIAL64_ROTATION_THRESHOLD) {
+        return false;
+    }
+    if (witness->witness_generation == 0U) {
+        return allow_factory && witness->flags == 0U &&
+               witness->journal_committed_generation == 0U &&
+               witness->journal_pending_generation == 0U &&
+               witness->operation_id_high_water == 0U;
+    }
+    journal_commissioned =
+        (witness->flags & UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED) != 0U;
+    allocator_commissioned =
+        (witness->flags & UCN_V6_MESSAGE_WITNESS_ALLOCATOR_COMMISSIONED) != 0U;
+    if ((journal_commissioned &&
+         witness->journal_committed_generation == 0U &&
+         witness->journal_pending_generation == 0U) ||
+        (!journal_commissioned &&
+         (witness->journal_committed_generation != 0U ||
+          witness->journal_pending_generation != 0U)) ||
+        (!allocator_commissioned && witness->operation_id_high_water != 0U)) {
+        return false;
+    }
+    if (allocator_commissioned && witness->operation_id_high_water == 0U) {
+        return false;
+    }
+    if (witness->journal_pending_generation != 0U &&
+        (witness->journal_committed_generation ==
+             UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
+         witness->journal_pending_generation !=
+             witness->journal_committed_generation + 1U)) {
+        return false;
+    }
+    return true;
+}
+
+static bool witness_equal(const ucn_v6_message_witness_t *left,
+                          const ucn_v6_message_witness_t *right)
+{
+    return left->magic == right->magic && left->schema == right->schema &&
+           left->flags == right->flags &&
+           left->witness_generation == right->witness_generation &&
+           left->journal_committed_generation ==
+               right->journal_committed_generation &&
+           left->journal_pending_generation ==
+               right->journal_pending_generation &&
+           left->operation_id_high_water == right->operation_id_high_water;
+}
+
+ucn_v6_result_t ucn_v6_message_witness_transition_validate(
+    const ucn_v6_message_witness_t *previous,
+    const ucn_v6_message_witness_t *next)
+{
+    bool allocator_changed;
+    bool journal_changed;
+    bool journal_transition = false;
+
+    if (!witness_is_valid(previous, true) ||
+        !witness_is_valid(next, false) ||
+        previous->witness_generation ==
+            UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
+        next->witness_generation != previous->witness_generation + 1U ||
+        next->operation_id_high_water <
+            previous->operation_id_high_water) {
+        return UCN_V6_ERR_STATE;
+    }
+    allocator_changed = next->operation_id_high_water !=
+                        previous->operation_id_high_water;
+    journal_changed = next->journal_committed_generation !=
+                          previous->journal_committed_generation ||
+                      next->journal_pending_generation !=
+                          previous->journal_pending_generation ||
+                      ((next->flags ^ previous->flags) &
+                       UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED) != 0U;
+    if ((previous->flags &
+         UCN_V6_MESSAGE_WITNESS_ALLOCATOR_COMMISSIONED) != 0U &&
+        (next->flags &
+         UCN_V6_MESSAGE_WITNESS_ALLOCATOR_COMMISSIONED) == 0U) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (allocator_changed &&
+        (next->flags &
+         UCN_V6_MESSAGE_WITNESS_ALLOCATOR_COMMISSIONED) == 0U) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (!journal_changed) {
+        journal_transition = true;
+    } else if (previous->journal_pending_generation == 0U &&
+               next->journal_committed_generation ==
+                   previous->journal_committed_generation &&
+               next->journal_pending_generation ==
+                   previous->journal_committed_generation + 1U &&
+               (next->flags &
+                UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED) != 0U) {
+        journal_transition = true;
+    } else if (previous->journal_pending_generation != 0U &&
+               next->journal_pending_generation == 0U &&
+               (next->journal_committed_generation ==
+                    previous->journal_committed_generation ||
+                next->journal_committed_generation ==
+                    previous->journal_pending_generation)) {
+        if (next->journal_committed_generation == 0U) {
+            journal_transition =
+                (next->flags &
+                 UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED) == 0U;
+        } else {
+            journal_transition =
+                (next->flags &
+                 UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED) != 0U;
+        }
+    }
+    if (!journal_transition || (allocator_changed && journal_changed)) {
+        return UCN_V6_ERR_STATE;
+    }
+    return UCN_V6_OK;
+}
+
 static void snapshot_make_factory(
     ucn_v6_operation_journal_snapshot_t *snapshot)
 {
@@ -295,10 +436,9 @@ static void snapshot_make_factory(
 
 static bool store_is_valid(const ucn_v6_message_store_ops_t *store)
 {
-    return store != NULL && store->load_journal != NULL &&
-           store->submit_journal != NULL &&
-           store->load_operation_id_high_water != NULL &&
-           store->persist_operation_id_high_water != NULL;
+    return store != NULL && store->load_witness != NULL &&
+           store->reserve_witness != NULL && store->load_journal != NULL &&
+           store->submit_journal != NULL;
 }
 
 static ucn_v6_result_t serial64_checked_next(
@@ -321,6 +461,49 @@ static ucn_v6_result_t load_under_gate(
 {
     memset(snapshot, 0, sizeof(*snapshot));
     return store->load_journal(store->context, snapshot);
+}
+
+static ucn_v6_result_t load_witness_under_gate(
+    const ucn_v6_message_store_ops_t *store,
+    ucn_v6_message_witness_t *witness)
+{
+    memset(witness, 0, sizeof(*witness));
+    return store->load_witness(store->context, witness);
+}
+
+static ucn_v6_result_t reserve_witness_under_gate(
+    const ucn_v6_message_store_ops_t *store,
+    const ucn_v6_message_witness_t *previous,
+    ucn_v6_message_witness_t *candidate,
+    ucn_v6_message_witness_t *verified)
+{
+    uint64_t next_generation;
+    ucn_v6_result_t result;
+
+    if (previous == NULL || candidate == NULL || verified == NULL ||
+        candidate->witness_generation != previous->witness_generation) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    result = serial64_checked_next(previous->witness_generation,
+                                   &next_generation);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    candidate->witness_generation = next_generation;
+    if (ucn_v6_message_witness_transition_validate(previous, candidate) !=
+        UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
+    }
+    result = store->reserve_witness(store->context, candidate);
+    if (result != UCN_V6_OK) {
+        return result;
+    }
+    result = load_witness_under_gate(store, verified);
+    if (result != UCN_V6_OK || !witness_is_valid(verified, false) ||
+        !witness_equal(candidate, verified)) {
+        return UCN_V6_ERR_STATE;
+    }
+    return UCN_V6_OK;
 }
 
 static ucn_v6_result_t submit_and_verify_under_gate(
@@ -408,7 +591,12 @@ static ucn_v6_result_t persist_candidate(
     ucn_v6_operation_journal_t *journal,
     ucn_v6_operation_journal_snapshot_t *candidate)
 {
-    ucn_v6_operation_journal_snapshot_t verified;
+    ucn_v6_operation_journal_snapshot_t verified = {0};
+    ucn_v6_message_witness_t current = {0};
+    ucn_v6_message_witness_t pending = {0};
+    ucn_v6_message_witness_t pending_verified = {0};
+    ucn_v6_message_witness_t committed_witness = {0};
+    ucn_v6_message_witness_t committed_verified = {0};
     uint64_t next_generation;
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
@@ -427,13 +615,45 @@ static ucn_v6_result_t persist_candidate(
     if (result != UCN_V6_OK) {
         return result;
     }
-    result = submit_and_verify_under_gate(&journal->store, candidate,
-                                          &verified);
+    result = load_witness_under_gate(&journal->store, &current);
+    if (result == UCN_V6_ERR_NOT_FOUND &&
+        journal->witness.witness_generation == 0U) {
+        witness_make_factory(&current);
+        result = UCN_V6_OK;
+    }
+    if (result != UCN_V6_OK || !witness_is_valid(&current, true) ||
+        current.journal_committed_generation !=
+            journal->committed.snapshot_generation ||
+        current.journal_pending_generation != 0U) {
+        result = UCN_V6_ERR_STATE;
+    }
+    if (result == UCN_V6_OK) {
+        pending = current;
+        pending.flags |= UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED;
+        pending.journal_pending_generation = next_generation;
+        result = reserve_witness_under_gate(&journal->store, &current,
+                                            &pending,
+                                            &pending_verified);
+    }
+    if (result == UCN_V6_OK) {
+        result = submit_and_verify_under_gate(&journal->store, candidate,
+                                              &verified);
+    }
+    if (result == UCN_V6_OK) {
+        committed_witness = pending_verified;
+        committed_witness.journal_committed_generation = next_generation;
+        committed_witness.journal_pending_generation = 0U;
+        result = reserve_witness_under_gate(&journal->store,
+                                            &pending_verified,
+                                            &committed_witness,
+                                            &committed_verified);
+    }
     leave_result = ucn_v6_callback_gate_leave(journal->callback_gate, journal);
     if (result != UCN_V6_OK || leave_result != UCN_V6_OK) {
         journal->faulted = true;
         return result != UCN_V6_OK ? result : leave_result;
     }
+    journal->witness = committed_verified;
     journal->committed = verified;
     return UCN_V6_OK;
 }
@@ -505,7 +725,7 @@ ucn_v6_result_t ucn_v6_operation_id_allocator_init_in_place(
 {
     ucn_v6_operation_id_allocator_t initialized;
     ucn_v6_operation_id_allocator_t *allocator;
-    uint64_t high_water = 0U;
+    ucn_v6_message_witness_t witness;
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
 
@@ -532,15 +752,20 @@ ucn_v6_result_t ucn_v6_operation_id_allocator_init_in_place(
     if (result != UCN_V6_OK) {
         return result;
     }
-    result = store->load_operation_id_high_water(store->context, &high_water);
-    leave_result = ucn_v6_callback_gate_leave(callback_gate, allocator);
-    if ((result != UCN_V6_OK && result != UCN_V6_ERR_NOT_FOUND) ||
-        leave_result != UCN_V6_OK ||
-        high_water > UCN_V6_SERIAL64_ROTATION_THRESHOLD) {
-        return result != UCN_V6_OK && result != UCN_V6_ERR_NOT_FOUND ?
-                   result : UCN_V6_ERR_STATE;
+    result = load_witness_under_gate(store, &witness);
+    if (result == UCN_V6_ERR_NOT_FOUND) {
+        witness_make_factory(&witness);
+        result = UCN_V6_OK;
+    } else if (result != UCN_V6_OK ||
+               !witness_is_valid(&witness, false)) {
+        result = UCN_V6_ERR_STATE;
     }
-    if (high_water == UCN_V6_SERIAL64_ROTATION_THRESHOLD) {
+    leave_result = ucn_v6_callback_gate_leave(callback_gate, allocator);
+    if (result != UCN_V6_OK || leave_result != UCN_V6_OK) {
+        return result != UCN_V6_OK ? result : leave_result;
+    }
+    if (witness.operation_id_high_water ==
+        UCN_V6_SERIAL64_ROTATION_THRESHOLD) {
         return UCN_V6_ERR_EXHAUSTED;
     }
     memset(&initialized, 0, sizeof(initialized));
@@ -549,8 +774,9 @@ ucn_v6_result_t ucn_v6_operation_id_allocator_init_in_place(
     initialized.layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
     initialized.store = *store;
     initialized.callback_gate = callback_gate;
-    initialized.next_id = high_water + 1U;
-    initialized.reserved_through = high_water;
+    initialized.witness = witness;
+    initialized.next_id = witness.operation_id_high_water + 1U;
+    initialized.reserved_through = witness.operation_id_high_water;
     initialized.reservation_block_size = reservation_block_size;
     initialized.initialized = true;
     initialized.canary = UCN_V6_OPERATION_ALLOCATOR_CANARY;
@@ -564,7 +790,9 @@ ucn_v6_result_t ucn_v6_operation_id_take(
     uint64_t *operation_id)
 {
     uint64_t new_high_water;
-    uint64_t verified_high_water = 0U;
+    ucn_v6_message_witness_t current = {0};
+    ucn_v6_message_witness_t candidate = {0};
+    ucn_v6_message_witness_t verified = {0};
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
 
@@ -587,15 +815,24 @@ ucn_v6_result_t ucn_v6_operation_id_take(
         if (result != UCN_V6_OK) {
             return result;
         }
-        result = allocator->store.persist_operation_id_high_water(
-            allocator->store.context, new_high_water);
-        if (result == UCN_V6_OK) {
-            result = allocator->store.load_operation_id_high_water(
-                allocator->store.context, &verified_high_water);
-            if (result != UCN_V6_OK ||
-                verified_high_water != new_high_water) {
-                result = UCN_V6_ERR_STATE;
-            }
+        result = load_witness_under_gate(&allocator->store, &current);
+        if (result == UCN_V6_ERR_NOT_FOUND &&
+            allocator->witness.witness_generation == 0U) {
+            witness_make_factory(&current);
+            result = UCN_V6_OK;
+        }
+        if (result != UCN_V6_OK || !witness_is_valid(&current, true) ||
+            current.operation_id_high_water !=
+                allocator->reserved_through) {
+            result = UCN_V6_ERR_STATE;
+        } else {
+            candidate = current;
+            candidate.flags |=
+                UCN_V6_MESSAGE_WITNESS_ALLOCATOR_COMMISSIONED;
+            candidate.operation_id_high_water = new_high_water;
+            result = reserve_witness_under_gate(&allocator->store,
+                                                &current,
+                                                &candidate, &verified);
         }
         leave_result = ucn_v6_callback_gate_leave(allocator->callback_gate,
                                                   allocator);
@@ -603,6 +840,7 @@ ucn_v6_result_t ucn_v6_operation_id_take(
             allocator->faulted = true;
             return result != UCN_V6_OK ? result : leave_result;
         }
+        allocator->witness = verified;
         allocator->reserved_through = new_high_water;
     }
     if (allocator->next_id == 0U ||
@@ -624,6 +862,7 @@ ucn_v6_result_t ucn_v6_operation_id_allocator_copy_view(
     }
     view->next_id = allocator->next_id;
     view->reserved_through = allocator->reserved_through;
+    view->witness_generation = allocator->witness.witness_generation;
     view->reservation_block_size = allocator->reservation_block_size;
     view->faulted = allocator->faulted;
     return UCN_V6_OK;
@@ -637,14 +876,18 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
     ucn_v6_callback_gate_t *callback_gate,
     ucn_v6_operation_journal_t **journal_out)
 {
-    ucn_v6_operation_journal_t initialized;
+    ucn_v6_operation_journal_t initialized = {0};
     ucn_v6_operation_journal_t *journal;
-    ucn_v6_operation_journal_snapshot_t loaded;
-    ucn_v6_operation_journal_snapshot_t migrated;
-    ucn_v6_operation_journal_snapshot_t verified;
+    ucn_v6_operation_journal_snapshot_t loaded = {0};
+    ucn_v6_operation_journal_snapshot_t migrated = {0};
+    ucn_v6_operation_journal_snapshot_t verified = {0};
+    ucn_v6_message_witness_t witness = {0};
+    ucn_v6_message_witness_t witness_candidate = {0};
+    ucn_v6_message_witness_t witness_verified = {0};
     uint64_t next_generation;
     size_t index;
     bool changed = false;
+    bool journal_found = false;
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
 
@@ -671,12 +914,63 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
     if (result != UCN_V6_OK) {
         return result;
     }
-    result = load_under_gate(store, &loaded);
+    result = load_witness_under_gate(store, &witness);
     if (result == UCN_V6_ERR_NOT_FOUND) {
-        snapshot_make_factory(&loaded);
+        witness_make_factory(&witness);
         result = UCN_V6_OK;
     } else if (result != UCN_V6_OK ||
-               !snapshot_is_valid(&loaded, false)) {
+               !witness_is_valid(&witness, false)) {
+        result = UCN_V6_ERR_STATE;
+    }
+    if (result == UCN_V6_OK) {
+        result = load_under_gate(store, &loaded);
+        if (result == UCN_V6_ERR_NOT_FOUND) {
+            snapshot_make_factory(&loaded);
+            result = UCN_V6_OK;
+        } else if (result == UCN_V6_OK &&
+                   snapshot_is_valid(&loaded, false)) {
+            journal_found = true;
+        } else {
+            result = UCN_V6_ERR_STATE;
+        }
+    }
+    if (result == UCN_V6_OK &&
+        (witness.flags & UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED) == 0U) {
+        if (journal_found || loaded.snapshot_generation != 0U) {
+            result = UCN_V6_ERR_STATE;
+        }
+    } else if (result == UCN_V6_OK &&
+               witness.journal_pending_generation != 0U) {
+        if ((journal_found && loaded.snapshot_generation ==
+                                  witness.journal_pending_generation)) {
+            witness_candidate = witness;
+            witness_candidate.journal_committed_generation =
+                witness.journal_pending_generation;
+            witness_candidate.journal_pending_generation = 0U;
+        } else if ((!journal_found &&
+                    witness.journal_committed_generation == 0U) ||
+                   (journal_found && loaded.snapshot_generation ==
+                                         witness.journal_committed_generation)) {
+            witness_candidate = witness;
+            witness_candidate.journal_pending_generation = 0U;
+            if (witness_candidate.journal_committed_generation == 0U) {
+                witness_candidate.flags &= (uint16_t)
+                    ~UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED;
+            }
+        } else {
+            result = UCN_V6_ERR_STATE;
+        }
+        if (result == UCN_V6_OK) {
+            result = reserve_witness_under_gate(store, &witness,
+                                                &witness_candidate,
+                                                &witness_verified);
+            if (result == UCN_V6_OK) {
+                witness = witness_verified;
+            }
+        }
+    } else if (result == UCN_V6_OK &&
+               (!journal_found || loaded.snapshot_generation !=
+                                     witness.journal_committed_generation)) {
         result = UCN_V6_ERR_STATE;
     }
     if (result == UCN_V6_OK) {
@@ -695,10 +989,31 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
                                            &next_generation);
             if (result == UCN_V6_OK) {
                 migrated.snapshot_generation = next_generation;
+                witness_candidate = witness;
+                witness_candidate.flags |=
+                    UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED;
+                witness_candidate.journal_pending_generation =
+                    next_generation;
+                result = reserve_witness_under_gate(store, &witness,
+                                                    &witness_candidate,
+                                                    &witness_verified);
+            }
+            if (result == UCN_V6_OK) {
+                witness = witness_verified;
                 result = submit_and_verify_under_gate(store, &migrated,
                                                        &verified);
+            }
+            if (result == UCN_V6_OK) {
+                witness_candidate = witness;
+                witness_candidate.journal_committed_generation =
+                    next_generation;
+                witness_candidate.journal_pending_generation = 0U;
+                result = reserve_witness_under_gate(store, &witness,
+                                                    &witness_candidate,
+                                                    &witness_verified);
                 if (result == UCN_V6_OK) {
                     loaded = verified;
+                    witness = witness_verified;
                 }
             }
         }
@@ -712,6 +1027,7 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
     initialized.schema = UCN_V6_STORAGE_LAYOUT;
     initialized.layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
     initialized.committed = loaded;
+    initialized.witness = witness;
     initialized.store = *store;
     initialized.callback_gate = callback_gate;
     initialized.initialized = true;
@@ -1090,6 +1406,8 @@ ucn_v6_result_t ucn_v6_operation_journal_copy_view(
     }
     memset(&next, 0, sizeof(next));
     next.committed_generation = journal->committed.snapshot_generation;
+    next.witness_generation = journal->witness.witness_generation;
+    next.pending_generation = journal->witness.journal_pending_generation;
     next.faulted = journal->faulted;
     for (index = 0U; index < UCN_V6_OPERATION_JOURNAL_SLOTS; ++index) {
         if (journal->committed.slots[index].occupied) {

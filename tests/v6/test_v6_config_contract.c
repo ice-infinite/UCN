@@ -18,6 +18,7 @@ static ucn_v6_feature_manifest_t header_manifest(void)
     memset(&value, 0, sizeof(value));
     value.api_version = UCN_V6_API_VERSION;
     value.storage_layout = UCN_V6_STORAGE_LAYOUT;
+    value.profile = UCN_V6_PROFILE;
     value.feature_bits = UCN_V6_COMPILED_FEATURE_BITS;
     value.layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
     value.max_bindings = UCN_V6_CONFIG_MAX_BINDINGS;
@@ -84,6 +85,36 @@ int main(void)
     CHECK(ucn_v6_manifest_validate_exact(&manifest) == UCN_V6_OK);
     CHECK(memcmp(&manifest, ucn_v6_compiled_manifest(),
                  sizeof(manifest)) == 0);
+    CHECK(manifest.profile == UCN_V6_PROFILE);
+#if UCN_V6_PROFILE == UCN_V6_PROFILE_NANO
+    CHECK(manifest.max_bindings == 4U);
+    CHECK(manifest.transfer_max_class == 3U);
+    CHECK(manifest.adapter_frame_bytes == 256U);
+#elif UCN_V6_PROFILE == UCN_V6_PROFILE_LITE
+    CHECK(manifest.max_bindings == 8U);
+    CHECK(manifest.transfer_max_class == 6U);
+    CHECK(manifest.adapter_frame_bytes == 256U);
+#else
+    CHECK(manifest.max_bindings == 16U);
+    CHECK(manifest.transfer_max_class == 8U);
+    CHECK(manifest.adapter_frame_bytes == 512U);
+#endif
+    CHECK((manifest.feature_bits & UCN_V6_FEATURE_QOS) != 0U);
+#if UCN_V6_FEATURE_REALTIME_ENABLED
+    CHECK((manifest.feature_bits & UCN_V6_FEATURE_REALTIME) != 0U);
+#else
+    CHECK((manifest.feature_bits & UCN_V6_FEATURE_REALTIME) == 0U);
+#endif
+#if UCN_V6_FEATURE_CLUSTER_ENABLED
+    CHECK((manifest.feature_bits & UCN_V6_FEATURE_CLUSTER) != 0U);
+#else
+    CHECK((manifest.feature_bits & UCN_V6_FEATURE_CLUSTER) == 0U);
+#endif
+#if UCN_V6_FEATURE_ADAPTER_ENABLED
+    CHECK((manifest.feature_bits & UCN_V6_FEATURE_ADAPTER) != 0U);
+#else
+    CHECK((manifest.feature_bits & UCN_V6_FEATURE_ADAPTER) == 0U);
+#endif
 #endif
     CHECK(ucn_v6_storage_validate(
               storage.bytes, sizeof(storage), sizeof(storage),

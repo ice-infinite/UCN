@@ -57,11 +57,44 @@ def main() -> int:
     for target in required_targets:
         if f"add_library({target} " not in cmake:
             errors.append(f"missing CMake target {target}")
-    if not re.search(
-        r"option\s*\(\s*UCN_BUILD_V6_EXPERIMENTAL\b[\s\S]*?\bOFF\s*\)",
-        cmake,
-    ):
-        errors.append("v6 default-OFF build fence is missing")
+    if not re.search(r"project\s*\(\s*UCN\s+VERSION\s+6\.0\.0\b", cmake):
+        errors.append("CMake project is not the v6-only release surface")
+    forbidden_cmake = (
+        "UCN_BUILD_V6_EXPERIMENTAL",
+        "UCN_CLUSTER_ENABLE_V3_COMPAT",
+        "UCN_ENABLE_WIRE_V4_RELEASE_GATES",
+        "UCN_BUILD_CLUSTER_TAKEOVER_EXPERIMENTAL",
+        "UCN_BUILD_CLUSTER_HANDOVER_EXPERIMENTAL",
+        "UCN_BUILD_CLUSTER_REKEY_EXPERIMENTAL",
+    )
+    for token in forbidden_cmake:
+        if token in cmake:
+            errors.append(f"legacy CMake option remains: {token}")
+
+    legacy_paths: list[Path] = []
+    for path in (root / "src").rglob("*"):
+        if path.is_file() and (root / "src" / "v6") not in path.parents:
+            legacy_paths.append(path)
+    for path in (root / "include" / "ucn").rglob("*"):
+        if (path.is_file() and path.name != "ucn.h" and
+                (root / "include" / "ucn" / "v6") not in path.parents):
+            legacy_paths.append(path)
+    for path in (root / "tests").rglob("*"):
+        if path.is_file() and (root / "tests" / "v6") not in path.parents:
+            legacy_paths.append(path)
+    for path in (root / "tools").rglob("*"):
+        if (path.is_file() and "__pycache__" not in path.parts and
+                (root / "tools" / "v6") not in path.parents):
+            legacy_paths.append(path)
+    for path in sorted(legacy_paths):
+        errors.append(f"legacy release asset remains: {path.relative_to(root)}")
+
+    umbrella = (root / "include" / "ucn" / "ucn.h")
+    if not umbrella.is_file():
+        errors.append("v6 public umbrella header is missing")
+    elif re.search(r'#\s*include\s*[<\"]ucn/(?!v6/|ucn\.h)',
+                   umbrella.read_text(encoding="utf-8")):
+        errors.append("public umbrella includes a legacy header")
 
     required_bearer_files = (
         "src/v6/adapter/ucn_v6_uart.c",

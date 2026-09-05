@@ -26,21 +26,29 @@ typedef struct fake_handler {
     ucn_v6_result_t nested_result;
 } fake_handler_t;
 
-static bool fake_try_lock(void *context, bool from_isr)
+static void fake_lock_task(void *context)
 {
     fake_lock_t *lock = (fake_lock_t *)context;
-    (void)from_isr;
-    if (lock->locked) {
-        return false;
-    }
+    lock->locked = true;
+}
+
+static bool fake_try_lock_from_isr(void *context)
+{
+    fake_lock_t *lock = (fake_lock_t *)context;
+    if (lock->locked) return false;
     lock->locked = true;
     return true;
 }
 
-static void fake_unlock(void *context, bool from_isr)
+static void fake_unlock_task(void *context)
 {
     fake_lock_t *lock = (fake_lock_t *)context;
-    (void)from_isr;
+    lock->locked = false;
+}
+
+static void fake_unlock_from_isr(void *context)
+{
+    fake_lock_t *lock = (fake_lock_t *)context;
     lock->locked = false;
 }
 
@@ -82,8 +90,10 @@ static ucn_v6_owner_lock_ops_t make_lock_ops(fake_lock_t *lock)
     ucn_v6_owner_lock_ops_t ops;
     memset(&ops, 0, sizeof(ops));
     ops.context = lock;
-    ops.try_lock = fake_try_lock;
-    ops.unlock = fake_unlock;
+    ops.lock_task = fake_lock_task;
+    ops.try_lock_from_isr = fake_try_lock_from_isr;
+    ops.unlock_task = fake_unlock_task;
+    ops.unlock_from_isr = fake_unlock_from_isr;
     ops.notify = fake_notify;
     return ops;
 }

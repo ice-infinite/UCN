@@ -1,87 +1,92 @@
-# UniLink / UCN
+# UniLink / UCN v6
 
-**UniLink** 是协议品牌名；**UCN（Unified Communication Network）** 是正式协议与架构缩写，代码使用 `ucn_*` 前缀。
+**UniLink** 是协议品牌名，**UCN（Unified Communication Network）** 是代码与架构名称。当前
+`v6-development` 分支只构建 UCN v6；v4/v5 运行时代码、公共头、兼容 Stub、双栈测试和旧
+CMake 开关已从当前发布树删除。v5 的最后实验快照保存在 Git 分支
+`v5-final-experimental` 与 Tag `v5.0.0-experimental-final`。
 
-UCN 是面向 MCU 自组网的 C99 通信库。它通过统一的 Node、Endpoint、Link、Route、Service 和 Transfer 语义，把 UART、CAN、Wi-Fi、ESP-NOW、BLE、USB、RS-485、LoRa 等承载与业务逻辑解耦。
+UCN v6 是面向 MCU 的 C99 有界通信协议实现。它把身份、Wire、安全、消息语义、路由、QoS、
+可靠传输和物理接口分层；Realtime 与 Cluster 是互不依赖的可选模块。运行时不用堆分配，
+Nano/Lite/Full 只改变容量和可发送上限，不改变解析同一 v6 Wire 的能力。
 
-Linux、ROS 2、MAVLink 和地面站可以作为 Host/Bridge 接入，但不是组网、寻路或转发的前提；没有 Linux 时，MCU 节点仍可独立运行。
+## 当前实现
 
-## 架构
+- 单一 v6 Wire：A0～A3 地址档、CRC32C、Hop/Group/E2E 安全选择器与 canonical AAD；
+- Device Principal、Realm Address Binding Generation、Bootstrap 与 Peer Reauth；
+- Q0～Q3、Delivery Guarantee、Interaction Role、64-bit Operation ID 与 durable Journal；
+- 认证 Capability、Path Frame MTU 与精确 Payload Budget；
+- Binding-aware RouteSet、原子 Candidate 激活、多路径和动态 Metric；
+- 有界 QoS、公平调度、每源/每流配额与不可提权的 Hop Budget；
+- 32 B～8 KiB Message Class、Selective Repeat、SACK、Credit 和多 Path Pipeline；
+- 可选 Realtime：时间域、uncertainty、Deadline 双门禁；
+- 可选 Cluster：单一 Target FSM、Joint Config、Backup、Takeover、Handover、Recovery、Rekey；
+- Event→Ring→Protocol Owner Adapter，以及 UART、ESP-NOW/Wi-Fi、CAN、USB、FreeRTOS 和
+  ESP32-S3 参考绑定。
 
-```text
-业务任务
-  ├─ Service：任务/服务请求、结果与本机 Fast Path
-  ├─ Transfer：T32～T8K 有界消息、分片/重组/ACK
-  └─ Core：Node / Endpoint / Route / Path / Policy
-          └─ Adapter / Source：Stream、CAN 或产品自定义介质
-                  └─ Port / BSP / Driver
-
-可选 Cluster：成员、Head/Backup、Authority、Config、Recovery
-可选 Host：Linux、ROS 2、网关、诊断工具
-```
-
-## 当前能力
-
-- Core Wire v5，W0～W3 Adaptive Wire Class；
-- 静态对象、固定表、有界队列，UCN 核心不依赖动态分配；
-- HELLO/Neighbor/Heartbeat、AODV-Lite、RERR、Route/Path；
-- Full Profile 的动态 Cost、Pinned/Failover 和 Q1 负载均衡；
-- 可选 Service Router/Bridge 与 T32～T8K Transfer；
-- 标准 Event Runtime、Port API v2、Stream Source、CAN/CAN-FD Source；
-- Security Policy/Provider、E2E 透明密文转发与 ACL 合同；
-- 可选 Cluster Current FSM，以及隔离的 Wire v4/Target 实验组件。
-
-## 必须注意的边界
-
-- 仓库提供通用 Adapter/Source 合同，不会自动配置芯片引脚、DMA、Wi-Fi SDK 或 CAN 控制器；
-- Security 接口不等于仓库已经提供生产身份、密钥和审计 AEAD；
-- 默认 Cluster 使用 v3/32 B Current Wire；v4/40 B encoder 默认关闭，生产 RX/TX/FSM 未放行；
-- M10 Takeover、M11 Handover、M13 Rekey Archive 默认关闭；
-- Cluster 仍为 `AUDIT HOLD / RELEASE NO-GO`，软件全绿不替代真实 Flash 掉电、多 Bearer、长期功耗和 MCU 资源验收。
-
-详细成熟度见[当前能力、限制与成熟度](docs/official/00-项目总览/02-当前能力、限制与成熟度.md)。
-
-## 构建
+## 快速构建
 
 ```powershell
-cmake -S . -B build -DUCN_BUILD_TESTS=ON
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug `
+  -DUCN_BUILD_TESTS=ON -DUCN_PROFILE=FULL
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-选择 Profile：
+裁剪示例：
 
 ```powershell
-cmake -S . -B build_nano -DUCN_PROFILE=NANO -DUCN_FEATURE_SERVICE=OFF
-cmake -S . -B build_lite -DUCN_PROFILE=LITE
-cmake -S . -B build_full -DUCN_PROFILE=FULL
+cmake -S . -B build-nano -G Ninja `
+  -DUCN_PROFILE=NANO `
+  -DUCN_FEATURE_REALTIME=OFF `
+  -DUCN_FEATURE_CLUSTER=OFF `
+  -DUCN_FEATURE_ADAPTER=OFF
+cmake --build build-nano --parallel
 ```
 
-## 文档
+安装并在外部工程消费：
+
+```powershell
+cmake --install build --prefix install
+# 外部工程：find_package(UCN 6 CONFIG REQUIRED)
+#            target_link_libraries(app PRIVATE UCN::ucn)
+```
+
+公共入口为 `#include <ucn/ucn.h>`。
+
+## Profile 与 Feature
+
+| Profile | 定位 | 最大可发送 Message Class | 说明 |
+|---|---|---:|---|
+| Nano | 极低资源端点/简单中继 | 256 B | 表项最少，仍解析 A0～A3 和所有 v6 合法帧 |
+| Lite | 常规 MCU 节点 | 2 KiB | 中等 Route、QoS、Transfer 与邻居容量 |
+| Full | 网关、簇头、高容量节点 | 8 KiB | 完整默认容量，不代表必须同时实例化全部 Owner |
+
+Realtime、Cluster、Adapter 通过 CMake Feature 开关裁剪。Feature 关闭时对应头不会由
+`<ucn/ucn.h>` 引入、对应 archive 不构建，Feature Manifest 和 Layout Hash 也会变化。
+
+## 重要成熟度边界
+
+当前已完成的是 v6 软件实现、Host 测试、模型和发布面收口，不是 UCN 1.0 RC：
+
+- ESP32-S3、多 Bearer、CAN/CAN-FD、USB、ISR/DMA、真实 Flash 掉电尚需同一候选提交实测；
+- Realtime 的硬件 timestamp、asymmetry 与 uncertainty 上界尚需测量；
+- P99/P999 延迟、吞吐、CPU、RAM/栈、功耗和 24 小时长稳尚未形成 v6 发布证据；
+- MSVC 已完成当前软件矩阵；可运行的 TSan 环境仍需补验；
+- 安全 API 和状态机不等于已内置生产密钥系统或经过密码学产品认证。
+
+因此仓库当前状态是 **v6 单一协议开发基线 / 软件自审中**。不得把测试绿色等同于硬件、
+掉电、安全或发布放行。
+
+## 文档入口
 
 - [官方文档](docs/official/README.md)
-- [源码参考与架构图](docs/reference/README.md)
-- [验证证据](docs/evidence/README.md)
-- [实验组件边界](docs/experimental/README.md)
-- [历史归档](docs/archive/README.md)
+- [用户手册](docs/用户手册/README.md)
+- [源码阅读指南](docs/源码阅读指南/README.md)
 - [任务表](docs/00-项目管理/00-任务表.md)
 - [项目操作记录](docs/00-项目管理/01-项目操作记录.md)
-- [函数调用树](docs/calltree/README.md)
+- [V6 架构 RFC](docs/10-理论与规划/建议方案/UCN_v6_最终协议架构与破坏性重构_RFC.md)
+- [V6-14 验证报告](docs/08-实现与验证/版本演进/UCN_V6_14_全量验证与资源门禁报告.md)
+- [V6-15 单一发布面与多轮自审](docs/08-实现与验证/版本演进/UCN_V6_15_单一协议发布面与多轮自审报告.md)
+- [V6X-A01～A11 外审整改与跨模块自审](docs/08-实现与验证/版本演进/UCN_V6_外审V6X_A01_A11整改与跨模块自审报告.md)
 
-## 源码目录
-
-```text
-include/ucn/  公共 C API
-src/core/     Wire、配置和基础语义
-src/node/     Node、Neighbor、Endpoint 生命周期
-src/routing/  Route、Path、Policy、Cost
-src/transport/ Link、Adapter、Owner
-src/adapters/ Stream、CAN/CAN-FD Source
-src/ports/    裸机、RTOS 与 Host Port
-src/service/  Service Router/Bridge
-src/extended/ Transfer、Cluster、Federation 与实验组件
-tests/        单元、集成、负向和虚拟拓扑测试
-tools/        规模模拟与文档/资源门禁
-```
-
-项目版本为 5.0.0，仍处于发布前优化阶段。兼容、迁移和发布判断请查阅[发布文档](docs/official/13-兼容、迁移与发布/README.md)。
+源码以 `include/ucn/v6/` 和 `src/v6/` 为当前事实；旧文档只用于解释历史决策。

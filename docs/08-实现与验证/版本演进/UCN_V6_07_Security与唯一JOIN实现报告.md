@@ -162,3 +162,22 @@ Group Policy/Key，不重新发明 ID 分配器。
 - 独立外部审计。
 
 因此当前状态只能写作：`V6-07 软件实现与自审完成 / FINAL EXTERNAL REVIEW DEFERRED`。
+
+## 11. V6X-A02、A03、A11 外审整改补充
+
+Wire 与 Security 已把单一 Packet Sequence 拆为两个所有权域：
+
+- `origin_sequence` 属于端到端或 Group 安全上下文，进入 canonical AAD，中继保持不变；
+- `hop_sequence` 属于当前 Peer Session，每跳重新分配、验证 Replay 并重新生成 Hop Tag。
+
+新增 `ucn_v6_security_relay_frame()` 后，中继必须先从原始编码帧完成 Hop Tag、selector 和
+Replay 验证，才会输出 Security-owned `verified_ingress`。随后只允许修改 Hop Budget、下一跳
+selector 和 Hop Sequence；Source、Origin Sequence、密文、E2E Tag 与所有 E2E AAD 字段保持
+不变。工作区不得与入站或输出缓冲区重叠，拒绝路径不写回结果对象。
+
+RX Replay Window 现在是易失运行态，不再每收一帧写一次完整 Snapshot。持久化只发生在低频
+Session/Key 变化和 Hop/E2E TX Sequence 固定区间预留。重启后 Peer 必须 Reauth、Group 必须
+Rekey，且 TX 会跳过整个已预留区间，因此不复用旧序号，也不会形成每包 Flash 写放大。
+
+新增 A→B→C、A 经 B 到 C/D 多目标以及五节点安全中继回归；Nano 使用每节点最多两个 Peer
+Session 也能完成整条链路。

@@ -68,13 +68,16 @@ static ucn_v6_capability_record_t capability_record(
                               UCN_V6_FEATURE_TRANSFER;
     value.peer.hop_suite_bits = UINT32_C(1) << UCN_V6_SUITE_HMAC_SHA256_128;
     value.peer.e2e_suite_bits = UINT32_C(1) << UCN_V6_SUITE_AES_GCM_128;
-    value.peer.max_message_class = UCN_V6_MESSAGE_T8K;
-    value.peer.max_rx_window = 16U;
-    value.peer.max_concurrent_transfers = 4U;
+    value.peer.max_message_class =
+        (ucn_v6_message_class_t)UCN_V6_CONFIG_TRANSFER_MAX_CLASS;
+    value.peer.max_rx_window = UCN_V6_CONFIG_TRANSFER_WINDOW;
+    value.peer.max_concurrent_transfers = UCN_V6_CONFIG_TRANSFER_RX_SLOTS;
+#if UCN_V6_FEATURE_REALTIME_ENABLED
     value.peer.realtime_mode_bits = UCN_V6_REALTIME_MODE_SYNCED |
                                     UCN_V6_REALTIME_MODE_DEADLINE;
     value.peer.clock_domain_id = 1U;
     value.peer.clock_domain_generation = 1U;
+#endif
     return value;
 }
 
@@ -125,7 +128,8 @@ static ucn_v6_frame_t budget_frame(void)
     frame.source_binding_generation = 2U;
     frame.destination_binding_generation = 3U;
     frame.session_generation = 5U;
-    frame.packet_sequence = 1U;
+    frame.origin_sequence = 1U;
+    frame.hop_sequence = 1U;
     frame.peer_hop.suite_id = UCN_V6_SUITE_HMAC_SHA256_128;
     frame.peer_hop.key_id = 1U;
     frame.peer_hop.key_generation = 1U;
@@ -199,14 +203,13 @@ static ucn_v6_route_path_t route_path(fixture_t *fixture,
                                       uint16_t weight)
 {
     ucn_v6_path_budget_request_t request;
+    ucn_v6_path_budget_accumulator_t accumulator;
     ucn_v6_route_path_t path;
     ucn_v6_frame_t frame = budget_frame();
     uint8_t digest[UCN_V6_CAPABILITY_DIGEST_BYTES];
     memset(&request, 0, sizeof(request));
     memset(&path, 0, sizeof(path));
     (void)ucn_v6_capability_digest(&fixture->destination_capability, digest);
-    request.hops = &fixture->destination_capability;
-    request.hop_count = 1U;
     request.destination_principal =
         fixture->route_domain.destination_principal;
     request.destination_binding = fixture->route_domain.destination_binding;
@@ -229,7 +232,11 @@ static ucn_v6_route_path_t route_path(fixture_t *fixture,
     request.policy_max_concurrency = 2U;
     request.frame_contract = &frame;
     request.fragment_header_bytes = 16U;
-    (void)ucn_v6_capability_derive_path(&request, &path.capability);
+    (void)ucn_v6_capability_path_reduce_begin(&request, &accumulator);
+    (void)ucn_v6_capability_path_reduce_hop(
+        &accumulator, &fixture->destination_capability);
+    (void)ucn_v6_capability_path_reduce_finalize(
+        &accumulator, &path.capability);
     (void)ucn_v6_capability_install_path(fixture->capability_owner, 2U,
                                          &path.capability);
     path.path_id = path_id;
@@ -261,6 +268,10 @@ static int activate_candidate(fixture_t *fixture,
     CHECK(ucn_v6_route_candidate_add_path(
               fixture->route_owner, fixture->capability_owner, 11U,
               candidate_id, &fixture->route_domain, &first) == UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_record_probe(
+              fixture->route_owner, 12U, candidate_id, first.path_id,
+              UCN_V6_SERIAL_ROTATION_THRESHOLD + UINT32_C(1)) ==
+          UCN_V6_ERR_ARGUMENT);
     if (two_paths) {
         second = route_path(fixture, 2U, route_generation,
                             route_generation, 1U, 2U, 3U);

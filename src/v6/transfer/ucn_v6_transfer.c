@@ -111,6 +111,10 @@ static bool send_request_is_valid(
         !ucn_v6_binding_key_equal(&request->path.destination_binding,
                                   &request->route_domain.destination_binding) ||
         request->path.session_generation == 0U ||
+        request->path.session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        request->path.destination_link_instance_generation == 0U ||
+        request->path.destination_link_instance_generation >
+            UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         request->path.max_message_class < request->message_class ||
         request->path.deadline_us == 0U) {
         return false;
@@ -229,8 +233,7 @@ ucn_v6_result_t ucn_v6_transfer_send_begin(
         request->path.deadline_us <= now_us) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    if (find_tx(owner, request->message_id) != NULL ||
-        request->message_id <= owner->tx_message_high_water) {
+    if (find_tx(owner, request->message_id) != NULL) {
         return UCN_V6_ERR_REPLAY;
     }
     for (index = 0U; index < UCN_V6_CONFIG_TRANSFER_TX_SLOTS; ++index) {
@@ -254,11 +257,6 @@ ucn_v6_result_t ucn_v6_transfer_send_begin(
     if (path_concurrency >= request->path.max_concurrency) {
         return UCN_V6_ERR_NO_SPACE;
     }
-    if (owner->tx_message_high_water ==
-            UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
-        request->message_id != owner->tx_message_high_water + 1U) {
-        return UCN_V6_ERR_REPLAY;
-    }
     if ((tx = find_free_tx(owner)) == NULL) {
         return UCN_V6_ERR_NO_SPACE;
     }
@@ -274,7 +272,6 @@ ucn_v6_result_t ucn_v6_transfer_send_begin(
     tx->message_crc32c =
         ucn_v6_crc32c(request->payload, request->payload_length);
     initialize_tx_window(tx);
-    owner->tx_message_high_water = request->message_id;
     ++owner->stats.tx_active;
     saturating_increment(&owner->stats.transfers_started);
     return UCN_V6_OK;
@@ -621,6 +618,11 @@ ucn_v6_result_t ucn_v6_transfer_rebind_path(
             &path->destination_binding,
             &tx->request.route_domain.destination_binding) ||
         path->session_generation != tx->request.path.session_generation ||
+        path->session_generation == 0U ||
+        path->session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        path->destination_link_instance_generation == 0U ||
+        path->destination_link_instance_generation >
+            UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         path->fragment_data_budget < tx->request.fragment_data_budget ||
         path->max_window < tx->request.window_size ||
         path->max_message_class < tx->request.message_class ||

@@ -83,7 +83,10 @@ expiry 才清槽。分配前同时预检 per-Link 和 per-Link/per-Group 两个 
 
 ## 6. Path 能力归约与预算
 
-Path 派生采用以下确定性规则：
+Path 派生采用固定状态的流式归约器。Protocol Owner 先初始化 accumulator，随后每取得一跳的
+认证 Capability 就执行一次 O(1) `path_reduce_hop()`，最后调用 `path_reduce_finalize()`。
+调用方不能一次提交任意长度的 hop 数组，因此单次 API 工作量有界；总跳数硬上限为 65534，
+达到上限后下一跳返回 EXHAUSTED 且 accumulator 不变。归约规则为：
 
 ```text
 path_frame_mtu = min(path policy limit,
@@ -141,8 +144,18 @@ fragment_data_budget = payload_budget - exact_fragment_header_bytes
 
 - 使用 Wire Codec 计算 exact overhead，不复制一份易漂移常量；
 - Feature/Suite/MTU/Window/Concurrency/Timestamp 全部归约；
+- 每次只消费一跳且工作量固定，65534 跳后禁止继续推进；
 - 下溢与 unsupported requirement 不写 output；
 - 公开结构体的语义幂等使用逐字段比较，不依赖 C padding `memcmp`。
+
+### 7.6 V6-15 第三轮交叉自审
+
+- `install_path()` 现在独立执行完整 Path 合法域校验，不再只信任此前完成过流式 Path 归约；
+- Session/Link/Route/Path Generation 全部执行 no-wrap 上界检查；Feature/Suite/Message Class、
+  Window、Concurrency、Timestamp、MTU、Payload 和 Fragment Budget 均失败关闭；
+- 安装值不得超过当前已认证目标 Peer 的 Feature、Suite、Class、Window、Concurrency、
+  Timestamp 或 Link/Processing MTU，未知 bit 和能力抬高不会进入 Path 表；
+- 负向测试同时断言失败时既不覆盖旧 Path，也不增加已安装 Path 数量。
 
 ## 8. 验证结果
 
@@ -167,3 +180,14 @@ fragment_data_budget = payload_budget - exact_fragment_header_bytes
 - 本报告是软件实现与自审证据，不是实机、性能、掉电或最终外审签字。
 
 当前状态：`V6-06 软件实现与分项自审完成 / FINAL EXTERNAL REVIEW DEFERRED`。
+
+## 10. V6X-A08、A09 外审整改补充
+
+Capability 现在不是“缓存中存在即可使用”。所有消费方必须同时验证 Discovery 与 Capability
+的半开 Deadline，`now == deadline` 即视为过期；Cluster 成员资格、Authority、Directory、
+Tunnel/Path 导出均不得读取过期记录。测试覆盖记录刚好到期后立即撤销资格，而不是等待下一次
+周期清扫。
+
+Peer/Group Hint 的预算槽采用和 Bootstrap 相同的显式 Timer Owner 回收语义：表满时不驱逐，
+输入流不能决定牺牲哪个现有槽；只有到期且没有 pending/hint 的闲置项可回收。大量 generation
+churn 回归证明表不会因历史空槽永久耗尽，也不会让攻击流量覆盖活跃状态。

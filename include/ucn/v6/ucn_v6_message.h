@@ -9,18 +9,19 @@ extern "C" {
 
 #define UCN_V6_OPERATION_DIGEST_BYTES ((size_t)32U)
 #define UCN_V6_OPERATION_RESULT_MAX_BYTES ((size_t)64U)
-#ifndef UCN_V6_CONFIG_OPERATION_SLOTS
-#define UCN_V6_CONFIG_OPERATION_SLOTS 8U
-#endif
-#ifndef UCN_V6_CONFIG_OPERATION_HIGH_WATERS
-#define UCN_V6_CONFIG_OPERATION_HIGH_WATERS 8U
-#endif
 #define UCN_V6_OPERATION_JOURNAL_SLOTS \
     ((size_t)UCN_V6_CONFIG_OPERATION_SLOTS)
 #define UCN_V6_OPERATION_HIGH_WATER_SLOTS \
     ((size_t)UCN_V6_CONFIG_OPERATION_HIGH_WATERS)
 #define UCN_V6_OPERATION_JOURNAL_MAGIC UINT32_C(0x554F5036)
 #define UCN_V6_OPERATION_JOURNAL_SCHEMA UINT16_C(1)
+#define UCN_V6_MESSAGE_WITNESS_MAGIC UINT32_C(0x554D5736)
+#define UCN_V6_MESSAGE_WITNESS_SCHEMA UINT16_C(1)
+
+enum {
+    UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED = 1U << 0,
+    UCN_V6_MESSAGE_WITNESS_ALLOCATOR_COMMISSIONED = 1U << 1
+};
 
 typedef enum ucn_v6_endpoint_execution_contract {
     UCN_V6_ENDPOINT_NON_RETRYABLE = 1,
@@ -108,20 +109,33 @@ typedef struct ucn_v6_operation_journal_snapshot {
         high_waters[UCN_V6_OPERATION_HIGH_WATER_SLOTS];
 } ucn_v6_operation_journal_snapshot_t;
 
+/* Independent anti-rollback witness.  A conforming Provider stores this in
+ * a monotonic/fenced domain separate from the dual-slot journal.  Once either
+ * commissioned bit is set, load_witness must never report NOT_FOUND. */
+typedef struct ucn_v6_message_witness {
+    uint32_t magic;
+    uint16_t schema;
+    uint16_t flags;
+    uint64_t witness_generation;
+    uint64_t journal_committed_generation;
+    uint64_t journal_pending_generation;
+    uint64_t operation_id_high_water;
+} ucn_v6_message_witness_t;
+
 typedef struct ucn_v6_message_store_ops {
     void *context;
+    ucn_v6_result_t (*load_witness)(
+        void *context,
+        ucn_v6_message_witness_t *witness);
+    ucn_v6_result_t (*reserve_witness)(
+        void *context,
+        const ucn_v6_message_witness_t *witness);
     ucn_v6_result_t (*load_journal)(
         void *context,
         ucn_v6_operation_journal_snapshot_t *snapshot);
     ucn_v6_result_t (*submit_journal)(
         void *context,
         const ucn_v6_operation_journal_snapshot_t *snapshot);
-    ucn_v6_result_t (*load_operation_id_high_water)(
-        void *context,
-        uint64_t *high_water);
-    ucn_v6_result_t (*persist_operation_id_high_water)(
-        void *context,
-        uint64_t high_water);
 } ucn_v6_message_store_ops_t;
 
 typedef struct ucn_v6_operation_id_allocator ucn_v6_operation_id_allocator_t;
@@ -148,12 +162,15 @@ typedef union ucn_v6_operation_journal_storage {
 typedef struct ucn_v6_operation_id_allocator_view {
     uint64_t next_id;
     uint64_t reserved_through;
+    uint64_t witness_generation;
     uint32_t reservation_block_size;
     bool faulted;
 } ucn_v6_operation_id_allocator_view_t;
 
 typedef struct ucn_v6_operation_journal_view {
     uint64_t committed_generation;
+    uint64_t witness_generation;
+    uint64_t pending_generation;
     uint16_t occupied_slots;
     bool faulted;
 } ucn_v6_operation_journal_view_t;
@@ -166,6 +183,13 @@ struct ucn_v6_feature_manifest;
 ucn_v6_result_t ucn_v6_message_validate(
     const ucn_v6_message_descriptor_t *message,
     const ucn_v6_endpoint_contract_t *endpoint);
+
+/* EN: Validates the exact one-step monotonic witness transition that a
+ * persistence Provider must enforce atomically.
+ * 中文：校验持久化 Provider 必须原子执行的单步 Witness 单调转换。 */
+ucn_v6_result_t ucn_v6_message_witness_transition_validate(
+    const ucn_v6_message_witness_t *previous,
+    const ucn_v6_message_witness_t *next);
 
 /* EN: Initializes a persistently reserved, non-wrapping Operation-ID source.
  * 中文：初始化持久区间预留且不可回绕的 Operation ID 分配器。 */

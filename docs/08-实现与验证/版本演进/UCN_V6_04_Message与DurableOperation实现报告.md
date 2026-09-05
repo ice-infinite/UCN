@@ -18,17 +18,19 @@ Endpoint、最大 Payload/Result 和允许组合由不可变 Endpoint Contract �
 ## 2. Operation ID 的持久区间预留
 
 Request、Result 和 Error 使用同一个非零 64-bit Operation ID。发送方分配器不逐个写 Flash，
-而是先持久化预留一段 ID，再从该段内发号：
+而是通过独立、不可随 Journal Snapshot 一起回滚的 Witness 先持久化预留一段 ID，再从该段内发号：
 
 ```text
-load durable high-water N
-reserve and verify N+B
-publish N+1 ... N+B
+load durable witness high-water N
+  -> reserve witness high-water N+B
+  -> reload and verify exact witness
+  -> publish N+1 ... N+B
 ```
 
 掉电后未用完的号码会跳过，不会回收复用。持久化或回读不一致会永久 Fence 当前分配器；
 达到 `0xFFFFFFFFFFFFFFFE` 后返回 EXHAUSTED，不允许回绕到 1。所有 Provider 回调共享 V6-02
-的 caller-owned callback gate，回调中的递归分配失败关闭。
+的 caller-owned callback gate，回调中的递归分配失败关闭。Provider 一旦进入 commissioned
+状态，后续不得把 Witness 报为 `NOT_FOUND`；否则等价于 anti-rollback 证据丢失，初始化失败关闭。
 
 ## 3. Durable Operation Journal
 
@@ -73,19 +75,25 @@ Digest 仍保留。
 
 ## 5. Provider 原子边界
 
-每次变更都复制当前 committed snapshot，完成全部合法性检查后才进入 Provider：
+每次 Journal 变更都复制当前 committed snapshot，完成全部合法性检查后才进入 Provider。
+`record_generation` 不依赖 Snapshot 自证，而由独立 Witness 约束，提交顺序固定为：
 
 ```text
-candidate generation checked-next
-    -> submit full snapshot
-    -> reload full snapshot
-    -> semantic exact compare
+validate candidate generation against committed witness
+    -> reserve pending witness generation
+    -> reload and verify exact pending witness
+    -> submit full journal snapshot
+    -> reload and semantic-exact compare snapshot
+    -> finalize witness committed generation
+    -> reload and verify exact committed witness
     -> publish committed RAM view
 ```
 
-submit 失败、reload 失败、全零/坏 Schema、字段冲突或不一致回读都不会发布 candidate；由于
-底层写入结果可能不确定，Owner 同时进入 faulted，防止继续承诺。Provider 回调前先建立共享
-重入门，回调中的 Journal/Allocator 控制调用返回 STATE，不能产生第二次写入。
+启动时若 Witness 显示 pending 而 Snapshot 仍是旧代际，则单调取消该 pending；Snapshot 已是
+新代际则完成 Witness finalize。Witness 已 committed 到新代际而 Snapshot 缺失或更旧时禁止静默
+回退。submit、reserve、reload、全零/坏 Schema、非法 Witness 转换、字段冲突或不一致回读都不会
+发布 candidate；由于底层写入结果可能不确定，Owner 同时进入 faulted，防止继续承诺。Provider
+回调前先建立共享重入门，回调中的 Journal/Allocator 控制调用返回 STATE，不能产生第二次写入。
 
 ## 6. 分项自审与定向反例
 
@@ -99,6 +107,10 @@ submit 失败、reload 失败、全零/坏 Schema、字段冲突或不一致回�
    重启 `EXECUTING -> IN_DOUBT`、未认证对账、全零 Record 与 submit failure 均有确定性回归；
 6. 所有失败路径检查 admission/output 或 committed snapshot 不写回；持久化不确定错误只增加
    fault fence，不伪造成功。
+7. 后续全局自审为 Journal 增加独立 anti-rollback Witness，并以合法旧 Snapshot 回放、Witness
+   先写/Journal 后写两个掉电窗口、committed Witness 配旧 Snapshot 等反例锁定恢复规则；
+8. MSVC Release 严格告警暴露的临时 Witness/Snapshot 未初始化风险已统一改为显式零初始化；
+   内部预检也显式接收 `previous` 与 `candidate`，避免把已修改候选误当上一持久状态。
 
 ## 7. 尚未声称完成的范围
 

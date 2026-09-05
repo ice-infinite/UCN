@@ -7,7 +7,7 @@
 
 新增 `ucn_v6_wire` 静态库、公共 semantic frame 和严格 Codec。实现固定：
 
-- A0～A3 地址宽度和 36/38/40/42 B 基础 Frame 开销；
+- A0～A3 地址宽度和 40/42/44/46 B 基础 Frame 开销；
 - 8 B 公共前缀、固定 Realm/双 Binding/Session/Sequence/Payload Length；
 - Peer Hop、Group、E2E、Protocol、Message、Route、Path、Hop Budget 的唯一扩展顺序；
 - Payload、16 B E2E Tag、16 B Peer/Group Tag、CRC32C 的唯一 Trailer 顺序；
@@ -46,7 +46,9 @@ Address Class 仍单独认证。
 实现过程中自审并关闭：
 
 1. 最初把基础固定字段误算为 30 B；逐字段 Offset 复核后修正为“不含地址的 22 B”，恢复
-   RFC 冻结的 36/38/40/42 B。
+   RFC 冻结的 40/42/44/46 B。相较最初草案增加的 4 B 来自独立
+   `origin_sequence` 与 `hop_sequence`：前者属于源到目标 E2E 重放域，后者由每一跳重签，
+   避免同一下一跳承载多个最终目标时互相误判重放。
 2. 最初 AAD 常量按 70 B 估算；逐 Offset 展开后确认完整固定序列为 80 B，并增加独立向量。
 3. Decoder 的 payload/tag bounds 初版把 CRC 余量重复扣除，导致合法 Golden 被拒绝；现统一
    以 CRC 起点为 limit，最后再精确验证 `offset+4==input_length`。

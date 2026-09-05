@@ -66,6 +66,7 @@ int main(void)
 
     printf("manifest.api_version=%u\n", (unsigned)manifest->api_version);
     printf("manifest.storage_layout=%u\n", (unsigned)manifest->storage_layout);
+    printf("manifest.profile=%u\n", (unsigned)manifest->profile);
     printf("manifest.feature_bits=%u\n", (unsigned)manifest->feature_bits);
     printf("manifest.layout_hash=%llu\n",
            (unsigned long long)manifest->layout_hash);

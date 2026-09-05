@@ -43,17 +43,22 @@ static bool flow_is_valid(ucn_v6_bootstrap_flow_t flow)
 
 static bool key_is_valid(const ucn_v6_bootstrap_key_t *key)
 {
-    return key != NULL && key->ingress_link_generation != 0U &&
+    return key != NULL && key->ingress_link_id != 0U &&
+           key->ingress_link_generation != 0U &&
+           key->ingress_link_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            key->local_peer_discriminator != 0U &&
            ucn_v6_principal_is_valid(&key->identity_digest) &&
-           key->transaction_id != 0U;
+           key->transaction_id != 0U &&
+           key->transaction_id <= UCN_V6_SERIAL64_ROTATION_THRESHOLD;
 }
 
 static bool key_equal(
     const ucn_v6_bootstrap_key_t *left,
     const ucn_v6_bootstrap_key_t *right)
 {
-    return left->ingress_link_generation == right->ingress_link_generation &&
+    return left->ingress_link_id == right->ingress_link_id &&
+           left->ingress_link_generation == right->ingress_link_generation &&
            left->local_peer_discriminator == right->local_peer_discriminator &&
            left->transaction_id == right->transaction_id &&
            principal_equal(&left->identity_digest, &right->identity_digest);
@@ -202,6 +207,7 @@ static ucn_v6_bootstrap_pending_t *find_pending(
 
 static ucn_v6_bootstrap_link_budget_t *find_budget(
     ucn_v6_bootstrap_owner_t *owner,
+    uint16_t link_id,
     uint32_t link_generation)
 {
     size_t index;
@@ -209,6 +215,7 @@ static ucn_v6_bootstrap_link_budget_t *find_budget(
 
     for (index = 0U; index < UCN_V6_BOOTSTRAP_MAX_BUDGET_LINKS; ++index) {
         if (owner->budgets[index].occupied &&
+            owner->budgets[index].ingress_link_id == link_id &&
             owner->budgets[index].ingress_link_generation == link_generation) {
             return &owner->budgets[index];
         }
@@ -217,6 +224,32 @@ static ucn_v6_bootstrap_link_budget_t *find_budget(
         }
     }
     return empty;
+}
+
+static bool budget_has_pending(
+    const ucn_v6_bootstrap_owner_t *owner,
+    const ucn_v6_bootstrap_link_budget_t *budget)
+{
+    const ucn_v6_bootstrap_pending_t *arrays[2];
+    size_t array_index;
+    size_t slot_index;
+
+    arrays[0] = owner->join_pending;
+    arrays[1] = owner->reauth_pending;
+    for (array_index = 0U; array_index < 2U; ++array_index) {
+        for (slot_index = 0U; slot_index < owner->config.max_pending;
+             ++slot_index) {
+            if (arrays[array_index][slot_index].occupied &&
+                arrays[array_index][slot_index].key.ingress_link_id ==
+                    budget->ingress_link_id &&
+                arrays[array_index][slot_index]
+                        .key.ingress_link_generation ==
+                    budget->ingress_link_generation) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 static void pending_resource_usage(
@@ -244,7 +277,8 @@ static void pending_resource_usage(
                 continue;
             }
             ++(*global_count);
-            if (pending->key.ingress_link_generation !=
+            if (pending->key.ingress_link_id != key->ingress_link_id ||
+                pending->key.ingress_link_generation !=
                 key->ingress_link_generation) {
                 continue;
             }
@@ -302,6 +336,7 @@ ucn_v6_result_t ucn_v6_bootstrap_owner_init_in_place(
 
 ucn_v6_result_t ucn_v6_bootstrap_admit_initial_hello(
     ucn_v6_bootstrap_owner_t *owner,
+    uint16_t ingress_link_id,
     uint32_t ingress_link_generation,
     uint64_t now_us,
     size_t request_bytes,
@@ -312,20 +347,24 @@ ucn_v6_result_t ucn_v6_bootstrap_admit_initial_hello(
     uint64_t missing_tokens;
     uint64_t seconds_to_full;
 
-    if (!owner_is_valid(owner) ||
-        ingress_link_generation == 0U || request_bytes == 0U ||
+    if (!owner_is_valid(owner) || ingress_link_id == 0U ||
+        ingress_link_generation == 0U ||
+        ingress_link_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        request_bytes == 0U ||
         response_bytes > request_bytes) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    budget = find_budget(owner, ingress_link_generation);
+    budget = find_budget(owner, ingress_link_id, ingress_link_generation);
     if (budget == NULL) {
         return UCN_V6_ERR_NO_SPACE;
     }
     if (!budget->occupied) {
         budget->occupied = true;
+        budget->ingress_link_id = ingress_link_id;
         budget->ingress_link_generation = ingress_link_generation;
         budget->tokens = owner->config.token_burst;
         budget->last_refill_us = now_us;
+        budget->last_activity_us = now_us;
     } else {
         if (now_us < budget->last_refill_us) {
             return UCN_V6_ERR_STATE;
@@ -357,6 +396,7 @@ ucn_v6_result_t ucn_v6_bootstrap_admit_initial_hello(
         return UCN_V6_ERR_ACCESS;
     }
     --budget->tokens;
+    budget->last_activity_us = now_us;
     return UCN_V6_OK;
 }
 
@@ -380,6 +420,7 @@ ucn_v6_result_t ucn_v6_bootstrap_open_after_cookie(
 
     if (!owner_is_valid(owner) || !flow_is_valid(flow) ||
         !key_is_valid(key) || !transcript_is_valid(transcript) ||
+        transcript->flow != flow ||
         !cookie_verified ||
         !principal_equal(&key->identity_digest,
                          &transcript->joining_device_identity_digest) ||
@@ -458,7 +499,8 @@ ucn_v6_result_t ucn_v6_bootstrap_advance(
     ucn_v6_bootstrap_phase_t next_phase;
 
     if (!owner_is_valid(owner) || !flow_is_valid(flow) ||
-        !key_is_valid(key) || !transcript_is_valid(transcript)) {
+        !key_is_valid(key) || !transcript_is_valid(transcript) ||
+        transcript->flow != flow) {
         return UCN_V6_ERR_ARGUMENT;
     }
     pending = find_pending(owner, flow, key);
@@ -602,6 +644,18 @@ size_t ucn_v6_bootstrap_expire(
                        sizeof(arrays[array_index][slot_index]));
                 ++expired;
             }
+        }
+    }
+    for (slot_index = 0U;
+         slot_index < UCN_V6_BOOTSTRAP_MAX_BUDGET_LINKS;
+         ++slot_index) {
+        ucn_v6_bootstrap_link_budget_t *budget =
+            &owner->budgets[slot_index];
+        if (budget->occupied && !budget_has_pending(owner, budget) &&
+            now_us >= budget->last_activity_us &&
+            now_us - budget->last_activity_us >=
+                owner->config.pending_timeout_us) {
+            memset(budget, 0, sizeof(*budget));
         }
     }
     return expired;

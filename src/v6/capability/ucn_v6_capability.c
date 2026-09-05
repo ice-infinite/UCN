@@ -9,7 +9,8 @@
                 UCN_V6_FEATURE_MESSAGE | UCN_V6_FEATURE_SECURITY |      \
                 UCN_V6_FEATURE_ROUTE | UCN_V6_FEATURE_TRANSFER |        \
                 UCN_V6_FEATURE_REALTIME | UCN_V6_FEATURE_CLUSTER |      \
-                UCN_V6_FEATURE_CAPABILITY | UCN_V6_FEATURE_ADAPTER))
+                UCN_V6_FEATURE_CAPABILITY | UCN_V6_FEATURE_ADAPTER |    \
+                UCN_V6_FEATURE_QOS))
 #define UCN_V6_CAPABILITY_KNOWN_LINK_FLAGS UINT16_C(0x001F)
 #define UCN_V6_CAPABILITY_KNOWN_TIMESTAMP_BITS UINT16_C(0x000F)
 #define UCN_V6_CAPABILITY_HOP_SUITE_BITS UINT32_C(0x00000002)
@@ -656,6 +657,7 @@ static void preview_link_budget(
         next->ingress_link_generation = link_generation;
         next->tokens = UCN_V6_GROUP_HINTS_PER_LINK;
         next->last_refill_us = now_us;
+        next->last_activity_us = now_us;
         return;
     }
     *next = *current;
@@ -692,6 +694,7 @@ static void preview_group_budget(
         next->group_generation = group_generation;
         next->tokens = UCN_V6_GROUP_HINTS_PER_LINK;
         next->last_refill_us = now_us;
+        next->last_activity_us = now_us;
         return;
     }
     *next = *current;
@@ -774,6 +777,8 @@ ucn_v6_result_t ucn_v6_capability_ingest_group_hello_hint(
     }
     --next_link.tokens;
     --next_group.tokens;
+    next_link.last_activity_us = now_us;
+    next_group.last_activity_us = now_us;
     *link = next_link;
     *group = next_group;
     memset(hint, 0, sizeof(*hint));
@@ -798,26 +803,69 @@ static uint16_t minimum_u16(uint16_t left, uint16_t right)
     return left < right ? left : right;
 }
 
-ucn_v6_result_t ucn_v6_capability_derive_path(
-    const ucn_v6_path_budget_request_t *request,
-    ucn_v6_path_capability_t *path)
+static bool path_capability_is_valid(
+    const ucn_v6_path_capability_t *path,
+    uint64_t now_us)
 {
-    ucn_v6_path_capability_t derived;
+    return path != NULL && path->valid &&
+           ucn_v6_principal_is_valid(&path->destination_principal) &&
+           ucn_v6_binding_key_is_valid(&path->destination_binding) &&
+           path->session_generation != 0U &&
+           path->session_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           path->destination_link_instance_generation != 0U &&
+           path->destination_link_instance_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           digest_is_nonzero(path->destination_capability_digest) &&
+           path->route_generation != 0U &&
+           path->route_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           path->path_id != 0U && path->path_generation != 0U &&
+           path->path_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           path->path_frame_mtu != 0U &&
+           path->path_frame_mtu <= UCN_V6_WIRE_MAX_FRAME_BYTES &&
+           path->payload_budget != 0U &&
+           path->payload_budget < path->path_frame_mtu &&
+           path->fragment_data_budget != 0U &&
+           path->fragment_data_budget <= path->payload_budget &&
+           path->feature_bits != 0U &&
+           (path->feature_bits & ~UCN_V6_CAPABILITY_KNOWN_FEATURES) == 0U &&
+           path->hop_suite_bits != 0U &&
+           (path->hop_suite_bits & ~UCN_V6_CAPABILITY_HOP_SUITE_BITS) == 0U &&
+           path->e2e_suite_bits != 0U &&
+           (path->e2e_suite_bits & ~UCN_V6_CAPABILITY_E2E_SUITE_BITS) == 0U &&
+           (uint32_t)path->max_message_class <=
+               (uint32_t)UCN_V6_MESSAGE_T8K &&
+           path->max_window != 0U && path->max_concurrency != 0U &&
+           (path->timestamp_capability_bits &
+            (uint16_t)~UCN_V6_CAPABILITY_KNOWN_TIMESTAMP_BITS) == 0U &&
+           ((path->timestamp_capability_bits == 0U) ==
+            (path->timestamp_uncertainty_us == 0U)) &&
+           path->deadline_us != 0U && now_us < path->deadline_us;
+}
+
+ucn_v6_result_t ucn_v6_capability_path_reduce_begin(
+    const ucn_v6_path_budget_request_t *request,
+    ucn_v6_path_budget_accumulator_t *accumulator)
+{
+    ucn_v6_path_budget_accumulator_t initialized;
     ucn_v6_frame_t frame;
     size_t overhead;
-    size_t index;
-    uint64_t uncertainty = 0U;
-    if (request == NULL || path == NULL || request->hops == NULL ||
-        request->hop_count == 0U || request->frame_contract == NULL ||
+    if (request == NULL || accumulator == NULL ||
+        request->frame_contract == NULL ||
         request->frame_contract->payload != NULL ||
         request->frame_contract->payload_length != 0U ||
         !ucn_v6_principal_is_valid(&request->destination_principal) ||
         !ucn_v6_binding_key_is_valid(&request->destination_binding) ||
         request->session_generation == 0U ||
+        request->session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         request->destination_link_instance_generation == 0U ||
+        request->destination_link_instance_generation >
+            UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         !digest_is_nonzero(request->destination_capability_digest) ||
-        request->route_generation == 0U || request->path_id == 0U ||
-        request->path_generation == 0U || request->deadline_us == 0U ||
+        request->route_generation == 0U ||
+        request->route_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        request->path_id == 0U || request->path_generation == 0U ||
+        request->path_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        request->deadline_us == 0U ||
         request->path_policy_frame_mtu == 0U ||
         request->required_hop_suite_bits == 0U ||
         request->required_e2e_suite_bits == 0U ||
@@ -827,84 +875,126 @@ ucn_v6_result_t ucn_v6_capability_derive_path(
             (uint32_t)UCN_V6_MESSAGE_T8K) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    memset(&derived, 0, sizeof(derived));
-    derived.valid = true;
-    derived.immutable_for_realtime = request->fixed_path;
-    derived.destination_principal = request->destination_principal;
-    derived.destination_binding = request->destination_binding;
-    derived.session_generation = request->session_generation;
-    derived.destination_link_instance_generation =
+    frame = *request->frame_contract;
+    if (ucn_v6_wire_encoded_size(&frame, &overhead) != UCN_V6_OK ||
+        overhead > UINT32_MAX) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(&initialized, 0, sizeof(initialized));
+    initialized.active = true;
+    initialized.required_feature_bits = request->required_feature_bits;
+    initialized.required_hop_suite_bits =
+        request->required_hop_suite_bits;
+    initialized.required_e2e_suite_bits =
+        request->required_e2e_suite_bits;
+    initialized.frame_overhead_bytes = (uint32_t)overhead;
+    initialized.fragment_header_bytes = request->fragment_header_bytes;
+    initialized.derived.valid = true;
+    initialized.derived.immutable_for_realtime = request->fixed_path;
+    initialized.derived.destination_principal = request->destination_principal;
+    initialized.derived.destination_binding = request->destination_binding;
+    initialized.derived.session_generation = request->session_generation;
+    initialized.derived.destination_link_instance_generation =
         request->destination_link_instance_generation;
-    memcpy(derived.destination_capability_digest,
+    memcpy(initialized.derived.destination_capability_digest,
            request->destination_capability_digest,
-           sizeof(derived.destination_capability_digest));
-    derived.route_generation = request->route_generation;
-    derived.path_id = request->path_id;
-    derived.path_generation = request->path_generation;
-    derived.path_frame_mtu = request->path_policy_frame_mtu;
-    derived.feature_bits = UINT32_MAX;
-    derived.hop_suite_bits = UINT32_MAX;
-    derived.e2e_suite_bits = UINT32_MAX;
-    derived.max_message_class = request->policy_max_message_class;
-    derived.max_window = request->policy_max_window;
-    derived.max_concurrency = request->policy_max_concurrency;
-    derived.timestamp_capability_bits = UCN_V6_CAPABILITY_KNOWN_TIMESTAMP_BITS;
-    derived.deadline_us = request->deadline_us;
-    for (index = 0U; index < request->hop_count; ++index) {
-        const ucn_v6_capability_record_t *record = &request->hops[index];
-        uint32_t frame_limit;
-        if (!record_is_valid(record)) {
-            return UCN_V6_ERR_ARGUMENT;
-        }
-        frame_limit = minimum_u32(record->link.link_frame_mtu,
-                                  record->link.processing_frame_mtu);
-        derived.path_frame_mtu = minimum_u32(derived.path_frame_mtu,
-                                              frame_limit);
-        derived.feature_bits &= record->peer.feature_bits;
-        derived.hop_suite_bits &= record->peer.hop_suite_bits;
-        derived.e2e_suite_bits &= record->peer.e2e_suite_bits;
-        derived.max_message_class =
-            (ucn_v6_message_class_t)minimum_u32(
-                (uint32_t)derived.max_message_class,
-                (uint32_t)record->peer.max_message_class);
-        derived.max_window = minimum_u16(derived.max_window,
-                                         record->peer.max_rx_window);
-        derived.max_concurrency = minimum_u16(
-            derived.max_concurrency,
-            record->peer.max_concurrent_transfers);
-        derived.timestamp_capability_bits &=
-            record->link.timestamp_capability_bits;
-        if (record->link.timestamp_capability_bits != 0U) {
-            uncertainty += record->link.timestamp_uncertainty_us;
-            if (uncertainty > UINT32_MAX) {
-                return UCN_V6_ERR_EXHAUSTED;
-            }
+           sizeof(initialized.derived.destination_capability_digest));
+    initialized.derived.route_generation = request->route_generation;
+    initialized.derived.path_id = request->path_id;
+    initialized.derived.path_generation = request->path_generation;
+    initialized.derived.path_frame_mtu = request->path_policy_frame_mtu;
+    initialized.derived.feature_bits = UINT32_MAX;
+    initialized.derived.hop_suite_bits = UINT32_MAX;
+    initialized.derived.e2e_suite_bits = UINT32_MAX;
+    initialized.derived.max_message_class =
+        request->policy_max_message_class;
+    initialized.derived.max_window = request->policy_max_window;
+    initialized.derived.max_concurrency = request->policy_max_concurrency;
+    initialized.derived.timestamp_capability_bits =
+        UCN_V6_CAPABILITY_KNOWN_TIMESTAMP_BITS;
+    initialized.derived.deadline_us = request->deadline_us;
+    *accumulator = initialized;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_capability_path_reduce_hop(
+    ucn_v6_path_budget_accumulator_t *accumulator,
+    const ucn_v6_capability_record_t *record)
+{
+    ucn_v6_path_capability_t next;
+    uint64_t uncertainty;
+    uint32_t frame_limit;
+    if (accumulator == NULL || !accumulator->active ||
+        !record_is_valid(record)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (accumulator->hop_count == UCN_V6_PATH_HOP_LIMIT) {
+        return UCN_V6_ERR_EXHAUSTED;
+    }
+    uncertainty = accumulator->timestamp_uncertainty_us;
+    if (record->link.timestamp_capability_bits != 0U) {
+        uncertainty += record->link.timestamp_uncertainty_us;
+        if (uncertainty > UINT32_MAX) {
+            return UCN_V6_ERR_EXHAUSTED;
         }
     }
+    next = accumulator->derived;
+    frame_limit = minimum_u32(record->link.link_frame_mtu,
+                              record->link.processing_frame_mtu);
+    next.path_frame_mtu = minimum_u32(next.path_frame_mtu, frame_limit);
+    next.feature_bits &= record->peer.feature_bits;
+    next.hop_suite_bits &= record->peer.hop_suite_bits;
+    next.e2e_suite_bits &= record->peer.e2e_suite_bits;
+    next.max_message_class = (ucn_v6_message_class_t)minimum_u32(
+        (uint32_t)next.max_message_class,
+        (uint32_t)record->peer.max_message_class);
+    next.max_window = minimum_u16(next.max_window,
+                                  record->peer.max_rx_window);
+    next.max_concurrency = minimum_u16(
+        next.max_concurrency, record->peer.max_concurrent_transfers);
+    next.timestamp_capability_bits &=
+        record->link.timestamp_capability_bits;
+    accumulator->derived = next;
+    accumulator->timestamp_uncertainty_us = uncertainty;
+    ++accumulator->hop_count;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_capability_path_reduce_finalize(
+    ucn_v6_path_budget_accumulator_t *accumulator,
+    ucn_v6_path_capability_t *path)
+{
+    ucn_v6_path_capability_t derived;
+    if (accumulator == NULL || path == NULL || !accumulator->active ||
+        accumulator->hop_count == 0U) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    derived = accumulator->derived;
     derived.timestamp_uncertainty_us =
-        derived.timestamp_capability_bits == 0U ? 0U : (uint32_t)uncertainty;
-    if ((derived.feature_bits & request->required_feature_bits) !=
-            request->required_feature_bits ||
-        (derived.hop_suite_bits & request->required_hop_suite_bits) !=
-            request->required_hop_suite_bits ||
-        (derived.e2e_suite_bits & request->required_e2e_suite_bits) !=
-            request->required_e2e_suite_bits ||
+        derived.timestamp_capability_bits == 0U ? 0U :
+        (uint32_t)accumulator->timestamp_uncertainty_us;
+    if ((derived.feature_bits & accumulator->required_feature_bits) !=
+            accumulator->required_feature_bits ||
+        (derived.hop_suite_bits & accumulator->required_hop_suite_bits) !=
+            accumulator->required_hop_suite_bits ||
+        (derived.e2e_suite_bits & accumulator->required_e2e_suite_bits) !=
+            accumulator->required_e2e_suite_bits ||
         derived.path_frame_mtu == 0U || derived.max_window == 0U ||
         derived.max_concurrency == 0U) {
         return UCN_V6_ERR_ACCESS;
     }
-    frame = *request->frame_contract;
-    if (ucn_v6_wire_encoded_size(&frame, &overhead) != UCN_V6_OK ||
-        overhead >= derived.path_frame_mtu) {
+    if (accumulator->frame_overhead_bytes >= derived.path_frame_mtu) {
         return UCN_V6_ERR_NO_SPACE;
     }
-    derived.payload_budget = derived.path_frame_mtu - (uint32_t)overhead;
-    if (request->fragment_header_bytes >= derived.payload_budget) {
+    derived.payload_budget = derived.path_frame_mtu -
+                             accumulator->frame_overhead_bytes;
+    if (accumulator->fragment_header_bytes >= derived.payload_budget) {
         return UCN_V6_ERR_NO_SPACE;
     }
     derived.fragment_data_budget =
-        derived.payload_budget - request->fragment_header_bytes;
+        derived.payload_budget - accumulator->fragment_header_bytes;
     *path = derived;
+    accumulator->active = false;
     return UCN_V6_OK;
 }
 
@@ -962,18 +1052,8 @@ ucn_v6_result_t ucn_v6_capability_install_path(
     ucn_v6_path_capability_t *target = NULL;
     ucn_v6_cached_peer_capability_t peer;
     size_t index;
-    if (!owner_is_valid(owner) || owner->faulted || path == NULL ||
-        !path->valid || !ucn_v6_principal_is_valid(
-            &path->destination_principal) ||
-        !ucn_v6_binding_key_is_valid(&path->destination_binding) ||
-        path->session_generation == 0U ||
-        path->destination_link_instance_generation == 0U ||
-        !digest_is_nonzero(path->destination_capability_digest) ||
-        path->route_generation == 0U || path->path_id == 0U ||
-        path->path_generation == 0U || path->path_frame_mtu == 0U ||
-        path->payload_budget == 0U || path->fragment_data_budget == 0U ||
-        path->fragment_data_budget > path->payload_budget ||
-        path->deadline_us == 0U || now_us >= path->deadline_us) {
+    if (!owner_is_valid(owner) || owner->faulted ||
+        !path_capability_is_valid(path, now_us)) {
         return UCN_V6_ERR_ARGUMENT;
     }
     if (ucn_v6_capability_copy_peer(
@@ -983,6 +1063,23 @@ ucn_v6_result_t ucn_v6_capability_install_path(
         memcmp(peer.digest, path->destination_capability_digest,
                sizeof(peer.digest)) != 0) {
         return UCN_V6_ERR_STATE;
+    }
+    if ((path->feature_bits & ~peer.record.peer.feature_bits) != 0U ||
+        (path->hop_suite_bits & ~peer.record.peer.hop_suite_bits) != 0U ||
+        (path->e2e_suite_bits & ~peer.record.peer.e2e_suite_bits) != 0U ||
+        (uint32_t)path->max_message_class >
+            (uint32_t)peer.record.peer.max_message_class ||
+        path->max_window > peer.record.peer.max_rx_window ||
+        path->max_concurrency >
+            peer.record.peer.max_concurrent_transfers ||
+        (path->timestamp_capability_bits &
+         (uint16_t)~peer.record.link.timestamp_capability_bits) != 0U ||
+        (path->timestamp_capability_bits != 0U &&
+         path->timestamp_uncertainty_us <
+             peer.record.link.timestamp_uncertainty_us) ||
+        path->path_frame_mtu > peer.record.link.link_frame_mtu ||
+        path->path_frame_mtu > peer.record.link.processing_frame_mtu) {
+        return UCN_V6_ERR_ACCESS;
     }
     for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PATHS; ++index) {
         if (owner->paths[index].valid &&
@@ -1026,7 +1123,10 @@ ucn_v6_result_t ucn_v6_capability_copy_peer(
     if (!owner_is_valid(owner) || owner->faulted ||
         !ucn_v6_principal_is_valid(principal) ||
         !ucn_v6_binding_key_is_valid(binding) || session_generation == 0U ||
-        link_instance_generation == 0U || peer_out == NULL) {
+        session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        link_instance_generation == 0U ||
+        link_instance_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        peer_out == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
     for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PEERS; ++index) {
@@ -1063,8 +1163,13 @@ ucn_v6_result_t ucn_v6_capability_copy_path(
     if (!owner_is_valid(owner) || owner->faulted ||
         !ucn_v6_principal_is_valid(destination_principal) ||
         !ucn_v6_binding_key_is_valid(destination_binding) ||
-        session_generation == 0U || route_generation == 0U || path_id == 0U ||
-        path_generation == 0U || path_out == NULL) {
+        session_generation == 0U ||
+        session_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        route_generation == 0U ||
+        route_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        path_id == 0U || path_generation == 0U ||
+        path_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        path_out == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
     for (index = 0U; index < UCN_V6_CONFIG_CAPABILITY_PATHS; ++index) {
@@ -1123,6 +1228,59 @@ ucn_v6_result_t ucn_v6_capability_expire(
         if (owner->hints[index].occupied &&
             now_us >= owner->hints[index].deadline_us) {
             memset(&owner->hints[index], 0, sizeof(owner->hints[index]));
+        }
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_GROUP_DISCOVERY_LINKS; ++index) {
+        ucn_v6_group_hint_link_budget_t *link = &owner->hint_links[index];
+        size_t hint_index;
+        bool referenced = false;
+        if (!link->occupied || now_us < link->last_activity_us ||
+            now_us - link->last_activity_us <
+                UCN_V6_GROUP_HINT_TIMEOUT_US) {
+            continue;
+        }
+        for (hint_index = 0U;
+             hint_index < UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS;
+             ++hint_index) {
+            if (owner->hints[hint_index].occupied &&
+                owner->hints[hint_index].ingress_link_id ==
+                    link->ingress_link_id &&
+                owner->hints[hint_index].ingress_link_generation ==
+                    link->ingress_link_generation) {
+                referenced = true;
+                break;
+            }
+        }
+        if (!referenced) {
+            memset(link, 0, sizeof(*link));
+        }
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS; ++index) {
+        ucn_v6_group_hint_group_budget_t *group = &owner->hint_groups[index];
+        size_t hint_index;
+        bool referenced = false;
+        if (!group->occupied || now_us < group->last_activity_us ||
+            now_us - group->last_activity_us <
+                UCN_V6_GROUP_HINT_TIMEOUT_US) {
+            continue;
+        }
+        for (hint_index = 0U;
+             hint_index < UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS;
+             ++hint_index) {
+            if (owner->hints[hint_index].occupied &&
+                owner->hints[hint_index].ingress_link_id ==
+                    group->ingress_link_id &&
+                owner->hints[hint_index].ingress_link_generation ==
+                    group->ingress_link_generation &&
+                owner->hints[hint_index].group_id == group->group_id &&
+                owner->hints[hint_index].group_generation ==
+                    group->group_generation) {
+                referenced = true;
+                break;
+            }
+        }
+        if (!referenced) {
+            memset(group, 0, sizeof(*group));
         }
     }
     return UCN_V6_OK;

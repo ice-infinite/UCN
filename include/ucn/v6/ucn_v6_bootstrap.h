@@ -7,12 +7,6 @@
 extern "C" {
 #endif
 
-#ifndef UCN_V6_CONFIG_BOOTSTRAP_PENDING
-#define UCN_V6_CONFIG_BOOTSTRAP_PENDING 8U
-#endif
-#ifndef UCN_V6_CONFIG_BOOTSTRAP_LINKS
-#define UCN_V6_CONFIG_BOOTSTRAP_LINKS 8U
-#endif
 #define UCN_V6_BOOTSTRAP_MAX_PENDING \
     ((size_t)UCN_V6_CONFIG_BOOTSTRAP_PENDING)
 #define UCN_V6_BOOTSTRAP_MAX_BUDGET_LINKS \
@@ -35,6 +29,7 @@ typedef enum ucn_v6_bootstrap_phase {
 } ucn_v6_bootstrap_phase_t;
 
 typedef struct ucn_v6_bootstrap_key {
+    uint16_t ingress_link_id;
     uint32_t ingress_link_generation;
     uint32_t local_peer_discriminator;
     ucn_v6_principal_t identity_digest;
@@ -85,9 +80,11 @@ typedef struct ucn_v6_bootstrap_pending {
 
 typedef struct ucn_v6_bootstrap_link_budget {
     bool occupied;
+    uint16_t ingress_link_id;
     uint32_t ingress_link_generation;
     uint8_t tokens;
     uint64_t last_refill_us;
+    uint64_t last_activity_us;
 } ucn_v6_bootstrap_link_budget_t;
 
 typedef struct ucn_v6_bootstrap_config {
@@ -102,7 +99,7 @@ typedef struct ucn_v6_bootstrap_owner ucn_v6_bootstrap_owner_t;
 #ifndef UCN_V6_BOOTSTRAP_OWNER_STORAGE_BYTES
 #define UCN_V6_BOOTSTRAP_OWNER_STORAGE_BYTES                           \
     ((size_t)(512U + UCN_V6_CONFIG_BOOTSTRAP_PENDING * 2U * 256U +   \
-              UCN_V6_CONFIG_BOOTSTRAP_LINKS * 32U))
+              UCN_V6_CONFIG_BOOTSTRAP_LINKS * 48U))
 #endif
 typedef union ucn_v6_bootstrap_owner_storage {
     uint64_t alignment_u64;
@@ -129,10 +126,11 @@ ucn_v6_result_t ucn_v6_bootstrap_owner_init_in_place(
     const struct ucn_v6_feature_manifest *manifest,
     const ucn_v6_bootstrap_config_t *config,
     ucn_v6_bootstrap_owner_t **owner);
-/* EN: Applies the no-amplification and per-Link pre-auth token budget.
- * 中文：执行无放大与每 Link 认证前令牌预算。 */
+/* EN: Applies no-amplification and the exact {Link ID, generation} budget.
+ * 中文：执行无放大与精确 {Link ID, generation} 认证前令牌预算。 */
 ucn_v6_result_t ucn_v6_bootstrap_admit_initial_hello(
     ucn_v6_bootstrap_owner_t *owner,
+    uint16_t ingress_link_id,
     uint32_t ingress_link_generation,
     uint64_t now_us,
     size_t request_bytes,
@@ -174,8 +172,13 @@ ucn_v6_result_t ucn_v6_bootstrap_validate_final(
     const ucn_v6_bootstrap_key_t *key,
     const ucn_v6_bootstrap_transcript_t *transcript,
     uint64_t now_us);
-/* EN: Explicitly expires half-open deadlines; hostile input never evicts.
- * 中文：显式清理半开截止期；恶意输入不能借机驱逐槽位。 */
+/* EN: Explicitly expires half-open deadlines and idle Link-generation rate
+ * slots. A rate slot is reclaimed only when no pending transaction refers to
+ * it and its idle interval has elapsed; hostile input never evicts live state.
+ * The return value counts expired pending transactions, not rate slots.
+ * 中文：显式清理半开截止期和空闲 Link-generation 限流槽。
+ * 仅当没有 pending 事务引用且空闲期已到时才回收限流槽；恶意
+ * 输入不能驱逐活跃状态。返回值只统计过期 pending 事务数。 */
 size_t ucn_v6_bootstrap_expire(
     ucn_v6_bootstrap_owner_t *owner,
     uint64_t now_us);

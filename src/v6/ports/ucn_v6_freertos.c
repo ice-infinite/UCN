@@ -45,20 +45,28 @@ static bool ops_valid(const ucn_v6_freertos_port_ops_t *ops)
            ops->read_monotonic_time_us != NULL;
 }
 
-static bool owner_try_lock(void *context, bool from_isr)
+static void owner_lock_task(void *context)
 {
     ucn_v6_freertos_port_t *port = (ucn_v6_freertos_port_t *)context;
-    if (from_isr) {
-        return port->ops.try_lock_from_isr(port->ops.context);
-    }
-    return port->ops.lock_task(port->ops.context) == UCN_V6_OK;
+    port->ops.lock_task(port->ops.context);
 }
 
-static void owner_unlock(void *context, bool from_isr)
+static bool owner_try_lock_from_isr(void *context)
 {
     ucn_v6_freertos_port_t *port = (ucn_v6_freertos_port_t *)context;
-    if (from_isr) port->ops.unlock_from_isr(port->ops.context);
-    else port->ops.unlock_task(port->ops.context);
+    return port->ops.try_lock_from_isr(port->ops.context);
+}
+
+static void owner_unlock_task(void *context)
+{
+    ucn_v6_freertos_port_t *port = (ucn_v6_freertos_port_t *)context;
+    port->ops.unlock_task(port->ops.context);
+}
+
+static void owner_unlock_from_isr(void *context)
+{
+    ucn_v6_freertos_port_t *port = (ucn_v6_freertos_port_t *)context;
+    port->ops.unlock_from_isr(port->ops.context);
 }
 
 static void owner_notify(void *context, bool from_isr)
@@ -70,7 +78,8 @@ static void owner_notify(void *context, bool from_isr)
 static ucn_v6_result_t adapter_lock_task(void *context)
 {
     ucn_v6_freertos_port_t *port = (ucn_v6_freertos_port_t *)context;
-    return port->ops.lock_task(port->ops.context);
+    port->ops.lock_task(port->ops.context);
+    return UCN_V6_OK;
 }
 
 static bool adapter_try_lock_from_isr(void *context)
@@ -132,7 +141,7 @@ ucn_v6_result_t ucn_v6_freertos_port_init_in_place(
                                      UCN_V6_FREERTOS_PORT_STORAGE_BYTES,
                                      UCN_V6_STORAGE_ALIGNMENT);
     if (result != UCN_V6_OK) return result;
-    if (ops->lock_task(ops->context) != UCN_V6_OK) return UCN_V6_ERR_STATE;
+    ops->lock_task(ops->context);
     memset(storage, 0, storage_bytes);
     port = (ucn_v6_freertos_port_t *)storage;
     port->magic = UCN_V6_FREERTOS_MAGIC;
@@ -144,8 +153,10 @@ ucn_v6_result_t ucn_v6_freertos_port_init_in_place(
     port->canary = UCN_V6_FREERTOS_CANARY;
     memset(&owner_ops, 0, sizeof(owner_ops));
     owner_ops.context = port;
-    owner_ops.try_lock = owner_try_lock;
-    owner_ops.unlock = owner_unlock;
+    owner_ops.lock_task = owner_lock_task;
+    owner_ops.try_lock_from_isr = owner_try_lock_from_isr;
+    owner_ops.unlock_task = owner_unlock_task;
+    owner_ops.unlock_from_isr = owner_unlock_from_isr;
     owner_ops.notify = owner_notify;
     ops->unlock_task(ops->context);
     result = ucn_v6_protocol_owner_init_in_place(
@@ -182,9 +193,7 @@ ucn_v6_result_t ucn_v6_freertos_port_bind_adapter(
     ucn_v6_adapter_owner_t *adapter)
 {
     if (!port_valid(port) || adapter == NULL) return UCN_V6_ERR_ARGUMENT;
-    if (port->ops.lock_task(port->ops.context) != UCN_V6_OK) {
-        return UCN_V6_ERR_STATE;
-    }
+    port->ops.lock_task(port->ops.context);
     if (port->adapter != NULL) {
         port->ops.unlock_task(port->ops.context);
         return UCN_V6_ERR_REPLAY;

@@ -6,6 +6,7 @@
 #define RECORD_MAGIC UINT32_C(0x56364352)
 #define RECORD_BODY_BYTES (UCN_V6_CLUSTER_RECORD_BYTES - 4U)
 #define CONTROL_BODY_BYTES (UCN_V6_CLUSTER_CONTROL_BYTES - 4U)
+#define DIRECTORY_BODY_BYTES (UCN_V6_CLUSTER_DIRECTORY_BYTES - 4U)
 
 typedef char cluster_owner_storage_must_fit[
     sizeof(struct ucn_v6_cluster_owner) <= UCN_V6_CLUSTER_OWNER_STORAGE_BYTES ?
@@ -37,6 +38,11 @@ static bool serial_valid(uint32_t value)
     return value != 0U && value <= UCN_V6_SERIAL_ROTATION_THRESHOLD;
 }
 
+static bool serial64_valid(uint64_t value)
+{
+    return value != 0U && value <= UCN_V6_SERIAL64_ROTATION_THRESHOLD;
+}
+
 static bool principal_equal(const ucn_v6_principal_t *left,
                             const ucn_v6_principal_t *right)
 {
@@ -51,6 +57,69 @@ static bool binding_equal(const ucn_v6_binding_key_t *left,
            left->realm_id == right->realm_id &&
            left->node_address == right->node_address &&
            left->binding_generation == right->binding_generation;
+}
+
+static bool route_domain_equal(const ucn_v6_route_domain_t *left,
+                               const ucn_v6_route_domain_t *right)
+{
+    return left != NULL && right != NULL &&
+           principal_equal(&left->origin_principal,
+                           &right->origin_principal) &&
+           binding_equal(&left->origin_binding, &right->origin_binding) &&
+           left->origin_session_generation ==
+               right->origin_session_generation &&
+           principal_equal(&left->destination_principal,
+                           &right->destination_principal) &&
+           binding_equal(&left->destination_binding,
+                         &right->destination_binding);
+}
+
+static bool path_capability_equal(const ucn_v6_path_capability_t *left,
+                                  const ucn_v6_path_capability_t *right)
+{
+    return left != NULL && right != NULL &&
+           left->valid == right->valid &&
+           left->immutable_for_realtime == right->immutable_for_realtime &&
+           principal_equal(&left->destination_principal,
+                           &right->destination_principal) &&
+           binding_equal(&left->destination_binding,
+                         &right->destination_binding) &&
+           left->session_generation == right->session_generation &&
+           left->destination_link_instance_generation ==
+               right->destination_link_instance_generation &&
+           memcmp(left->destination_capability_digest,
+                  right->destination_capability_digest,
+                  UCN_V6_CAPABILITY_DIGEST_BYTES) == 0 &&
+           left->route_generation == right->route_generation &&
+           left->path_id == right->path_id &&
+           left->path_generation == right->path_generation &&
+           left->path_frame_mtu == right->path_frame_mtu &&
+           left->payload_budget == right->payload_budget &&
+           left->fragment_data_budget == right->fragment_data_budget &&
+           left->feature_bits == right->feature_bits &&
+           left->hop_suite_bits == right->hop_suite_bits &&
+           left->e2e_suite_bits == right->e2e_suite_bits &&
+           left->max_message_class == right->max_message_class &&
+           left->max_window == right->max_window &&
+           left->max_concurrency == right->max_concurrency &&
+           left->timestamp_capability_bits ==
+               right->timestamp_capability_bits &&
+           left->timestamp_uncertainty_us ==
+               right->timestamp_uncertainty_us &&
+           left->deadline_us == right->deadline_us;
+}
+
+static bool tunnel_equal(const ucn_v6_cluster_tunnel_t *left,
+                         const ucn_v6_cluster_tunnel_t *right)
+{
+    return left != NULL && right != NULL &&
+           left->occupied == right->occupied &&
+           left->tunnel_id == right->tunnel_id &&
+           left->source_cluster_id == right->source_cluster_id &&
+           left->destination_cluster_id == right->destination_cluster_id &&
+           route_domain_equal(&left->route_domain, &right->route_domain) &&
+           path_capability_equal(&left->path, &right->path) &&
+           left->deadline_us == right->deadline_us;
 }
 
 static bool epoch_equal(const ucn_v6_cluster_epoch_t *left,
@@ -300,6 +369,26 @@ bool ucn_v6_cluster_config_is_valid(const ucn_v6_cluster_config_t *config)
     return true;
 }
 
+static bool config_contains_voter(
+    const ucn_v6_cluster_config_t *config,
+    const ucn_v6_principal_t *principal,
+    const ucn_v6_binding_key_t *binding)
+{
+    size_t index;
+    if (!ucn_v6_cluster_config_is_valid(config) || principal == NULL ||
+        binding == NULL) {
+        return false;
+    }
+    for (index = 0U; index < config->voter_count; ++index) {
+        if (principal_equal(&config->voters[index].principal, principal) &&
+            ucn_v6_binding_key_equal(&config->voters[index].binding,
+                                     binding)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool config_equal(const ucn_v6_cluster_config_t *left,
                          const ucn_v6_cluster_config_t *right)
 {
@@ -398,7 +487,7 @@ static bool backup_is_valid(const ucn_v6_cluster_backup_t *backup)
            ucn_v6_binding_key_is_valid(&backup->binding) &&
            serial_valid(backup->generation) &&
            (!backup->ready ||
-            (backup->config_transaction_id != 0U &&
+            (serial64_valid(backup->config_transaction_id) &&
              serial_valid(backup->acknowledged_config_generation)));
 }
 
@@ -451,7 +540,7 @@ static bool transition_is_valid(
     }
     return transition->kind >= UCN_V6_CLUSTER_TRANSITION_TAKEOVER &&
            transition->kind <= UCN_V6_CLUSTER_TRANSITION_REKEY &&
-           transition->transaction_id != 0U &&
+           serial64_valid(transition->transaction_id) &&
            ucn_v6_cluster_epoch_is_valid(&transition->old_epoch) &&
            ucn_v6_cluster_epoch_is_valid(&transition->target_epoch) &&
            serial_valid(transition->target_config_id) &&
@@ -466,11 +555,13 @@ static bool transition_is_valid(
 static bool snapshot_is_valid(const ucn_v6_cluster_snapshot_t *snapshot)
 {
     size_t index;
-    if (snapshot == NULL || snapshot->record_generation == 0U ||
+    if (snapshot == NULL || !serial64_valid(snapshot->record_generation) ||
+        snapshot->transaction_high_water >
+            UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
         snapshot->boot_incarnation == 0U ||
         snapshot->boot_incarnation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        snapshot->role > UCN_V6_CLUSTER_FENCED ||
-        snapshot->phase > UCN_V6_CLUSTER_PHASE_FAULT ||
+        (uint32_t)snapshot->role > (uint32_t)UCN_V6_CLUSTER_FENCED ||
+        (uint32_t)snapshot->phase > (uint32_t)UCN_V6_CLUSTER_PHASE_FAULT ||
         snapshot->tombstone_count > UCN_V6_CONFIG_CLUSTER_TOMBSTONES) {
         return false;
     }
@@ -499,7 +590,7 @@ static bool snapshot_is_valid(const ucn_v6_cluster_snapshot_t *snapshot)
     }
     if (snapshot->joint_valid) {
         if (snapshot->phase != UCN_V6_CLUSTER_PHASE_JOINT ||
-            snapshot->joint_transaction_id == 0U ||
+            !serial64_valid(snapshot->joint_transaction_id) ||
             !ucn_v6_cluster_config_is_valid(&snapshot->joint_new_config)) {
             return false;
         }
@@ -532,7 +623,7 @@ static bool snapshot_is_valid(const ucn_v6_cluster_snapshot_t *snapshot)
             if (!item->occupied || !serial_valid(item->retired_cluster_id) ||
                 !serial_valid(item->replacement_cluster_id) ||
                 item->retired_cluster_id == item->replacement_cluster_id ||
-                item->transaction_id == 0U) {
+                !serial64_valid(item->transaction_id)) {
                 return false;
             }
             for (prior = 0U; prior < index; ++prior) {
@@ -814,8 +905,10 @@ ucn_v6_result_t ucn_v6_cluster_snapshot_decode(
 static bool control_is_valid(const ucn_v6_cluster_control_t *control)
 {
     if (control == NULL ||
-        control->kind < UCN_V6_CLUSTER_CTL_ADVERTISE ||
-        control->kind > UCN_V6_CLUSTER_CTL_REKEY_COMMIT ||
+        (uint32_t)control->kind <
+            (uint32_t)UCN_V6_CLUSTER_CTL_ADVERTISE ||
+        (uint32_t)control->kind >
+            (uint32_t)UCN_V6_CLUSTER_CTL_REKEY_COMMIT ||
         (control->flags & UINT16_C(0xFFF0)) != 0U ||
         !ucn_v6_cluster_epoch_is_valid(&control->old_epoch)) {
         return false;
@@ -825,7 +918,7 @@ static bool control_is_valid(const ucn_v6_cluster_control_t *control)
         return false;
     }
     if (control->kind >= UCN_V6_CLUSTER_CTL_CONFIG_PREPARE &&
-        control->transaction_id == 0U) {
+        !serial64_valid(control->transaction_id)) {
         return false;
     }
     if (control->kind == UCN_V6_CLUSTER_CTL_CONFIG_PREPARE ||
@@ -936,6 +1029,110 @@ ucn_v6_result_t ucn_v6_cluster_control_decode(
     return UCN_V6_OK;
 }
 
+static bool directory_wire_is_valid(
+    const ucn_v6_cluster_directory_entry_t *entry)
+{
+    return entry != NULL && entry->occupied &&
+           serial_valid(entry->remote_cluster_id) &&
+           ucn_v6_cluster_epoch_is_valid(&entry->remote_epoch) &&
+           entry->remote_epoch.cluster_id == entry->remote_cluster_id &&
+           ucn_v6_principal_is_valid(&entry->next_hop.principal) &&
+           ucn_v6_binding_key_is_valid(&entry->next_hop.binding) &&
+           serial_valid(entry->next_hop.session_generation) &&
+           serial_valid(entry->route_generation) && entry->path_id != 0U &&
+           serial_valid(entry->path_generation) && entry->deadline_us != 0U;
+}
+
+ucn_v6_result_t ucn_v6_cluster_directory_encode(
+    const ucn_v6_cluster_directory_entry_t *entry,
+    uint8_t output[UCN_V6_CLUSTER_DIRECTORY_BYTES])
+{
+    uint8_t encoded[UCN_V6_CLUSTER_DIRECTORY_BYTES];
+    byte_writer_t writer;
+    uint32_t crc;
+
+    if (!directory_wire_is_valid(entry) || output == NULL) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(encoded, 0, sizeof(encoded));
+    writer.bytes = encoded;
+    writer.capacity = DIRECTORY_BODY_BYTES;
+    writer.offset = 0U;
+    writer.ok = true;
+    writer_u8(&writer, UCN_V6_CLUSTER_DIRECTORY_VERSION);
+    writer_u8(&writer, 1U);
+    writer_skip(&writer, 2U);
+    writer_u32(&writer, entry->remote_cluster_id);
+    write_epoch(&writer, &entry->remote_epoch);
+    writer_bytes(&writer, entry->next_hop.principal.bytes,
+                 sizeof(entry->next_hop.principal.bytes));
+    write_binding(&writer, &entry->next_hop.binding);
+    writer_u32(&writer, entry->next_hop.session_generation);
+    writer_u32(&writer, entry->route_generation);
+    writer_u16(&writer, entry->path_id);
+    writer_u32(&writer, entry->path_generation);
+    writer_u64(&writer, entry->deadline_us);
+    writer_skip(&writer, 2U);
+    if (!writer.ok || writer.offset != DIRECTORY_BODY_BYTES) {
+        return UCN_V6_ERR_EXHAUSTED;
+    }
+    crc = ucn_v6_crc32c(encoded, DIRECTORY_BODY_BYTES);
+    encoded[DIRECTORY_BODY_BYTES] = (uint8_t)(crc >> 24U);
+    encoded[DIRECTORY_BODY_BYTES + 1U] = (uint8_t)(crc >> 16U);
+    encoded[DIRECTORY_BODY_BYTES + 2U] = (uint8_t)(crc >> 8U);
+    encoded[DIRECTORY_BODY_BYTES + 3U] = (uint8_t)crc;
+    memcpy(output, encoded, sizeof(encoded));
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_cluster_directory_decode(
+    const uint8_t *input, size_t input_length,
+    ucn_v6_cluster_directory_entry_t *entry)
+{
+    ucn_v6_cluster_directory_entry_t decoded;
+    byte_reader_t reader;
+    uint32_t expected_crc;
+
+    if (input == NULL || entry == NULL ||
+        input_length != UCN_V6_CLUSTER_DIRECTORY_BYTES) {
+        return UCN_V6_ERR_MALFORMED;
+    }
+    expected_crc = ((uint32_t)input[DIRECTORY_BODY_BYTES] << 24U) |
+                   ((uint32_t)input[DIRECTORY_BODY_BYTES + 1U] << 16U) |
+                   ((uint32_t)input[DIRECTORY_BODY_BYTES + 2U] << 8U) |
+                   input[DIRECTORY_BODY_BYTES + 3U];
+    if (expected_crc != ucn_v6_crc32c(input, DIRECTORY_BODY_BYTES)) {
+        return UCN_V6_ERR_MALFORMED;
+    }
+    memset(&decoded, 0, sizeof(decoded));
+    reader.bytes = input;
+    reader.length = DIRECTORY_BODY_BYTES;
+    reader.offset = 0U;
+    reader.ok = true;
+    if (reader_u8(&reader) != UCN_V6_CLUSTER_DIRECTORY_VERSION ||
+        reader_u8(&reader) != 1U || !reader_zero(&reader, 2U)) {
+        return UCN_V6_ERR_MALFORMED;
+    }
+    decoded.occupied = true;
+    decoded.remote_cluster_id = reader_u32(&reader);
+    read_epoch(&reader, &decoded.remote_epoch);
+    reader_bytes(&reader, decoded.next_hop.principal.bytes,
+                 sizeof(decoded.next_hop.principal.bytes));
+    read_binding(&reader, &decoded.next_hop.binding);
+    decoded.next_hop.session_generation = reader_u32(&reader);
+    decoded.route_generation = reader_u32(&reader);
+    decoded.path_id = reader_u16(&reader);
+    decoded.path_generation = reader_u32(&reader);
+    decoded.deadline_us = reader_u64(&reader);
+    if (!reader_zero(&reader, 2U) || !reader.ok ||
+        reader.offset != DIRECTORY_BODY_BYTES ||
+        !directory_wire_is_valid(&decoded)) {
+        return UCN_V6_ERR_MALFORMED;
+    }
+    *entry = decoded;
+    return UCN_V6_OK;
+}
+
 static bool owner_is_valid(const ucn_v6_cluster_owner_t *owner)
 {
     return owner != NULL && owner->magic == UCN_V6_CLUSTER_OWNER_MAGIC &&
@@ -946,7 +1143,9 @@ static bool owner_is_valid(const ucn_v6_cluster_owner_t *owner)
 
 static bool store_is_valid(const ucn_v6_cluster_store_ops_t *store)
 {
-    return store != NULL && store->load != NULL && store->submit != NULL;
+    return store != NULL && store->load_generation_witness != NULL &&
+           store->reserve_generation_witness != NULL &&
+           store->load != NULL && store->submit != NULL;
 }
 
 static bool gate_is_available(ucn_v6_cluster_owner_t *owner)
@@ -979,10 +1178,15 @@ static ucn_v6_result_t persist_snapshot(
     const ucn_v6_cluster_snapshot_t *requested)
 {
     size_t loaded_length = 0U;
+    uint64_t loaded_witness = 0U;
     ucn_v6_result_t result;
-    if (owner == NULL || requested == NULL || owner->persistence_faulted ||
-        requested->record_generation == UINT64_MAX) {
+    if (owner == NULL || requested == NULL || owner->persistence_faulted) {
         return UCN_V6_ERR_STATE;
+    }
+    if (owner->durable.record_generation >=
+        UCN_V6_SERIAL64_ROTATION_THRESHOLD) {
+        persistence_fault(owner);
+        return UCN_V6_ERR_EXHAUSTED;
     }
     owner->staging = *requested;
     owner->staging.record_generation = owner->durable.record_generation + 1U;
@@ -995,15 +1199,25 @@ static ucn_v6_result_t persist_snapshot(
     if (result != UCN_V6_OK) {
         return result;
     }
-    result = owner->store.submit(owner->store.context, owner->record_work,
-                                 UCN_V6_CLUSTER_RECORD_BYTES);
+    result = owner->store.reserve_generation_witness(
+        owner->store.context, owner->staging.record_generation);
     if (result == UCN_V6_OK) {
-        result = owner->store.load(owner->store.context, owner->record_verify,
+        result = owner->store.submit(owner->store.context, owner->record_work,
+                                     UCN_V6_CLUSTER_RECORD_BYTES);
+    }
+    if (result == UCN_V6_OK) {
+        result = owner->store.load_generation_witness(
+            owner->store.context, &loaded_witness);
+    }
+    if (result == UCN_V6_OK) {
+        result = owner->store.load(owner->store.context,
+                                   owner->record_verify,
                                    UCN_V6_CLUSTER_RECORD_BYTES,
                                    &loaded_length);
     }
     gate_leave(owner);
     if (result != UCN_V6_OK ||
+        loaded_witness != owner->staging.record_generation ||
         loaded_length != UCN_V6_CLUSTER_RECORD_BYTES ||
         memcmp(owner->record_work, owner->record_verify,
                UCN_V6_CLUSTER_RECORD_BYTES) != 0) {
@@ -1166,6 +1380,41 @@ static bool opened_is_authorized(const ucn_v6_security_open_result_t *opened)
                UCN_V6_SERIAL_ROTATION_THRESHOLD;
 }
 
+static bool opened_cluster_control(
+    const ucn_v6_security_open_result_t *opened,
+    ucn_v6_cluster_control_kind_t expected_kind,
+    ucn_v6_cluster_control_t *control)
+{
+    ucn_v6_cluster_control_t decoded;
+
+    if (!opened_is_authorized(opened) || control == NULL ||
+        opened->frame.frame_type != UCN_V6_FRAME_CONTROL ||
+        (opened->frame.flags & UCN_V6_FLAG_PROTOCOL_CONTEXT) == 0U ||
+        opened->frame.protocol_opcode != UCN_V6_PROTOCOL_OPCODE_CLUSTER_CONTROL ||
+        ucn_v6_cluster_control_decode(opened->frame.payload,
+                                      opened->frame.payload_length,
+                                      &decoded) != UCN_V6_OK ||
+        decoded.kind != expected_kind) {
+        return false;
+    }
+    *control = decoded;
+    return true;
+}
+
+static bool opened_cluster_directory(
+    const ucn_v6_security_open_result_t *opened,
+    ucn_v6_cluster_directory_entry_t *entry)
+{
+    return opened_is_authorized(opened) && entry != NULL &&
+           opened->frame.frame_type == UCN_V6_FRAME_CONTROL &&
+           (opened->frame.flags & UCN_V6_FLAG_PROTOCOL_CONTEXT) != 0U &&
+           opened->frame.protocol_opcode ==
+               UCN_V6_PROTOCOL_OPCODE_CLUSTER_DIRECTORY &&
+           ucn_v6_cluster_directory_decode(opened->frame.payload,
+                                            opened->frame.payload_length,
+                                            entry) == UCN_V6_OK;
+}
+
 static bool local_is_voter(const ucn_v6_cluster_owner_t *owner,
                            const ucn_v6_cluster_config_t *config)
 {
@@ -1195,6 +1444,9 @@ ucn_v6_result_t ucn_v6_cluster_owner_init_in_place(
 {
     ucn_v6_cluster_owner_t *target;
     size_t length = 0U;
+    uint64_t witness = 0U;
+    uint64_t verify_witness = 0U;
+    ucn_v6_result_t witness_result;
     ucn_v6_result_t result;
     if (owner != NULL) {
         *owner = NULL;
@@ -1228,24 +1480,31 @@ ucn_v6_result_t ucn_v6_cluster_owner_init_in_place(
         memset(storage, 0, storage_bytes);
         return result;
     }
+    witness_result = store->load_generation_witness(store->context, &witness);
     result = store->load(store->context, target->record_verify,
                          UCN_V6_CLUSTER_RECORD_BYTES, &length);
     (void)ucn_v6_callback_gate_leave(callback_gate, storage);
-    if (result == UCN_V6_ERR_NOT_FOUND) {
+    if (result == UCN_V6_ERR_NOT_FOUND &&
+        witness_result == UCN_V6_ERR_NOT_FOUND) {
         memset(&target->durable, 0, sizeof(target->durable));
         target->durable.record_generation = 1U;
         target->durable.boot_incarnation = 1U;
         target->durable.role = UCN_V6_CLUSTER_OBSERVER;
         target->durable.phase = UCN_V6_CLUSTER_PHASE_STABLE;
-    } else if (result == UCN_V6_OK &&
+    } else if (result == UCN_V6_OK && witness_result == UCN_V6_OK &&
                length == UCN_V6_CLUSTER_RECORD_BYTES &&
                ucn_v6_cluster_snapshot_decode(target->record_verify, length,
                                                &target->staging,
                                                &target->durable) ==
                    UCN_V6_OK &&
-               target->durable.record_generation != UINT64_MAX &&
-               target->durable.boot_incarnation <
-                   UCN_V6_SERIAL_ROTATION_THRESHOLD) {
+               witness == target->durable.record_generation) {
+        if (target->durable.record_generation >=
+                UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
+            target->durable.boot_incarnation >=
+                UCN_V6_SERIAL_ROTATION_THRESHOLD) {
+            memset(storage, 0, storage_bytes);
+            return UCN_V6_ERR_EXHAUSTED;
+        }
         ++target->durable.record_generation;
         ++target->durable.boot_incarnation;
     } else {
@@ -1262,8 +1521,16 @@ ucn_v6_result_t ucn_v6_cluster_owner_init_in_place(
         memset(storage, 0, storage_bytes);
         return result;
     }
-    result = store->submit(store->context, target->record_work,
-                           UCN_V6_CLUSTER_RECORD_BYTES);
+    result = store->reserve_generation_witness(
+        store->context, target->durable.record_generation);
+    if (result == UCN_V6_OK) {
+        result = store->submit(store->context, target->record_work,
+                               UCN_V6_CLUSTER_RECORD_BYTES);
+    }
+    if (result == UCN_V6_OK) {
+        result = store->load_generation_witness(store->context,
+                                                &verify_witness);
+    }
     if (result == UCN_V6_OK) {
         length = 0U;
         result = store->load(store->context, target->record_verify,
@@ -1271,6 +1538,7 @@ ucn_v6_result_t ucn_v6_cluster_owner_init_in_place(
     }
     (void)ucn_v6_callback_gate_leave(callback_gate, storage);
     if (result != UCN_V6_OK ||
+        verify_witness != target->durable.record_generation ||
         length != UCN_V6_CLUSTER_RECORD_BYTES ||
         memcmp(target->record_work, target->record_verify,
                UCN_V6_CLUSTER_RECORD_BYTES) != 0) {
@@ -1323,7 +1591,9 @@ ucn_v6_result_t ucn_v6_cluster_admit_member(
     uint64_t deadline;
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
         !opened_is_authorized(opened) || capability == NULL ||
-        !capability->valid || lease_duration_us == 0U ||
+        !capability->valid || capability->discovery_deadline_us <= now_us ||
+        capability->capability_deadline_us <= now_us ||
+        lease_duration_us == 0U ||
         UINT64_MAX - now_us < lease_duration_us ||
         !principal_equal(&opened->authenticated_principal,
                          &capability->principal) ||
@@ -1407,17 +1677,19 @@ ucn_v6_result_t ucn_v6_cluster_assign_backup(
 
 ucn_v6_result_t ucn_v6_cluster_backup_ack_config(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened,
-    uint64_t transaction_id, uint32_t config_id,
-    uint32_t config_generation)
+    const ucn_v6_security_open_result_t *opened)
 {
+    ucn_v6_cluster_control_t control;
     ucn_v6_cluster_snapshot_t *next;
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
-        !opened_is_authorized(opened) || !owner->durable.backup.valid ||
-        !owner->durable.joint_valid || transaction_id == 0U ||
-        transaction_id != owner->durable.joint_transaction_id ||
-        config_id != owner->durable.joint_new_config.config_id ||
-        config_generation != owner->durable.joint_new_config.generation ||
+        !opened_cluster_control(opened, UCN_V6_CLUSTER_CTL_CONFIG_ACK,
+                                &control) ||
+        !owner->durable.backup.valid || !owner->durable.joint_valid ||
+        !serial64_valid(control.transaction_id) ||
+        control.transaction_id != owner->durable.joint_transaction_id ||
+        control.config_id != owner->durable.joint_new_config.config_id ||
+        control.config_generation != owner->durable.joint_new_config.generation ||
+        !epoch_equal(&control.old_epoch, &owner->durable.active_epoch) ||
         !principal_equal(&opened->authenticated_principal,
                          &owner->durable.backup.principal) ||
         !binding_equal(&opened->ingress_peer_session.binding,
@@ -1427,8 +1699,8 @@ ucn_v6_result_t ucn_v6_cluster_backup_ack_config(
     owner->staging = owner->durable;
     next = &owner->staging;
     next->backup.ready = true;
-    next->backup.config_transaction_id = transaction_id;
-    next->backup.acknowledged_config_generation = config_generation;
+    next->backup.config_transaction_id = control.transaction_id;
+    next->backup.acknowledged_config_generation = control.config_generation;
     return persist_snapshot(owner, next);
 }
 
@@ -1441,7 +1713,8 @@ ucn_v6_result_t ucn_v6_cluster_prepare_joint(
     uint32_t expected_generation;
     ucn_v6_result_t result;
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
-        transaction_id == 0U || !ucn_v6_cluster_config_is_valid(new_config) ||
+        !serial64_valid(transaction_id) ||
+        !ucn_v6_cluster_config_is_valid(new_config) ||
         owner->durable.phase != UCN_V6_CLUSTER_PHASE_STABLE ||
         owner->durable.joint_valid ||
         transaction_id <= owner->durable.transaction_high_water ||
@@ -1485,7 +1758,7 @@ ucn_v6_result_t ucn_v6_cluster_commit_joint(
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
         !owner->durable.joint_valid ||
         owner->durable.phase != UCN_V6_CLUSTER_PHASE_JOINT ||
-        transaction_id == 0U ||
+        !serial64_valid(transaction_id) ||
         transaction_id != owner->durable.joint_transaction_id) {
         return UCN_V6_ERR_STATE;
     }
@@ -1527,7 +1800,7 @@ ucn_v6_result_t ucn_v6_cluster_abort_joint(
     ucn_v6_cluster_snapshot_t *next;
     ucn_v6_result_t result;
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
-        !owner->durable.joint_valid || transaction_id == 0U ||
+        !owner->durable.joint_valid || !serial64_valid(transaction_id) ||
         owner->durable.joint_transaction_id != transaction_id ||
         !config_equal(&owner->durable.joint_new_config, expected_new_config)) {
         return UCN_V6_ERR_STATE;
@@ -1575,7 +1848,8 @@ ucn_v6_result_t ucn_v6_cluster_begin_takeover(
     int self_index;
     uint32_t term;
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
-        transaction_id == 0U || !serial_valid(backup_generation) ||
+        !serial64_valid(transaction_id) ||
+        !serial_valid(backup_generation) ||
         transaction_id <= owner->durable.transaction_high_water ||
         owner->durable.phase != UCN_V6_CLUSTER_PHASE_STABLE ||
         !owner->durable.backup.valid ||
@@ -1626,17 +1900,32 @@ ucn_v6_result_t ucn_v6_cluster_begin_takeover(
 
 ucn_v6_result_t ucn_v6_cluster_record_transition_vote(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened,
-    const ucn_v6_cluster_control_t *vote)
+    const ucn_v6_security_open_result_t *opened)
 {
+    ucn_v6_cluster_control_t decoded;
+    const ucn_v6_cluster_control_t *vote = &decoded;
     ucn_v6_cluster_snapshot_t *next;
     int old_index;
     int new_index;
     uint32_t old_bit = 0U;
     uint32_t new_bit = 0U;
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
-        !opened_is_authorized(opened) || !control_is_valid(vote) ||
         !owner->durable.transition.valid ||
+        (owner->durable.phase != UCN_V6_CLUSTER_PHASE_TAKEOVER &&
+         owner->durable.phase != UCN_V6_CLUSTER_PHASE_RECOVERY)) {
+        if (owner_is_valid(owner)) increment_saturated(&owner->rejected_security);
+        return UCN_V6_ERR_ACCESS;
+    }
+    if (!opened_cluster_control(
+            opened,
+            owner->durable.phase == UCN_V6_CLUSTER_PHASE_TAKEOVER ?
+                UCN_V6_CLUSTER_CTL_TAKEOVER_VOTE :
+                UCN_V6_CLUSTER_CTL_RECOVERY_VOTE,
+            &decoded)) {
+        increment_saturated(&owner->rejected_security);
+        return UCN_V6_ERR_ACCESS;
+    }
+    if (
         owner->durable.transition.transaction_id != vote->transaction_id ||
         !epoch_equal(&owner->durable.transition.old_epoch,
                      &vote->old_epoch) ||
@@ -1644,9 +1933,7 @@ ucn_v6_result_t ucn_v6_cluster_record_transition_vote(
                      &vote->target_epoch) ||
         owner->durable.transition.target_config_id != vote->config_id ||
         owner->durable.transition.target_config_generation !=
-            vote->config_generation ||
-        (owner->durable.phase != UCN_V6_CLUSTER_PHASE_TAKEOVER &&
-         owner->durable.phase != UCN_V6_CLUSTER_PHASE_RECOVERY)) {
+            vote->config_generation) {
         if (owner_is_valid(owner)) increment_saturated(&owner->rejected_security);
         return UCN_V6_ERR_ACCESS;
     }
@@ -1703,7 +1990,7 @@ ucn_v6_result_t ucn_v6_cluster_commit_takeover(
         !owner->durable.transition.valid ||
         owner->durable.transition.kind !=
             UCN_V6_CLUSTER_TRANSITION_TAKEOVER ||
-        transaction_id == 0U ||
+        !serial64_valid(transaction_id) ||
         owner->durable.transition.transaction_id != transaction_id ||
         !transition_has_quorum(&owner->durable)) {
         increment_saturated(&owner->rejected_quorum);
@@ -1732,10 +2019,13 @@ ucn_v6_result_t ucn_v6_cluster_begin_handover(
         return UCN_V6_ERR_STATE;
     }
     recompute_authority(owner, now_us);
-    if (!owner->authority_active || transaction_id == 0U ||
+    if (!owner->authority_active || !serial64_valid(transaction_id) ||
         transaction_id <= owner->durable.transaction_high_water ||
         !ucn_v6_cluster_epoch_is_valid(target_epoch) ||
         !ucn_v6_cluster_config_is_valid(target_config) ||
+        !config_contains_voter(target_config,
+                               &target_epoch->head_principal,
+                               &target_epoch->head_binding) ||
         principal_equal(&target_epoch->head_principal,
                         &owner->local_principal) ||
         owner->durable.phase != UCN_V6_CLUSTER_PHASE_STABLE) {
@@ -1776,12 +2066,14 @@ ucn_v6_result_t ucn_v6_cluster_begin_handover(
 
 ucn_v6_result_t ucn_v6_cluster_handover_ready(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened,
-    const ucn_v6_cluster_control_t *ready)
+    const ucn_v6_security_open_result_t *opened)
 {
+    ucn_v6_cluster_control_t decoded;
+    const ucn_v6_cluster_control_t *ready = &decoded;
     ucn_v6_cluster_snapshot_t *next;
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
-        !opened_is_authorized(opened) || !control_is_valid(ready) ||
+        !opened_cluster_control(opened, UCN_V6_CLUSTER_CTL_HANDOVER_READY,
+                                &decoded) ||
         owner->durable.phase != UCN_V6_CLUSTER_PHASE_HANDOVER ||
         !owner->durable.transition.valid ||
         ready->kind != UCN_V6_CLUSTER_CTL_HANDOVER_READY ||
@@ -1813,7 +2105,8 @@ ucn_v6_result_t ucn_v6_cluster_commit_handover(
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
         owner->durable.phase != UCN_V6_CLUSTER_PHASE_HANDOVER ||
         !owner->durable.transition.valid ||
-        !owner->durable.transition.ready || transaction_id == 0U ||
+        !owner->durable.transition.ready ||
+        !serial64_valid(transaction_id) ||
         owner->durable.transition.transaction_id != transaction_id) {
         return UCN_V6_ERR_STATE;
     }
@@ -1851,7 +2144,7 @@ ucn_v6_result_t ucn_v6_cluster_begin_recovery(
         return UCN_V6_ERR_STATE;
     }
     recompute_authority(owner, now_us);
-    if (owner->authority_active || transaction_id == 0U ||
+    if (owner->authority_active || !serial64_valid(transaction_id) ||
         transaction_id <= owner->durable.transaction_high_water ||
         !ucn_v6_cluster_epoch_is_valid(target_epoch) ||
         !principal_equal(&target_epoch->head_principal,
@@ -1901,7 +2194,8 @@ ucn_v6_result_t ucn_v6_cluster_commit_recovery(
     ucn_v6_result_t result;
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
         owner->durable.phase != UCN_V6_CLUSTER_PHASE_RECOVERY ||
-        !owner->durable.transition.valid || transaction_id == 0U ||
+        !owner->durable.transition.valid ||
+        !serial64_valid(transaction_id) ||
         owner->durable.transition.transaction_id != transaction_id ||
         !transition_has_quorum(&owner->durable)) {
         increment_saturated(&owner->rejected_quorum);
@@ -1939,7 +2233,7 @@ ucn_v6_result_t ucn_v6_cluster_rekey(
         return UCN_V6_ERR_STATE;
     }
     recompute_authority(owner, now_us);
-    if (!owner->authority_active || transaction_id == 0U ||
+    if (!owner->authority_active || !serial64_valid(transaction_id) ||
         transaction_id <= owner->durable.transaction_high_water ||
         !serial_valid(successor_cluster_id) ||
         successor_cluster_id == owner->durable.active_epoch.cluster_id ||
@@ -1989,12 +2283,14 @@ static bool directory_entry_is_valid(
 ucn_v6_result_t ucn_v6_cluster_directory_install(
     ucn_v6_cluster_owner_t *owner,
     const ucn_v6_security_open_result_t *opened,
-    const ucn_v6_cluster_directory_entry_t *entry, uint64_t now_us)
+    uint64_t now_us)
 {
+    ucn_v6_cluster_directory_entry_t decoded;
+    const ucn_v6_cluster_directory_entry_t *entry = &decoded;
     size_t index;
     size_t empty = UCN_V6_CONFIG_CLUSTER_DIRECTORY;
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
-        !opened_is_authorized(opened) ||
+        !opened_cluster_directory(opened, &decoded) ||
         !directory_entry_is_valid(entry, now_us) ||
         !principal_equal(&opened->authenticated_principal,
                          &entry->remote_epoch.head_principal)) {
@@ -2085,7 +2381,7 @@ ucn_v6_result_t ucn_v6_cluster_tunnel_install(
             continue;
         }
         if (current->tunnel_id == tunnel->tunnel_id) {
-            if (memcmp(current, tunnel, sizeof(*current)) == 0) {
+            if (tunnel_equal(current, tunnel)) {
                 return UCN_V6_OK;
             }
             return UCN_V6_ERR_REPLAY;

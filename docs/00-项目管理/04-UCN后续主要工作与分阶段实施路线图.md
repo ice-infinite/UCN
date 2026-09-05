@@ -81,7 +81,7 @@ UCN 不应继续用一个发布结论同时覆盖 v5 实验、v6 Core 和 Cluste
 | 发布线 | 内容 | 当前状态 | 放行方式 |
 | --- | --- | --- | --- |
 | v5 Experimental | 当前 Frame、Node、Mesh、Route、Path、QoS、Transfer 和实验组件 | 软件证据丰富但不发布 | 只形成不可变历史快照 |
-| v6 / UCN 1.0 | 单一 Identity、Wire、Security、Message、Capability、RouteSet、Transfer 与参考平台 | V6-00 架构 RFC 已终审 GO；实现未开始 | 按 V6-01～V6-15 逐项实现和外审 |
+| v6 / UCN 1.0 | 单一 Identity、Wire、Security、Message、Capability、RouteSet、Transfer 与参考平台 | V6-00 已终审 GO；V6-01～13 软件实现完成，V6-14/15 软件范围完成并等待统一外审 | 继续完成 TSan、目标硬件、Flash 掉电、性能长稳、生产密码 Provider 与最终外审；通过前不创建 1.0 RC |
 | Cluster Target | 复用 v6 的 Joint Config、Authority、Backup、Takeover、Handover、Recovery、Rekey | 模型较完整，统一接线待 v6 基座 | 作为可选模块随 1.0 支持矩阵签字 |
 
 这样可以先保存 v5 试验成果，再构建一个没有兼容债务的 MCU 自组网 Core；Cluster

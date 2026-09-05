@@ -109,6 +109,13 @@ Directory/Tunnel 均使用编译期固定槽，表满不驱逐已有安全状态
 | 12-08 Directory/Tunnel | 认证 Head、代际单调、固定槽、过期和 Transfer Path 导出已覆盖 |
 | 12-09 资源/隔离 | 32 voter 上限、Owner staging、小栈、无 Realtime 链接和 default-OFF Core 已覆盖 |
 
+V6-15 第三轮交叉自审补充了两类 Record/API 边界：
+
+- Tunnel 重放改为逐字段语义相等，不以包含 padding 的整个 C 结构体 `memcmp` 判定；相同语义、
+  不同 padding 的输入保持幂等，真实字段冲突仍按 replay 拒绝；
+- Record Generation、transaction high-water、所有 Cluster txid 和公开 Role/Phase/Control Kind
+  都执行完整 no-wrap 或无符号枚举合法域检查；到达阈值后持久化与启动推进失败关闭。
+
 ## 9. 验证结果
 
 | 门禁 | 结果 |
@@ -136,3 +143,18 @@ Feature 矩阵统一归 V6-14 重跑。
 - 独立外部审计。
 
 这些项目必须由 V6-13/14 的对应原始证据关闭，不能由当前 Host 测试推导。
+
+## 11. V6X-A05、A06、A08 外审整改补充
+
+Cluster ACK、Vote、Ready、Directory/Tunnel 等状态推进不再接受与 Wire Payload 分离的调用方
+结构。Control 和 Directory 都有固定 canonical codec；入口从 V6-07 Security Open Result 的
+已认证 Payload 解码，再匹配 Type、Opcode、Epoch、Config、Principal、Binding、Session 和
+Capability。修改 Payload 任一语义字节都会使认证语义入口失败，不能用未认证旁路替换。
+
+Cluster Store 增加独立 rollback witness 和单调 `record_generation`。所有状态提交执行
+`witness-first → record submit → record reload → canonical exact compare`；启动时 witness 与
+Record 任一方向不一致均进入 Fault，不静默采用旧槽。Host Fake 只证明软件调用顺序，真实双槽
+介质与断电仍属于硬件 HOLD。
+
+成员、Authority、Directory 与 Tunnel/Path 导出在使用 Capability 前均重新检查 Discovery 和
+Capability 半开 Deadline。过期状态不会等待后台清扫才能失权，`now == deadline` 已有定向反例。

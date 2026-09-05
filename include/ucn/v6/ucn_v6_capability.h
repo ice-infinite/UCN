@@ -13,6 +13,7 @@ extern "C" {
 #define UCN_V6_CAPABILITY_QUERY_BYTES ((size_t)20U)
 #define UCN_V6_GROUP_HINT_TIMEOUT_US UINT64_C(1000000)
 #define UCN_V6_GROUP_HINTS_PER_LINK ((uint8_t)2U)
+#define UCN_V6_PATH_HOP_LIMIT UINT16_C(65534)
 
 enum {
     UCN_V6_LINK_ORDERED = 1U << 0,
@@ -136,8 +137,6 @@ typedef struct ucn_v6_path_capability {
 } ucn_v6_path_capability_t;
 
 typedef struct ucn_v6_path_budget_request {
-    const ucn_v6_capability_record_t *hops;
-    size_t hop_count;
     ucn_v6_principal_t destination_principal;
     ucn_v6_binding_key_t destination_binding;
     uint32_t session_generation;
@@ -158,6 +157,21 @@ typedef struct ucn_v6_path_budget_request {
     const ucn_v6_frame_t *frame_contract;
     uint16_t fragment_header_bytes;
 } ucn_v6_path_budget_request_t;
+
+/* Stack/caller-owned streaming reducer.  Each accumulate call performs
+ * constant work for exactly one Hop, so Protocol Owner budgets stay bounded
+ * without imposing a small network-wide hop limit. */
+typedef struct ucn_v6_path_budget_accumulator {
+    ucn_v6_path_capability_t derived;
+    uint32_t required_feature_bits;
+    uint32_t required_hop_suite_bits;
+    uint32_t required_e2e_suite_bits;
+    uint32_t frame_overhead_bytes;
+    uint64_t timestamp_uncertainty_us;
+    uint16_t fragment_header_bytes;
+    uint16_t hop_count;
+    bool active;
+} ucn_v6_path_budget_accumulator_t;
 
 typedef struct ucn_v6_group_discovery_hint {
     bool occupied;
@@ -258,10 +272,16 @@ ucn_v6_result_t ucn_v6_capability_ingest_group_hello_hint(
     uint32_t ingress_link_generation,
     const ucn_v6_security_open_result_t *opened);
 
-/* EN: Derives exact path MTU/payload/fragment budgets with checked subtraction.
- * 中文：以受检减法归约精确 Path MTU、Payload 与 Fragment 数据预算。 */
-ucn_v6_result_t ucn_v6_capability_derive_path(
+/* EN: Derives a Path in bounded begin/one-Hop/finalize steps.
+ * 中文：以 begin/单 Hop/finalize 的有界步骤归约 Path。 */
+ucn_v6_result_t ucn_v6_capability_path_reduce_begin(
     const ucn_v6_path_budget_request_t *request,
+    ucn_v6_path_budget_accumulator_t *accumulator);
+ucn_v6_result_t ucn_v6_capability_path_reduce_hop(
+    ucn_v6_path_budget_accumulator_t *accumulator,
+    const ucn_v6_capability_record_t *hop);
+ucn_v6_result_t ucn_v6_capability_path_reduce_finalize(
+    ucn_v6_path_budget_accumulator_t *accumulator,
     ucn_v6_path_capability_t *path);
 ucn_v6_result_t ucn_v6_capability_install_path(
     ucn_v6_capability_owner_t *owner,

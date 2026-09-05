@@ -2,7 +2,8 @@
 /build/
 /build-*/
 /build_*/
-/.v6-matrix/
+/.v6-*/
+/构建中文路径*/
 /cmake-build-*/
 /.h743cmp/
 CMakeCache.txt

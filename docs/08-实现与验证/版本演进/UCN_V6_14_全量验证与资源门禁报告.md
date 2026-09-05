@@ -1,166 +1,162 @@
 # UCN V6-14 全量验证与资源门禁报告
 
-## 1. 结论与证据等级
+## 1. 当前结论
 
-V6-14 当前完成了可在本机重复的软件验证框架，但没有完成参考产品实机、真实掉电、24 小时
-长稳、MSVC 和可运行的 TSan。故结论严格分为：
+V6-14 已完成当前主机能够执行的软件验证体系，并在 V6-15 的单一 v6 发布面上重新执行。
+结论必须按证据等级拆开：
 
-- 软件验证资产：`SELF REVIEW PASS`；
-- 当前可用 GCC/Clang/ASan/UBSan/Analyzer 门禁：`PASS`；
-- MSVC、TSan：`ENVIRONMENT HOLD`；
-- ESP32-S3、UART/RS-485、ESP-NOW、CAN/CAN-FD、USB、Flash、功耗和 24 h：
+- GCC、MSVC、Clang、Debug/Release、Nano/Lite/Full、Feature ON/OFF：`PASS`；
+- ASan/UBSan、GCC `-fanalyzer`、中文构建目录、安装包消费者、1k/10k 模拟：`PASS`；
+- pthread 并发功能回归：`PASS`；
+- TSan：`ENVIRONMENT HOLD`，Clang 18 缺少 runtime，不能写成通过；
+- ESP32-S3、真实 UART/RS-485、ESP-NOW、CAN/CAN-FD、USB、Flash 掉电、功耗和长稳：
   `HARDWARE HOLD`；
-- V6-14 整体：`PARTIAL / SOFTWARE GATES COMPLETE`；
+- V6-14：`PARTIAL / SOFTWARE SCOPE COMPLETE`；
 - UCN 1.0 RC：`NOT AUTHORIZED`。
 
-Host 单元测试、模拟器和静态分析只能证明相应软件合同，不能替代 MCU 上的 ISR/DMA、Flash
-掉电、真实时间戳、链路误差、吞吐、尾延迟或功耗证据。
+Host 结果能证明接口、状态机和固定内存合同，不能替代 MCU ISR/DMA、真实时钟误差、Flash
+撕裂写、吞吐、尾延迟、功耗或 24 小时运行证据。
 
-## 2. 可执行验证资产
+## 2. 可重复执行的门禁
 
-| 资产 | 作用 | 失败含义 |
-|---|---|---|
-| `tools/v6/check_v6_boundaries.py` | 检查模块、固定内存、依赖和默认关闭边界 | v6 源码边界或构建隔离漂移 |
-| `tools/v6/run_v6_software_matrix.ps1` | Windows GCC 六组配置矩阵 | Profile、优化级别或裁剪配置不一致 |
-| `tools/v6/run_v6_sanitizers.sh` | WSL ASan/UBSan 与 Analyzer | 内存、未定义行为或静态路径风险 |
-| `tools/v6/ucn_v6_scale_sim.c` | 真实 Cluster Owner 的 1k/10k 模拟 | 固定容量、持久恢复或 Authority Fence 失败 |
-| `tools/v6/ucn_v6_resource_report.c` | 输出 Manifest 与全部公开静态 Storage 上界 | 资源合同或配置 Hash 失配 |
-| `tools/v6/validate_v6_evidence.py` | 校验 commit、artifact 与 SHA-256 绑定 | 证据不完整、被替换或错误宣称 release-ready |
+| 资产 | 检查内容 |
+|---|---|
+| `tools/v6/check_v6_boundaries.py` | 单一 v6 源码面、无堆、无旧头/目标/选项、模块依赖 |
+| `tools/v6/check_v6_archives.py` | GNU `nm` 或 MSVC `dumpbin` 检查 archive 名称和 `ucn_v6_*` 符号域 |
+| `tools/v6/check_v6_current_docs.py` | 当前文档、本地链接和版本标记 |
+| `tools/v6/generate_v6_api_index.py --check` | 公共函数索引与头文件一致，防止手册漂移 |
+| `tools/v6/run_v6_software_matrix.ps1` | Windows GCC 的 Profile/Feature/优化矩阵 |
+| `tools/v6/run_v6_sanitizers.sh` | WSL ASan/UBSan 和 `-fanalyzer` |
+| `tools/v6/ucn_v6_scale_sim.c` | 真实 Cluster Owner 的 1k/10k 逻辑节点模拟 |
+| `tools/v6/ucn_v6_resource_report.c` | Manifest、Layout Hash 和公共 Storage 上界 |
+| `tools/v6/test_v6_install_consumer.cmake` | 安装后由独立工程 `find_package` 并链接 `UCN::ucn` |
+| `tools/v6/validate_v6_evidence.py` | commit、artifact、SHA-256 和 release-ready 声明一致性 |
 
-所有验证脚本均失败关闭。边界检查只扫描 `src/v6` 与 `include/ucn/v6` 的运行时源码；Host-only
-模拟器可以使用堆内存构造大规模场景，但生产 v6 archive 禁止 `malloc/calloc/realloc/free/alloca`。
+生产 `src/v6` 和 `include/ucn/v6` 禁止 `malloc/calloc/realloc/free/alloca`。规模模拟可在 Host
+侧创建大量对象，但这种测试辅助行为不得进入安装库。
 
-## 3. 分项自审
+## 3. 多轮软件验证结果
 
-### 3.1 Source Boundary
+### 3.1 Windows GCC/Ninja
 
-检查内容包括：
+V6-15 最终发布面矩阵：
 
-1. v6 运行时 `.c/.h` 集合非空；
-2. 生产 v6 源码不调用堆分配；
-3. v6 不包含 `ucn/v6/` 之外的旧公共头；
-4. 源码没有 `TODO/FIXME` 未完成标记；
-5. Cluster 不依赖 Realtime，Realtime 不依赖 Cluster；
-6. Config、Identity、Wire、Message、Owner、Security、Capability、Route、QoS、Transfer、
-   Realtime、Cluster、Adapter 目标均存在；
-7. V6-13 的 UART、Wi-Fi、CAN、USB、FreeRTOS 文件分离存在；
-8. 当前过渡阶段 `UCN_BUILD_V6_EXPERIMENTAL` 仍为 default-OFF，且默认 Core/Cluster archive
-   中 `ucn_v6_*` 符号为 0。
-
-结果：`PASS`。V6-15 切换 v6 为唯一生产面后，第 8 条必须随发布架构改写，不能继续把
-default-OFF 当作完成。
-
-### 3.2 编译器、优化和配置矩阵
-
-Windows GCC/Ninja 实际结果：
-
-| 配置 | v6 门禁 |
+| 配置 | CTest |
 |---|---:|
-| Full Debug | 19/19 |
-| Full Release | 19/19 |
-| Lite Debug | 19/19 |
-| Nano Debug | 19/19 |
-| Service OFF | 19/19 |
-| 最小 Adapter：1 Link、1 RX、1 TX、64 B Frame | 4/4 |
+| Full Debug | 25/25 |
+| Full Release | 25/25 |
+| Lite Debug | 25/25 |
+| Nano Debug | 25/25 |
+| Nano，Realtime/Cluster/Adapter OFF | 20/20 |
+| Nano，仅 Realtime ON | 21/21 |
+| Nano，仅 Cluster ON | 23/23 |
+| Nano，仅 Adapter ON | 21/21 |
 
-此外，当前完整过渡树 Full Debug CTest 为 `77/77`；带中文的构建目录使用 Ninja 完成 v6
-`17/17`。MinGW Makefiles 对中文源码根存在生成器限制，中文门禁统一使用 Ninja。
+每组均包含适用的源码边界、archive 符号、当前文档、API 索引、配置合同、模块测试、资源报告、
+证据校验和安装包 consumer。关闭 Feature 后对应源码、头引用和测试目标不进入链接闭包。
 
-WSL 结果：
+### 3.2 MSVC 与中文目录
 
-- GCC 13 ASan/UBSan：20/20；
-- GCC 13 `-fanalyzer`：18/18；
-- Clang 18 `-Wall -Wextra -Werror`：18/18；
-- pthread 双线程双 Link Adapter：包含于上述矩阵并通过。
+- Visual Studio Build Tools 18、MSVC 19.51、Release Full：`25/25`；
+- 本轮全新 Visual Studio 2019、MSVC 19.29、Release Full：`25/25`；
+- 中文构建目录、GCC/Ninja、Release Full：`25/25`；
+- 安装包 consumer 同时通过 GCC 和 MSVC；
+- MinGW `ld` 不能打开带非 ASCII 的 archive 绝对路径，因此 Windows consumer 门禁把安装
+  staging 放入确定的 ASCII 临时目录。UCN 主源码和主构建仍实际位于中文目录；该工具链
+  限制不被误写成“任意 Unicode 安装前缀均支持”。
 
-本机未安装 MSVC，不能把旧记录或其他机器的结果冒充本提交证据。
+### 3.3 WSL GCC/Clang
 
-### 3.3 模型、属性、Fuzz 与安全负向
+- GCC 13 ASan/UBSan Full：`26/26`；
+- GCC 13 `-fanalyzer` Full：`26/26`；
+- Clang 18 `-Wall -Wextra -Werror` Full：`26/26`；
+- pthread 双线程 Adapter 回归包含在三组 Linux 矩阵内。
 
-- Wire 使用固定 seed 的 4096 次 raw fuzz；任何被接受输入必须能 canonical 往返；
-- 各模块测试覆盖坏 Version/Schema/Flag/Selector/Tag、旧 Binding/Session、Serial 回退、
-  输出不写回和 Provider 假成功；
-- Message Journal、Identity、Realtime、Cluster 均覆盖 reload 后的 fail-closed 状态；
-- QoS 覆盖 per-Class/per-Source/per-Flow 配额与 Budget 注入；
-- Transfer 覆盖丢片、乱序、重复、SACK/Credit 丢失和 Path/Session 变化；
-- Adapter 覆盖同步 completion、cancel 竞争、Link reopen 和迟到 Generation。
+### 3.4 TSan
 
-本项为模型/软件证明，不等于真正密码算法的侧信道评估、无线攻击测试或 Flash 电源切断。
+当前 Clang 18 环境缺少 `libclang_rt.tsan-x86_64.a`。因此只能记录并发功能测试通过，不能声称
+TSan 通过。后续必须在可工作的 TSan 工具链重跑，或提供经外审接受的目标 RTOS/SMP 等价证据。
 
-### 3.4 规模与恢复
+## 4. Profile 与静态资源
 
-`ucn_v6_scale_sim` 不是虚构状态计数器，而是为每个逻辑簇创建真实 Cluster Owner、Store 和
-callback gate。测试分别运行 1,000 与 10,000 个逻辑节点，以最多 16 个成员组成一个簇：
+三个 Profile 编译同一协议并都能解析 A0～A3；区别是固定容量和默认最大 Transfer 档。下表
+是 64-bit Host 上公共 Storage 的编译期安全上界，不是运行时堆用量，也不要求产品同时创建
+全部对象。
 
-- 创建并持久化 Cluster Epoch；
-- 逐个接收认证成员并建立 quorum；
-- 检查 Head Authority；
-- 每 17 个簇执行一次持久 Record reload；
-- reload 后没有恢复 volatile lease 时，Authority 必须为 false。
+| Owner | Nano | Lite | Full |
+|---|---:|---:|---:|
+| Identity Authority | 1,040 | 1,568 | 2,624 |
+| Bootstrap | 1,600 | 2,688 | 4,864 |
+| Operation Allocator | 256 | 256 | 256 |
+| Operation Journal | 1,152 | 1,792 | 3,072 |
+| Protocol Owner | 1,024 | 1,024 | 1,024 |
+| Security | 4,288 | 7,680 | 16,384 |
+| Capability | 3,024 | 5,024 | 9,024 |
+| Route | 11,776 | 29,696 | 70,656 |
+| Metric | 2,048 | 5,120 | 9,216 |
+| QoS | 7,424 | 19,456 | 36,864 |
+| Transfer | 14,592 | 29,696 | 79,872 |
+| Realtime | 2,752 | 2,944 | 3,840 |
+| Cluster | 11,392 | 14,912 | 22,272 |
+| Adapter | 7,936 | 17,920 | 48,128 |
+| FreeRTOS Port | 2,048 | 2,048 | 2,048 |
 
-1,000 和 10,000 节点两组均通过。它证明算法和固定单簇容量可以分组扩展，不证明一块 MCU
-同时保存 10,000 个节点，也不证明真实无线网络已在该规模收敛。
+Manifest API 为 1，当前 Storage Layout 为 4。V6X-A01～A11 时曾为 3，本次因 Message Witness、
+Realtime 完整 Domain Proposal Record、Owner 锁合同和 Capability 流式接口破坏性升级为 4。
+Profile、Feature bits 和所有影响私有布局的容量均
+进入 Layout Hash；头文件配置与已编译库不一致时必须在初始化前失败。
 
-## 4. 默认资源上界
+## 5. 模型、负向和规模验证
 
-资源工具输出当前 Full 默认公共 Storage 上界：
+- Wire：精确 Golden、错误长度/版本/Flag/Selector/CRC/Tag、输出不写回和固定 seed fuzz；
+- Identity/Security：Binding/Session ABA、旧 Key、重放、Provider 假成功、Bootstrap 预算；
+- Message：Operation ID 区间、Journal 掉电状态、IN_DOUBT、结果重放、满表和 Tombstone；
+- Route/QoS：Candidate 原子性、迟到 ACK、RouteSet、动态 Metric、饥饿与 Budget 注入；
+- Transfer：乱序、重复、丢片、SACK、Credit、重传、Path/Session 变化；
+- Realtime：完整 uncertainty、两级 Deadline、Domain Generation、高水位与固定 Path；
+- Cluster：Record 回读、Joint quorum、Takeover/Handover/Recovery/Rekey、Fence 和 Tombstone；
+- Adapter：完整 RX item、token、同步 completion、cancel 竞争、quiesce/reopen 和迟到事件；
+- 规模：1,000/10,000 逻辑节点按固定成员容量分簇，周期性 reload 后没有 volatile lease时
+  Authority 必须保持关闭。
 
-| Owner | 字节 |
-|---|---:|
-| Identity Authority | 2,624 |
-| Bootstrap | 4,864 |
-| Operation Allocator / Journal | 256 / 3,072 |
-| Protocol Owner | 1,024 |
-| Security | 16,384 |
-| Capability | 9,024 |
-| Route | 70,656 |
-| Metric / QoS | 9,216 / 36,864 |
-| Transfer | 79,872 |
-| Realtime | 3,840 |
-| Cluster | 22,272 |
-| Adapter | 48,128 |
-| FreeRTOS Port | 2,048 |
+10k 模拟证明按簇分治的数据结构和 Owner 可以扩展，不证明单 MCU 保存 10k 节点，也不证明
+真实无线网络已在该规模收敛。
 
-这些数值是为避免私有结构变化破坏调用方而保留的编译期安全上界，不是要求每个产品同时分配
-全部对象。可选 Feature 不启用时不应声明对应 Storage。最小 Adapter 配置的上界为 4,864 B。
-V6-15 发布前仍须建立正式 Nano/Lite/Full 产品 Manifest，明确各 Profile 启用模块和容量；
-仅在 CMake 中写 `UCN_PROFILE=NANO` 而不改变 v6 Product Manifest，不构成资源裁剪证据。
+## 6. 安装与单一发布面
 
-## 5. 并发与 TSan 边界
+安装树只包含：`include/ucn/ucn.h`、`include/ucn/v6/**`、`libucn_v6_*.a/.lib`，以及
+`UCNConfig.cmake`、版本文件和 `UCNTargets`。独立 consumer 使用
+`find_package(UCN 6 CONFIG REQUIRED)` 和 `UCN::ucn` 编译运行。发布目录不再包含 v4/v5
+头、源码、测试、工具、兼容 target 或旧公共符号。
 
-共享 Gate、task blocking lock、ISR try-lock、Buffer token 和 completion 生命周期已有双线程
-Host 回归。GCC TSan 在当前 WSL 上两次都于测试逻辑开始前报告
-`ThreadSanitizer: unexpected memory mapping`；Clang 18 环境缺少 TSan runtime。因此当前只
-声明 pthread 并发功能测试通过，不声明 TSan 通过。发布证据必须在可工作的 TSan 环境重跑，
-或由目标 RTOS/SMP 形式验证提供等价且经外审接受的证据。
+## 7. 尚未关闭的发布门禁
 
-## 6. 实机证据合同
+以下项目需要外部环境或硬件，继续保持 HOLD：
 
-实机证据统一存放于 `docs/08-实现与验证/实机证据/V6/`。每个 PASS 必须绑定：
+1. 可工作的 TSan 工具链；
+2. ESP32-S3 N16R8/N8R8 的固件、真实 RAM/栈/Flash 尺寸；
+3. UART/RS-485、ESP-NOW、Classic CAN/CAN-FD、USB 的 ISR/DMA/completion；
+4. 1～5 跳吞吐、Q0～Q3 尾延迟、32 B～8 KiB 与混合 Bearer；
+5. Realtime 硬件 timestamp、asymmetry 和 uncertainty 上界；
+6. Flash 双槽撕裂写、真实断电窗口和启动恢复；
+7. CPU、栈、RAM、功耗、P99/P999 和 24 小时长稳；
+8. 最终统一外审 P0/P1 归零。
 
-- 40 位 Git commit；
-- 固件 SHA-256 与逐板刷入记录；
-- 板号、芯片、SDK、编译器、供电、接线、Bearer、引脚和速率；
-- 测试开始/结束时间与阈值；
-- 原始日志文件及 SHA-256；
-- 断电、复位、断链、重连、丢包、乱序、并发、温度和功耗条件。
+所以 V6-14 的软件范围已完成，但整体仍为 `PARTIAL`；V6-15 可以完成单一发布面和外审包，
+不能生成 1.0 RC 或发布 Tag。
 
-校验器要求 `release_ready` 与“全部 required gate 为 PASS”完全一致。HOLD/FAIL 项不得附带
-伪证据路径；PASS 项的 artifact 缺失或哈希不符必须失败。
+## 11. V6X-A01～A11 整改后的追加验证
 
-## 7. 未关闭门禁
+最终整改重新执行的软件矩阵为：Full Debug/Release `26/26`、Lite `26/26`、Nano `26/26`；
+Nano Feature-Off `21/21`，Realtime-only `22/22`，Cluster-only `24/24`，Adapter-only
+`22/22`。MSVC 19.29 Full Release `26/26`，WSL GCC ASan/UBSan 与 `-fanalyzer` 均
+`27/27`，Clang 18.1.3 Release `-Wall -Wextra -Werror` 为 `27/27`。
 
-下列项目需要真实环境，当前不能通过继续写 Host 测试来关闭：
+新增门禁包含五节点逐跳安全重签、多 E2E 目标共享下一跳、Identity/Cluster rollback witness、
+Operation ID 间隙、Realtime/Cluster 认证 Payload 绑定、Capability Deadline、预算代际回收和
+“连续 RX 不写 Flash”。完整问题映射见
+[V6X-A01～A11 整改报告](UCN_V6_外审V6X_A01_A11整改与跨模块自审报告.md)。
 
-1. ESP32-S3 N16R8/N8R8 固件和真实 RAM/栈/Flash 尺寸；
-2. UART/RS-485 1～5 跳、3 Mbit/s、高负载 Q0～Q3 与 T32～T8K；
-3. ESP-NOW 及 UART+ESP-NOW 混合路径；
-4. Classic CAN、CAN-FD、USB 的 Carrier/ISR/DMA/completion；
-5. Realtime 硬件 timestamp、asymmetry 和 uncertainty 实测；
-6. Flash 双槽撕裂写、掉电窗口和启动恢复；
-7. 断链/reopen 与迟到事件；
-8. CPU、栈、RAM、吞吐、P99/P999 延迟、功耗和 24 小时长稳；
-9. MSVC 和可运行的 TSan 工具链。
-
-因此 V6-15 可以继续准备发布面清理、denylist 和文档，但不得生成 `UCN 1.0 RC`、发布 Tag
-或生产 GO，直至上述适用门禁由同一候选提交的证据关闭。
+后续从头自审又新增 Message Witness 旧 Snapshot 回放/掉电窗口、Realtime same-generation
+Proposal Identity ABA、Owner task/ISR 锁分离、Handover Voter 资格及 65534 跳流式归约反例；
+整改后的测试数量不变，以上 `26/27` 组均已用最新源码重新执行，不沿用旧构建结论。

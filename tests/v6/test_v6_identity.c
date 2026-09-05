@@ -14,10 +14,17 @@
     } while (0)
 
 typedef struct fake_store {
-    unsigned epoch_calls;
-    unsigned binding_calls;
-    unsigned group_calls;
+    ucn_v6_identity_snapshot_t snapshot;
+    uint64_t witness;
+    unsigned witness_load_calls;
+    unsigned witness_reserve_calls;
+    unsigned load_calls;
+    unsigned submit_calls;
+    bool present;
     bool fail_next;
+    bool fail_submit_once;
+    bool corrupt_reload;
+    bool perturb_padding;
     bool reenter_init;
     ucn_v6_result_t reenter_result;
     void *reenter_storage;
@@ -45,13 +52,22 @@ static ucn_v6_result_t fake_result(fake_store_t *store)
     return UCN_V6_OK;
 }
 
-static ucn_v6_result_t persist_epoch(
-    void *context,
-    const ucn_v6_authority_epoch_t *epoch)
+static ucn_v6_result_t load_witness(void *context, uint64_t *generation)
 {
     fake_store_t *store = (fake_store_t *)context;
-    CHECK(epoch != NULL);
-    ++store->epoch_calls;
+    CHECK(generation != NULL);
+    ++store->witness_load_calls;
+    if (store->witness == 0U) {
+        return UCN_V6_ERR_NOT_FOUND;
+    }
+    *generation = store->witness;
+    return UCN_V6_OK;
+}
+
+static ucn_v6_result_t reserve_witness(void *context, uint64_t generation)
+{
+    fake_store_t *store = (fake_store_t *)context;
+    ++store->witness_reserve_calls;
     if (store->reenter_init) {
         ucn_v6_identity_authority_t *reentered = NULL;
         store->reenter_init = false;
@@ -60,25 +76,72 @@ static ucn_v6_result_t persist_epoch(
             ucn_v6_compiled_manifest(), 7U, store->reenter_ops,
             store->reenter_gate, &reentered);
     }
-    return fake_result(store);
+    if (fake_result(store) != UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
+    }
+    if (generation == 0U || generation <= store->witness) {
+        return UCN_V6_ERR_REPLAY;
+    }
+    store->witness = generation;
+    return UCN_V6_OK;
 }
 
-static ucn_v6_result_t persist_binding(
+static ucn_v6_result_t load_snapshot(
     void *context,
-    const ucn_v6_binding_slot_t *slot)
+    ucn_v6_identity_snapshot_t *snapshot)
 {
     fake_store_t *store = (fake_store_t *)context;
-    CHECK(slot != NULL);
-    ++store->binding_calls;
-    return fake_result(store);
+    CHECK(snapshot != NULL);
+    ++store->load_calls;
+    if (!store->present) {
+        return UCN_V6_ERR_NOT_FOUND;
+    }
+    *snapshot = store->snapshot;
+    if (store->perturb_padding) {
+        const size_t padding_start =
+            offsetof(ucn_v6_identity_snapshot_t, epoch_valid) +
+            sizeof(snapshot->epoch_valid);
+        const size_t padding_end =
+            offsetof(ucn_v6_identity_snapshot_t, epoch);
+        if (padding_end > padding_start) {
+            ((uint8_t *)snapshot)[padding_start] ^= UINT8_C(0xA5);
+        }
+    }
+    if (store->corrupt_reload) {
+        snapshot->record_generation ^= UINT64_C(1);
+    }
+    return UCN_V6_OK;
 }
 
-static ucn_v6_result_t persist_group(void *context, uint32_t high_water)
+static ucn_v6_result_t submit_snapshot(
+    void *context,
+    const ucn_v6_identity_snapshot_t *snapshot)
 {
     fake_store_t *store = (fake_store_t *)context;
-    CHECK(high_water != 0U);
-    ++store->group_calls;
-    return fake_result(store);
+    CHECK(snapshot != NULL);
+    ++store->submit_calls;
+    if (store->fail_submit_once) {
+        store->fail_submit_once = false;
+        return UCN_V6_ERR_STATE;
+    }
+    if (fake_result(store) != UCN_V6_OK) {
+        return UCN_V6_ERR_STATE;
+    }
+    store->snapshot = *snapshot;
+    store->present = true;
+    return UCN_V6_OK;
+}
+
+static ucn_v6_identity_store_ops_t store_ops(fake_store_t *store)
+{
+    ucn_v6_identity_store_ops_t ops;
+    memset(&ops, 0, sizeof(ops));
+    ops.context = store;
+    ops.load_generation_witness = load_witness;
+    ops.reserve_generation_witness = reserve_witness;
+    ops.load = load_snapshot;
+    ops.submit = submit_snapshot;
+    return ops;
 }
 
 static ucn_v6_principal_t principal(uint8_t seed)
@@ -162,6 +225,7 @@ static ucn_v6_bootstrap_key_t bootstrap_key(
 {
     ucn_v6_bootstrap_key_t key;
     memset(&key, 0, sizeof(key));
+    key.ingress_link_id = 1U;
     key.ingress_link_generation = link_generation;
     key.local_peer_discriminator = discriminator;
     key.identity_digest = value->joining_device_identity_digest;
@@ -218,11 +282,7 @@ static int test_authority_persist_before_publish(void)
     uint32_t group_id = 0U;
 
     memset(&store, 0, sizeof(store));
-    memset(&ops, 0, sizeof(ops));
-    ops.context = &store;
-    ops.persist_authority_epoch = persist_epoch;
-    ops.persist_binding_slot = persist_binding;
-    ops.persist_group_high_water = persist_group;
+    ops = store_ops(&store);
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, fake_gate_lock,
                                     fake_gate_unlock) == UCN_V6_OK);
     CHECK(ucn_v6_identity_authority_init_in_place(
@@ -239,7 +299,8 @@ static int test_authority_persist_before_publish(void)
               authority, &epoch, UINT64_C(1000000)) == UCN_V6_OK);
     CHECK(ucn_v6_identity_authority_copy_view(
               authority, &authority_view) == UCN_V6_OK);
-    CHECK(store.epoch_calls == 1U && authority_view.epoch_valid);
+    CHECK(store.submit_calls == 1U && authority_view.epoch_valid);
+    CHECK(authority_view.record_generation == 1U);
     CHECK(store.reenter_result == UCN_V6_ERR_STATE);
 
     fill_bytes(lease_id, sizeof(lease_id), 0xC0U);
@@ -283,7 +344,7 @@ static int test_authority_persist_before_publish(void)
               authority, 14U, &group_id) == UCN_V6_OK);
     CHECK(group_id == 1U);
     CHECK(ucn_v6_identity_authority_retire_dynamic_group(
-              authority, group_id) == UCN_V6_OK);
+              authority, 14U, group_id) == UCN_V6_OK);
     CHECK(ucn_v6_identity_authority_allocate_dynamic_group(
               authority, 15U, &group_id) == UCN_V6_OK);
     CHECK(group_id == 2U);
@@ -309,11 +370,7 @@ static int test_opaque_storage_preflight_and_corruption(void)
     };
 
     memset(&store, 0, sizeof(store));
-    memset(&ops, 0, sizeof(ops));
-    ops.context = &store;
-    ops.persist_authority_epoch = persist_epoch;
-    ops.persist_binding_slot = persist_binding;
-    ops.persist_group_high_water = persist_group;
+    ops = store_ops(&store);
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, fake_gate_lock,
                                     fake_gate_unlock) == UCN_V6_OK);
     bad_manifest.layout_hash ^= UINT64_C(1);
@@ -354,12 +411,124 @@ static int test_opaque_storage_preflight_and_corruption(void)
     return 0;
 }
 
+static int test_authority_restart_and_rollback_witness(void)
+{
+    fake_store_t store;
+    ucn_v6_identity_store_ops_t ops;
+    ucn_v6_callback_gate_t gate;
+    ucn_v6_identity_authority_storage_t first_storage;
+    ucn_v6_identity_authority_storage_t restarted_storage;
+    ucn_v6_identity_authority_storage_t rejected_storage;
+    ucn_v6_identity_authority_storage_t rejected_before;
+    ucn_v6_identity_authority_t *first = NULL;
+    ucn_v6_identity_authority_t *restarted = NULL;
+    ucn_v6_identity_authority_t *rejected =
+        (ucn_v6_identity_authority_t *)(uintptr_t)1U;
+    ucn_v6_identity_authority_view_t view;
+    ucn_v6_authority_epoch_t epoch = authority_epoch(1U);
+    ucn_v6_identity_snapshot_t old_snapshot;
+    uint32_t group_id = 0U;
+    unsigned submits_before;
+
+    memset(&store, 0, sizeof(store));
+    ops = store_ops(&store);
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, fake_gate_lock,
+                                    fake_gate_unlock) == UCN_V6_OK);
+    CHECK(ucn_v6_identity_authority_init_in_place(
+              first_storage.bytes, sizeof(first_storage),
+              ucn_v6_compiled_manifest(), 7U, &ops, &gate,
+              &first) == UCN_V6_OK);
+    store.perturb_padding = true;
+    CHECK(ucn_v6_identity_authority_install_epoch(
+              first, &epoch, UINT64_C(1000000)) == UCN_V6_OK);
+    old_snapshot = store.snapshot;
+    CHECK(ucn_v6_identity_authority_allocate_dynamic_group(
+              first, 10U, &group_id) == UCN_V6_OK);
+    CHECK(group_id == 1U);
+    submits_before = store.submit_calls;
+    CHECK(ucn_v6_identity_authority_retire_dynamic_group(
+              first, UINT64_C(1000000), group_id) == UCN_V6_ERR_ACCESS);
+    CHECK(store.submit_calls == submits_before);
+    CHECK(ucn_v6_identity_authority_retire_dynamic_group(
+              first, 11U, group_id) == UCN_V6_OK);
+
+    CHECK(ucn_v6_identity_authority_init_in_place(
+              restarted_storage.bytes, sizeof(restarted_storage),
+              ucn_v6_compiled_manifest(), 7U, &ops, &gate,
+              &restarted) == UCN_V6_OK);
+    CHECK(ucn_v6_identity_authority_copy_view(restarted, &view) == UCN_V6_OK);
+    CHECK(view.record_generation == store.witness);
+    CHECK(view.epoch_valid);
+    CHECK(view.local_lease_deadline_us == 0U);
+    CHECK(view.dynamic_group_id_high_water == 1U);
+    CHECK(ucn_v6_identity_authority_install_epoch(
+              restarted, &epoch, UINT64_C(2000000)) == UCN_V6_OK);
+    CHECK(ucn_v6_identity_authority_allocate_dynamic_group(
+              restarted, 12U, &group_id) == UCN_V6_OK);
+    CHECK(group_id == 2U);
+
+    /* A stale-but-valid slot must never be accepted when the independent
+     * witness proves that a newer state was published.
+     * 独立 witness 证明已经发布更新状态时，旧但有效的槽绝不能回退加载。 */
+    store.snapshot = old_snapshot;
+    memset(&rejected_storage, 0xA5, sizeof(rejected_storage));
+    rejected_before = rejected_storage;
+    CHECK(ucn_v6_identity_authority_init_in_place(
+              rejected_storage.bytes, sizeof(rejected_storage),
+              ucn_v6_compiled_manifest(), 7U, &ops, &gate,
+              &rejected) == UCN_V6_ERR_STATE);
+    CHECK(rejected == (ucn_v6_identity_authority_t *)(uintptr_t)1U);
+    CHECK(memcmp(&rejected_storage, &rejected_before,
+                 sizeof(rejected_storage)) == 0);
+    return 0;
+}
+
+static int test_authority_torn_write_fails_closed(void)
+{
+    fake_store_t store;
+    ucn_v6_identity_store_ops_t ops;
+    ucn_v6_callback_gate_t gate;
+    ucn_v6_identity_authority_storage_t storage;
+    ucn_v6_identity_authority_storage_t reboot_storage;
+    ucn_v6_identity_authority_t *authority = NULL;
+    ucn_v6_identity_authority_t *rebooted = NULL;
+    ucn_v6_identity_authority_view_t view;
+    ucn_v6_authority_epoch_t epoch = authority_epoch(1U);
+    ucn_v6_result_t reboot_result;
+
+    memset(&store, 0, sizeof(store));
+    ops = store_ops(&store);
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, fake_gate_lock,
+                                    fake_gate_unlock) == UCN_V6_OK);
+    CHECK(ucn_v6_identity_authority_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
+              7U, &ops, &gate, &authority) == UCN_V6_OK);
+    store.fail_submit_once = true;
+    CHECK(ucn_v6_identity_authority_install_epoch(
+              authority, &epoch, UINT64_C(1000000)) == UCN_V6_ERR_STATE);
+    CHECK(ucn_v6_identity_authority_copy_view(authority, &view) == UCN_V6_OK);
+    CHECK(view.faulted && !view.epoch_valid);
+    CHECK(store.witness == 1U && !store.present);
+    reboot_result = ucn_v6_identity_authority_init_in_place(
+        reboot_storage.bytes, sizeof(reboot_storage),
+        ucn_v6_compiled_manifest(), 7U, &ops, &gate, &rebooted);
+    if (reboot_result != UCN_V6_ERR_STATE) {
+        fprintf(stderr, "unexpected torn reboot result=%d\n", reboot_result);
+    }
+    CHECK(reboot_result == UCN_V6_ERR_STATE);
+    CHECK(rebooted == NULL);
+    return 0;
+}
+
 static int test_bootstrap_resource_and_state_contract(void)
 {
     ucn_v6_bootstrap_owner_storage_t owner_storage;
     ucn_v6_bootstrap_owner_t *owner = NULL;
     ucn_v6_bootstrap_config_t config = {
-        4U, 2U, 4U, 2U, UINT64_C(3000000)
+        UCN_V6_CONFIG_BOOTSTRAP_PENDING,
+        UCN_V6_CONFIG_BOOTSTRAP_PENDING < 2U ?
+            UCN_V6_CONFIG_BOOTSTRAP_PENDING : 2U,
+        4U, 2U, UINT64_C(3000000)
     };
     ucn_v6_bootstrap_transcript_t value = transcript(UINT64_C(100));
     ucn_v6_bootstrap_transcript_t conflict;
@@ -372,19 +541,21 @@ static int test_bootstrap_resource_and_state_contract(void)
               owner_storage.bytes, sizeof(owner_storage),
               ucn_v6_compiled_manifest(), &config, &owner) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              owner, 1U, 0U, 32U, 33U) == UCN_V6_ERR_ARGUMENT);
+              owner, 1U, 1U, 0U, 32U, 33U) == UCN_V6_ERR_ARGUMENT);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              owner, 1U, 0U, 32U, 32U) == UCN_V6_OK);
+              owner, 1U, 1U, 0U, 32U, 32U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              owner, 1U, 1U, 32U, 32U) == UCN_V6_OK);
+              owner, 1U, 1U, 1U, 32U, 32U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              owner, 1U, 2U, 32U, 32U) == UCN_V6_OK);
+              owner, 1U, 1U, 2U, 32U, 32U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              owner, 1U, 3U, 32U, 32U) == UCN_V6_OK);
+              owner, 1U, 1U, 3U, 32U, 32U) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              owner, 1U, 4U, 32U, 32U) == UCN_V6_ERR_ACCESS);
+              owner, 1U, 1U, 4U, 32U, 32U) == UCN_V6_ERR_ACCESS);
     CHECK(ucn_v6_bootstrap_admit_initial_hello(
-              owner, 1U, UINT64_C(1000000), 32U, 32U) == UCN_V6_OK);
+              owner, 2U, 1U, 4U, 32U, 32U) == UCN_V6_OK);
+    CHECK(ucn_v6_bootstrap_admit_initial_hello(
+              owner, 1U, 1U, UINT64_C(1000000), 32U, 32U) == UCN_V6_OK);
 
     CHECK(ucn_v6_bootstrap_open_after_cookie(
               owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value,
@@ -449,10 +620,19 @@ static int test_bootstrap_resource_and_state_contract(void)
     CHECK(ucn_v6_bootstrap_expire(owner, pending.deadline_us) == 1U);
 
     value = transcript(UINT64_C(200));
+    value.flow = UCN_V6_BOOTSTRAP_FLOW_REAUTH;
     key = bootstrap_key(&value, 2U, 1U);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
               owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &value,
               NULL, true, 30U) == UCN_V6_ERR_STATE);
+    conflict = value;
+    conflict.flow = UCN_V6_BOOTSTRAP_FLOW_JOIN;
+    CHECK(ucn_v6_bootstrap_open_after_cookie(
+              owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &conflict,
+              &binding, true, 30U) == UCN_V6_ERR_SECURITY);
+    CHECK(ucn_v6_bootstrap_copy_pending(
+              owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key,
+              &pending) == UCN_V6_ERR_NOT_FOUND);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
               owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &value,
               &binding, true, 30U) == UCN_V6_OK);
@@ -472,18 +652,30 @@ static int test_bootstrap_cross_flow_capacity_contract(void)
 {
     ucn_v6_bootstrap_owner_storage_t owner_storage;
     ucn_v6_bootstrap_owner_t *owner = NULL;
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 4U
     ucn_v6_bootstrap_config_t config = {
         4U, 2U, 4U, 2U, UINT64_C(3000000)
     };
+#else
+    ucn_v6_bootstrap_config_t config = {
+        UCN_V6_CONFIG_BOOTSTRAP_PENDING, 1U, 4U, 2U,
+        UINT64_C(3000000)
+    };
+#endif
     ucn_v6_bootstrap_transcript_t join_a = transcript(UINT64_C(301));
     ucn_v6_bootstrap_transcript_t reauth_a = transcript(UINT64_C(302));
     ucn_v6_bootstrap_transcript_t reauth_b = transcript(UINT64_C(303));
     ucn_v6_bootstrap_transcript_t join_b = transcript(UINT64_C(304));
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 4U
     ucn_v6_bootstrap_transcript_t join_c = transcript(UINT64_C(305));
     ucn_v6_bootstrap_transcript_t join_d = transcript(UINT64_C(306));
     ucn_v6_bootstrap_transcript_t join_e = transcript(UINT64_C(307));
+#endif
     ucn_v6_bootstrap_key_t key;
     ucn_v6_binding_key_t binding = { UINT32_C(0x10203040), 7U, 3U };
+
+    reauth_a.flow = UCN_V6_BOOTSTRAP_FLOW_REAUTH;
+    reauth_b.flow = UCN_V6_BOOTSTRAP_FLOW_REAUTH;
 
     CHECK(ucn_v6_bootstrap_owner_init_in_place(
               owner_storage.bytes, sizeof(owner_storage),
@@ -500,10 +692,15 @@ static int test_bootstrap_cross_flow_capacity_contract(void)
               owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &reauth_a,
               &binding, true, 1U) == UCN_V6_ERR_NO_SPACE);
 
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 4U
     key = bootstrap_key(&reauth_b, 1U, 2U);
+#else
+    key = bootstrap_key(&reauth_b, 2U, 2U);
+#endif
     CHECK(ucn_v6_bootstrap_open_after_cookie(
               owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &reauth_b,
               &binding, true, 2U) == UCN_V6_OK);
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 4U
     key = bootstrap_key(&join_b, 1U, 3U);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
               owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &join_b,
@@ -521,6 +718,109 @@ static int test_bootstrap_cross_flow_capacity_contract(void)
     CHECK(ucn_v6_bootstrap_open_after_cookie(
               owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &join_e,
               NULL, true, 6U) == UCN_V6_ERR_NO_SPACE);
+#else
+    key = bootstrap_key(&join_b, 2U, 3U);
+    CHECK(ucn_v6_bootstrap_open_after_cookie(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &join_b,
+              NULL, true, 3U) == UCN_V6_ERR_NO_SPACE);
+#endif
+    return 0;
+}
+
+static int test_bootstrap_exact_link_instance_budget(void)
+{
+    ucn_v6_bootstrap_owner_storage_t owner_storage;
+    ucn_v6_bootstrap_owner_t *owner = NULL;
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 4U
+    ucn_v6_bootstrap_config_t config = {
+        4U, 2U, 2U, 1U, UINT64_C(3000000)
+    };
+#else
+    ucn_v6_bootstrap_config_t config = {
+        UCN_V6_CONFIG_BOOTSTRAP_PENDING, 1U, 2U, 1U,
+        UINT64_C(3000000)
+    };
+#endif
+    ucn_v6_bootstrap_transcript_t first = transcript(UINT64_C(401));
+    ucn_v6_bootstrap_transcript_t second = transcript(UINT64_C(402));
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 4U
+    ucn_v6_bootstrap_transcript_t third = transcript(UINT64_C(403));
+#endif
+    ucn_v6_bootstrap_key_t key;
+
+    CHECK(ucn_v6_bootstrap_owner_init_in_place(
+              owner_storage.bytes, sizeof(owner_storage),
+              ucn_v6_compiled_manifest(), &config, &owner) == UCN_V6_OK);
+    CHECK(ucn_v6_bootstrap_admit_initial_hello(
+              owner, 1U, 1U, 0U, 16U, 16U) == UCN_V6_OK);
+    CHECK(ucn_v6_bootstrap_admit_initial_hello(
+              owner, 1U, 1U, 1U, 16U, 16U) == UCN_V6_OK);
+    CHECK(ucn_v6_bootstrap_admit_initial_hello(
+              owner, 1U, 1U, 2U, 16U, 16U) == UCN_V6_ERR_ACCESS);
+    CHECK(ucn_v6_bootstrap_admit_initial_hello(
+              owner, 2U, 1U, 2U, 16U, 16U) == UCN_V6_OK);
+
+    key = bootstrap_key(&first, 1U, 1U);
+    CHECK(ucn_v6_bootstrap_open_after_cookie(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &first,
+              NULL, true, 10U) == UCN_V6_OK);
+    key = bootstrap_key(&second, 1U, 2U);
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 4U
+    CHECK(ucn_v6_bootstrap_open_after_cookie(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &second,
+              NULL, true, 11U) == UCN_V6_OK);
+    key = bootstrap_key(&third, 1U, 3U);
+    CHECK(ucn_v6_bootstrap_open_after_cookie(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &third,
+              NULL, true, 12U) == UCN_V6_ERR_NO_SPACE);
+    key.ingress_link_id = 2U;
+    CHECK(ucn_v6_bootstrap_open_after_cookie(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &third,
+              NULL, true, 12U) == UCN_V6_OK);
+#else
+    CHECK(ucn_v6_bootstrap_open_after_cookie(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &second,
+              NULL, true, 11U) == UCN_V6_ERR_NO_SPACE);
+    key.ingress_link_id = 2U;
+    CHECK(ucn_v6_bootstrap_open_after_cookie(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &second,
+              NULL, true, 11U) == UCN_V6_OK);
+#endif
+    return 0;
+}
+
+static int test_bootstrap_budget_generation_churn_reclaims_idle_slots(void)
+{
+    ucn_v6_bootstrap_owner_storage_t owner_storage;
+    ucn_v6_bootstrap_owner_t *owner = NULL;
+    ucn_v6_bootstrap_config_t config = {
+        2U, 1U, 2U, 1U, UINT64_C(1000)
+    };
+    size_t index;
+
+    CHECK(ucn_v6_bootstrap_owner_init_in_place(
+              owner_storage.bytes, sizeof(owner_storage),
+              ucn_v6_compiled_manifest(), &config, &owner) == UCN_V6_OK);
+    for (index = 0U; index < UCN_V6_BOOTSTRAP_MAX_BUDGET_LINKS; ++index) {
+        CHECK(ucn_v6_bootstrap_admit_initial_hello(
+                  owner, 1U, (uint32_t)(index + 1U), (uint64_t)index,
+                  16U, 16U) == UCN_V6_OK);
+    }
+    CHECK(ucn_v6_bootstrap_admit_initial_hello(
+              owner, 1U,
+              (uint32_t)(UCN_V6_BOOTSTRAP_MAX_BUDGET_LINKS + 1U),
+              UINT64_C(20), 16U, 16U) == UCN_V6_ERR_NO_SPACE);
+
+    /* Only the explicit timer owner reclaims idle generations. No hostile
+     * request may evict a live rate-limit bucket during admission. */
+    CHECK(ucn_v6_bootstrap_expire(
+              owner,
+              UINT64_C(1000) + UCN_V6_BOOTSTRAP_MAX_BUDGET_LINKS) == 0U);
+    CHECK(ucn_v6_bootstrap_admit_initial_hello(
+              owner, 1U,
+              (uint32_t)(UCN_V6_BOOTSTRAP_MAX_BUDGET_LINKS + 1U),
+              UINT64_C(1001) + UCN_V6_BOOTSTRAP_MAX_BUDGET_LINKS,
+              16U, 16U) == UCN_V6_OK);
     return 0;
 }
 
@@ -529,8 +829,12 @@ int main(void)
     CHECK(test_identity_and_deadline_contract() == 0);
     CHECK(test_authority_persist_before_publish() == 0);
     CHECK(test_opaque_storage_preflight_and_corruption() == 0);
+    CHECK(test_authority_restart_and_rollback_witness() == 0);
+    CHECK(test_authority_torn_write_fails_closed() == 0);
     CHECK(test_bootstrap_resource_and_state_contract() == 0);
     CHECK(test_bootstrap_cross_flow_capacity_contract() == 0);
+    CHECK(test_bootstrap_exact_link_instance_budget() == 0);
+    CHECK(test_bootstrap_budget_generation_churn_reclaims_idle_slots() == 0);
     puts("ucn v6 identity/bootstrap tests passed");
     return 0;
 }

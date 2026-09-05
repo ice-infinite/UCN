@@ -15,12 +15,34 @@
 typedef struct fake_store {
     bool valid;
     bool fail_submit;
+    uint64_t witness;
     uint8_t bytes[UCN_V6_CLUSTER_RECORD_BYTES];
     unsigned loads;
     unsigned submits;
     ucn_v6_cluster_owner_t *reenter_owner;
     ucn_v6_result_t reenter_result;
 } fake_store_t;
+
+static ucn_v6_result_t store_load_witness(void *context,
+                                           uint64_t *generation)
+{
+    fake_store_t *store = (fake_store_t *)context;
+    if (generation == NULL) return UCN_V6_ERR_ARGUMENT;
+    if (store->witness == 0U) return UCN_V6_ERR_NOT_FOUND;
+    *generation = store->witness;
+    return UCN_V6_OK;
+}
+
+static ucn_v6_result_t store_reserve_witness(void *context,
+                                              uint64_t generation)
+{
+    fake_store_t *store = (fake_store_t *)context;
+    if (generation == 0U || generation <= store->witness) {
+        return UCN_V6_ERR_REPLAY;
+    }
+    store->witness = generation;
+    return UCN_V6_OK;
+}
 
 static void gate_lock(void *context)
 {
@@ -125,7 +147,40 @@ static ucn_v6_cached_peer_capability_t capability(uint8_t seed,
     value.session_generation = 1U;
     value.record.capability_generation = 1U;
     value.record.peer.feature_bits = UCN_V6_FEATURE_CLUSTER;
+    value.discovery_deadline_us = UINT64_MAX;
+    value.capability_deadline_us = UINT64_MAX;
     return value;
+}
+
+static ucn_v6_result_t bind_control_payload(
+    ucn_v6_security_open_result_t *opened_value,
+    const ucn_v6_cluster_control_t *control,
+    uint8_t payload[UCN_V6_CLUSTER_CONTROL_BYTES])
+{
+    ucn_v6_result_t result = ucn_v6_cluster_control_encode(control, payload);
+    if (result != UCN_V6_OK) return result;
+    opened_value->frame.frame_type = UCN_V6_FRAME_CONTROL;
+    opened_value->frame.flags |= UCN_V6_FLAG_PROTOCOL_CONTEXT;
+    opened_value->frame.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_CLUSTER_CONTROL;
+    opened_value->frame.payload = payload;
+    opened_value->frame.payload_length = UCN_V6_CLUSTER_CONTROL_BYTES;
+    return UCN_V6_OK;
+}
+
+static ucn_v6_result_t bind_directory_payload(
+    ucn_v6_security_open_result_t *opened_value,
+    const ucn_v6_cluster_directory_entry_t *entry,
+    uint8_t payload[UCN_V6_CLUSTER_DIRECTORY_BYTES])
+{
+    ucn_v6_result_t result = ucn_v6_cluster_directory_encode(entry, payload);
+    if (result != UCN_V6_OK) return result;
+    opened_value->frame.frame_type = UCN_V6_FRAME_CONTROL;
+    opened_value->frame.flags |= UCN_V6_FLAG_PROTOCOL_CONTEXT;
+    opened_value->frame.protocol_opcode =
+        UCN_V6_PROTOCOL_OPCODE_CLUSTER_DIRECTORY;
+    opened_value->frame.payload = payload;
+    opened_value->frame.payload_length = UCN_V6_CLUSTER_DIRECTORY_BYTES;
+    return UCN_V6_OK;
 }
 
 static ucn_v6_cluster_control_t transition_control(
@@ -156,6 +211,8 @@ static ucn_v6_result_t init_owner(
     ucn_v6_binding_key_t local_binding = binding(address);
     memset(&ops, 0, sizeof(ops));
     ops.context = fake;
+    ops.load_generation_witness = store_load_witness;
+    ops.reserve_generation_witness = store_reserve_witness;
     ops.load = store_load;
     ops.submit = store_submit;
     return ucn_v6_cluster_owner_init_in_place(
@@ -213,6 +270,24 @@ static int test_record_and_control_codec(void)
     CHECK(ucn_v6_cluster_snapshot_encode(&snapshot, bytes) ==
           UCN_V6_ERR_ARGUMENT);
     CHECK(memcmp(bytes, before, sizeof(bytes)) == 0);
+    snapshot.record_generation =
+        UCN_V6_SERIAL64_ROTATION_THRESHOLD + UINT64_C(1);
+    CHECK(ucn_v6_cluster_snapshot_encode(&snapshot, bytes) ==
+          UCN_V6_ERR_ARGUMENT);
+    snapshot.record_generation = 1U;
+    snapshot.transaction_high_water =
+        UCN_V6_SERIAL64_ROTATION_THRESHOLD + UINT64_C(1);
+    CHECK(ucn_v6_cluster_snapshot_encode(&snapshot, bytes) ==
+          UCN_V6_ERR_ARGUMENT);
+    snapshot.transaction_high_water = 0U;
+    snapshot.role = (ucn_v6_cluster_role_t)-1;
+    CHECK(ucn_v6_cluster_snapshot_encode(&snapshot, bytes) ==
+          UCN_V6_ERR_ARGUMENT);
+    snapshot.role = UCN_V6_CLUSTER_OBSERVER;
+    snapshot.phase = (ucn_v6_cluster_phase_t)-1;
+    CHECK(ucn_v6_cluster_snapshot_encode(&snapshot, bytes) ==
+          UCN_V6_ERR_ARGUMENT);
+    snapshot.phase = UCN_V6_CLUSTER_PHASE_STABLE;
 
     memset(&control, 0, sizeof(control));
     control.kind = UCN_V6_CLUSTER_CTL_HANDOVER_COMMIT;
@@ -233,6 +308,14 @@ static int test_record_and_control_codec(void)
     CHECK(control_decoded.kind == control.kind &&
           control_decoded.transaction_id == control.transaction_id &&
           control_decoded.target_epoch.term == 3U);
+    control.kind = (ucn_v6_cluster_control_kind_t)-1;
+    CHECK(ucn_v6_cluster_control_encode(&control, control_bytes) ==
+          UCN_V6_ERR_ARGUMENT);
+    control.kind = UCN_V6_CLUSTER_CTL_HANDOVER_COMMIT;
+    control.transaction_id =
+        UCN_V6_SERIAL64_ROTATION_THRESHOLD + UINT64_C(1);
+    CHECK(ucn_v6_cluster_control_encode(&control, control_bytes) ==
+          UCN_V6_ERR_ARGUMENT);
     control_bytes[80] ^= 1U;
     CHECK(ucn_v6_cluster_control_decode(control_bytes, sizeof(control_bytes),
                                         &control_decoded) ==
@@ -255,6 +338,9 @@ static int test_joint_authority_directory_and_tunnel(void)
     ucn_v6_cluster_view_t view;
     ucn_v6_cluster_directory_entry_t directory;
     ucn_v6_cluster_tunnel_t tunnel;
+    ucn_v6_cluster_control_t message;
+    uint8_t control_payload[UCN_V6_CLUSTER_CONTROL_BYTES];
+    uint8_t directory_payload[UCN_V6_CLUSTER_DIRECTORY_BYTES];
     memset(&fake, 0, sizeof(fake));
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, gate_lock, gate_unlock) ==
           UCN_V6_OK);
@@ -276,8 +362,22 @@ static int test_joint_authority_directory_and_tunnel(void)
     CHECK(ucn_v6_cluster_prepare_joint(owner, 100U, &new_config, 2U) ==
           UCN_V6_OK);
     CHECK(ucn_v6_cluster_commit_joint(owner, 100U, 2U) == UCN_V6_ERR_ACCESS);
-    CHECK(ucn_v6_cluster_backup_ack_config(owner, &open2, 100U, 2U, 2U) ==
-          UCN_V6_OK);
+    memset(&message, 0, sizeof(message));
+    message.kind = UCN_V6_CLUSTER_CTL_CONFIG_ACK;
+    message.transaction_id = 100U;
+    {
+        ucn_v6_cluster_snapshot_t current;
+        CHECK(ucn_v6_cluster_copy_snapshot(owner, &current) == UCN_V6_OK);
+        message.old_epoch = current.active_epoch;
+    }
+    message.config_id = 2U;
+    message.config_generation = 2U;
+    CHECK(bind_control_payload(&open2, &message, control_payload) == UCN_V6_OK);
+    control_payload[UCN_V6_CLUSTER_CONTROL_BYTES - 1U] ^= 1U;
+    CHECK(ucn_v6_cluster_backup_ack_config(owner, &open2) ==
+          UCN_V6_ERR_ACCESS);
+    CHECK(bind_control_payload(&open2, &message, control_payload) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_backup_ack_config(owner, &open2) == UCN_V6_OK);
     CHECK(ucn_v6_cluster_commit_joint(owner, 100U, 2U) == UCN_V6_OK);
     new_config.config_id = 3U;
     new_config.generation = 3U;
@@ -308,8 +408,14 @@ static int test_joint_authority_directory_and_tunnel(void)
     directory.path_id = 1U;
     directory.path_generation = 1U;
     directory.deadline_us = 50U;
-    CHECK(ucn_v6_cluster_directory_install(owner, &open2, &directory, 2U) ==
+    CHECK(bind_directory_payload(&open2, &directory, directory_payload) ==
           UCN_V6_OK);
+    directory_payload[UCN_V6_CLUSTER_DIRECTORY_BYTES - 1U] ^= 1U;
+    CHECK(ucn_v6_cluster_directory_install(owner, &open2, 2U) ==
+          UCN_V6_ERR_SECURITY);
+    CHECK(bind_directory_payload(&open2, &directory, directory_payload) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_cluster_directory_install(owner, &open2, 2U) == UCN_V6_OK);
     memset(&tunnel, 0, sizeof(tunnel));
     tunnel.occupied = true;
     tunnel.tunnel_id = 1U;
@@ -332,6 +438,24 @@ static int test_joint_authority_directory_and_tunnel(void)
     tunnel.path.deadline_us = 50U;
     tunnel.deadline_us = 50U;
     CHECK(ucn_v6_cluster_tunnel_install(owner, &tunnel, 2U) == UCN_V6_OK);
+    {
+        ucn_v6_cluster_tunnel_t semantic_replay;
+        memset(&semantic_replay, 0xA5, sizeof(semantic_replay));
+        semantic_replay.occupied = tunnel.occupied;
+        semantic_replay.tunnel_id = tunnel.tunnel_id;
+        semantic_replay.source_cluster_id = tunnel.source_cluster_id;
+        semantic_replay.destination_cluster_id =
+            tunnel.destination_cluster_id;
+        semantic_replay.route_domain = tunnel.route_domain;
+        semantic_replay.path = tunnel.path;
+        semantic_replay.deadline_us = tunnel.deadline_us;
+        CHECK(memcmp(&semantic_replay, &tunnel, sizeof(tunnel)) != 0);
+        CHECK(ucn_v6_cluster_tunnel_install(owner, &semantic_replay, 2U) ==
+              UCN_V6_OK);
+        semantic_replay.destination_cluster_id = 8U;
+        CHECK(ucn_v6_cluster_tunnel_install(owner, &semantic_replay, 2U) ==
+              UCN_V6_ERR_REPLAY);
+    }
     {
         ucn_v6_cluster_tunnel_t copied;
         memset(&copied, 0, sizeof(copied));
@@ -366,6 +490,7 @@ static int test_takeover_recovery_rekey_and_handover(void)
     ucn_v6_cluster_snapshot_t snapshot;
     ucn_v6_cluster_epoch_t target;
     ucn_v6_cluster_control_t message;
+    uint8_t control_payload[UCN_V6_CLUSTER_CONTROL_BYTES];
     memset(&fake, 0, sizeof(fake));
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, gate_lock, gate_unlock) ==
           UCN_V6_OK);
@@ -388,6 +513,7 @@ static int test_takeover_recovery_rekey_and_handover(void)
     snapshot.backup.generation = 2U;
     snapshot.record_generation++;
     CHECK(ucn_v6_cluster_snapshot_encode(&snapshot, fake.bytes) == UCN_V6_OK);
+    fake.witness = snapshot.record_generation;
     memset(&gate, 0, sizeof(gate));
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, gate_lock, gate_unlock) ==
           UCN_V6_OK);
@@ -405,15 +531,16 @@ static int test_takeover_recovery_rekey_and_handover(void)
         ucn_v6_cluster_snapshot_t before_vote = snapshot;
         ucn_v6_cluster_snapshot_t after_vote;
         ++message.target_epoch.term;
-        CHECK(ucn_v6_cluster_record_transition_vote(reloaded, &open1,
-                                                    &message) ==
+        CHECK(bind_control_payload(&open1, &message, control_payload) ==
+              UCN_V6_OK);
+        CHECK(ucn_v6_cluster_record_transition_vote(reloaded, &open1) ==
               UCN_V6_ERR_ACCESS);
         CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &after_vote) == UCN_V6_OK);
         CHECK(memcmp(&before_vote, &after_vote, sizeof(before_vote)) == 0);
         --message.target_epoch.term;
     }
-    CHECK(ucn_v6_cluster_record_transition_vote(reloaded, &open1, &message) ==
-          UCN_V6_OK);
+    CHECK(bind_control_payload(&open1, &message, control_payload) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_record_transition_vote(reloaded, &open1) == UCN_V6_OK);
     CHECK(ucn_v6_cluster_commit_takeover(reloaded, 200U, 200U) == UCN_V6_OK);
     CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &snapshot) == UCN_V6_OK);
     CHECK(snapshot.role == UCN_V6_CLUSTER_HEAD &&
@@ -431,17 +558,31 @@ static int test_takeover_recovery_rekey_and_handover(void)
     target.term = 2U;
     target.head_principal = principal(0x10U);
     target.head_binding = binding(1U);
+    {
+        ucn_v6_cluster_epoch_t nonvoter = target;
+        ucn_v6_cluster_snapshot_t before;
+        ucn_v6_cluster_snapshot_t after;
+        nonvoter.head_principal = principal(0x40U);
+        nonvoter.head_binding = binding(4U);
+        CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &before) == UCN_V6_OK);
+        CHECK(ucn_v6_cluster_begin_handover(
+                  reloaded, 300U, &nonvoter, &snapshot.stable_config,
+                  201U) == UCN_V6_ERR_STATE);
+        CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &after) == UCN_V6_OK);
+        CHECK(memcmp(&before, &after, sizeof(before)) == 0);
+    }
     CHECK(ucn_v6_cluster_begin_handover(
               reloaded, 300U, &target, &snapshot.stable_config, 201U) ==
           UCN_V6_OK);
     CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &snapshot) == UCN_V6_OK);
     message = transition_control(&snapshot, UCN_V6_CLUSTER_CTL_HANDOVER_READY);
     ++message.old_epoch.term;
-    CHECK(ucn_v6_cluster_handover_ready(reloaded, &open1, &message) ==
+    CHECK(bind_control_payload(&open1, &message, control_payload) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_handover_ready(reloaded, &open1) ==
           UCN_V6_ERR_ACCESS);
     --message.old_epoch.term;
-    CHECK(ucn_v6_cluster_handover_ready(reloaded, &open1, &message) ==
-          UCN_V6_OK);
+    CHECK(bind_control_payload(&open1, &message, control_payload) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_handover_ready(reloaded, &open1) == UCN_V6_OK);
     CHECK(ucn_v6_cluster_commit_handover(reloaded, 300U) == UCN_V6_OK);
     CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &snapshot) == UCN_V6_OK);
     CHECK(snapshot.role == UCN_V6_CLUSTER_FENCED &&
@@ -455,10 +596,10 @@ static int test_takeover_recovery_rekey_and_handover(void)
           UCN_V6_OK);
     CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &snapshot) == UCN_V6_OK);
     message = transition_control(&snapshot, UCN_V6_CLUSTER_CTL_RECOVERY_VOTE);
-    CHECK(ucn_v6_cluster_record_transition_vote(reloaded, &open1, &message) ==
-          UCN_V6_OK);
-    CHECK(ucn_v6_cluster_record_transition_vote(reloaded, &open3, &message) ==
-          UCN_V6_OK);
+    CHECK(bind_control_payload(&open1, &message, control_payload) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_record_transition_vote(reloaded, &open1) == UCN_V6_OK);
+    CHECK(bind_control_payload(&open3, &message, control_payload) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_record_transition_vote(reloaded, &open3) == UCN_V6_OK);
     CHECK(ucn_v6_cluster_commit_recovery(reloaded, 400U, 400U) == UCN_V6_OK);
     CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &snapshot) == UCN_V6_OK);
     CHECK(snapshot.active_epoch.cluster_id == 3U &&
@@ -498,12 +639,71 @@ static int test_callback_reentry_and_failure_close(void)
     return 0;
 }
 
+static int test_witness_rollback_torn_write_and_capability_expiry(void)
+{
+    fake_store_t fake;
+    fake_store_t torn;
+    ucn_v6_callback_gate_t gate;
+    ucn_v6_callback_gate_t reload_gate;
+    ucn_v6_cluster_owner_storage_t storage;
+    ucn_v6_cluster_owner_storage_t reload_storage;
+    ucn_v6_cluster_owner_t *owner = NULL;
+    ucn_v6_cluster_owner_t *reloaded = NULL;
+    ucn_v6_cluster_config_t config = config3();
+    ucn_v6_security_open_result_t open2 = opened(0x20U, 2U);
+    ucn_v6_cached_peer_capability_t cap2 = capability(0x20U, 2U);
+    uint8_t old_record[UCN_V6_CLUSTER_RECORD_BYTES];
+
+    memset(&fake, 0, sizeof(fake));
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, gate_lock, gate_unlock) ==
+          UCN_V6_OK);
+    CHECK(init_owner(&storage, &fake, &gate, 0x10U, 1U, &owner) == UCN_V6_OK);
+    memcpy(old_record, fake.bytes, sizeof(old_record));
+    CHECK(ucn_v6_cluster_create(owner, 1U, &config, 0U) == UCN_V6_OK);
+    CHECK(fake.witness == 2U);
+    memcpy(fake.bytes, old_record, sizeof(fake.bytes));
+    CHECK(ucn_v6_callback_gate_init(&reload_gate, NULL, gate_lock,
+                                    gate_unlock) == UCN_V6_OK);
+    CHECK(init_owner(&reload_storage, &fake, &reload_gate, 0x10U, 1U,
+                     &reloaded) != UCN_V6_OK);
+    CHECK(reloaded == NULL);
+
+    memset(&torn, 0, sizeof(torn));
+    memset(&gate, 0, sizeof(gate));
+    memset(&reload_gate, 0, sizeof(reload_gate));
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, gate_lock, gate_unlock) ==
+          UCN_V6_OK);
+    CHECK(init_owner(&storage, &torn, &gate, 0x10U, 1U, &owner) == UCN_V6_OK);
+    torn.fail_submit = true;
+    CHECK(ucn_v6_cluster_create(owner, 1U, &config, 0U) == UCN_V6_ERR_STATE);
+    CHECK(torn.witness == 2U);
+    torn.fail_submit = false;
+    CHECK(ucn_v6_callback_gate_init(&reload_gate, NULL, gate_lock,
+                                    gate_unlock) == UCN_V6_OK);
+    CHECK(init_owner(&reload_storage, &torn, &reload_gate, 0x10U, 1U,
+                     &reloaded) != UCN_V6_OK);
+    CHECK(reloaded == NULL);
+
+    memset(&fake, 0, sizeof(fake));
+    memset(&gate, 0, sizeof(gate));
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, gate_lock, gate_unlock) ==
+          UCN_V6_OK);
+    CHECK(init_owner(&storage, &fake, &gate, 0x10U, 1U, &owner) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_create(owner, 1U, &config, 0U) == UCN_V6_OK);
+    cap2.discovery_deadline_us = 10U;
+    cap2.capability_deadline_us = 10U;
+    CHECK(ucn_v6_cluster_admit_member(owner, &open2, &cap2, 10U, 100U) ==
+          UCN_V6_ERR_SECURITY);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_record_and_control_codec() == 0);
     CHECK(test_joint_authority_directory_and_tunnel() == 0);
     CHECK(test_takeover_recovery_rekey_and_handover() == 0);
     CHECK(test_callback_reentry_and_failure_close() == 0);
+    CHECK(test_witness_rollback_torn_write_and_capability_expiry() == 0);
     puts("ucn v6 cluster tests passed");
     return 0;
 }

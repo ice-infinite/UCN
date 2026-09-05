@@ -16,6 +16,7 @@ extern "C" {
 
 #define UCN_V6_REALTIME_ENVELOPE_VERSION ((uint8_t)1U)
 #define UCN_V6_REALTIME_ENVELOPE_BYTES ((size_t)16U)
+#define UCN_V6_TIME_SYNC_SAMPLE_BYTES ((size_t)48U)
 #define UCN_V6_REALTIME_SAMPLE_WINDOW ((size_t)5U)
 #define UCN_V6_REALTIME_DOMAIN_ID_MAX UINT16_C(0xFFFE)
 #define UCN_V6_REALTIME_UNCERTAINTY_UNKNOWN ((uint8_t)31U)
@@ -99,6 +100,13 @@ typedef struct ucn_v6_time_domain_config {
     uint32_t oscillator_uncertainty_ppb;
 } ucn_v6_time_domain_config_t;
 
+/* Durable, canonical proposal identity for one Domain generation.  Equality
+ * is field-wise; a generation may never be rebound to another Session/Path
+ * or timing policy after reset. */
+typedef struct ucn_v6_realtime_domain_record {
+    ucn_v6_time_domain_config_t config;
+} ucn_v6_realtime_domain_record_t;
+
 typedef struct ucn_v6_time_sync_sample {
     uint16_t clock_domain_id;
     uint32_t domain_generation;
@@ -146,20 +154,19 @@ typedef struct ucn_v6_realtime_receive_view {
     size_t business_length;
 } ucn_v6_realtime_receive_view_t;
 
-/* The generation store is synchronous and must preserve a per
- * {master principal, clock domain} high-water across reset. */
+/* The generation store is synchronous and anti-rollback.  Once a record is
+ * reserved, the same {master principal, clock domain, generation} may only
+ * reload with an exactly equal canonical Domain proposal. */
 typedef struct ucn_v6_realtime_generation_store_ops {
     void *context;
-    ucn_v6_result_t (*load_high_water)(
+    ucn_v6_result_t (*load_domain_record)(
         void *context,
         const ucn_v6_principal_t *master,
         uint16_t clock_domain_id,
-        uint32_t *generation);
-    ucn_v6_result_t (*reserve_high_water)(
+        ucn_v6_realtime_domain_record_t *record);
+    ucn_v6_result_t (*reserve_domain_record)(
         void *context,
-        const ucn_v6_principal_t *master,
-        uint16_t clock_domain_id,
-        uint32_t generation);
+        const ucn_v6_realtime_domain_record_t *record);
 } ucn_v6_realtime_generation_store_ops_t;
 
 typedef struct ucn_v6_realtime_owner ucn_v6_realtime_owner_t;
@@ -191,6 +198,15 @@ ucn_v6_result_t ucn_v6_realtime_envelope_decode(
 ucn_v6_result_t ucn_v6_realtime_uncertainty_aggregate(
     const ucn_v6_realtime_uncertainty_t *components,
     uint32_t *upper_bound_us);
+/* EN: Encodes/decodes the exact authenticated TIME_FOLLOW_UP sample payload.
+ * 中文：编码/解码经过认证的 TIME_FOLLOW_UP 精确采样载荷。 */
+ucn_v6_result_t ucn_v6_time_sync_sample_encode(
+    const ucn_v6_time_sync_sample_t *sample,
+    uint8_t output[UCN_V6_TIME_SYNC_SAMPLE_BYTES]);
+ucn_v6_result_t ucn_v6_time_sync_sample_decode(
+    const uint8_t *input,
+    size_t input_length,
+    ucn_v6_time_sync_sample_t *sample);
 
 /* EN: Initializes one fixed-capacity Realtime owner.
  * 中文：初始化一个固定容量的实时 Owner。 */
@@ -220,8 +236,7 @@ ucn_v6_result_t ucn_v6_realtime_bind_domain(
  * 中文：准入一个已认证采样；动态 Path 和仅诊断能力绝不推动 LOCKED。 */
 ucn_v6_result_t ucn_v6_realtime_ingest_sample(
     ucn_v6_realtime_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened,
-    const ucn_v6_time_sync_sample_t *sample);
+    const ucn_v6_security_open_result_t *opened);
 ucn_v6_result_t ucn_v6_realtime_get_clock(
     ucn_v6_realtime_owner_t *owner,
     uint16_t clock_domain_id,

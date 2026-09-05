@@ -6,7 +6,7 @@
 
 ## 当前建议
 
-- [UCN v6 最终协议架构与破坏性重构 RFC](UCN_v6_最终协议架构与破坏性重构_RFC.md)：在协议尚未正式发布、无需兼容 v4/v5 测试固件的前提下，重新冻结 Identity/双向认证 Bootstrap/Address Authority 与 Binding、Core Wire/AAD/Peer-Group-E2E Key Selector、交付与交互、生产安全、Capability/Path Payload Budget、RouteSet、Transfer、QoS、C99 Storage、Realtime、Cluster 和发布门禁；V6A-01～V6A-25 全部外审通过，`V6-00 = DONE / EXTERNAL FINAL REVIEW GO`（仅架构 RFC/纯文档范围）。v6 代码尚未开始，V6-01 仍等待 V5-64 A06 可追溯外审和用户明确授权。
+- [UCN v6 最终协议架构与破坏性重构 RFC](UCN_v6_最终协议架构与破坏性重构_RFC.md)：在协议尚未正式发布、无需兼容 v4/v5 测试固件的前提下，重新冻结 Identity/双向认证 Bootstrap/Address Authority 与 Binding、Core Wire/AAD/Peer-Group-E2E Key Selector、交付与交互、生产安全、Capability/Path Payload Budget、RouteSet、Transfer、QoS、C99 Storage、Realtime、Cluster 和发布门禁；V6A-01～V6A-25 全部外审通过，`V6-00 = DONE / EXTERNAL FINAL REVIEW GO`（仅架构 RFC/纯文档范围）。当前 V6-01～13 软件实现已完成，V6-14/15 完成可执行软件范围并等待统一外审；TSan、目标硬件、Flash 掉电、性能长稳和生产密码 Provider 仍为发布阻断项。
 - [UCN v6 V6-00 最终架构 RFC 自审报告](UCN_v6_V6-00_最终架构RFC自审报告.md)：逐项复核当前 v5 事实、v6 顶层决策、Wire 候选长度、安全边界、跨模块依赖、Compatibility Removal Manifest 和 V6-00～V6-15 实施顺序，并记录 V6A-01～25 五轮整改与最终外部签字；结论为 V6-00 纯文档范围终审 GO。
 - [UCN FPGA 硬件转发节点实施方案](UCN_FPGA硬件转发节点实施方案.md)：规定未来使用 FPGA 作为可选高速转发、汇聚或骨干节点时的软硬件边界、数据流水线、控制接口、Route/Path 表、QoS、安全、故障回退、实施阶段与验证门禁。当前仅为设计建议，尚无 RTL 和实机结论。
 - [UCN 可选实时元数据与分布式时间同步详细设计方案](UCN_可选实时元数据与分布式时间同步详细设计方案.md)：按 Endpoint/业务流定义 `NONE/LOCAL_STAMP/SYNCED_STAMP/DEADLINE`，以普通消息零额外时间 Wire 字节、Timed 消息候选 16 B 端到端 Envelope 起步，再分阶段建设 Time Domain、硬件时间戳、同步服务和可选 Hop-aware Deadline。RT-A01～A11 已完成整改、第四轮全体自审与受限软件范围外部复审；生产接线和实机继续 HOLD。

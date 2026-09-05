@@ -633,7 +633,8 @@ ucn_v6_result_t ucn_v6_route_candidate_record_probe(
 {
     ucn_v6_route_candidate_view_t *candidate;
     size_t index;
-    if (!owner_is_valid(owner) || path_id == 0U || path_generation == 0U) {
+    if (!owner_is_valid(owner) || path_id == 0U || path_generation == 0U ||
+        path_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
         return UCN_V6_ERR_ARGUMENT;
     }
     candidate = find_candidate(owner, candidate_transaction_id);
@@ -1097,7 +1098,10 @@ ucn_v6_result_t ucn_v6_route_mark_error(
     size_t index;
     size_t pin_index;
     if (!owner_is_valid(owner) || !domain_is_valid(domain) ||
-        route_generation == 0U || path_id == 0U || path_generation == 0U) {
+        route_generation == 0U ||
+        route_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        path_id == 0U || path_generation == 0U ||
+        path_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
         return UCN_V6_ERR_ARGUMENT;
     }
     set = find_set(owner, domain);
@@ -1233,7 +1237,8 @@ ucn_v6_result_t ucn_v6_route_accept_generation(
 {
     const ucn_v6_route_set_slot_t *set;
     if (!owner_is_valid(owner) || !domain_is_valid(domain) ||
-        route_generation == 0U) {
+        route_generation == 0U ||
+        route_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
         return UCN_V6_ERR_ARGUMENT;
     }
     set = find_set_const(owner, domain);

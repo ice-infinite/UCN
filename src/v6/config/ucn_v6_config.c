@@ -5,6 +5,8 @@
 static const ucn_v6_feature_manifest_t compiled_manifest = {
     UCN_V6_API_VERSION,
     UCN_V6_STORAGE_LAYOUT,
+    UCN_V6_PROFILE,
+    0U,
     UCN_V6_COMPILED_FEATURE_BITS,
     UCN_V6_COMPILED_LAYOUT_HASH,
     UCN_V6_CONFIG_MAX_BINDINGS,
@@ -70,6 +72,8 @@ ucn_v6_result_t ucn_v6_manifest_validate_exact(
     }
     return manifest->api_version == expected->api_version &&
            manifest->storage_layout == expected->storage_layout &&
+           manifest->profile == expected->profile &&
+           manifest->reserved_zero == 0U &&
            manifest->feature_bits == expected->feature_bits &&
            manifest->layout_hash == expected->layout_hash &&
            manifest->max_bindings == expected->max_bindings &&

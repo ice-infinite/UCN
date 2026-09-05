@@ -12,6 +12,7 @@ typedef struct ucn_v6_group_hint_link_budget {
     uint32_t ingress_link_generation;
     uint8_t tokens;
     uint64_t last_refill_us;
+    uint64_t last_activity_us;
 } ucn_v6_group_hint_link_budget_t;
 
 typedef struct ucn_v6_group_hint_group_budget {
@@ -22,6 +23,7 @@ typedef struct ucn_v6_group_hint_group_budget {
     uint32_t group_generation;
     uint8_t tokens;
     uint64_t last_refill_us;
+    uint64_t last_activity_us;
 } ucn_v6_group_hint_group_budget_t;
 
 struct ucn_v6_capability_owner {

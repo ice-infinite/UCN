@@ -14,8 +14,9 @@ static bool event_is_valid(ucn_v6_owner_event_t event)
 
 static bool lock_ops_are_valid(const ucn_v6_owner_lock_ops_t *ops)
 {
-    return ops != NULL && ops->try_lock != NULL && ops->unlock != NULL &&
-           ops->notify != NULL;
+    return ops != NULL && ops->lock_task != NULL &&
+           ops->try_lock_from_isr != NULL && ops->unlock_task != NULL &&
+           ops->unlock_from_isr != NULL && ops->notify != NULL;
 }
 
 static bool owner_storage_is_valid(const ucn_v6_protocol_owner_t *owner)
@@ -50,9 +51,7 @@ ucn_v6_result_t ucn_v6_protocol_owner_init_in_place(
     if (result != UCN_V6_OK) {
         return result;
     }
-    if (!lock_ops->try_lock(lock_ops->context, false)) {
-        return UCN_V6_ERR_STATE;
-    }
+    lock_ops->lock_task(lock_ops->context);
     owner = (ucn_v6_protocol_owner_t *)storage;
     memset(owner, 0, sizeof(*owner));
     owner->magic = UCN_V6_PROTOCOL_OWNER_MAGIC;
@@ -62,7 +61,7 @@ ucn_v6_result_t ucn_v6_protocol_owner_init_in_place(
     owner->event_depth = manifest->owner_event_depth;
     owner->canary = UCN_V6_PROTOCOL_OWNER_CANARY;
     *owner_out = owner;
-    lock_ops->unlock(lock_ops->context, false);
+    lock_ops->unlock_task(lock_ops->context);
     return UCN_V6_OK;
 }
 
@@ -81,26 +80,37 @@ ucn_v6_result_t ucn_v6_protocol_owner_post(
         return UCN_V6_ERR_STATE;
     }
     ops = owner->lock_ops;
-    if (!lock_ops_are_valid(&ops) || !ops.try_lock(ops.context, from_isr)) {
+    if (!lock_ops_are_valid(&ops)) {
         return UCN_V6_ERR_STATE;
     }
+    if (from_isr) {
+        if (!ops.try_lock_from_isr(ops.context)) {
+            return UCN_V6_ERR_STATE;
+        }
+    } else {
+        ops.lock_task(ops.context);
+    }
     if (owner->faulted) {
-        ops.unlock(ops.context, from_isr);
+        if (from_isr) ops.unlock_from_isr(ops.context);
+        else ops.unlock_task(ops.context);
         return UCN_V6_ERR_STATE;
     }
     if (owner->pending_total >= owner->event_depth) {
-        ops.unlock(ops.context, from_isr);
+        if (from_isr) ops.unlock_from_isr(ops.context);
+        else ops.unlock_task(ops.context);
         return UCN_V6_ERR_NO_SPACE;
     }
     index = (size_t)event - 1U;
     if (owner->pending_by_event[index] == UINT16_MAX) {
         owner->faulted = true;
-        ops.unlock(ops.context, from_isr);
+        if (from_isr) ops.unlock_from_isr(ops.context);
+        else ops.unlock_task(ops.context);
         return UCN_V6_ERR_EXHAUSTED;
     }
     ++owner->pending_by_event[index];
     ++owner->pending_total;
-    ops.unlock(ops.context, from_isr);
+    if (from_isr) ops.unlock_from_isr(ops.context);
+    else ops.unlock_task(ops.context);
     ops.notify(ops.context, from_isr);
     return UCN_V6_OK;
 }
@@ -124,27 +134,24 @@ ucn_v6_result_t ucn_v6_protocol_owner_run(
         return UCN_V6_ERR_STATE;
     }
     ops = owner->lock_ops;
-    if (!lock_ops_are_valid(&ops) ||
-        !ops.try_lock(ops.context, false)) {
+    if (!lock_ops_are_valid(&ops)) {
         return UCN_V6_ERR_STATE;
     }
+    ops.lock_task(ops.context);
     if (!owner_storage_is_valid(owner) || owner->faulted || owner->running) {
-        ops.unlock(ops.context, false);
+        ops.unlock_task(ops.context);
         return UCN_V6_ERR_STATE;
     }
     owner->running = true;
-    ops.unlock(ops.context, false);
+    ops.unlock_task(ops.context);
 
     while (count < budget) {
         size_t offset;
         size_t selected = UCN_V6_OWNER_EVENT_COUNT;
 
-        if (!ops.try_lock(ops.context, false)) {
-            result = UCN_V6_ERR_STATE;
-            break;
-        }
+        ops.lock_task(ops.context);
         if (!owner_storage_is_valid(owner) || owner->faulted) {
-            ops.unlock(ops.context, false);
+            ops.unlock_task(ops.context);
             result = UCN_V6_ERR_STATE;
             break;
         }
@@ -157,7 +164,7 @@ ucn_v6_result_t ucn_v6_protocol_owner_run(
                 break;
             }
         }
-        ops.unlock(ops.context, false);
+        ops.unlock_task(ops.context);
         if (selected == UCN_V6_OWNER_EVENT_COUNT) {
             break;
         }
@@ -167,15 +174,12 @@ ucn_v6_result_t ucn_v6_protocol_owner_run(
         if (result != UCN_V6_OK) {
             break;
         }
-        if (!ops.try_lock(ops.context, false)) {
-            result = UCN_V6_ERR_STATE;
-            break;
-        }
+        ops.lock_task(ops.context);
         if (!owner_storage_is_valid(owner) ||
             owner->pending_by_event[selected] == 0U ||
             owner->pending_total == 0U) {
             owner->faulted = true;
-            ops.unlock(ops.context, false);
+            ops.unlock_task(ops.context);
             result = UCN_V6_ERR_STATE;
             break;
         }
@@ -183,17 +187,15 @@ ucn_v6_result_t ucn_v6_protocol_owner_run(
         --owner->pending_total;
         owner->next_event_index =
             (uint8_t)((selected + 1U) % UCN_V6_OWNER_EVENT_COUNT);
-        ops.unlock(ops.context, false);
+        ops.unlock_task(ops.context);
         ++count;
     }
 
-    if (!ops.try_lock(ops.context, false)) {
-        return UCN_V6_ERR_STATE;
-    }
+    ops.lock_task(ops.context);
     if (owner_storage_is_valid(owner)) {
         owner->running = false;
     }
-    ops.unlock(ops.context, false);
+    ops.unlock_task(ops.context);
     *processed = count;
     return result;
 }
@@ -213,11 +215,12 @@ ucn_v6_result_t ucn_v6_protocol_owner_copy_view(
         return UCN_V6_ERR_STATE;
     }
     ops = owner->lock_ops;
-    if (!lock_ops_are_valid(&ops) || !ops.try_lock(ops.context, false)) {
+    if (!lock_ops_are_valid(&ops)) {
         return UCN_V6_ERR_STATE;
     }
+    ops.lock_task(ops.context);
     if (!owner_storage_is_valid(owner)) {
-        ops.unlock(ops.context, false);
+        ops.unlock_task(ops.context);
         return UCN_V6_ERR_STATE;
     }
     memset(&next, 0, sizeof(next));
@@ -228,7 +231,7 @@ ucn_v6_result_t ucn_v6_protocol_owner_copy_view(
     for (index = 0U; index < UCN_V6_OWNER_EVENT_COUNT; ++index) {
         next.pending_by_event[index] = owner->pending_by_event[index];
     }
-    ops.unlock(ops.context, false);
+    ops.unlock_task(ops.context);
     *view = next;
     return UCN_V6_OK;
 }

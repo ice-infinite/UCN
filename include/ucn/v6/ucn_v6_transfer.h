@@ -69,10 +69,15 @@ typedef struct ucn_v6_transfer_send_request {
     uint16_t window_size;
 } ucn_v6_transfer_send_request_t;
 
-/* EN: message_id is the durable operation_id. The caller owns payload and
- * must keep it immutable until retire_tx returns its buffer_token.
- * 中文：message_id 即持久 Operation ID；payload 由调用方持有，并须保持
- * 不变，直到 retire_tx 返还 buffer_token。 */
+/* EN: message_id is the request operation_id, but Transfer does not allocate
+ * or impose a global contiguous order on that identifier. Durable duplicate
+ * execution protection belongs to the Message operation journal and is
+ * scoped by the authenticated initiator. The caller owns payload and must
+ * keep it immutable until retire_tx returns its buffer_token.
+ * 中文：message_id 等于请求的 operation_id，但 Transfer 不分配该
+ * 标识，也不强制全局连续顺序。持久化的防重复执行由 Message
+ * Operation Journal 按认证发起者域负责。payload 由调用方持有，
+ * 并须保持不变，直到 retire_tx 返还 buffer_token。 */
 
 typedef enum ucn_v6_transfer_tx_phase {
     UCN_V6_TRANSFER_TX_SENDING = 1,

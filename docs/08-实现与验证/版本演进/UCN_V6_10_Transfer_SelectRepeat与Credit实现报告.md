@@ -133,3 +133,14 @@ Reservation、发送 Deadline 后不可退休、以及 Session 撤销遗漏 Tran
 切换性能属于 V6-13/14 实机与系统验证。当前也没有把 Transfer 接入生产 Node/Adapter。
 
 当前状态：`V6-10 软件实现与分项自审完成 / FINAL EXTERNAL REVIEW DEFERRED`。
+
+## 10. V6X-A07 外审整改补充
+
+Transfer 不再把全局 `operation_id` 当成本地严格连续的 Message Counter。该 ID 的唯一性和
+重启幂等由 V6-04 Operation Allocator/Journal 所有；网络乱序、并发调用方和区间预留都会自然
+产生间隙。Transfer 只拒绝当前活动槽内的精确冲突，并继续校验 Source/Destination Binding、
+Session、Path、Message Class 和总长度。
+
+回归明确覆盖同一端点先接收 `1000` 再接收 `7`，以及重建 Transfer Owner 后接收
+`9000000`；这些都必须成功。精确活动事务的重复/冲突仍失败关闭，不能因为允许间隙而降低
+幂等边界。

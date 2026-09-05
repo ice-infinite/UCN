@@ -6,6 +6,7 @@
 
 typedef struct scale_store {
     bool valid;
+    uint64_t generation_witness;
     uint8_t bytes[UCN_V6_CLUSTER_RECORD_BYTES];
 } scale_store_t;
 
@@ -17,6 +18,26 @@ typedef struct scale_cluster {
 
 static void gate_lock(void *context) { (void)context; }
 static void gate_unlock(void *context) { (void)context; }
+
+static ucn_v6_result_t store_load_witness(void *context,
+                                          uint64_t *generation)
+{
+    scale_store_t *store = (scale_store_t *)context;
+    if (store->generation_witness == 0U) return UCN_V6_ERR_NOT_FOUND;
+    *generation = store->generation_witness;
+    return UCN_V6_OK;
+}
+
+static ucn_v6_result_t store_reserve_witness(void *context,
+                                             uint64_t generation)
+{
+    scale_store_t *store = (scale_store_t *)context;
+    if (generation == 0U || generation <= store->generation_witness) {
+        return UCN_V6_ERR_REPLAY;
+    }
+    store->generation_witness = generation;
+    return UCN_V6_OK;
+}
 
 static ucn_v6_result_t store_load(void *context, uint8_t *record,
                                   size_t capacity, size_t *length)
@@ -89,6 +110,8 @@ static ucn_v6_cached_peer_capability_t capability(uint32_t address)
     value.session_generation = 1U;
     value.record.capability_generation = 1U;
     value.record.peer.feature_bits = UCN_V6_FEATURE_CLUSTER;
+    value.discovery_deadline_us = UINT64_MAX;
+    value.capability_deadline_us = UINT64_MAX;
     return value;
 }
 
@@ -108,6 +131,8 @@ static int initialize_cluster(
     ucn_v6_cached_peer_capability_t peer_capability;
     memset(&store_ops, 0, sizeof(store_ops));
     store_ops.context = &fixture->store;
+    store_ops.load_generation_witness = store_load_witness;
+    store_ops.reserve_generation_witness = store_reserve_witness;
     store_ops.load = store_load;
     store_ops.submit = store_submit;
     if (ucn_v6_callback_gate_init(

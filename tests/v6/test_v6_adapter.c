@@ -58,6 +58,11 @@ static ucn_v6_result_t fake_lock_task(void *context)
     return UCN_V6_OK;
 }
 
+static void fake_port_lock_task(void *context)
+{
+    (void)fake_lock_task(context);
+}
+
 static bool fake_try_lock_from_isr(void *context)
 {
     fake_environment_t *environment = (fake_environment_t *)context;
@@ -262,7 +267,9 @@ static int test_reference_profiles_and_rx(void)
     CHECK(ucn_v6_esp_now_link_config_init(
               &wifi_settings, &auxiliary_config) == UCN_V6_OK);
     CHECK(auxiliary_config.bearer == UCN_V6_BEARER_ESP_NOW &&
-          auxiliary_config.carrier_mtu == 250U);
+          auxiliary_config.carrier_mtu ==
+              (UCN_V6_CONFIG_ADAPTER_FRAME_BYTES < 250U ?
+                   UCN_V6_CONFIG_ADAPTER_FRAME_BYTES : 250U));
     memset(&usb_settings, 0, sizeof(usb_settings));
     usb_settings.base.link_id = 4U;
     usb_settings.base.initial_generation = 1U;
@@ -339,7 +346,9 @@ static int test_esp32s3_reference_configuration(void)
     wifi.link.base.ops = driver_ops(&driver);
     CHECK(ucn_v6_esp32s3_esp_now_binding_build(&wifi, &config) == UCN_V6_OK);
     CHECK(config.bearer == UCN_V6_BEARER_ESP_NOW &&
-          config.carrier_mtu == 250U);
+          config.carrier_mtu ==
+              (UCN_V6_CONFIG_ADAPTER_FRAME_BYTES < 250U ?
+                   UCN_V6_CONFIG_ADAPTER_FRAME_BYTES : 250U));
     wifi.channel = 15U;
     CHECK(ucn_v6_esp32s3_esp_now_binding_build(&wifi, &config) ==
           UCN_V6_ERR_CONFIG);
@@ -520,7 +529,7 @@ static int test_freertos_notification_owner(void)
     port_ops.struct_size = sizeof(port_ops);
     port_ops.api_version = UCN_V6_FREERTOS_PORT_API_VERSION;
     port_ops.context = &environment;
-    port_ops.lock_task = fake_lock_task;
+    port_ops.lock_task = fake_port_lock_task;
     port_ops.try_lock_from_isr = fake_try_lock_from_isr;
     port_ops.unlock_task = fake_unlock_task;
     port_ops.unlock_from_isr = fake_unlock_from_isr;

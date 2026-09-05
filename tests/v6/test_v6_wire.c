@@ -16,33 +16,35 @@ static const uint8_t golden_a0[] = {
     0x55U, 0x43U, 0x06U, 0x01U, 0x08U, 0x00U, 0x01U, 0x01U,
     0x11U, 0x22U, 0x33U, 0x44U, 0x00U, 0xFFU, 0x00U, 0x00U,
     0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
-    0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x04U,
-    0x01U, 0x02U, 0xDEU, 0xADU, 0xBEU, 0xEFU, 0x93U, 0xC9U,
-    0xD2U, 0xDBU
+    0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+    0x00U, 0x00U, 0x00U, 0x04U, 0x01U, 0x02U, 0xDEU, 0xADU,
+    0xBEU, 0xEFU, 0x28U, 0xF0U, 0x48U, 0x6CU
 };
 static const uint8_t golden_a1[] = {
     0x55U, 0x43U, 0x46U, 0x01U, 0x08U, 0x00U, 0x01U, 0x01U,
     0x11U, 0x22U, 0x33U, 0x44U, 0x00U, 0x00U, 0xFFU, 0xFFU,
     0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
     0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
-    0x00U, 0x04U, 0x01U, 0x02U, 0xDEU, 0xADU, 0xBEU, 0xEFU,
-    0x78U, 0xD6U, 0x8DU, 0x5CU
+    0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x04U, 0x01U, 0x02U,
+    0xDEU, 0xADU, 0xBEU, 0xEFU, 0x3AU, 0x33U, 0x66U, 0x3BU
 };
 static const uint8_t golden_a2[] = {
     0x55U, 0x43U, 0x86U, 0x01U, 0x08U, 0x00U, 0x01U, 0x01U,
     0x11U, 0x22U, 0x33U, 0x44U, 0x00U, 0x00U, 0x00U, 0xFFU,
     0xFFU, 0xFFU, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
     0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
-    0x00U, 0x00U, 0x00U, 0x04U, 0x01U, 0x02U, 0xDEU, 0xADU,
-    0xBEU, 0xEFU, 0xABU, 0x41U, 0x95U, 0x69U
+    0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x04U,
+    0x01U, 0x02U, 0xDEU, 0xADU, 0xBEU, 0xEFU, 0x94U, 0x0EU,
+    0xCBU, 0xEBU
 };
 static const uint8_t golden_a3[] = {
     0x55U, 0x43U, 0xC6U, 0x01U, 0x08U, 0x00U, 0x01U, 0x01U,
     0x11U, 0x22U, 0x33U, 0x44U, 0x00U, 0x00U, 0x00U, 0x00U,
     0xFFU, 0xFFU, 0xFFU, 0xFFU, 0x00U, 0x00U, 0x00U, 0x00U,
     0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
-    0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x04U, 0x01U, 0x02U,
-    0xDEU, 0xADU, 0xBEU, 0xEFU, 0x03U, 0x94U, 0x15U, 0xBEU
+    0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+    0x00U, 0x04U, 0x01U, 0x02U, 0xDEU, 0xADU, 0xBEU, 0xEFU,
+    0x58U, 0xE0U, 0xFAU, 0x39U
 };
 
 static void fill_tag(uint8_t tag[UCN_V6_SECURITY_TAG_BYTES], uint8_t seed)
@@ -96,7 +98,8 @@ static ucn_v6_frame_t rich_data_frame(void)
     frame.source_binding_generation = UINT32_C(0x11121314);
     frame.destination_binding_generation = UINT32_C(0x21222324);
     frame.session_generation = UINT32_C(0x31323334);
-    frame.packet_sequence = UINT32_C(0x41424344);
+    frame.origin_sequence = UINT32_C(0x41424344);
+    frame.hop_sequence = UINT32_C(0x45464748);
     frame.peer_hop.suite_id = 1U;
     frame.peer_hop.key_id = UINT16_C(0x5152);
     frame.peer_hop.key_generation = UINT32_C(0x53545556);
@@ -280,6 +283,10 @@ static int test_semantic_negative_matrix(void)
 {
     ucn_v6_frame_t base = rich_data_frame();
     ucn_v6_frame_t bad;
+    ucn_v6_frame_t both;
+    ucn_v6_frame_t decoded;
+    uint8_t wire[256];
+    size_t wire_length = 0U;
 
     bad = base;
     bad.address_class = (ucn_v6_address_class_t)-1;
@@ -292,10 +299,17 @@ static int test_semantic_negative_matrix(void)
     bad.group.key_id = 1U;
     bad.group.key_generation = 1U;
     CHECK(expect_encode_reject_no_write(&bad) == 0);
-    bad = base;
-    bad.flags |= UCN_V6_FLAG_ROUTE_CONTEXT;
-    bad.route_generation = 1U;
-    CHECK(expect_encode_reject_no_write(&bad) == 0);
+    both = base;
+    both.flags |= UCN_V6_FLAG_ROUTE_CONTEXT;
+    both.route_generation = UINT32_C(0x31323335);
+    CHECK(ucn_v6_wire_encode(&both, wire, sizeof(wire), &wire_length) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_wire_decode(wire, wire_length, &decoded) == UCN_V6_OK);
+    CHECK((decoded.flags & UCN_V6_FLAG_ROUTE_CONTEXT) != 0U &&
+          (decoded.flags & UCN_V6_FLAG_PATH_CONTEXT) != 0U &&
+          decoded.route_generation == both.route_generation &&
+          decoded.path.path_id == both.path.path_id &&
+          decoded.path.path_generation == both.path.path_generation);
     bad = base;
     bad.e2e.key_id = 0U;
     CHECK(expect_encode_reject_no_write(&bad) == 0);
@@ -310,7 +324,10 @@ static int test_semantic_negative_matrix(void)
     bad.message.operation_id = UINT64_MAX;
     CHECK(expect_encode_reject_no_write(&bad) == 0);
     bad = base;
-    bad.packet_sequence = UINT32_MAX;
+    bad.origin_sequence = UINT32_MAX;
+    CHECK(expect_encode_reject_no_write(&bad) == 0);
+    bad = base;
+    bad.hop_sequence = UINT32_MAX;
     CHECK(expect_encode_reject_no_write(&bad) == 0);
     bad = base;
     bad.hop_budget.remaining_budget_us =
@@ -387,7 +404,7 @@ static int test_group_hello_contract(void)
     frame.destination_address = UINT16_MAX;
     frame.source_binding_generation = 1U;
     frame.session_generation = 1U;
-    frame.packet_sequence = 1U;
+    frame.origin_sequence = 1U;
     frame.group.group_id = 1U;
     frame.group.group_generation = 1U;
     frame.group.suite_id = 1U;
@@ -431,7 +448,7 @@ static int test_peer_control_route_contract(void)
     frame.source_binding_generation = 4U;
     frame.destination_binding_generation = 5U;
     frame.session_generation = 6U;
-    frame.packet_sequence = 7U;
+    frame.hop_sequence = 7U;
     frame.peer_hop.suite_id = 1U;
     frame.peer_hop.key_id = 8U;
     frame.peer_hop.key_generation = 9U;

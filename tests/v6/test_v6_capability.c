@@ -242,7 +242,8 @@ static ucn_v6_frame_t budget_frame(void)
     frame.source_binding_generation = 2U;
     frame.destination_binding_generation = 3U;
     frame.session_generation = 5U;
-    frame.packet_sequence = 1U;
+    frame.origin_sequence = 1U;
+    frame.hop_sequence = 1U;
     frame.peer_hop.suite_id = UCN_V6_SUITE_HMAC_SHA256_128;
     frame.peer_hop.key_id = 1U;
     frame.peer_hop.key_generation = 1U;
@@ -269,6 +270,7 @@ static int test_path_budget_and_invalidation(void)
     ucn_v6_binding_key_t binding = { 1U, 7U, 3U };
     ucn_v6_security_open_result_t opened;
     ucn_v6_path_budget_request_t request;
+    ucn_v6_path_budget_accumulator_t accumulator;
     ucn_v6_path_capability_t path;
     ucn_v6_path_capability_t copied;
     ucn_v6_frame_t frame = budget_frame();
@@ -300,8 +302,6 @@ static int test_path_budget_and_invalidation(void)
               owner, 10U, 2U, 12U, &opened, &hops[1]) == UCN_V6_OK);
     CHECK(ucn_v6_capability_digest(&hops[1], digest) == UCN_V6_OK);
     memset(&request, 0, sizeof(request));
-    request.hops = hops;
-    request.hop_count = 2U;
     request.destination_principal = destination;
     request.destination_binding = binding;
     request.session_generation = 5U;
@@ -325,7 +325,14 @@ static int test_path_budget_and_invalidation(void)
     request.frame_contract = &frame;
     request.fragment_header_bytes = 12U;
     CHECK(ucn_v6_wire_encoded_size(&frame, &overhead) == UCN_V6_OK);
-    CHECK(ucn_v6_capability_derive_path(&request, &path) == UCN_V6_OK);
+    CHECK(ucn_v6_capability_path_reduce_begin(
+              &request, &accumulator) == UCN_V6_OK);
+    CHECK(ucn_v6_capability_path_reduce_hop(
+              &accumulator, &hops[0]) == UCN_V6_OK);
+    CHECK(ucn_v6_capability_path_reduce_hop(
+              &accumulator, &hops[1]) == UCN_V6_OK);
+    CHECK(ucn_v6_capability_path_reduce_finalize(
+              &accumulator, &path) == UCN_V6_OK);
     CHECK(path.path_frame_mtu == 172U);
     CHECK(path.payload_budget == 172U - overhead);
     CHECK(path.fragment_data_budget == path.payload_budget - 12U);
@@ -334,9 +341,25 @@ static int test_path_budget_and_invalidation(void)
     CHECK(path.immutable_for_realtime);
     CHECK(path.timestamp_uncertainty_us == 8U);
     CHECK(ucn_v6_capability_install_path(owner, 20U, &path) == UCN_V6_OK);
+    {
+        ucn_v6_path_capability_t forged = path;
+        forged.route_generation =
+            UCN_V6_SERIAL_ROTATION_THRESHOLD + UINT32_C(1);
+        CHECK(ucn_v6_capability_install_path(owner, 20U, &forged) ==
+              UCN_V6_ERR_ARGUMENT);
+        forged = path;
+        forged.feature_bits |= UINT32_C(0x80000000);
+        CHECK(ucn_v6_capability_install_path(owner, 20U, &forged) ==
+              UCN_V6_ERR_ARGUMENT);
+        forged = path;
+        forged.max_window = (uint16_t)(hops[1].peer.max_rx_window + 1U);
+        CHECK(ucn_v6_capability_install_path(owner, 20U, &forged) ==
+              UCN_V6_ERR_ACCESS);
+    }
     CHECK(ucn_v6_capability_copy_path(
               owner, 20U, &destination, &binding, 5U, 2U, 4U, 6U,
               &copied) == UCN_V6_OK);
+    CHECK(memcmp(&path, &copied, sizeof(path)) == 0);
 
     ++hops[1].capability_generation;
     hops[1].link.nominal_rate_bps += 10U;
@@ -351,9 +374,26 @@ static int test_path_budget_and_invalidation(void)
     memset(&copied, 0xA5, sizeof(copied));
     {
         ucn_v6_path_capability_t before = copied;
-        CHECK(ucn_v6_capability_derive_path(&request, &copied) ==
+        CHECK(ucn_v6_capability_path_reduce_begin(
+                  &request, &accumulator) == UCN_V6_OK);
+        CHECK(ucn_v6_capability_path_reduce_hop(
+                  &accumulator, &hops[0]) == UCN_V6_OK);
+        CHECK(ucn_v6_capability_path_reduce_hop(
+                  &accumulator, &hops[1]) == UCN_V6_OK);
+        CHECK(ucn_v6_capability_path_reduce_finalize(
+                  &accumulator, &copied) ==
               UCN_V6_ERR_NO_SPACE);
         CHECK(memcmp(&copied, &before, sizeof(copied)) == 0);
+    }
+    request.path_policy_frame_mtu = 200U;
+    CHECK(ucn_v6_capability_path_reduce_begin(
+              &request, &accumulator) == UCN_V6_OK);
+    accumulator.hop_count = UCN_V6_PATH_HOP_LIMIT;
+    {
+        ucn_v6_path_budget_accumulator_t before = accumulator;
+        CHECK(ucn_v6_capability_path_reduce_hop(
+                  &accumulator, &hops[0]) == UCN_V6_ERR_EXHAUSTED);
+        CHECK(memcmp(&accumulator, &before, sizeof(before)) == 0);
     }
     return 0;
 }
@@ -405,6 +445,7 @@ static int test_group_hint_is_bounded(void)
               &first) == UCN_V6_ERR_TIMEOUT);
     CHECK(ucn_v6_capability_expire(
               owner, UCN_V6_GROUP_HINT_TIMEOUT_US) == UCN_V6_OK);
+    third.frame.group.group_id = first.frame.group.group_id;
     CHECK(ucn_v6_capability_ingest_group_hello_hint(
               owner, UCN_V6_GROUP_HINT_TIMEOUT_US, 3U, 4U,
               &third) == UCN_V6_OK);
@@ -452,6 +493,32 @@ static int test_peer_table_full_never_evicts(void)
     return 0;
 }
 
+static int test_group_hint_budget_generation_churn_reclaims_idle_slots(void)
+{
+    ucn_v6_capability_record_t local = record(1U, 1U, 512U);
+    ucn_v6_capability_owner_storage_t storage;
+    ucn_v6_capability_owner_t *owner = NULL;
+    size_t index;
+    uint64_t now_us = 0U;
+
+    CHECK(ucn_v6_capability_owner_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
+              &local, 5000U, 5000U, &owner) == UCN_V6_OK);
+    for (index = 0U;
+         index < UCN_V6_CONFIG_GROUP_DISCOVERY_HINTS + 2U;
+         ++index) {
+        ucn_v6_security_open_result_t opened =
+            group_open((uint32_t)(100U + index), 1U, 1U);
+        opened.frame.group.group_id = 50U;
+        CHECK(ucn_v6_capability_ingest_group_hello_hint(
+                  owner, now_us, 7U, (uint32_t)(index + 1U),
+                  &opened) == UCN_V6_OK);
+        now_us += UCN_V6_GROUP_HINT_TIMEOUT_US;
+        CHECK(ucn_v6_capability_expire(owner, now_us) == UCN_V6_OK);
+    }
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_codec_and_authenticated_cache() == 0);
@@ -459,6 +526,7 @@ int main(void)
     CHECK(test_path_budget_and_invalidation() == 0);
     CHECK(test_group_hint_is_bounded() == 0);
     CHECK(test_peer_table_full_never_evicts() == 0);
+    CHECK(test_group_hint_budget_generation_churn_reclaims_idle_slots() == 0);
     puts("ucn v6 capability tests passed");
     return 0;
 }

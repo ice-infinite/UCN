@@ -11,13 +11,14 @@
 extern "C" {
 #endif
 
-#define UCN_V6_FREERTOS_PORT_API_VERSION UINT16_C(1)
+#define UCN_V6_FREERTOS_PORT_API_VERSION UINT16_C(2)
 
 typedef struct ucn_v6_freertos_port_ops {
     size_t struct_size;
     uint16_t api_version;
     void *context;
-    ucn_v6_result_t (*lock_task)(void *context);
+    /* Must acquire the task-context critical section before returning. */
+    void (*lock_task)(void *context);
     bool (*try_lock_from_isr)(void *context);
     void (*unlock_task)(void *context);
     void (*unlock_from_isr)(void *context);

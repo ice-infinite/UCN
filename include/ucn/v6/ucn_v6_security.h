@@ -56,7 +56,6 @@ typedef struct ucn_v6_key_selector {
 typedef struct ucn_v6_replay_window {
     uint32_t highest_sequence;
     uint64_t seen_bitmap;
-    uint32_t durable_reserved_through;
     bool initialized;
 } ucn_v6_replay_window_t;
 
@@ -90,8 +89,10 @@ typedef struct ucn_v6_security_session_record {
     ucn_v6_replay_window_t hop_replay_previous;
     ucn_v6_replay_window_t e2e_replay_current;
     ucn_v6_replay_window_t e2e_replay_previous;
-    uint32_t tx_next_sequence;
-    uint32_t tx_reserved_through;
+    uint32_t hop_tx_next_sequence;
+    uint32_t hop_tx_reserved_through;
+    uint32_t e2e_tx_next_sequence;
+    uint32_t e2e_tx_reserved_through;
 } ucn_v6_security_session_record_t;
 
 typedef struct ucn_v6_acl_key {
@@ -126,6 +127,7 @@ typedef struct ucn_v6_group_policy_slot {
 
 typedef struct ucn_v6_group_key_slot {
     ucn_v6_group_key_state_t state;
+    bool requires_rekey;
     uint32_t group_id;
     uint32_t group_generation;
     uint16_t key_id;
@@ -275,6 +277,14 @@ typedef struct ucn_v6_security_view {
 } ucn_v6_security_view_t;
 
 typedef struct ucn_v6_security_open_result {
+    /* EN: frame.payload is borrowed. For authenticated/plain frames it points
+     * into encoded_frame; for decrypted frames it points into the caller's
+     * plaintext_storage. It remains valid only while that backing storage is
+     * unchanged. The result is an in-process capability returned by Security,
+     * not a serializable or cryptographic proof object.
+     * 中文：frame.payload 为借用指针。认证明文帧指向 encoded_frame，解密帧
+     * 指向调用方的 plaintext_storage；仅在对应后备存储未改变期间有效。
+     * 此结果是 Security 返回的进程内能力，不是可序列化或密码学证明对象。 */
     ucn_v6_frame_t frame;
     ucn_v6_principal_t authenticated_principal;
     ucn_v6_session_key_t ingress_peer_session;
@@ -408,6 +418,39 @@ ucn_v6_result_t ucn_v6_security_protect_frame(
     uint8_t *output,
     size_t output_capacity,
     size_t *output_length);
+
+/* EN: Verifies the raw ingress frame and replay state, then replaces only
+ * mutable hop state. The original source, origin sequence, ciphertext and
+ * E2E tag remain byte-for-byte unchanged; a fresh next-hop sequence and Link
+ * tag are used. verified_ingress returns the Security-produced in-process
+ * admission result for immediate Route/QoS use; this API never accepts a
+ * caller-supplied result as proof. Its frame payload borrows encoded_frame and
+ * must not outlive or out-mutate that storage. frame_work must not overlap
+ * either the raw ingress bytes or output; rejected calls never write
+ * output/result objects.
+ * 中文：先在 Security 内部验证原始入站帧与重放状态，再仅替换可变
+ * 逐跳状态。原始 Source、Origin 序号、密文和 E2E Tag 保持不变，
+ * 并使用新的下一跳序号与 Link Tag。verified_ingress 是供 Route/QoS 立即
+ * 使用的进程内准入结果，本 API 不接受调用方预先传入的结果充当证明；其中
+ * 的帧 Payload 借用 encoded_frame，不得超过或改写该存储的生命周期。
+ * frame_work 不得与原始入站字节或 output 重叠；拒绝路径不会写回输出或
+ * 结果对象。 */
+ucn_v6_result_t ucn_v6_security_relay_frame(
+    ucn_v6_security_manager_t *manager,
+    uint64_t now_us,
+    uint32_t ingress_link_instance_generation,
+    const ucn_v6_principal_t *authenticated_peer_principal,
+    const ucn_v6_principal_t *next_hop_principal,
+    uint64_t hop_budget_debit_us,
+    const uint8_t *encoded_frame,
+    size_t encoded_length,
+    uint8_t *frame_work,
+    size_t frame_work_capacity,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_length,
+    ucn_v6_security_open_result_t *verified_ingress,
+    ucn_v6_frame_t *relayed_frame);
 
 /* EN: Protects one exact hop-authenticated HELLO/Capability control frame.
  * This path never grants Endpoint ACL or admission authority.

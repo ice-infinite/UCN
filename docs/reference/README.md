@@ -1,9 +1,12 @@
-# 源码参考
+# UCN v6 源码参考
 
-本目录提供从公共头、CMake 和源码生成/核对的速查表与图。语义解释仍以 [官方文档](../official/README.md) 为主；精确签名以当前源码为最终依据。
+当前可机械核对的入口：
 
-- [生成式参考](generated/公共API符号表.md)
-- [架构图](diagrams/总体架构图.md)
-- [调用树](../calltree/README.md)
+- [公共函数签名索引](../源码阅读指南/06-公共函数签名索引.md)
+- [调用关系入口](../calltree/README.md)
+- [`include/ucn/v6/`](../../include/ucn/v6/ucn_v6_config.h)：公共配置和 API
+- [`src/v6/`](../../src/v6/config/ucn_v6_config.c)：唯一当前运行时
+- [`tests/v6/`](../../tests/v6/test_v6_config_contract.c)：可执行合同
 
-当前快照基线：`codex/v5-adaptive-wire@a093862`。后续提交必须重新核对生成表，禁止把旧快照当作实时反射。
+旧 v5 生成表和架构图已移入 `docs/archive/v5-user-facing-20260905/reference/`。当前语义先看
+[官方文档](../official/README.md)，精确签名和条件编译以公共头为最终依据。

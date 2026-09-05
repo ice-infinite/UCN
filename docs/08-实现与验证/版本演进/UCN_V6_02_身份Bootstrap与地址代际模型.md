@@ -77,14 +77,14 @@ live := now_us < deadline
 两条流程拥有独立状态数组，但共享同一认证前资源预算：
 
 - 全局 pending 默认最多 8；
-- 同一 ingress Link Generation 默认最多 2；
+- 同一 `{ingress_link_id, ingress_link_generation}` 默认最多 2；
 - 同一 `{link,local discriminator,identity digest}` 只能有 1 条；
 - 每 Link Token Bucket 默认 burst 4、每秒补 2；
 - pending 使用绝对 3 s 半开 Deadline；
 - 只有显式 `ucn_v6_bootstrap_expire()` 能清理到期槽，恶意输入不能 lazy-expire 合法事务。
 
 未通过 Cookie 时不分配 pending。响应字节数不得大于请求，防止认证前放大。通过 Cookie 后，
-key 必须绑定 Link Generation、local peer discriminator、Identity Digest 和 64-bit txid；完整
+key 必须绑定 Link ID、Link Generation、local peer discriminator、Identity Digest 和 64-bit txid；完整
 transcript 再绑定双方 Principal、双 nonce、Realm/Address/Binding、Lease、Suite/Key Context
 及前序消息摘要。
 
@@ -122,6 +122,9 @@ checked-next，并在发布 ID 前持久化新高水位。退休只释放 active
    调用方持有且受公共锁保护的 callback gate；递归初始化在写入前拒绝。
 4. 终态 pending 的测试最初忽略了另一条已完成 JOIN 也会在同一 timer tick 到期。测试改为
    分别锁定并验证两条事务的半开 Deadline，不再用含糊的总计数掩盖生命周期。
+5. V6-15 第三轮交叉自审发现仅用 Link Generation 作为预算域会把两个都处于 generation 1 的
+   不同物理 Link 混为一体。Bootstrap Key、Token Bucket 和 pending 计数现统一绑定精确
+   `{link_id,generation}`；定向回归证明 Link 1 的令牌或 pending 耗尽不影响 Link 2。
 
 ## 8. 验证证据
 
@@ -145,3 +148,19 @@ Binding 退休再分配、Group ID 不复用、Cookie 前零 pending、无放大
 - 没有 Flash 双槽、掉电、回滚或 MCU 实测；Host fake Provider 不是持久化证明。
 - 没有把 Bootstrap 结果写入 Neighbor、Route、Path、ACL 或 Cluster。
 - 本报告是内部自审证据，不是外部审计签字。
+
+## 10. V6X-A01、A09、A10 外审整改补充
+
+连续实现后的交叉外审指出，最初的 Identity Authority 只保留了 RAM 高水位，无法在重启后
+证明 Binding/Group ID 没有回退。本轮将 Store 合同升级为完整
+`ucn_v6_identity_snapshot_t + record_generation + rollback witness`：初始化先同时读取状态和
+witness；提交先推进独立 witness，再写 Snapshot，最后重新加载并逐字段验证。witness 超前、
+状态超前、旧 Snapshot 回放或 Provider 假成功均失败关闭。
+
+所有 Binding 分配/退休、动态 Group 分配/退休都走同一个持久提交入口。Group 退休还必须在
+调用时重新验证 Authority Lease、Fence 和 quorum；过期或失权不能依靠先前缓存继续释放 ID。
+已退休 Group 不回退动态分配高水位。
+
+Bootstrap 与 Capability 的 per-Link/per-Peer 预算表增加显式定时回收。只有 Timer Owner 能在
+绝对 Deadline 到达后回收没有 pending 事务的闲置代际槽；输入请求不能通过“制造新代际”惰性
+驱逐未到期或活跃槽。对应重启/回滚、Group retire 和 generation churn 回归均已进入测试。

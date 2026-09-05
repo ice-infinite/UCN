@@ -12,11 +12,11 @@ extern "C" {
 #define UCN_V6_HEADER_CONTRACT_1 ((uint8_t)1U)
 #define UCN_V6_SECURITY_TAG_BYTES ((size_t)16U)
 #define UCN_V6_CANONICAL_AAD_BYTES ((size_t)80U)
-#define UCN_V6_BASE_FRAME_BYTES_A0 ((size_t)36U)
-#define UCN_V6_BASE_FRAME_BYTES_A1 ((size_t)38U)
-#define UCN_V6_BASE_FRAME_BYTES_A2 ((size_t)40U)
-#define UCN_V6_BASE_FRAME_BYTES_A3 ((size_t)42U)
-#define UCN_V6_WIRE_MAX_FRAME_BYTES ((size_t)65669U)
+#define UCN_V6_BASE_FRAME_BYTES_A0 ((size_t)40U)
+#define UCN_V6_BASE_FRAME_BYTES_A1 ((size_t)42U)
+#define UCN_V6_BASE_FRAME_BYTES_A2 ((size_t)44U)
+#define UCN_V6_BASE_FRAME_BYTES_A3 ((size_t)46U)
+#define UCN_V6_WIRE_MAX_FRAME_BYTES ((size_t)65673U)
 #define UCN_V6_PROTOCOL_OPCODE_GROUP_HELLO UINT16_C(1)
 #define UCN_V6_PROTOCOL_OPCODE_PEER_HELLO UINT16_C(2)
 #define UCN_V6_PROTOCOL_OPCODE_CAPABILITY_QUERY UINT16_C(3)
@@ -137,7 +137,13 @@ typedef struct ucn_v6_frame {
     uint32_t source_binding_generation;
     uint32_t destination_binding_generation;
     uint32_t session_generation;
-    uint32_t packet_sequence;
+    /* EN: Origin sequence is immutable across relays and belongs to the
+     * end-to-end or Group replay domain. Hop sequence is replaced and
+     * authenticated independently at every Peer hop.
+     * 中文：Origin 序号跨中继保持不变，归端到端或 Group 重放域所有；Hop
+     * 序号在每个 Peer 跳独立替换并认证。 */
+    uint32_t origin_sequence;
+    uint32_t hop_sequence;
     ucn_v6_peer_hop_context_t peer_hop;
     ucn_v6_group_context_t group;
     ucn_v6_e2e_context_t e2e;

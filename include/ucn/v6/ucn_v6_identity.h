@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ucn/v6/ucn_v6_config.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -12,30 +14,8 @@ extern "C" {
 #define UCN_V6_PROTOCOL_VERSION ((uint8_t)6U)
 #define UCN_V6_SERIAL_ROTATION_THRESHOLD UINT32_C(0xFFFFFFFE)
 #define UCN_V6_SERIAL64_ROTATION_THRESHOLD UINT64_C(0xFFFFFFFFFFFFFFFE)
-#ifndef UCN_V6_CONFIG_MAX_BINDINGS
-#define UCN_V6_CONFIG_MAX_BINDINGS 16U
-#endif
-#ifndef UCN_V6_CONFIG_MAX_ACTIVE_GROUPS
-#define UCN_V6_CONFIG_MAX_ACTIVE_GROUPS 8U
-#endif
 #define UCN_V6_MAX_BINDING_SLOTS ((size_t)UCN_V6_CONFIG_MAX_BINDINGS)
 #define UCN_V6_MAX_ACTIVE_GROUPS ((size_t)UCN_V6_CONFIG_MAX_ACTIVE_GROUPS)
-
-typedef enum ucn_v6_result {
-    UCN_V6_OK = 0,
-    UCN_V6_ERR_ARGUMENT = -1,
-    UCN_V6_ERR_CONFIG = -2,
-    UCN_V6_ERR_NO_SPACE = -3,
-    UCN_V6_ERR_MALFORMED = -4,
-    UCN_V6_ERR_SECURITY = -5,
-    UCN_V6_ERR_REPLAY = -6,
-    UCN_V6_ERR_ACCESS = -7,
-    UCN_V6_ERR_STATE = -8,
-    UCN_V6_ERR_EXHAUSTED = -9,
-    UCN_V6_ERR_NOT_FOUND = -10,
-    UCN_V6_ERR_TIMEOUT = -11,
-    UCN_V6_ERR_CANCELLED = -12
-} ucn_v6_result_t;
 
 typedef struct ucn_v6_principal {
     uint8_t bytes[16];
@@ -102,6 +82,28 @@ typedef struct ucn_v6_group_allocator {
     uint32_t active_group_ids[UCN_V6_MAX_ACTIVE_GROUPS];
 } ucn_v6_group_allocator_t;
 
+#define UCN_V6_IDENTITY_SNAPSHOT_MAGIC UINT32_C(0x56364953)
+#define UCN_V6_IDENTITY_SNAPSHOT_SCHEMA UINT16_C(1)
+
+/* EN: Semantic durable snapshot of one Realm Address Authority. Providers
+ * must serialize fields rather than treating compiler padding as persistent
+ * meaning. Local monotonic lease deadlines are deliberately excluded and
+ * must be re-established from a fresh authenticated challenge after restart.
+ * 中文：一个 Realm 地址权威的语义持久快照。Provider 必须按字段序列化，
+ * 不得把编译器 padding 当成持久语义。本地单调时钟租约截止期刻意不持久化，
+ * 重启后必须通过新的认证租约挑战重新建立。 */
+typedef struct ucn_v6_identity_snapshot {
+    uint32_t magic;
+    uint16_t schema;
+    uint16_t reserved;
+    uint64_t record_generation;
+    uint32_t realm_id;
+    bool epoch_valid;
+    ucn_v6_authority_epoch_t epoch;
+    ucn_v6_binding_slot_t bindings[UCN_V6_MAX_BINDING_SLOTS];
+    ucn_v6_group_allocator_t groups;
+} ucn_v6_identity_snapshot_t;
+
 typedef struct ucn_v6_callback_gate {
     void *context;
     void (*lock)(void *context);
@@ -113,15 +115,18 @@ typedef struct ucn_v6_callback_gate {
 
 typedef struct ucn_v6_identity_store_ops {
     void *context;
-    ucn_v6_result_t (*persist_authority_epoch)(
+    ucn_v6_result_t (*load_generation_witness)(
         void *context,
-        const ucn_v6_authority_epoch_t *epoch);
-    ucn_v6_result_t (*persist_binding_slot)(
+        uint64_t *generation);
+    ucn_v6_result_t (*reserve_generation_witness)(
         void *context,
-        const ucn_v6_binding_slot_t *slot);
-    ucn_v6_result_t (*persist_group_high_water)(
+        uint64_t generation);
+    ucn_v6_result_t (*load)(
         void *context,
-        uint32_t group_id_high_water);
+        ucn_v6_identity_snapshot_t *snapshot);
+    ucn_v6_result_t (*submit)(
+        void *context,
+        const ucn_v6_identity_snapshot_t *snapshot);
 } ucn_v6_identity_store_ops_t;
 
 typedef struct ucn_v6_identity_authority ucn_v6_identity_authority_t;
@@ -137,6 +142,7 @@ typedef union ucn_v6_identity_authority_storage {
 } ucn_v6_identity_authority_storage_t;
 
 typedef struct ucn_v6_identity_authority_view {
+    uint64_t record_generation;
     uint32_t realm_id;
     ucn_v6_authority_epoch_t epoch;
     uint64_t local_lease_deadline_us;
@@ -228,6 +234,7 @@ ucn_v6_result_t ucn_v6_identity_authority_allocate_dynamic_group(
     uint32_t *group_id);
 ucn_v6_result_t ucn_v6_identity_authority_retire_dynamic_group(
     ucn_v6_identity_authority_t *authority,
+    uint64_t now_us,
     uint32_t group_id);
 /* EN: Copies a read-only diagnostic view after validating opaque storage.
  * 中文：校验 opaque storage 后复制只读诊断视图。 */

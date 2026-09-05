@@ -42,6 +42,27 @@ static bool bytes_are_zero(const uint8_t *bytes, size_t length)
     return true;
 }
 
+static bool buffer_ranges_overlap(
+    const void *left,
+    size_t left_length,
+    const void *right,
+    size_t right_length)
+{
+    uintptr_t left_address;
+    uintptr_t right_address;
+
+    if (left == NULL || right == NULL || left_length == 0U ||
+        right_length == 0U) {
+        return false;
+    }
+    left_address = (uintptr_t)left;
+    right_address = (uintptr_t)right;
+    if (left_address <= right_address) {
+        return right_address - left_address < left_length;
+    }
+    return left_address - right_address < right_length;
+}
+
 static bool principal_equal(
     const ucn_v6_principal_t *left,
     const ucn_v6_principal_t *right)
@@ -180,13 +201,10 @@ static bool store_ops_are_valid(const ucn_v6_security_store_ops_t *store)
 static bool replay_is_valid(const ucn_v6_replay_window_t *window)
 {
     if (!window->initialized) {
-        return window->highest_sequence == 0U && window->seen_bitmap == 0U &&
-               window->durable_reserved_through == 0U;
+        return window->highest_sequence == 0U && window->seen_bitmap == 0U;
     }
     return window->highest_sequence != 0U &&
-           window->durable_reserved_through >= window->highest_sequence &&
-           window->durable_reserved_through <=
-               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           window->highest_sequence <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            (window->seen_bitmap & UINT64_C(1)) != 0U;
 }
 
@@ -274,9 +292,13 @@ static bool session_is_valid(
            replay_is_valid(&session->hop_replay_previous) &&
            replay_is_valid(&session->e2e_replay_current) &&
            replay_is_valid(&session->e2e_replay_previous) &&
-           session->tx_next_sequence != 0U &&
-           session->tx_next_sequence <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
-           session->tx_reserved_through <=
+           session->hop_tx_next_sequence != 0U &&
+           session->hop_tx_next_sequence <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           session->hop_tx_reserved_through <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           session->e2e_tx_next_sequence != 0U &&
+           session->e2e_tx_next_sequence <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           session->e2e_tx_reserved_through <=
                UCN_V6_SERIAL_ROTATION_THRESHOLD;
 }
 
@@ -320,7 +342,7 @@ static bool group_key_is_valid(
           key->tx_next_sequence > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
           key->tx_reserved_through > UCN_V6_SERIAL_ROTATION_THRESHOLD)) ||
         (key->state == UCN_V6_GROUP_KEY_RETIRED &&
-         (key->tx_next_sequence != 0U ||
+         (key->requires_rekey || key->tx_next_sequence != 0U ||
           key->tx_reserved_through != 0U))) {
         return false;
     }
@@ -385,6 +407,8 @@ static bool acl_key_is_valid(const ucn_v6_acl_key_t *key, uint32_t realm_id)
     uint32_t delivery = (uint32_t)key->delivery_guarantee;
     uint32_t interaction = (uint32_t)key->interaction_role;
     bool data;
+    bool transfer;
+    bool message_bearing;
 
     if (!ucn_v6_principal_is_valid(&key->device_principal) ||
         !ucn_v6_binding_key_is_valid(&key->source_binding) ||
@@ -403,11 +427,21 @@ static bool acl_key_is_valid(const ucn_v6_acl_key_t *key, uint32_t realm_id)
         return false;
     }
     data = key->frame_type == UCN_V6_FRAME_DATA;
+    transfer = key->frame_type == UCN_V6_FRAME_TRANSFER;
+    message_bearing = data || transfer;
     if (data) {
         if (key->protocol_opcode != 0U || key->source_endpoint == 0U ||
             key->destination_endpoint == 0U ||
             key->source_endpoint == UINT16_MAX ||
             key->destination_endpoint == UINT16_MAX) {
+            return false;
+        }
+    } else if (transfer) {
+        if (key->protocol_opcode == 0U || key->source_endpoint == 0U ||
+            key->destination_endpoint == 0U ||
+            key->source_endpoint == UINT16_MAX ||
+            key->destination_endpoint == UINT16_MAX ||
+            key->interaction_role == UCN_V6_INTERACTION_ONE_WAY) {
             return false;
         }
     } else if (key->protocol_opcode == 0U || key->source_endpoint != 0U ||
@@ -417,13 +451,16 @@ static bool acl_key_is_valid(const ucn_v6_acl_key_t *key, uint32_t realm_id)
     }
     if (key->operation_id_policy == UCN_V6_OPERATION_ID_NONE) {
         return key->exact_operation_id == 0U &&
-               (!data || key->interaction_role == UCN_V6_INTERACTION_ONE_WAY);
+               (!message_bearing ||
+                (data && key->interaction_role ==
+                             UCN_V6_INTERACTION_ONE_WAY));
     }
     if (key->operation_id_policy == UCN_V6_OPERATION_ID_ANY_NONZERO) {
-        return key->exact_operation_id == 0U && data &&
+        return key->exact_operation_id == 0U && message_bearing &&
                key->interaction_role != UCN_V6_INTERACTION_ONE_WAY;
     }
-    return key->operation_id_policy == UCN_V6_OPERATION_ID_EXACT && data &&
+    return key->operation_id_policy == UCN_V6_OPERATION_ID_EXACT &&
+           message_bearing &&
            key->interaction_role != UCN_V6_INTERACTION_ONE_WAY &&
            key->exact_operation_id != 0U &&
            key->exact_operation_id <= UCN_V6_SERIAL64_ROTATION_THRESHOLD;
@@ -532,8 +569,6 @@ static bool replay_equal(
 {
     return left->highest_sequence == right->highest_sequence &&
            left->seen_bitmap == right->seen_bitmap &&
-           left->durable_reserved_through ==
-               right->durable_reserved_through &&
            left->initialized == right->initialized;
 }
 
@@ -617,8 +652,10 @@ static bool session_equal(
                         &right->e2e_replay_current) &&
            replay_equal(&left->e2e_replay_previous,
                         &right->e2e_replay_previous) &&
-           left->tx_next_sequence == right->tx_next_sequence &&
-           left->tx_reserved_through == right->tx_reserved_through;
+           left->hop_tx_next_sequence == right->hop_tx_next_sequence &&
+           left->hop_tx_reserved_through == right->hop_tx_reserved_through &&
+           left->e2e_tx_next_sequence == right->e2e_tx_next_sequence &&
+           left->e2e_tx_reserved_through == right->e2e_tx_reserved_through;
 }
 
 static bool acl_key_fields_equal(
@@ -656,7 +693,9 @@ static bool group_key_equal(
     const ucn_v6_group_key_slot_t *left,
     const ucn_v6_group_key_slot_t *right)
 {
-    return left->state == right->state && left->group_id == right->group_id &&
+    return left->state == right->state &&
+           left->requires_rekey == right->requires_rekey &&
+           left->group_id == right->group_id &&
            left->group_generation == right->group_generation &&
            left->key_id == right->key_id &&
            left->suite_id == right->suite_id &&
@@ -860,16 +899,36 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
     for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
         ucn_v6_security_session_record_t *session = &loaded.sessions[index];
         if (session->occupied &&
-            session->tx_next_sequence <= session->tx_reserved_through) {
-            if (session->tx_reserved_through >=
+            session->hop_tx_next_sequence <=
+                session->hop_tx_reserved_through) {
+            if (session->hop_tx_reserved_through >=
                 UCN_V6_SERIAL_ROTATION_THRESHOLD) {
                 return UCN_V6_ERR_EXHAUSTED;
             }
-            session->tx_next_sequence = session->tx_reserved_through + 1U;
+            session->hop_tx_next_sequence =
+                session->hop_tx_reserved_through + 1U;
+        }
+        if (session->occupied &&
+            session->e2e_tx_next_sequence <=
+                session->e2e_tx_reserved_through) {
+            if (session->e2e_tx_reserved_through >=
+                UCN_V6_SERIAL_ROTATION_THRESHOLD) {
+                return UCN_V6_ERR_EXHAUSTED;
+            }
+            session->e2e_tx_next_sequence =
+                session->e2e_tx_reserved_through + 1U;
         }
         if (session->occupied && !session->revoked) {
             session->admitted = false;
             session->requires_reauth = true;
+            memset(&session->hop_replay_current, 0,
+                   sizeof(session->hop_replay_current));
+            memset(&session->hop_replay_previous, 0,
+                   sizeof(session->hop_replay_previous));
+            memset(&session->e2e_replay_current, 0,
+                   sizeof(session->e2e_replay_current));
+            memset(&session->e2e_replay_previous, 0,
+                   sizeof(session->e2e_replay_previous));
         }
     }
     for (index = 0U; index < UCN_V6_CONFIG_STATIC_GROUP_SLOTS; ++index) {
@@ -885,8 +944,15 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
                 }
                 key->tx_next_sequence = key->tx_reserved_through + 1U;
             }
+            if (key->state == UCN_V6_GROUP_KEY_ACTIVE) {
+                key->requires_rekey = true;
+                memset(&key->current_replay, 0, sizeof(key->current_replay));
+                memset(&key->previous_replay, 0, sizeof(key->previous_replay));
+            }
         }
     }
+    memset(loaded.group_replay_sources, 0,
+           sizeof(loaded.group_replay_sources));
     memset(&initialized, 0, sizeof(initialized));
     initialized.magic = UCN_V6_SECURITY_MANAGER_MAGIC;
     initialized.schema = UCN_V6_STORAGE_LAYOUT;
@@ -1301,7 +1367,8 @@ ucn_v6_result_t ucn_v6_security_commit_join(
         commit->authority_local_lease_deadline_us;
     slot->hop_current = commit->hop_selector;
     slot->e2e_current = commit->e2e_selector;
-    slot->tx_next_sequence = 1U;
+    slot->hop_tx_next_sequence = 1U;
+    slot->e2e_tx_next_sequence = 1U;
     return persist_candidate(manager, &candidate);
 }
 
@@ -1580,6 +1647,7 @@ ucn_v6_result_t ucn_v6_security_set_group_key(
             return UCN_V6_ERR_STATE;
         }
         next = *key;
+        next.requires_rekey = false;
         next.previous_generation = 0U;
         next.previous_deadline_us = 0U;
         memset(&next.current_replay, 0, sizeof(next.current_replay));
@@ -1594,6 +1662,7 @@ ucn_v6_result_t ucn_v6_security_set_group_key(
     } else if (key->state == UCN_V6_GROUP_KEY_RETIRED) {
         next = *current;
         next.state = UCN_V6_GROUP_KEY_RETIRED;
+        next.requires_rekey = false;
         next.previous_generation = 0U;
         next.previous_deadline_us = 0U;
         memset(&next.current_replay, 0, sizeof(next.current_replay));
@@ -1608,6 +1677,7 @@ ucn_v6_result_t ucn_v6_security_set_group_key(
             return UCN_V6_ERR_STATE;
         }
         next = *current;
+        next.requires_rekey = false;
         next.previous_generation = current->current_generation;
         next.previous_deadline_us = key->previous_deadline_us;
         next.previous_replay = current->current_replay;
@@ -1893,9 +1963,6 @@ static ucn_v6_result_t replay_preview(
         }
         next->seen_bitmap |= mask;
     }
-    if (next->durable_reserved_through < next->highest_sequence) {
-        next->durable_reserved_through = next->highest_sequence;
-    }
     return UCN_V6_OK;
 }
 
@@ -1937,6 +2004,8 @@ static void acl_request_from_frame(
     const ucn_v6_frame_t *frame,
     ucn_v6_security_direction_t direction)
 {
+    bool message_bearing = frame->frame_type == UCN_V6_FRAME_DATA ||
+                           frame->frame_type == UCN_V6_FRAME_TRANSFER;
     memset(request, 0, sizeof(*request));
     request->device_principal = *principal;
     request->source_binding.realm_id = frame->realm_id;
@@ -1955,10 +2024,10 @@ static void acl_request_from_frame(
                                    0U : frame->protocol_opcode;
     request->traffic_class = frame->traffic_class;
     request->delivery_guarantee = frame->delivery_guarantee;
-    request->interaction_role = frame->frame_type == UCN_V6_FRAME_DATA ?
+    request->interaction_role = message_bearing ?
                                     frame->message.interaction_role :
                                     UCN_V6_INTERACTION_ONE_WAY;
-    request->exact_operation_id = frame->frame_type == UCN_V6_FRAME_DATA ?
+    request->exact_operation_id = message_bearing ?
                                       frame->message.operation_id : 0U;
     request->direction = direction;
 }
@@ -2122,9 +2191,10 @@ static bool peer_discovery_contract_is_valid(const ucn_v6_frame_t *frame)
     return false;
 }
 
-static ucn_v6_result_t reserve_tx_sequence(
+static ucn_v6_result_t reserve_session_tx_sequence(
     ucn_v6_security_manager_t *manager,
-    const ucn_v6_principal_t *e2e_peer,
+    const ucn_v6_principal_t *peer,
+    bool hop_domain,
     uint32_t *sequence);
 
 ucn_v6_result_t ucn_v6_security_open_frame(
@@ -2212,16 +2282,16 @@ ucn_v6_result_t ucn_v6_security_open_frame(
             group_source->claimed_session_generation =
                 opened.frame.session_generation;
         }
+        if (group_key->requires_rekey) {
+            return UCN_V6_ERR_SECURITY;
+        }
         rc = replay_preview(&group_source->replay,
-                            opened.frame.packet_sequence, &replay_next);
+                            opened.frame.origin_sequence, &replay_next);
         if (rc != UCN_V6_OK) {
             return rc;
         }
         group_source->replay = replay_next;
-        rc = persist_candidate(manager, &candidate);
-        if (rc != UCN_V6_OK) {
-            return rc;
-        }
+        manager->committed = candidate;
         opened.group_discovery_only = true;
         *result_out = opened;
         return UCN_V6_OK;
@@ -2255,7 +2325,7 @@ ucn_v6_result_t ucn_v6_security_open_frame(
     }
     rc = replay_preview(previous ? &hop_session->hop_replay_previous :
                                    &hop_session->hop_replay_current,
-                        opened.frame.packet_sequence, &replay_next);
+                        opened.frame.hop_sequence, &replay_next);
     if (rc != UCN_V6_OK) {
         return rc;
     }
@@ -2281,10 +2351,7 @@ ucn_v6_result_t ucn_v6_security_open_frame(
     if (local_target) {
         if ((opened.frame.flags & UCN_V6_FLAG_E2E_CONTEXT) == 0U &&
             peer_discovery_contract_is_valid(&opened.frame)) {
-            rc = persist_candidate(manager, &candidate);
-            if (rc != UCN_V6_OK) {
-                return rc;
-            }
+            manager->committed = candidate;
             *result_out = opened;
             return UCN_V6_OK;
         }
@@ -2332,7 +2399,7 @@ ucn_v6_result_t ucn_v6_security_open_frame(
         }
         rc = replay_preview(previous ? &e2e_session->e2e_replay_previous :
                                        &e2e_session->e2e_replay_current,
-                            opened.frame.packet_sequence, &replay_next);
+                            opened.frame.origin_sequence, &replay_next);
         if (rc != UCN_V6_OK) {
             return rc;
         }
@@ -2351,10 +2418,12 @@ ucn_v6_result_t ucn_v6_security_open_frame(
         opened.authenticated_principal = e2e_session->peer_principal;
         opened.endpoint_authorized = true;
     }
-    rc = persist_candidate(manager, &candidate);
-    if (rc != UCN_V6_OK) {
-        return rc;
-    }
+    /* Replay windows are intentionally volatile. Every restart fences all
+     * Peer sessions behind authenticated REAUTH and all Group keys behind an
+     * explicit rekey, so accepting one frame never requires a full-snapshot
+     * flash write. / 重放窗口刻意保持为易失状态；每次重启都会要求 Peer
+     * 重新认证并要求 Group 换钥，因此正常收帧不再触发整份快照写 Flash。 */
+    manager->committed = candidate;
     *result_out = opened;
     return UCN_V6_OK;
 }
@@ -2401,7 +2470,8 @@ ucn_v6_result_t ucn_v6_security_protect_peer_discovery(
         !peer_discovery_contract_is_valid(&protected_frame)) {
         return UCN_V6_ERR_SECURITY;
     }
-    protected_frame.packet_sequence = 1U;
+    protected_frame.origin_sequence = 0U;
+    protected_frame.hop_sequence = 1U;
     protected_frame.peer_hop.suite_id = session->hop_current.suite_id;
     protected_frame.peer_hop.key_id = session->hop_current.key_id;
     protected_frame.peer_hop.key_generation =
@@ -2412,14 +2482,17 @@ ucn_v6_result_t ucn_v6_security_protect_peer_discovery(
         return rc;
     }
     if (frame_work_capacity < encoded_length ||
-        output_capacity < encoded_length) {
+        output_capacity < encoded_length ||
+        buffer_ranges_overlap(frame_work, encoded_length,
+                              output, encoded_length)) {
         return UCN_V6_ERR_NO_SPACE;
     }
-    rc = reserve_tx_sequence(manager, peer_principal, &sequence);
+    rc = reserve_session_tx_sequence(manager, peer_principal, true,
+                                     &sequence);
     if (rc != UCN_V6_OK) {
         return rc;
     }
-    protected_frame.packet_sequence = sequence;
+    protected_frame.hop_sequence = sequence;
     rc = ucn_v6_wire_encode(&protected_frame, frame_work,
                             frame_work_capacity, &encoded_length);
     if (rc != UCN_V6_OK || encoded_length < 20U) {
@@ -2443,9 +2516,10 @@ ucn_v6_result_t ucn_v6_security_protect_peer_discovery(
     return UCN_V6_OK;
 }
 
-static ucn_v6_result_t reserve_tx_sequence(
+static ucn_v6_result_t reserve_session_tx_sequence(
     ucn_v6_security_manager_t *manager,
-    const ucn_v6_principal_t *e2e_peer,
+    const ucn_v6_principal_t *peer,
+    bool hop_domain,
     uint32_t *sequence)
 {
     ucn_v6_security_snapshot_t candidate;
@@ -2453,33 +2527,45 @@ static ucn_v6_result_t reserve_tx_sequence(
     uint32_t reserved;
     ucn_v6_result_t rc;
     candidate = manager->committed;
-    session = find_session_by_principal(&candidate, e2e_peer);
+    uint32_t *next_sequence;
+    uint32_t *reserved_through;
+
+    session = find_session_by_principal(&candidate, peer);
     if (session == NULL || !session->admitted || session->revoked ||
-        session->tx_next_sequence == 0U ||
-        session->tx_next_sequence >= UCN_V6_SERIAL_ROTATION_THRESHOLD) {
+        session->requires_reauth) {
+        return UCN_V6_ERR_ACCESS;
+    }
+    next_sequence = hop_domain ? &session->hop_tx_next_sequence :
+                                 &session->e2e_tx_next_sequence;
+    reserved_through = hop_domain ? &session->hop_tx_reserved_through :
+                                    &session->e2e_tx_reserved_through;
+    if (*next_sequence == 0U ||
+        *next_sequence >= UCN_V6_SERIAL_ROTATION_THRESHOLD) {
         return UCN_V6_ERR_EXHAUSTED;
     }
-    if (session->tx_next_sequence > session->tx_reserved_through) {
-        reserved = session->tx_next_sequence;
+    if (*next_sequence > *reserved_through) {
+        reserved = *next_sequence;
         if (reserved <= UCN_V6_SERIAL_ROTATION_THRESHOLD - 63U) {
             reserved += 63U;
         } else {
             reserved = UCN_V6_SERIAL_ROTATION_THRESHOLD;
         }
-        session->tx_reserved_through = reserved;
+        *reserved_through = reserved;
         rc = persist_candidate(manager, &candidate);
         if (rc != UCN_V6_OK) {
             return rc;
         }
-        session = find_session_by_principal(&manager->committed, e2e_peer);
+        session = find_session_by_principal(&manager->committed, peer);
     } else {
-        session = find_session_by_principal(&manager->committed, e2e_peer);
+        session = find_session_by_principal(&manager->committed, peer);
     }
     if (session == NULL) {
         return UCN_V6_ERR_STATE;
     }
-    *sequence = session->tx_next_sequence;
-    ++session->tx_next_sequence;
+    next_sequence = hop_domain ? &session->hop_tx_next_sequence :
+                                 &session->e2e_tx_next_sequence;
+    *sequence = *next_sequence;
+    ++(*next_sequence);
     return UCN_V6_OK;
 }
 
@@ -2505,7 +2591,8 @@ ucn_v6_result_t ucn_v6_security_protect_frame(
     size_t aad_length = 0U;
     size_t encoded_length = 0U;
     size_t link_tag_offset;
-    uint32_t sequence;
+    uint32_t hop_sequence;
+    uint32_t origin_sequence;
     ucn_v6_result_t rc;
 
     if (!manager_storage_is_valid(manager) || manager->faulted ||
@@ -2546,7 +2633,8 @@ ucn_v6_result_t ucn_v6_security_protect_frame(
     if (!acl_allows(&manager->committed, &request)) {
         return UCN_V6_ERR_ACCESS;
     }
-    sealed.packet_sequence = 1U;
+    sealed.origin_sequence = 1U;
+    sealed.hop_sequence = 1U;
     sealed.peer_hop.suite_id = hop_session->hop_current.suite_id;
     sealed.peer_hop.key_id = hop_session->hop_current.key_id;
     sealed.peer_hop.key_generation =
@@ -2563,14 +2651,27 @@ ucn_v6_result_t ucn_v6_security_protect_frame(
         return rc;
     }
     if (frame_work_capacity < encoded_length ||
-        output_capacity < encoded_length) {
+        output_capacity < encoded_length ||
+        buffer_ranges_overlap(payload_work, sealed.payload_length,
+                              frame_work, encoded_length) ||
+        buffer_ranges_overlap(payload_work, sealed.payload_length,
+                              output, encoded_length) ||
+        buffer_ranges_overlap(frame_work, encoded_length,
+                              output, encoded_length)) {
         return UCN_V6_ERR_NO_SPACE;
     }
-    rc = reserve_tx_sequence(manager, e2e_peer_principal, &sequence);
+    rc = reserve_session_tx_sequence(manager, next_hop_principal, true,
+                                     &hop_sequence);
     if (rc != UCN_V6_OK) {
         return rc;
     }
-    sealed.packet_sequence = sequence;
+    rc = reserve_session_tx_sequence(manager, e2e_peer_principal, false,
+                                     &origin_sequence);
+    if (rc != UCN_V6_OK) {
+        return rc;
+    }
+    sealed.hop_sequence = hop_sequence;
+    sealed.origin_sequence = origin_sequence;
     rc = ucn_v6_wire_write_canonical_aad(
         &sealed, aad, sizeof(aad), &aad_length);
     if (rc != UCN_V6_OK) {
@@ -2611,6 +2712,128 @@ ucn_v6_result_t ucn_v6_security_protect_frame(
     memcpy(output, frame_work, encoded_length);
     *frame = sealed;
     *output_length = encoded_length;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_security_relay_frame(
+    ucn_v6_security_manager_t *manager,
+    uint64_t now_us,
+    uint32_t ingress_link_instance_generation,
+    const ucn_v6_principal_t *authenticated_peer_principal,
+    const ucn_v6_principal_t *next_hop_principal,
+    uint64_t hop_budget_debit_us,
+    const uint8_t *encoded_frame,
+    size_t encoded_length,
+    uint8_t *frame_work,
+    size_t frame_work_capacity,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_length,
+    ucn_v6_security_open_result_t *verified_ingress,
+    ucn_v6_frame_t *relayed_frame)
+{
+    ucn_v6_security_open_result_t opened;
+    ucn_v6_frame_t relay;
+    ucn_v6_security_session_record_t *hop_session;
+    size_t relay_length = 0U;
+    size_t link_tag_offset;
+    uint32_t hop_sequence;
+    ucn_v6_result_t rc;
+
+    if (!manager_storage_is_valid(manager) || manager->faulted ||
+        !ucn_v6_principal_is_valid(authenticated_peer_principal) ||
+        !ucn_v6_principal_is_valid(next_hop_principal) ||
+        encoded_frame == NULL || encoded_length == 0U ||
+        frame_work == NULL || output == NULL || output_length == NULL ||
+        verified_ingress == NULL || relayed_frame == NULL ||
+        buffer_ranges_overlap(encoded_frame, encoded_length,
+                              frame_work, encoded_length) ||
+        buffer_ranges_overlap(frame_work, encoded_length,
+                              output, encoded_length) ||
+        frame_work_capacity < encoded_length ||
+        output_capacity < encoded_length) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    rc = ucn_v6_security_open_frame(
+        manager, now_us, ingress_link_instance_generation,
+        authenticated_peer_principal, encoded_frame, encoded_length,
+        NULL, 0U, &opened);
+    if (rc != UCN_V6_OK) {
+        return rc;
+    }
+    if (!opened.hop_authenticated || opened.endpoint_authorized ||
+        opened.group_discovery_only) {
+        return UCN_V6_ERR_SECURITY;
+    }
+    relay = opened.frame;
+    if (relay.frame_type == UCN_V6_FRAME_BOOTSTRAP || relay.hop_limit <= 1U ||
+        (relay.flags & UCN_V6_FLAG_PEER_HOP_CONTEXT) == 0U ||
+        (relay.flags & UCN_V6_FLAG_GROUP_CONTEXT) != 0U ||
+        (relay.flags & UCN_V6_FLAG_E2E_CONTEXT) == 0U ||
+        relay.origin_sequence == 0U ||
+        (relay.payload_length != 0U && relay.payload == NULL)) {
+        return UCN_V6_ERR_STATE;
+    }
+    if ((relay.flags & UCN_V6_FLAG_HOP_BUDGET_CONTEXT) != 0U) {
+        if (hop_budget_debit_us == 0U ||
+            hop_budget_debit_us >= relay.hop_budget.remaining_budget_us) {
+            return UCN_V6_ERR_EXHAUSTED;
+        }
+        relay.hop_budget.remaining_budget_us -= hop_budget_debit_us;
+    } else if (hop_budget_debit_us != 0U) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    hop_session = find_session_by_principal(&manager->committed,
+                                             next_hop_principal);
+    if (hop_session == NULL || !hop_session->admitted || hop_session->revoked ||
+        hop_session->requires_reauth ||
+        now_us >= hop_session->local_lease_deadline_us) {
+        return UCN_V6_ERR_SECURITY;
+    }
+    --relay.hop_limit;
+    relay.peer_hop.suite_id = hop_session->hop_current.suite_id;
+    relay.peer_hop.key_id = hop_session->hop_current.key_id;
+    relay.peer_hop.key_generation = hop_session->hop_current.key_generation;
+    relay.hop_sequence = 1U;
+    memset(relay.link_tag, 0, sizeof(relay.link_tag));
+    rc = ucn_v6_wire_encoded_size(&relay, &relay_length);
+    if (rc != UCN_V6_OK) {
+        return rc;
+    }
+    if (frame_work_capacity < relay_length || output_capacity < relay_length) {
+        return UCN_V6_ERR_NO_SPACE;
+    }
+    rc = reserve_session_tx_sequence(manager, next_hop_principal, true,
+                                     &hop_sequence);
+    if (rc != UCN_V6_OK) {
+        return rc;
+    }
+    hop_session = find_session_by_principal(&manager->committed,
+                                             next_hop_principal);
+    if (hop_session == NULL) {
+        return UCN_V6_ERR_STATE;
+    }
+    relay.hop_sequence = hop_sequence;
+    rc = ucn_v6_wire_encode(&relay, frame_work, frame_work_capacity,
+                            &relay_length);
+    if (rc != UCN_V6_OK || relay_length < 20U) {
+        return rc != UCN_V6_OK ? rc : UCN_V6_ERR_STATE;
+    }
+    link_tag_offset = relay_length - UCN_V6_SECURITY_TAG_BYTES - 4U;
+    rc = crypto_compute_tag(manager, &hop_session->hop_current, frame_work,
+                            link_tag_offset, NULL, 0U, relay.link_tag);
+    if (rc != UCN_V6_OK) {
+        return rc;
+    }
+    rc = ucn_v6_wire_encode(&relay, frame_work, frame_work_capacity,
+                            &relay_length);
+    if (rc != UCN_V6_OK) {
+        return rc;
+    }
+    memcpy(output, frame_work, relay_length);
+    *verified_ingress = opened;
+    *relayed_frame = relay;
+    *output_length = relay_length;
     return UCN_V6_OK;
 }
 
@@ -2696,7 +2919,8 @@ ucn_v6_result_t ucn_v6_security_protect_group_hello(
             manager->committed.local_binding.binding_generation) {
         return UCN_V6_ERR_SECURITY;
     }
-    protected_frame.packet_sequence = 1U;
+    protected_frame.origin_sequence = 1U;
+    protected_frame.hop_sequence = 0U;
     protected_frame.group.group_id = group->group_id;
     protected_frame.group.group_generation = group->group_generation;
     protected_frame.group.suite_id = key->suite_id;
@@ -2708,7 +2932,9 @@ ucn_v6_result_t ucn_v6_security_protect_group_hello(
         return rc;
     }
     if (frame_work_capacity < encoded_length ||
-        output_capacity < encoded_length) {
+        output_capacity < encoded_length ||
+        buffer_ranges_overlap(frame_work, encoded_length,
+                              output, encoded_length)) {
         return UCN_V6_ERR_NO_SPACE;
     }
     rc = reserve_group_tx_sequence(manager, group_slot, key_slot, &sequence);
@@ -2716,7 +2942,7 @@ ucn_v6_result_t ucn_v6_security_protect_group_hello(
         return rc;
     }
     key = &manager->committed.group_keys[group_slot][key_slot];
-    protected_frame.packet_sequence = sequence;
+    protected_frame.origin_sequence = sequence;
     rc = ucn_v6_wire_encode(&protected_frame, frame_work,
                             frame_work_capacity, &encoded_length);
     if (rc != UCN_V6_OK || encoded_length < 20U) {
