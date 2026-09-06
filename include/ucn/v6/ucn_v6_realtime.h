@@ -17,7 +17,8 @@ extern "C" {
 
 #define UCN_V6_REALTIME_ENVELOPE_VERSION ((uint8_t)1U)
 #define UCN_V6_REALTIME_ENVELOPE_BYTES ((size_t)16U)
-#define UCN_V6_TIME_SYNC_SAMPLE_BYTES ((size_t)48U)
+#define UCN_V6_TIME_SYNC_ANNOUNCE_BYTES ((size_t)12U)
+#define UCN_V6_TIME_SYNC_RESPONSE_BYTES ((size_t)40U)
 #define UCN_V6_REALTIME_SAMPLE_WINDOW ((size_t)5U)
 #define UCN_V6_REALTIME_DOMAIN_ID_MAX UINT16_C(0xFFFE)
 #define UCN_V6_REALTIME_UNCERTAINTY_UNKNOWN ((uint8_t)31U)
@@ -96,6 +97,10 @@ typedef struct ucn_v6_time_domain_config {
     uint64_t max_holdover_us;
     uint32_t max_offset_jump_us;
     uint32_t oscillator_uncertainty_ppb;
+    uint32_t timer_resolution_bound_us;
+    uint32_t filter_residual_bound_us;
+    uint32_t arithmetic_rounding_bound_us;
+    uint32_t sample_capture_bound_us;
 } ucn_v6_time_domain_config_t;
 
 /* Durable proof fields that are relevant to Realtime admission.  This is not
@@ -128,13 +133,49 @@ typedef struct ucn_v6_realtime_domain_record {
     ucn_v6_realtime_path_proof_t path_proof;
 } ucn_v6_realtime_domain_record_t;
 
-typedef struct ucn_v6_time_sync_sample {
+typedef struct ucn_v6_time_sync_announce {
     uint16_t clock_domain_id;
     uint32_t domain_generation;
-    uint64_t local_sample_us;
-    int64_t offset_us;
-    ucn_v6_realtime_uncertainty_t uncertainty;
-} ucn_v6_time_sync_sample_t;
+    uint32_t sync_sequence;
+} ucn_v6_time_sync_announce_t;
+
+/* EN: Authenticated Master result for one completed four-event exchange.
+ * It carries only Master-owned T1/T4. Member-owned T2/T3 never cross Wire.
+ * 中文：一次四事件交换的 Master 认证结果；仅携带 Master 拥有的 T1/T4，
+ * Member 拥有的 T2/T3 永不上 Wire。 */
+typedef struct ucn_v6_time_sync_response {
+    uint16_t clock_domain_id;
+    uint32_t domain_generation;
+    uint32_t sync_sequence;
+    uint64_t t1_master_tx_us;
+    uint64_t t4_master_rx_us;
+    uint32_t t1_uncertainty_us;
+    uint32_t t4_uncertainty_us;
+} ucn_v6_time_sync_response_t;
+
+typedef struct ucn_v6_time_local_capture {
+    uint16_t link_id;
+    uint32_t link_generation;
+    uint32_t event_token;
+    uint64_t timestamp_us;
+    uint32_t uncertainty_us;
+    bool hardware;
+} ucn_v6_time_local_capture_t;
+
+typedef struct ucn_v6_time_sync_observation {
+    uint32_t sync_sequence;
+    /* The authenticated Master->Member Path carried TIME_SYNC and must also
+     * carry TIME_DELAY_RESPONSE.  The reverse reference below is the distinct
+     * Member->Master Path used by TIME_DELAY_REQUEST; the two Path IDs are not
+     * interchangeable.
+     * 认证的 Master->Member Path 承载 TIME_SYNC，并且也必须承载
+     * TIME_DELAY_RESPONSE。下方 reverse 引用是 TIME_DELAY_REQUEST 使用的
+     * 独立 Member->Master Path；两个 Path ID 不可混用。 */
+    ucn_v6_route_path_ref_t forward_route_ref;
+    ucn_v6_route_path_ref_t reverse_route_ref;
+    ucn_v6_time_local_capture_t t2_member_rx;
+    ucn_v6_time_local_capture_t t3_member_tx;
+} ucn_v6_time_sync_observation_t;
 
 typedef struct ucn_v6_realtime_clock_view {
     bool available;
@@ -224,15 +265,22 @@ ucn_v6_result_t ucn_v6_realtime_envelope_decode(
 ucn_v6_result_t ucn_v6_realtime_uncertainty_aggregate(
     const ucn_v6_realtime_uncertainty_t *components,
     uint32_t *upper_bound_us);
-/* EN: Encodes/decodes the exact authenticated TIME_FOLLOW_UP sample payload.
- * 中文：编码/解码经过认证的 TIME_FOLLOW_UP 精确采样载荷。 */
-ucn_v6_result_t ucn_v6_time_sync_sample_encode(
-    const ucn_v6_time_sync_sample_t *sample,
-    uint8_t output[UCN_V6_TIME_SYNC_SAMPLE_BYTES]);
-ucn_v6_result_t ucn_v6_time_sync_sample_decode(
-    const uint8_t *input,
-    size_t input_length,
-    ucn_v6_time_sync_sample_t *sample);
+ucn_v6_result_t ucn_v6_time_sync_announce_encode(
+    const ucn_v6_time_sync_announce_t *announce,
+    uint8_t output[UCN_V6_TIME_SYNC_ANNOUNCE_BYTES]);
+ucn_v6_result_t ucn_v6_time_sync_announce_decode(
+    const uint8_t *input, size_t input_length,
+    ucn_v6_time_sync_announce_t *announce);
+/* EN: Encodes/decodes the authenticated Master-owned T1/T4 response. The
+ * Member's T2/T3 captures are local-only and cannot be supplied by Wire.
+ * 中文：编码/解码由 Master 持有的认证 T1/T4 响应。Member 的 T2/T3 只存在于
+ * 本地，Wire 无权提供。 */
+ucn_v6_result_t ucn_v6_time_sync_response_encode(
+    const ucn_v6_time_sync_response_t *response,
+    uint8_t output[UCN_V6_TIME_SYNC_RESPONSE_BYTES]);
+ucn_v6_result_t ucn_v6_time_sync_response_decode(
+    const uint8_t *input, size_t input_length,
+    ucn_v6_time_sync_response_t *response);
 
 /* EN: Initializes one fixed-capacity Realtime owner.
  * 中文：初始化一个固定容量的实时 Owner。 */
@@ -258,12 +306,17 @@ ucn_v6_result_t ucn_v6_realtime_bind_domain(
     const ucn_v6_route_path_ref_t *fixed_route_ref,
     uint64_t now_us);
 
-/* EN: Admits one authenticated sample; dynamic paths and diagnostic-only
- * capabilities never contribute to LOCKED.
- * 中文：准入一个已认证采样；动态 Path 和仅诊断能力绝不推动 LOCKED。 */
-ucn_v6_result_t ucn_v6_realtime_ingest_sample(
+/* EN: Ingests one complete T1/T2/T3/T4 exchange. Security supplies the
+ * authenticated DELAY_RESPONSE containing T1/T4; the standard Runtime binds
+ * T2/T3 to atomic Adapter RX/TX-completion events before calling this API.
+ * No remote offset or remote claim of a local sample is accepted.
+ * 中文：准入一次完整 T1/T2/T3/T4 交换。Security 提供携带 T1/T4 的认证
+ * DELAY_RESPONSE；标准 Runtime 在调用前把 T2/T3 绑定到 Adapter 原子 RX/TX
+ * 完成事件。本接口不接受远端直接声明 offset 或本地采样时刻。 */
+ucn_v6_result_t ucn_v6_realtime_ingest_exchange(
     ucn_v6_realtime_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened,
+    const ucn_v6_security_open_result_t *opened_delay_response,
+    const ucn_v6_time_sync_observation_t *observation,
     uint64_t now_us);
 ucn_v6_result_t ucn_v6_realtime_get_clock(
     ucn_v6_realtime_owner_t *owner,

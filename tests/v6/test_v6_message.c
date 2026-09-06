@@ -1298,8 +1298,12 @@ static int test_invalid_record_and_store_failure_fail_closed(void)
               journal_storage.bytes, sizeof(journal_storage),
               ucn_v6_compiled_manifest(), &ops, &gate,
               &journal) == UCN_V6_ERR_STATE);
+    CHECK(journal == NULL);
+    /* Once Provider I/O begins, the caller-owned storage is the fixed
+     * transactional workspace. Failure leaves it deliberately uninitialized;
+     * only argument/preflight rejection promises byte-for-byte no-write. */
     CHECK(memcmp(&journal_storage, &before_storage,
-                 sizeof(journal_storage)) == 0);
+                 sizeof(journal_storage)) != 0);
 
     memset(&store, 0, sizeof(store));
     ops = fake_ops(&store);

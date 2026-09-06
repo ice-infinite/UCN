@@ -246,6 +246,8 @@ static bool frame_contract_is_valid(const ucn_v6_frame_t *frame)
     if (message) {
         if (frame->message.source_endpoint == 0U ||
             frame->message.destination_endpoint == 0U ||
+            frame->message.source_endpoint > UCN_V6_ENDPOINT_ID_MAX ||
+            frame->message.destination_endpoint > UCN_V6_ENDPOINT_ID_MAX ||
             (uint32_t)frame->message.interaction_role >
                 (uint32_t)UCN_V6_INTERACTION_ERROR ||
             ((frame->message.interaction_role ==
@@ -264,6 +266,7 @@ static bool frame_contract_is_valid(const ucn_v6_frame_t *frame)
     }
     if ((frame->flags & UCN_V6_FLAG_PATH_CONTEXT) != 0U &&
         (frame->path.path_id == 0U ||
+         frame->path.path_id > UCN_V6_PATH_ID_MAX ||
          !serial_is_valid(frame->path.path_generation))) {
         return false;
     }
@@ -332,6 +335,9 @@ static bool size_add(size_t *value, size_t increment)
     return true;
 }
 
+static bool wire_buffer_ranges_overlap(const void *left, size_t left_length,
+                                       const void *right, size_t right_length);
+
 ucn_v6_result_t ucn_v6_wire_encoded_size(
     const ucn_v6_frame_t *frame,
     size_t *encoded_size)
@@ -339,7 +345,11 @@ ucn_v6_result_t ucn_v6_wire_encoded_size(
     size_t size;
     size_t address_bytes;
 
-    if (encoded_size == NULL || !frame_contract_is_valid(frame)) {
+    if (encoded_size == NULL || !frame_contract_is_valid(frame) ||
+        wire_buffer_ranges_overlap(frame, sizeof(*frame), encoded_size,
+                                   sizeof(*encoded_size)) ||
+        wire_buffer_ranges_overlap(frame->payload, frame->payload_length,
+                                   encoded_size, sizeof(*encoded_size))) {
         return UCN_V6_ERR_ARGUMENT;
     }
     address_bytes = ucn_v6_address_bytes(frame->address_class);
@@ -413,6 +423,23 @@ uint32_t ucn_v6_crc32c(const uint8_t *data, size_t length)
     return ~crc;
 }
 
+static bool wire_buffer_ranges_overlap(const void *left, size_t left_length,
+                                       const void *right, size_t right_length)
+{
+    uintptr_t left_address;
+    uintptr_t right_address;
+    if (left == NULL || right == NULL || left_length == 0U ||
+        right_length == 0U) {
+        return false;
+    }
+    left_address = (uintptr_t)left;
+    right_address = (uintptr_t)right;
+    if (left_address <= right_address) {
+        return right_address - left_address < left_length;
+    }
+    return left_address - right_address < right_length;
+}
+
 ucn_v6_result_t ucn_v6_wire_encode(
     const ucn_v6_frame_t *frame,
     uint8_t *output,
@@ -434,6 +461,17 @@ ucn_v6_result_t ucn_v6_wire_encode(
     }
     if (output_capacity < required) {
         return UCN_V6_ERR_NO_SPACE;
+    }
+    if (wire_buffer_ranges_overlap(frame->payload, frame->payload_length,
+                                   output, required) ||
+        wire_buffer_ranges_overlap(frame, sizeof(*frame), output, required) ||
+        wire_buffer_ranges_overlap(frame->payload, frame->payload_length,
+                                   output_length, sizeof(*output_length)) ||
+        wire_buffer_ranges_overlap(frame, sizeof(*frame), output_length,
+                                   sizeof(*output_length)) ||
+        wire_buffer_ranges_overlap(output_length, sizeof(*output_length),
+                                   output, required)) {
+        return UCN_V6_ERR_ARGUMENT;
     }
     address_bytes = ucn_v6_address_bytes(frame->address_class);
     output[offset++] = UCN_V6_WIRE_MAGIC_0;
@@ -561,6 +599,8 @@ ucn_v6_result_t ucn_v6_wire_decode(
     if (input == NULL || frame == NULL ||
         input_length < UCN_V6_BASE_FRAME_BYTES_A0 ||
         input_length > UCN_V6_WIRE_MAX_FRAME_BYTES ||
+        wire_buffer_ranges_overlap(input, input_length,
+                                   frame, sizeof(*frame)) ||
         input[0] != UCN_V6_WIRE_MAGIC_0 ||
         input[1] != UCN_V6_WIRE_MAGIC_1) {
         return UCN_V6_ERR_MALFORMED;
@@ -723,7 +763,19 @@ ucn_v6_result_t ucn_v6_wire_write_canonical_aad(
     uint8_t context_kind = 0U;
 
     if (output == NULL || output_length == NULL ||
-        !frame_contract_is_valid(frame)) {
+        !frame_contract_is_valid(frame) ||
+        wire_buffer_ranges_overlap(frame->payload,
+                                   (size_t)frame->payload_length,
+                                   output, UCN_V6_CANONICAL_AAD_BYTES) ||
+        wire_buffer_ranges_overlap(frame->payload,
+                                   (size_t)frame->payload_length,
+                                   output_length, sizeof(*output_length)) ||
+        wire_buffer_ranges_overlap(frame, sizeof(*frame),
+                                   output, UCN_V6_CANONICAL_AAD_BYTES) ||
+        wire_buffer_ranges_overlap(frame, sizeof(*frame), output_length,
+                                   sizeof(*output_length)) ||
+        wire_buffer_ranges_overlap(output_length, sizeof(*output_length),
+                                   output, UCN_V6_CANONICAL_AAD_BYTES)) {
         return UCN_V6_ERR_ARGUMENT;
     }
     if (output_capacity < UCN_V6_CANONICAL_AAD_BYTES) {

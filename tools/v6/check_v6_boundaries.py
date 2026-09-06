@@ -31,6 +31,20 @@ def main() -> int:
         if "TODO" in text or "FIXME" in text:
             errors.append(f"unfinished marker in {relative}")
 
+    active_surface = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in runtime_files + public_files
+    )
+    removed_realtime_surface = (
+        "UCN_V6_PROTOCOL_OPCODE_TIME_FOLLOW_UP",
+        "UCN_V6_TIME_SYNC_SAMPLE_BYTES",
+        "ucn_v6_time_sync_sample_t",
+        "ucn_v6_realtime_ingest_sample",
+    )
+    for token in removed_realtime_surface:
+        if token in active_surface:
+            errors.append(f"removed Realtime surface remains: {token}")
+
     cluster_text = "\n".join(
         path.read_text(encoding="utf-8")
         for path in runtime_files + public_files
@@ -52,7 +66,7 @@ def main() -> int:
         "ucn_v6_message", "ucn_v6_owner", "ucn_v6_security",
         "ucn_v6_capability", "ucn_v6_route", "ucn_v6_qos",
         "ucn_v6_transfer", "ucn_v6_realtime", "ucn_v6_cluster",
-        "ucn_v6_adapter",
+        "ucn_v6_adapter", "ucn_v6_runtime",
     )
     for target in required_targets:
         if f"add_library({target} " not in cmake:
@@ -102,6 +116,8 @@ def main() -> int:
         "src/v6/adapter/ucn_v6_can.c",
         "src/v6/adapter/ucn_v6_usb.c",
         "src/v6/ports/ucn_v6_freertos.c",
+        "src/v6/runtime/ucn_v6_runtime.c",
+        "include/ucn/v6/ucn_v6_runtime.h",
     )
     for relative in required_bearer_files:
         if not (root / relative).is_file():

@@ -153,6 +153,10 @@ static int test_metric(void)
     CHECK(ucn_v6_metric_owner_init_in_place(
               storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
               &policy, &owner) == UCN_V6_OK);
+    key.path_id = UINT16_MAX;
+    CHECK(ucn_v6_metric_ingest(owner, &key, &sample) ==
+          UCN_V6_ERR_ARGUMENT);
+    key.path_id = 1U;
     CHECK(ucn_v6_metric_ingest(owner, &key, &sample) == UCN_V6_OK);
     CHECK(ucn_v6_metric_ingest(owner, &key, &sample) == UCN_V6_OK);
     conflict = sample;

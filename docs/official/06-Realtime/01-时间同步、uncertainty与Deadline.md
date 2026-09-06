@@ -16,9 +16,33 @@ Envelope。
 滤波历史与同 generation 单调输出高水位分开保存。失锁时清除 acquisition/filter，但不能
 清除已发布时间高水位；重新锁定若会倒退，`ingest_sample()` 在暴露 LOCKED 前直接 Fault。
 
-时间采样不是调用方可独立填写的旁路参数。`TIME_FOLLOW_UP` 使用固定 48 B canonical Payload，
-Domain 只从已经完成 Security Open 的 Frame Payload 解码，并精确绑定 Opcode、Master
-Principal、Binding、Session、Route 和固定 Path；任何错绑在修改滤波器前拒绝。
+时间采样不是调用方可独立填写的旁路参数。当前交换使用三个认证控制消息和四个物理事件：
+
+```text
+Master  TIME_SYNC{domain,generation,sequence}   -- T1 TX -->
+Member                                          <-- T2 RX
+Member  TIME_DELAY_REQUEST{same key}            -- T3 TX -->
+Master                                          <-- T4 RX
+Master  TIME_DELAY_RESPONSE{same key,T1,T4及上界}        --> Member
+```
+
+`TIME_SYNC` 的 canonical announce 固定为 12 B；`TIME_DELAY_RESPONSE` 的 canonical response
+固定为 40 B，只携带 Master 所有的 T1/T4。Member 的 T2/T3 永不上 Wire，必须由标准 Runtime
+从当前 Adapter RX 原子项和实际 TX completion 绑定。Domain 只接受已完成 Security Open 的
+`TIME_DELAY_RESPONSE`，并精确绑定 Opcode、Master Principal、Binding、Session、Route、
+固定 Path、Domain Generation 和 Sequence；任何错绑都在修改滤波器前拒绝。正向
+`Master→Member` 与反向 `Member→Master` 是两个独立的定向 Path Identity，可以使用不同
+Path ID/Generation。Runtime 分别冻结两者：`TIME_SYNC` 与 `TIME_DELAY_RESPONSE` 必须命中
+同一正向 Path，`TIME_DELAY_REQUEST` 必须命中当前反向 Path；任一方向的证明不能替代另一方向。
+
+这一设计不接受远端直接声明 `offset_us` 或 `local_sample_us`。Member 根据四个事件本地计算：
+
+```text
+offset = ((T1 - T2) + (T4 - T3)) / 2
+```
+
+所有差值、求和与除法舍入都执行 checked arithmetic。缺失硬件时间戳、事件键重复、Link
+Generation 错绑、反向 Path 失效、响应超时或任一 uncertainty 上界未知，均失败关闭。
 
 ## 3. uncertainty
 
@@ -35,7 +59,7 @@ Principal、Binding、Session、Route 和固定 Path；任何错绑在修改滤�
 半开区间意味着恰好到 deadline 已过期。远未来 capture time 不能通过 `max(0, now-capture)`
 伪装成年龄很小，必须单独按 uncertainty/future-skew 公式拒绝。
 
-## 5. 时间戳事件
+## 5. 时间戳事件与标准 Runtime
 
 T1/T4 属于 Master，T2/T3 属于 Member。四个本地 event key 不上 Wire；双方通过认证的
 `{message role,sync_seq,session_generation,path_generation}` 事务键关联。RX 必须原子入队
@@ -44,6 +68,19 @@ T1/T4 属于 Master，T2/T3 属于 Member。四个本地 event key 不上 Wire�
 节点只能取消自己持有的 key。超时、替换、切路或 reopen 采用 `peek → driver retire → ack/pop`
 释放 obligation；Driver 失败时 key 留队等待重试。远端旧事件由 Session/Path Generation、
 Abort 或绝对超时收敛。
+
+`ucn_v6_runtime_owner_t` 是生产接入的标准编排层。Driver 只向 Adapter 发布 RX/TX completion；
+Runtime 固定 Owner 阶段、退休顺序、依赖失效扇出和全部 T1～T4 绑定。Master 通过
+`ucn_v6_runtime_time_start_sync()` 让 Runtime 构造、保护并排队精确 `TIME_SYNC`；Member 在
+当前 RX callback 中用 `ucn_v6_runtime_time_observe_sync()` 获得 opaque handle，再由
+`ucn_v6_runtime_time_send_delay_request()` 构造并排队精确请求；Master 在当前请求 RX 上调用
+`ucn_v6_runtime_time_respond_delay_request()`；Member 只可用当前响应 RX 调用
+`ucn_v6_runtime_time_complete()`。应用不能直接提交三元组或任意 TX event key 冒充事务。
+
+产品回调只负责把已经过 Security Open 的控制/业务消息交回上述 Runtime API，以及接收已物理
+退休的 Buffer token，不能重排协议阶段。Link reopen 必须调用
+`ucn_v6_runtime_reopen_link()`，由它统一完成 Adapter quiesce、旧代际 token 回收和 Link
+invalidation 扇出；任何 RX、TX completion 或应用回调动态范围内的 reopen 都失败关闭。
 
 ## 6. HOLDOVER
 

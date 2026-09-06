@@ -5,6 +5,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* EN: Canonical 16-bit identifier domains. Zero means absent/unbound and
+ * UINT16_MAX is reserved as the invalid/exhausted sentinel. Keeping the
+ * usable upper bound here prevents Wire, Adapter and higher owners from
+ * accepting identifiers that another v6 layer can never consume.
+ * 中文：16 位标识符的统一合法域。0 表示缺省/未绑定，UINT16_MAX 保留为
+ * 无效/耗尽哨兵。统一在基础类型中声明可用上限，防止 Wire、Adapter 与上层
+ * Owner 对同一标识符给出互相矛盾的准入结论。 */
+#define UCN_V6_ENDPOINT_ID_MAX UINT16_C(65534)
+#define UCN_V6_LINK_ID_MAX UINT16_C(65534)
+#define UCN_V6_PATH_ID_MAX UINT16_C(65534)
+
 /* EN: Canonical cumulative path-hop domain shared by Capability, Route and
  * Metric. Zero means no valid path and UINT16_MAX is a reserved invalid /
  * exhausted sentinel; neither value may become an installed path cost.

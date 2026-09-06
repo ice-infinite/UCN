@@ -1,5 +1,7 @@
 # UCN V6-12 Cluster Target 统一实现报告
 
+> 历史实现快照：本文记录 V6-12 当时的 Record v1、4096 B Record 与资源数据，已不代表当前发布候选实现。当前实现已因外审整改升级为 Record v3、8192 B Record、Storage Layout 9；请以《UCN V6 外审 AUD-01～05 整改与自审报告（2026-09-06）》和当前配置头为准。
+
 ## 1. 范围与架构边界
 
 V6-12 新增独立 `ucn_v6_cluster` archive，把 Cluster 权威状态建立在 v6 Identity、Wire、

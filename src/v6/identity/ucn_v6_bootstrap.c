@@ -120,6 +120,7 @@ static bool flow_is_valid(ucn_v6_bootstrap_flow_t flow)
 static bool key_is_valid(const ucn_v6_bootstrap_key_t *key)
 {
     return key != NULL && key->ingress_link_id != 0U &&
+           key->ingress_link_id <= UCN_V6_LINK_ID_MAX &&
            key->ingress_link_generation != 0U &&
            key->ingress_link_generation <=
                UCN_V6_SERIAL_ROTATION_THRESHOLD &&
@@ -172,6 +173,7 @@ static bool transcript_is_valid(
            transcript->authority_binding_generation <=
                UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            transcript->selected_link_instance_id != 0U &&
+           transcript->selected_link_instance_id <= UCN_V6_LINK_ID_MAX &&
            bytes_nonzero(transcript->binding_lease_id,
                          sizeof(transcript->binding_lease_id)) &&
            transcript->binding_lease_duration_us != 0U &&
@@ -510,6 +512,26 @@ ucn_v6_result_t ucn_v6_bootstrap_owner_init_in_place(
     if (result != UCN_V6_OK) {
         return result;
     }
+    if (ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     owner_out, sizeof(*owner_out)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     manifest,
+                                     sizeof(ucn_v6_feature_manifest_t)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     config, sizeof(*config)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     verifier, sizeof(*verifier)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     callback_gate,
+                                     sizeof(*callback_gate)) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, verifier->context,
+            verifier->context != NULL ? 1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, callback_gate->context,
+            callback_gate->context != NULL ? 1U : 0U)) {
+        return UCN_V6_ERR_CONFIG;
+    }
     owner = (ucn_v6_bootstrap_owner_t *)storage;
     memset(owner, 0, sizeof(*owner));
     owner->magic = UCN_V6_BOOTSTRAP_OWNER_MAGIC;
@@ -543,7 +565,7 @@ ucn_v6_result_t ucn_v6_bootstrap_admit_initial_hello(
     if (callback_reentry_is_blocked(owner)) {
         return UCN_V6_ERR_STATE;
     }
-    if (ingress_link_id == 0U ||
+    if (ingress_link_id == 0U || ingress_link_id > UCN_V6_LINK_ID_MAX ||
         ingress_link_generation == 0U ||
         ingress_link_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         request_bytes == 0U ||
@@ -702,6 +724,7 @@ ucn_v6_result_t ucn_v6_bootstrap_open_after_cookie(
     if (existing_binding != NULL) {
         empty->existing_binding = *existing_binding;
     }
+    empty->challenge_started_local_us = now_us;
     empty->deadline_us = deadline;
     return UCN_V6_OK;
 }

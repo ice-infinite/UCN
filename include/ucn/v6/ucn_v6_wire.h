@@ -31,9 +31,8 @@ extern "C" {
 #define UCN_V6_PROTOCOL_OPCODE_TRANSFER_CREDIT UINT16_C(258)
 #define UCN_V6_PROTOCOL_OPCODE_TRANSFER_RESULT UINT16_C(259)
 #define UCN_V6_PROTOCOL_OPCODE_TIME_SYNC UINT16_C(512)
-#define UCN_V6_PROTOCOL_OPCODE_TIME_FOLLOW_UP UINT16_C(513)
-#define UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_REQUEST UINT16_C(514)
-#define UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE UINT16_C(515)
+#define UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_REQUEST UINT16_C(513)
+#define UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE UINT16_C(514)
 #define UCN_V6_PROTOCOL_OPCODE_CLUSTER_CONTROL UINT16_C(768)
 #define UCN_V6_PROTOCOL_OPCODE_CLUSTER_DIRECTORY UINT16_C(769)
 #define UCN_V6_PROTOCOL_OPCODE_CLUSTER_TUNNEL UINT16_C(770)
@@ -174,28 +173,35 @@ size_t ucn_v6_address_bytes(ucn_v6_address_class_t address_class);
  * 中文：返回小于链路本地保留值的最大可路由地址。 */
 uint32_t ucn_v6_address_max_ordinary(
     ucn_v6_address_class_t address_class);
-/* EN: Validates semantic fields and computes the exact encoded length.
- * 中文：校验语义字段并计算精确编码长度。 */
+/* EN: Validates semantic fields and computes the exact encoded length. The
+ * result object must not overlap the input frame or its payload storage.
+ * 中文：校验语义字段并计算精确编码长度；结果对象不得与输入 Frame 或其
+ * Payload 存储区重叠。 */
 ucn_v6_result_t ucn_v6_wire_encoded_size(
     const ucn_v6_frame_t *frame,
     size_t *encoded_size);
 /* EN: Encodes one canonical v6 frame without partial output on rejection.
- * The payload storage must not overlap the output storage.
- * 中文：编码唯一规范的 v6 帧；拒绝时不产生部分输出。载荷存储区不得与
- * 输出存储区重叠。 */
+ * The frame, payload, output bytes, and output-length object must be pairwise
+ * disjoint.
+ * 中文：编码唯一规范的 v6 帧；拒绝时不产生部分输出。Frame、Payload、
+ * 输出字节与长度对象必须两两互不重叠。 */
 ucn_v6_result_t ucn_v6_wire_encode(
     const ucn_v6_frame_t *frame,
     uint8_t *output,
     size_t output_capacity,
     size_t *output_length);
 /* EN: Decodes one exact v6 frame and writes the view only after all gates pass.
- * 中文：精确解码 v6 帧，全部门禁通过后才写回视图。 */
+ * The encoded input and output frame object must be disjoint.
+ * 中文：精确解码 v6 帧，全部门禁通过后才写回视图；编码输入与输出 Frame
+ * 对象必须完全分离。 */
 ucn_v6_result_t ucn_v6_wire_decode(
     const uint8_t *input,
     size_t input_length,
     ucn_v6_frame_t *frame);
-/* EN: Emits the fixed 80-byte end-to-end associated-data sequence.
- * 中文：输出固定 80 字节的端到端关联数据序列。 */
+/* EN: Emits the fixed 80-byte end-to-end associated-data sequence. The frame,
+ * output bytes, and output-length object must be disjoint.
+ * 中文：输出固定 80 字节的端到端关联数据序列；Frame、输出字节与长度对象
+ * 必须互不重叠。 */
 ucn_v6_result_t ucn_v6_wire_write_canonical_aad(
     const ucn_v6_frame_t *frame,
     uint8_t *output,

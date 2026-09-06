@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 #define UCN_V6_API_VERSION UINT16_C(1)
-#define UCN_V6_STORAGE_LAYOUT UINT16_C(6)
+#define UCN_V6_STORAGE_LAYOUT UINT16_C(9)
 #define UCN_V6_STORAGE_ALIGNMENT ((size_t)8U)
 
 #define UCN_V6_PROFILE_NANO 1U
@@ -187,6 +187,9 @@ extern "C" {
 #ifndef UCN_V6_CONFIG_CLUSTER_TUNNELS
 #define UCN_V6_CONFIG_CLUSTER_TUNNELS UCN_V6_PROFILE_DEFAULT(2U, 4U, 8U)
 #endif
+#ifndef UCN_V6_CONFIG_CLUSTER_TRANSITION_TIMEOUT_US
+#define UCN_V6_CONFIG_CLUSTER_TRANSITION_TIMEOUT_US UINT64_C(5000000)
+#endif
 #ifndef UCN_V6_CONFIG_ADAPTER_LINKS
 #define UCN_V6_CONFIG_ADAPTER_LINKS UCN_V6_PROFILE_DEFAULT(2U, 4U, 8U)
 #endif
@@ -198,6 +201,12 @@ extern "C" {
 #endif
 #ifndef UCN_V6_CONFIG_ADAPTER_FRAME_BYTES
 #define UCN_V6_CONFIG_ADAPTER_FRAME_BYTES UCN_V6_PROFILE_DEFAULT(256U, 256U, 512U)
+#endif
+#ifndef UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGES
+#define UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGES UCN_V6_PROFILE_DEFAULT(1U, 2U, 4U)
+#endif
+#ifndef UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGE_TIMEOUT_US
+#define UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGE_TIMEOUT_US UINT64_C(1000000)
 #endif
 
 #if UCN_V6_CONFIG_MAX_BINDINGS < 1U || UCN_V6_CONFIG_MAX_BINDINGS > 255U
@@ -355,6 +364,18 @@ extern "C" {
     UCN_V6_CONFIG_CLUSTER_TUNNELS > 255U
 #error "UCN_V6_CONFIG_CLUSTER_TUNNELS must be 1..255"
 #endif
+#if UCN_V6_CONFIG_CLUSTER_TRANSITION_TIMEOUT_US == 0U || \
+    UCN_V6_CONFIG_CLUSTER_TRANSITION_TIMEOUT_US > INT64_MAX
+#error "UCN_V6_CONFIG_CLUSTER_TRANSITION_TIMEOUT_US must be 1..INT64_MAX"
+#endif
+#if UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGES < 1U || \
+    UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGES > 255U
+#error "UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGES must be 1..255"
+#endif
+#if UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGE_TIMEOUT_US == 0U || \
+    UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGE_TIMEOUT_US > INT64_MAX
+#error "UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGE_TIMEOUT_US must be 1..INT64_MAX"
+#endif
 #if UCN_V6_CONFIG_ADAPTER_LINKS < 1U || UCN_V6_CONFIG_ADAPTER_LINKS > 255U
 #error "UCN_V6_CONFIG_ADAPTER_LINKS must be 1..255"
 #endif
@@ -413,7 +434,7 @@ enum {
      UCN_V6_ADAPTER_FEATURE_BIT)
 
 #define UCN_V6_COMPILED_LAYOUT_HASH                                        \
-    (UINT64_C(0xD65A000600000000) ^                                       \
+    (UINT64_C(0xD65A000900000000) ^                                       \
      ((uint64_t)UCN_V6_PROFILE * UINT64_C(0x9E3779B97F4A7C15)) ^           \
      ((uint64_t)UCN_V6_COMPILED_FEATURE_BITS *                            \
       UINT64_C(0xD6E8FEB86659FD93)) ^                                     \
@@ -500,6 +521,8 @@ enum {
       UINT64_C(0x91E10DA5C79E7B1D)) ^                                      \
      ((uint64_t)UCN_V6_CONFIG_CLUSTER_TUNNELS *                             \
       UINT64_C(0xDB4F0B9175AE2165)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_CLUSTER_TRANSITION_TIMEOUT_US *               \
+      UINT64_C(0x8CB92BA72F3D8DD7)) ^                                      \
      ((uint64_t)UCN_V6_CONFIG_ADAPTER_LINKS *                               \
       UINT64_C(0xBBE0563303A4615F)) ^                                      \
      ((uint64_t)UCN_V6_CONFIG_ADAPTER_RX_SLOTS *                            \
@@ -507,7 +530,11 @@ enum {
      ((uint64_t)UCN_V6_CONFIG_ADAPTER_TX_SLOTS *                            \
       UINT64_C(0x589965CC75374CC3)) ^                                      \
      ((uint64_t)UCN_V6_CONFIG_ADAPTER_FRAME_BYTES *                         \
-      UINT64_C(0x1D8E4E27C47D124F)))
+      UINT64_C(0x1D8E4E27C47D124F)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGES *                      \
+      UINT64_C(0xD1342543DE82EF95)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGE_TIMEOUT_US *            \
+      UINT64_C(0xA3B195354A39B70D)))
 
 #if UCN_V6_CONFIG_TRANSFER_MAX_CLASS == 0U
 #define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 32U
@@ -532,11 +559,11 @@ enum {
 #define UCN_V6_OPERATION_ID_ALLOCATOR_STORAGE_BYTES ((size_t)256U)
 #define UCN_V6_PROTOCOL_OWNER_STORAGE_BYTES ((size_t)1024U)
 #define UCN_V6_SECURITY_MANAGER_STORAGE_BYTES                             \
-    ((size_t)(2048U + UCN_V6_CONFIG_SECURITY_SESSIONS * 512U +           \
-              UCN_V6_CONFIG_ACL_ENTRIES * 128U +                         \
-              UCN_V6_CONFIG_STATIC_GROUP_SLOTS *                         \
-                  UCN_V6_CONFIG_GROUP_KEY_SLOTS * 192U +                  \
-              UCN_V6_CONFIG_GROUP_REPLAY_SOURCES * 128U))
+    ((size_t)(4096U + 3U * (UCN_V6_CONFIG_SECURITY_SESSIONS * 512U +     \
+                            UCN_V6_CONFIG_ACL_ENTRIES * 128U +           \
+                            UCN_V6_CONFIG_STATIC_GROUP_SLOTS *           \
+                                UCN_V6_CONFIG_GROUP_KEY_SLOTS * 192U +    \
+                            UCN_V6_CONFIG_GROUP_REPLAY_SOURCES * 128U)))
 #define UCN_V6_CAPABILITY_OWNER_STORAGE_BYTES                             \
     ((size_t)(1024U + UCN_V6_CONFIG_CAPABILITY_PEERS * 256U +            \
               UCN_V6_CONFIG_CAPABILITY_PATHS * 160U +                    \
@@ -572,7 +599,7 @@ enum {
     ((size_t)(2048U + UCN_V6_CONFIG_REALTIME_ENDPOINTS * 96U +            \
               UCN_V6_CONFIG_TIME_DOMAINS * (512U + 4U * 96U)))
 #define UCN_V6_CLUSTER_OWNER_STORAGE_BYTES                                \
-    ((size_t)(8192U + UCN_V6_CONFIG_CLUSTER_MEMBERS * 192U +              \
+    ((size_t)(18432U + UCN_V6_CONFIG_CLUSTER_MEMBERS * 192U +             \
               UCN_V6_CONFIG_CLUSTER_VOTERS * 160U * 2U +                 \
               UCN_V6_CONFIG_CLUSTER_TOMBSTONES * 96U +                   \
               UCN_V6_CONFIG_CLUSTER_DIRECTORY * 192U +                   \
@@ -585,6 +612,14 @@ enum {
               (UCN_V6_CONFIG_ADAPTER_RX_SLOTS +                          \
                UCN_V6_CONFIG_ADAPTER_TX_SLOTS) *                         \
                   (UCN_V6_CONFIG_ADAPTER_FRAME_BYTES + 128U)))
+#define UCN_V6_RUNTIME_OWNER_STORAGE_BYTES                                \
+    ((size_t)(2304U + UCN_V6_CONFIG_ADAPTER_FRAME_BYTES * 3U +            \
+               UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGES * 512U +               \
+              (UCN_V6_CONFIG_ADAPTER_TX_SLOTS +                           \
+               UCN_V6_CONFIG_TRANSFER_TX_SLOTS +                          \
+               UCN_V6_CONFIG_QOS_Q0_DEPTH + UCN_V6_CONFIG_QOS_Q1_DEPTH + \
+               UCN_V6_CONFIG_QOS_Q2_DEPTH + UCN_V6_CONFIG_QOS_Q3_DEPTH + \
+               UCN_V6_CONFIG_QOS_INFLIGHT) * 48U))
 #define UCN_V6_FREERTOS_PORT_STORAGE_BYTES ((size_t)3072U)
 
 #define UCN_V6_DECLARE_STORAGE_TYPE(name_, bytes_) \
@@ -663,6 +698,14 @@ ucn_v6_result_t ucn_v6_storage_validate(
     size_t storage_bytes,
     size_t required_bytes,
     size_t required_alignment);
+
+/* EN: Overflow-safe half-open range overlap check used before in-place
+ * initialization mutates caller storage. Zero-length ranges never overlap.
+ * 中文：供原地初始化在改写调用方存储前使用的防溢出半开区间重叠检查；
+ * 零长度区间永不重叠。 */
+bool ucn_v6_memory_ranges_overlap(
+    const void *left, size_t left_bytes,
+    const void *right, size_t right_bytes);
 
 #ifdef __cplusplus
 }

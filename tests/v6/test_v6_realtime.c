@@ -12,6 +12,16 @@
         }                                                                       \
     } while (0)
 
+/* Test-only compact description used to synthesize physically distinct
+ * T1/T2/T3/T4 events. It is deliberately not a public or Wire DTO. */
+typedef struct synthetic_exchange {
+    uint16_t clock_domain_id;
+    uint32_t domain_generation;
+    uint64_t local_sample_us;
+    int64_t offset_us;
+    ucn_v6_realtime_uncertainty_t uncertainty;
+} synthetic_exchange_t;
+
 typedef struct fake_store {
     bool valid;
     ucn_v6_realtime_domain_record_t record;
@@ -254,6 +264,10 @@ static ucn_v6_time_domain_config_t domain_config(
     value.max_holdover_us = 2000U;
     value.max_offset_jump_us = 500U;
     value.oscillator_uncertainty_ppb = 1000U;
+    value.timer_resolution_bound_us = 1U;
+    value.filter_residual_bound_us = 1U;
+    value.arithmetic_rounding_bound_us = 1U;
+    value.sample_capture_bound_us = 1U;
     return value;
 }
 
@@ -342,7 +356,7 @@ static ucn_v6_security_open_result_t opened_sample(
     value.frame.realm_id = binding->realm_id;
     value.frame.source_address = binding->node_address;
     value.frame.frame_type = UCN_V6_FRAME_CONTROL;
-    value.frame.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_TIME_FOLLOW_UP;
+    value.frame.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE;
     value.frame.source_binding_generation = binding->binding_generation;
     value.frame.session_generation = 3U;
     value.frame.route_generation = 1U;
@@ -648,6 +662,83 @@ static ucn_v6_result_t test_realtime_bind_domain(
     test_realtime_bind_domain((owner), (config), (path), (capability),        \
                               (now_us))
 
+static ucn_v6_result_t ingest_verified_exchange(
+    ucn_v6_realtime_owner_t *owner,
+    const ucn_v6_security_open_result_t *opened,
+    const synthetic_exchange_t *sample,
+    uint16_t opcode,
+    uint64_t now_us)
+{
+    fake_store_t *store = test_store_for_owner(owner);
+    ucn_v6_security_open_result_t response_opened;
+    ucn_v6_time_sync_response_t response;
+    ucn_v6_time_sync_observation_t observation;
+    uint8_t payload[UCN_V6_TIME_SYNC_RESPONSE_BYTES];
+    uint64_t magnitude;
+    if (store == NULL || !store->valid || opened == NULL || sample == NULL ||
+        sample->local_sample_us == 0U ||
+        sample->local_sample_us > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(&response, 0, sizeof(response));
+    response.clock_domain_id = sample->clock_domain_id;
+    response.domain_generation = sample->domain_generation;
+    response.sync_sequence = (uint32_t)sample->local_sample_us;
+    response.t1_uncertainty_us =
+        sample->uncertainty.link_timestamp_capture_bound_us;
+    response.t4_uncertainty_us = response.t1_uncertainty_us;
+    if (sample->offset_us >= 0) {
+        magnitude = (uint64_t)sample->offset_us;
+        if (UINT64_MAX - sample->local_sample_us < magnitude) {
+            return UCN_V6_ERR_EXHAUSTED;
+        }
+        response.t1_master_tx_us = sample->local_sample_us + magnitude;
+        response.t4_master_rx_us = response.t1_master_tx_us;
+    } else {
+        magnitude = (uint64_t)(-(sample->offset_us + 1)) + 1U;
+        if (sample->local_sample_us <= magnitude) {
+            return UCN_V6_ERR_ARGUMENT;
+        }
+        response.t1_master_tx_us = sample->local_sample_us - magnitude;
+        response.t4_master_rx_us = response.t1_master_tx_us;
+    }
+    if (ucn_v6_time_sync_response_encode(&response, payload) != UCN_V6_OK) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(&observation, 0, sizeof(observation));
+    observation.sync_sequence = response.sync_sequence;
+    observation.forward_route_ref = store->record.route_ref;
+    observation.forward_route_ref.domain.origin_principal =
+        store->record.route_ref.domain.destination_principal;
+    observation.forward_route_ref.domain.origin_binding =
+        store->record.route_ref.domain.destination_binding;
+    observation.forward_route_ref.domain.origin_session_generation =
+        store->record.route_ref.domain.destination_session_generation;
+    observation.forward_route_ref.domain.destination_principal =
+        store->record.route_ref.domain.origin_principal;
+    observation.forward_route_ref.domain.destination_binding =
+        store->record.route_ref.domain.origin_binding;
+    observation.forward_route_ref.domain.destination_session_generation =
+        store->record.route_ref.domain.origin_session_generation;
+    observation.reverse_route_ref = store->record.route_ref;
+    observation.t2_member_rx.link_id = 5U;
+    observation.t2_member_rx.link_generation = 6U;
+    observation.t2_member_rx.event_token = response.sync_sequence * 2U;
+    observation.t2_member_rx.timestamp_us = sample->local_sample_us;
+    observation.t2_member_rx.uncertainty_us = 1U;
+    observation.t2_member_rx.hardware = true;
+    observation.t3_member_tx = observation.t2_member_rx;
+    ++observation.t3_member_tx.event_token;
+    response_opened = *opened;
+    response_opened.ingress_link_instance_id = 5U;
+    response_opened.ingress_link_instance_generation = 6U;
+    response_opened.frame.protocol_opcode = opcode;
+    response_opened.frame.payload = payload;
+    response_opened.frame.payload_length = sizeof(payload);
+    return ucn_v6_realtime_ingest_exchange(
+        owner, &response_opened, &observation, now_us);
+}
+
 static int test_codec_and_uncertainty(void)
 {
     ucn_v6_realtime_envelope_t envelope;
@@ -656,9 +747,12 @@ static int test_codec_and_uncertainty(void)
     uint8_t bytes[UCN_V6_REALTIME_ENVELOPE_BYTES];
     uint8_t before[UCN_V6_REALTIME_ENVELOPE_BYTES];
     uint32_t bound = 0U;
-    ucn_v6_time_sync_sample_t sample;
-    ucn_v6_time_sync_sample_t sample_decoded;
-    uint8_t sample_bytes[UCN_V6_TIME_SYNC_SAMPLE_BYTES];
+    ucn_v6_time_sync_response_t response;
+    ucn_v6_time_sync_response_t response_decoded;
+    ucn_v6_time_sync_announce_t announce;
+    ucn_v6_time_sync_announce_t announce_decoded;
+    uint8_t announce_bytes[UCN_V6_TIME_SYNC_ANNOUNCE_BYTES];
+    uint8_t response_bytes[UCN_V6_TIME_SYNC_RESPONSE_BYTES];
     memset(&envelope, 0, sizeof(envelope));
     envelope.mode = UCN_V6_REALTIME_DEADLINE;
     envelope.uncertainty_class = 4U;
@@ -687,19 +781,45 @@ static int test_codec_and_uncertainty(void)
     CHECK(ucn_v6_realtime_envelope_encode(&envelope, bytes) ==
           UCN_V6_ERR_ARGUMENT);
     CHECK(memcmp(bytes, before, sizeof(bytes)) == 0);
-    memset(&sample, 0, sizeof(sample));
-    sample.clock_domain_id = 7U;
-    sample.domain_generation = 2U;
-    sample.local_sample_us = 123U;
-    sample.offset_us = -45;
-    sample.uncertainty = uncertainty();
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, sample_bytes) == UCN_V6_OK);
-    CHECK(ucn_v6_time_sync_sample_decode(sample_bytes, sizeof(sample_bytes),
-                                         &sample_decoded) == UCN_V6_OK);
-    CHECK(memcmp(&sample, &sample_decoded, sizeof(sample)) == 0);
-    sample_bytes[47] = 1U;
-    CHECK(ucn_v6_time_sync_sample_decode(sample_bytes, sizeof(sample_bytes),
-                                         &sample_decoded) ==
+    memset(&announce, 0, sizeof(announce));
+    announce.clock_domain_id = 7U;
+    announce.domain_generation = 2U;
+    announce.sync_sequence = 3U;
+    CHECK(ucn_v6_time_sync_announce_encode(&announce, announce_bytes) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_time_sync_announce_decode(
+              announce_bytes, sizeof(announce_bytes), &announce_decoded) ==
+          UCN_V6_OK);
+    CHECK(announce_decoded.clock_domain_id == announce.clock_domain_id &&
+          announce_decoded.domain_generation == announce.domain_generation &&
+          announce_decoded.sync_sequence == announce.sync_sequence);
+    announce_bytes[1] = 1U;
+    memset(&announce_decoded, 0xA5, sizeof(announce_decoded));
+    CHECK(ucn_v6_time_sync_announce_decode(
+              announce_bytes, sizeof(announce_bytes), &announce_decoded) ==
+          UCN_V6_ERR_MALFORMED);
+    {
+        ucn_v6_time_sync_announce_t sentinel;
+        memset(&sentinel, 0xA5, sizeof(sentinel));
+        CHECK(memcmp(&announce_decoded, &sentinel, sizeof(sentinel)) == 0);
+    }
+    memset(&response, 0, sizeof(response));
+    response.clock_domain_id = 7U;
+    response.domain_generation = 2U;
+    response.sync_sequence = 3U;
+    response.t1_master_tx_us = 123U;
+    response.t4_master_rx_us = 456U;
+    response.t1_uncertainty_us = 2U;
+    response.t4_uncertainty_us = 3U;
+    CHECK(ucn_v6_time_sync_response_encode(&response, response_bytes) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_time_sync_response_decode(
+              response_bytes, sizeof(response_bytes), &response_decoded) ==
+          UCN_V6_OK);
+    CHECK(memcmp(&response, &response_decoded, sizeof(response)) == 0);
+    response_bytes[39] = 1U;
+    CHECK(ucn_v6_time_sync_response_decode(
+              response_bytes, sizeof(response_bytes), &response_decoded) ==
           UCN_V6_ERR_MALFORMED);
     return 0;
 }
@@ -721,7 +841,7 @@ static int test_fixed_path_domain_and_dual_gate(void)
         domain_config(&master, &binding, 2U);
     ucn_v6_security_open_result_t opened = opened_sample(&master, &binding);
     ucn_v6_security_open_result_t bad_source;
-    ucn_v6_time_sync_sample_t sample;
+    synthetic_exchange_t sample;
     ucn_v6_realtime_endpoint_policy_t policy;
     ucn_v6_realtime_send_result_t send;
     ucn_v6_realtime_receive_view_t receive;
@@ -734,7 +854,6 @@ static int test_fixed_path_domain_and_dual_gate(void)
     size_t admitted_length = 0U;
     uint8_t payload[64];
     uint8_t sentinel[64];
-    uint8_t sample_payload[UCN_V6_TIME_SYNC_SAMPLE_BYTES];
 
     opened.ingress_peer_session.principal = principal(0x70U);
     opened.ingress_peer_session.binding.realm_id = 1U;
@@ -776,12 +895,10 @@ static int test_fixed_path_domain_and_dual_gate(void)
     sample.uncertainty = uncertainty();
     sample.local_sample_us = 100U;
     sample.offset_us = 1000;
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, sample_payload) == UCN_V6_OK);
-    opened.frame.payload = sample_payload;
-    opened.frame.payload_length = sizeof(sample_payload);
     CHECK(ucn_v6_realtime_copy_view(owner, &owner_view_before) == UCN_V6_OK);
-    opened.frame.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_PEER_HELLO;
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 100U) ==
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample, UCN_V6_PROTOCOL_OPCODE_PEER_HELLO,
+              100U) ==
           UCN_V6_ERR_ARGUMENT);
     CHECK(ucn_v6_realtime_copy_view(owner, &owner_view) == UCN_V6_OK);
     CHECK(owner_view.domains == owner_view_before.domains &&
@@ -789,29 +906,23 @@ static int test_fixed_path_domain_and_dual_gate(void)
           owner_view.accepted_samples == owner_view_before.accepted_samples &&
           owner_view.rejected_samples == owner_view_before.rejected_samples &&
           owner_view.faulted == owner_view_before.faulted);
-    opened.frame.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_TIME_FOLLOW_UP;
-    sample_payload[UCN_V6_TIME_SYNC_SAMPLE_BYTES - 1U] = 1U;
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 100U) ==
-          UCN_V6_ERR_ARGUMENT);
-    CHECK(ucn_v6_realtime_copy_view(owner, &owner_view) == UCN_V6_OK);
-    CHECK(owner_view.domains == owner_view_before.domains &&
-          owner_view.locked_domains == owner_view_before.locked_domains &&
-          owner_view.accepted_samples == owner_view_before.accepted_samples &&
-          owner_view.rejected_samples == owner_view_before.rejected_samples &&
-          owner_view.faulted == owner_view_before.faulted);
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, sample_payload) == UCN_V6_OK);
     bad_source = opened;
     bad_source.frame.realm_id = binding.realm_id + 1U;
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &bad_source, 100U) ==
+    CHECK(ingest_verified_exchange(
+              owner, &bad_source, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 100U) ==
           UCN_V6_ERR_ACCESS);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 100U) == UCN_V6_OK);
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 100U) == UCN_V6_OK);
     CHECK(ucn_v6_realtime_get_clock(owner, 7U, 100U, &clock) ==
           UCN_V6_ERR_STATE);
     sample.local_sample_us = 200U;
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, sample_payload) == UCN_V6_OK);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 200U) == UCN_V6_OK);
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 200U) == UCN_V6_OK);
     CHECK(ucn_v6_realtime_get_clock(owner, 7U, 250U, &clock) == UCN_V6_OK);
-    CHECK(clock.domain_time_us == 1250U && clock.uncertainty_us == 7U);
+    CHECK(clock.domain_time_us == 1250U && clock.uncertainty_us == 17U);
 
     memset(&policy, 0, sizeof(policy));
     policy.destination_endpoint = 20U;
@@ -829,6 +940,10 @@ static int test_fixed_path_domain_and_dual_gate(void)
               UCN_V6_ERR_ARGUMENT);
         invalid = policy;
         invalid.requirement = (ucn_v6_realtime_requirement_t)-1;
+        CHECK(ucn_v6_realtime_set_endpoint_policy(owner, &invalid) ==
+              UCN_V6_ERR_ARGUMENT);
+        invalid = policy;
+        invalid.destination_endpoint = UINT16_MAX;
         CHECK(ucn_v6_realtime_set_endpoint_policy(owner, &invalid) ==
               UCN_V6_ERR_ARGUMENT);
     }
@@ -888,9 +1003,9 @@ static int test_fixed_path_domain_and_dual_gate(void)
               owner, 20U, 1201U, 4U, false, business, sizeof(business),
               payload, sizeof(payload), &send) == UCN_V6_ERR_ACCESS);
     CHECK(memcmp(payload, sentinel, sizeof(payload)) == 0);
-    opened.frame.payload = sample_payload;
-    opened.frame.payload_length = sizeof(sample_payload);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 1201U) ==
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 1201U) ==
           UCN_V6_ERR_ACCESS);
 
     ++config.domain_generation;
@@ -1093,10 +1208,9 @@ static int test_same_domain_session_rebind_preserves_runtime_high_water(void)
     ucn_v6_time_domain_config_t config =
         domain_config(&master, &binding, 2U);
     ucn_v6_security_open_result_t opened = opened_sample(&master, &binding);
-    ucn_v6_time_sync_sample_t sample;
+    synthetic_exchange_t sample;
     ucn_v6_realtime_clock_view_t clock;
     ucn_v6_realtime_view_t view;
-    uint8_t payload[UCN_V6_TIME_SYNC_SAMPLE_BYTES];
 
     memset(&fake, 0, sizeof(fake));
     memset(&store, 0, sizeof(store));
@@ -1117,13 +1231,13 @@ static int test_same_domain_session_rebind_preserves_runtime_high_water(void)
     sample.uncertainty = uncertainty();
     sample.offset_us = 1000;
     sample.local_sample_us = 100U;
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, payload) == UCN_V6_OK);
-    opened.frame.payload = payload;
-    opened.frame.payload_length = sizeof(payload);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 100U) == UCN_V6_OK);
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 100U) == UCN_V6_OK);
     sample.local_sample_us = 200U;
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, payload) == UCN_V6_OK);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 200U) == UCN_V6_OK);
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 200U) == UCN_V6_OK);
     CHECK(ucn_v6_realtime_get_clock(owner, config.clock_domain_id, 250U,
                                     &clock) == UCN_V6_OK &&
           clock.domain_time_us == 1250U);
@@ -1144,9 +1258,10 @@ static int test_same_domain_session_rebind_preserves_runtime_high_water(void)
     opened.frame.route_generation = path.route_generation;
     opened.frame.path.path_generation = path.path_generation;
     sample.local_sample_us = 300U;
-    sample.offset_us = -500;
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, payload) == UCN_V6_OK);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 300U) ==
+    sample.offset_us = 0;
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 300U) ==
           UCN_V6_ERR_STATE);
     CHECK(ucn_v6_realtime_copy_view(owner, &view) == UCN_V6_OK &&
           view.faulted && view.locked_domains == 0U);
@@ -1456,10 +1571,9 @@ static int test_dependency_expiry_and_holdover_rebind(void)
     ucn_v6_time_domain_config_t config =
         domain_config(&master, &binding, 1U);
     ucn_v6_security_open_result_t opened = opened_sample(&master, &binding);
-    ucn_v6_time_sync_sample_t sample;
+    synthetic_exchange_t sample;
     ucn_v6_realtime_clock_view_t clock;
     ucn_v6_realtime_view_t view;
-    uint8_t payload[UCN_V6_TIME_SYNC_SAMPLE_BYTES];
 
     memset(&fake, 0, sizeof(fake));
     memset(&store, 0, sizeof(store));
@@ -1483,13 +1597,13 @@ static int test_dependency_expiry_and_holdover_rebind(void)
     sample.uncertainty = uncertainty();
     sample.offset_us = 1000;
     sample.local_sample_us = 100U;
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, payload) == UCN_V6_OK);
-    opened.frame.payload = payload;
-    opened.frame.payload_length = sizeof(payload);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 100U) == UCN_V6_OK);
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 100U) == UCN_V6_OK);
     sample.local_sample_us = 200U;
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, payload) == UCN_V6_OK);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 200U) == UCN_V6_OK);
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 200U) == UCN_V6_OK);
     CHECK(ucn_v6_realtime_get_clock(owner, config.clock_domain_id, 399U,
                                     &clock) == UCN_V6_OK);
     CHECK(ucn_v6_realtime_step(owner, 400U) == UCN_V6_OK);
@@ -1500,8 +1614,9 @@ static int test_dependency_expiry_and_holdover_rebind(void)
     CHECK(ucn_v6_realtime_copy_view(owner, &view) == UCN_V6_OK &&
           view.locked_domains == 0U);
     sample.local_sample_us = 401U;
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, payload) == UCN_V6_OK);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 401U) ==
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 401U) ==
           UCN_V6_ERR_ACCESS);
 
     ++config.domain_generation;
@@ -1517,11 +1632,13 @@ static int test_dependency_expiry_and_holdover_rebind(void)
     opened.frame.path.path_generation = path.path_generation;
     sample.domain_generation = config.domain_generation;
     sample.local_sample_us = 460U;
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, payload) == UCN_V6_OK);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 460U) == UCN_V6_OK);
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 460U) == UCN_V6_OK);
     sample.local_sample_us = 470U;
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, payload) == UCN_V6_OK);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 470U) == UCN_V6_OK);
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 470U) == UCN_V6_OK);
     CHECK(ucn_v6_realtime_get_clock(owner, config.clock_domain_id, 1470U,
                                     &clock) == UCN_V6_OK && clock.holdover);
     CHECK(ucn_v6_realtime_copy_view(owner, &view) == UCN_V6_OK &&
@@ -1556,10 +1673,9 @@ static int test_fault_releases_locked_domain_count(void)
     ucn_v6_time_domain_config_t config =
         domain_config(&master, &binding, 1U);
     ucn_v6_security_open_result_t opened = opened_sample(&master, &binding);
-    ucn_v6_time_sync_sample_t sample;
+    synthetic_exchange_t sample;
     ucn_v6_realtime_view_t view;
     ucn_v6_realtime_clock_view_t clock;
-    uint8_t payload[UCN_V6_TIME_SYNC_SAMPLE_BYTES];
 
     memset(&fake, 0, sizeof(fake));
     memset(&store, 0, sizeof(store));
@@ -1580,20 +1696,21 @@ static int test_fault_releases_locked_domain_count(void)
     sample.uncertainty = uncertainty();
     sample.offset_us = 1000;
     sample.local_sample_us = 100U;
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, payload) == UCN_V6_OK);
-    opened.frame.payload = payload;
-    opened.frame.payload_length = sizeof(payload);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 100U) == UCN_V6_OK);
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 100U) == UCN_V6_OK);
     sample.local_sample_us = 200U;
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, payload) == UCN_V6_OK);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 200U) == UCN_V6_OK);
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 200U) == UCN_V6_OK);
     CHECK(ucn_v6_realtime_copy_view(owner, &view) == UCN_V6_OK &&
           view.locked_domains == 1U && !view.faulted);
 
     sample.local_sample_us = 300U;
     sample.offset_us = 2000;
-    CHECK(ucn_v6_time_sync_sample_encode(&sample, payload) == UCN_V6_OK);
-    CHECK(ucn_v6_realtime_ingest_sample(owner, &opened, 300U) ==
+    CHECK(ingest_verified_exchange(
+              owner, &opened, &sample,
+              UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE, 300U) ==
           UCN_V6_ERR_STATE);
     CHECK(ucn_v6_realtime_copy_view(owner, &view) == UCN_V6_OK &&
           view.locked_domains == 0U && view.faulted &&

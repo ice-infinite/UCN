@@ -248,7 +248,9 @@ static bool send_request_is_valid(
         (request->message.traffic_class != UCN_V6_TRAFFIC_Q2 &&
          request->message.traffic_class != UCN_V6_TRAFFIC_Q3) ||
         request->message.source_endpoint == 0U ||
+        request->message.source_endpoint > UCN_V6_ENDPOINT_ID_MAX ||
         request->message.destination_endpoint == 0U ||
+        request->message.destination_endpoint > UCN_V6_ENDPOINT_ID_MAX ||
         request->fragment_data_budget == 0U ||
         request->window_size == 0U ||
         request->window_size > UCN_V6_CONFIG_TRANSFER_WINDOW) {
@@ -343,6 +345,15 @@ ucn_v6_result_t ucn_v6_transfer_owner_init_in_place(
         ucn_v6_storage_validate(storage, storage_bytes,
                                 UCN_V6_TRANSFER_OWNER_STORAGE_BYTES,
                                 UCN_V6_STORAGE_ALIGNMENT) != UCN_V6_OK) {
+        return UCN_V6_ERR_CONFIG;
+    }
+    if (ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     owner_out, sizeof(*owner_out)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     manifest, sizeof(*manifest)) ||
+        (route_owner != NULL &&
+         ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                      route_owner, 1U))) {
         return UCN_V6_ERR_CONFIG;
     }
     owner = (ucn_v6_transfer_owner_t *)storage;
@@ -854,7 +865,9 @@ static bool fragment_context_is_valid(
            opened->frame.message.interaction_role <=
                UCN_V6_INTERACTION_ERROR &&
            opened->frame.message.source_endpoint != 0U &&
+           opened->frame.message.source_endpoint <= UCN_V6_ENDPOINT_ID_MAX &&
            opened->frame.message.destination_endpoint != 0U &&
+           opened->frame.message.destination_endpoint <= UCN_V6_ENDPOINT_ID_MAX &&
            opened->frame.message.operation_id != 0U &&
            opened->frame.message.operation_id <=
                UCN_V6_SERIAL64_ROTATION_THRESHOLD;
@@ -1369,6 +1382,7 @@ ucn_v6_result_t ucn_v6_transfer_reserve_credit(
     size_t index;
     if (!owner_is_valid(owner) || !session_is_valid(peer) ||
         reservation_out == NULL || link_id == 0U ||
+        link_id > UCN_V6_LINK_ID_MAX ||
         link_generation == 0U ||
         link_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
         (traffic_class != UCN_V6_TRAFFIC_Q2 &&

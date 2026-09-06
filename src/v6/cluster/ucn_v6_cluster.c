@@ -6,7 +6,7 @@
 #define RECORD_MAGIC UINT32_C(0x56364352)
 #define RECORD_BODY_BYTES (UCN_V6_CLUSTER_RECORD_BYTES - 4U)
 #define TRANSITION_BODY_BYTES                                                \
-    ((size_t)(112U + UCN_V6_CONFIG_CLUSTER_VOTERS * 28U))
+    ((size_t)(132U + UCN_V6_CONFIG_CLUSTER_VOTERS * (28U + 128U)))
 #define CONTROL_BODY_BYTES (UCN_V6_CLUSTER_CONTROL_BYTES - 4U)
 #define DIRECTORY_BODY_BYTES (UCN_V6_CLUSTER_DIRECTORY_BYTES - 4U)
 
@@ -28,6 +28,9 @@ typedef struct byte_reader {
     bool ok;
 } byte_reader_t;
 
+static bool transition_is_runtime_live(
+    const ucn_v6_cluster_owner_t *owner, uint64_t now_us);
+
 static void increment_saturated(uint32_t *value)
 {
     if (*value != UINT32_MAX) {
@@ -43,6 +46,19 @@ static bool serial_valid(uint32_t value)
 static bool serial64_valid(uint64_t value)
 {
     return value != 0U && value <= UCN_V6_SERIAL64_ROTATION_THRESHOLD;
+}
+
+static bool authority_proof_ref_is_valid(
+    const ucn_v6_cluster_authority_proof_ref_t *ref)
+{
+    return ref != NULL && serial_valid(ref->proof_id) &&
+           serial_valid(ref->generation);
+}
+
+static bool authority_proof_ref_is_zero(
+    const ucn_v6_cluster_authority_proof_ref_t *ref)
+{
+    return ref != NULL && ref->proof_id == 0U && ref->generation == 0U;
 }
 
 static bool principal_equal(const ucn_v6_principal_t *left,
@@ -559,27 +575,148 @@ static bool vote_is_valid(const ucn_v6_cluster_vote_id_t *vote)
            serial_valid(vote->backup_generation);
 }
 
+static bool bytes_are_zero(const uint8_t *bytes, size_t length)
+{
+    size_t index;
+    if (bytes == NULL) return false;
+    for (index = 0U; index < length; ++index) {
+        if (bytes[index] != 0U) return false;
+    }
+    return true;
+}
+
+static bool transition_vote_evidence_is_zero(
+    const ucn_v6_cluster_transition_vote_evidence_t *evidence)
+{
+    ucn_v6_cluster_transition_vote_evidence_t zero;
+    if (evidence == NULL) return false;
+    memset(&zero, 0, sizeof(zero));
+    return memcmp(evidence, &zero, sizeof(zero)) == 0;
+}
+
+static bool transition_vote_evidence_is_valid(
+    const ucn_v6_cluster_transition_vote_evidence_t *evidence,
+    const ucn_v6_cluster_voter_t *voter, bool required)
+{
+    bool local_form;
+    if (!required) return transition_vote_evidence_is_zero(evidence);
+    if (evidence == NULL || voter == NULL || !evidence->valid ||
+        !ucn_v6_principal_is_valid(&evidence->session.principal) ||
+        !ucn_v6_binding_key_is_valid(&evidence->session.binding) ||
+        !serial_valid(evidence->session.session_generation) ||
+        !principal_equal(&evidence->session.principal, &voter->principal) ||
+        !binding_equal(&evidence->session.binding, &voter->binding)) {
+        return false;
+    }
+    local_form = evidence->ingress_link_id == 0U;
+    if (local_form) {
+        return evidence->ingress_link_generation == 0U &&
+               evidence->capability_generation == 0U &&
+               bytes_are_zero(evidence->capability_digest,
+                              sizeof(evidence->capability_digest));
+    }
+    return evidence->ingress_link_id <= UCN_V6_LINK_ID_MAX &&
+           serial_valid(evidence->ingress_link_generation) &&
+           serial_valid(evidence->capability_generation) &&
+           !bytes_are_zero(evidence->capability_digest,
+                           sizeof(evidence->capability_digest));
+}
+
+static bool transition_vote_evidence_is_structurally_valid(
+    const ucn_v6_cluster_transition_vote_evidence_t *evidence,
+    bool required)
+{
+    ucn_v6_cluster_voter_t voter;
+    if (!required) return transition_vote_evidence_is_zero(evidence);
+    if (evidence == NULL) return false;
+    memset(&voter, 0, sizeof(voter));
+    voter.principal = evidence->session.principal;
+    voter.binding = evidence->session.binding;
+    return transition_vote_evidence_is_valid(evidence, &voter, true);
+}
+
+static bool transition_evidence_matches_configs(
+    const ucn_v6_cluster_transition_proof_t *transition,
+    const ucn_v6_cluster_config_t *old_config)
+{
+    size_t index;
+    uint32_t old_allowed;
+    uint32_t new_allowed;
+    if (transition == NULL || old_config == NULL ||
+        !ucn_v6_cluster_config_is_valid(old_config)) {
+        return false;
+    }
+    old_allowed = old_config->voter_count == 32U ? UINT32_MAX :
+        (UINT32_C(1) << old_config->voter_count) - 1U;
+    new_allowed = transition->target_config.voter_count == 32U ?
+        UINT32_MAX :
+        (UINT32_C(1) << transition->target_config.voter_count) - 1U;
+    if ((transition->old_voter_bitmap & ~old_allowed) != 0U ||
+        (transition->new_voter_bitmap & ~new_allowed) != 0U) {
+        return false;
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_VOTERS; ++index) {
+        bool old_required = index < old_config->voter_count &&
+            (transition->old_voter_bitmap &
+             (UINT32_C(1) << (uint32_t)index)) != 0U;
+        bool new_required = index < transition->target_config.voter_count &&
+            (transition->new_voter_bitmap &
+             (UINT32_C(1) << (uint32_t)index)) != 0U;
+        if (!transition_vote_evidence_is_valid(
+                &transition->old_vote_evidence[index],
+                index < old_config->voter_count ?
+                    &old_config->voters[index] : NULL,
+                old_required) ||
+            !transition_vote_evidence_is_valid(
+                &transition->new_vote_evidence[index],
+                index < transition->target_config.voter_count ?
+                    &transition->target_config.voters[index] : NULL,
+                new_required)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool transition_is_valid(
     const ucn_v6_cluster_transition_proof_t *transition)
 {
+    size_t index;
     if (transition == NULL) {
         return false;
     }
     if (!transition->valid) {
-        return !transition->ready &&
-               transition->kind == UCN_V6_CLUSTER_TRANSITION_NONE &&
-               transition->transaction_id == 0U &&
-               epoch_is_zero(&transition->old_epoch) &&
-               epoch_is_zero(&transition->target_epoch) &&
-               transition->target_config_id == 0U &&
-               transition->target_config_generation == 0U &&
-               config_is_zero(&transition->target_config) &&
-               transition->old_voter_bitmap == 0U &&
-               transition->new_voter_bitmap == 0U;
+        if (transition->ready ||
+            transition->kind != UCN_V6_CLUSTER_TRANSITION_NONE ||
+            transition->transaction_id != 0U ||
+            transition->started_boot_incarnation != 0U ||
+            transition->deadline_us != 0U ||
+            !epoch_is_zero(&transition->old_epoch) ||
+            !epoch_is_zero(&transition->target_epoch) ||
+            transition->target_config_id != 0U ||
+            transition->target_config_generation != 0U ||
+            !config_is_zero(&transition->target_config) ||
+            transition->old_voter_bitmap != 0U ||
+            transition->new_voter_bitmap != 0U ||
+            !authority_proof_ref_is_zero(
+                &transition->target_authority_proof)) {
+            return false;
+        }
+        for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_VOTERS; ++index) {
+            if (!transition_vote_evidence_is_zero(
+                    &transition->old_vote_evidence[index]) ||
+                !transition_vote_evidence_is_zero(
+                    &transition->new_vote_evidence[index])) {
+                return false;
+            }
+        }
+        return true;
     }
-    return transition->kind >= UCN_V6_CLUSTER_TRANSITION_TAKEOVER &&
+    if (!(transition->kind >= UCN_V6_CLUSTER_TRANSITION_TAKEOVER &&
            transition->kind <= UCN_V6_CLUSTER_TRANSITION_REKEY &&
            serial64_valid(transition->transaction_id) &&
+           serial_valid(transition->started_boot_incarnation) &&
+           transition->deadline_us != 0U &&
            ucn_v6_cluster_epoch_is_valid(&transition->old_epoch) &&
            ucn_v6_cluster_epoch_is_valid(&transition->target_epoch) &&
            serial_valid(transition->target_config_id) &&
@@ -588,7 +725,35 @@ static bool transition_is_valid(
            transition->target_config.config_id ==
                transition->target_config_id &&
            transition->target_config.generation ==
-               transition->target_config_generation;
+                transition->target_config_generation &&
+           ((!transition->ready && authority_proof_ref_is_zero(
+                                      &transition->target_authority_proof)) ||
+            (transition->ready &&
+             transition->kind == UCN_V6_CLUSTER_TRANSITION_HANDOVER &&
+             authority_proof_ref_is_valid(
+                 &transition->target_authority_proof))))) {
+        return false;
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_VOTERS; ++index) {
+        bool old_required =
+            (transition->old_voter_bitmap &
+             (UINT32_C(1) << (uint32_t)index)) != 0U;
+        bool new_required =
+            index < transition->target_config.voter_count &&
+            (transition->new_voter_bitmap &
+             (UINT32_C(1) << (uint32_t)index)) != 0U;
+        /* The old Config is snapshot-scoped and checked by snapshot_is_valid. */
+        if (!transition_vote_evidence_is_structurally_valid(
+                &transition->old_vote_evidence[index], old_required) ||
+            !transition_vote_evidence_is_valid(
+                &transition->new_vote_evidence[index],
+                index < transition->target_config.voter_count ?
+                    &transition->target_config.voters[index] : NULL,
+                new_required)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool snapshot_is_valid(const ucn_v6_cluster_snapshot_t *snapshot)
@@ -641,6 +806,14 @@ static bool snapshot_is_valid(const ucn_v6_cluster_snapshot_t *snapshot)
         !vote_is_valid(&snapshot->last_vote) ||
         !transition_is_valid(&snapshot->transition)) {
         return false;
+    }
+    if (snapshot->transition.valid) {
+        if (snapshot->transition.started_boot_incarnation >
+                snapshot->boot_incarnation ||
+            !transition_evidence_matches_configs(
+                &snapshot->transition, &snapshot->stable_config)) {
+            return false;
+        }
     }
     if (snapshot->phase >= UCN_V6_CLUSTER_PHASE_TAKEOVER &&
         snapshot->phase <= UCN_V6_CLUSTER_PHASE_REKEY) {
@@ -753,16 +926,58 @@ static void read_vote(byte_reader_t *reader, ucn_v6_cluster_vote_id_t *vote)
     vote->backup_generation = reader_u32(reader);
 }
 
+static void write_transition_vote_evidence(
+    byte_writer_t *writer,
+    const ucn_v6_cluster_transition_vote_evidence_t *evidence)
+{
+    writer_u8(writer, evidence->valid ? 1U : 0U);
+    writer_skip(writer, 3U);
+    write_binding(writer, &evidence->session.binding);
+    writer_bytes(writer, evidence->session.principal.bytes,
+                 sizeof(evidence->session.principal.bytes));
+    writer_u32(writer, evidence->session.session_generation);
+    writer_u16(writer, evidence->ingress_link_id);
+    writer_skip(writer, 2U);
+    writer_u32(writer, evidence->ingress_link_generation);
+    writer_u32(writer, evidence->capability_generation);
+    writer_bytes(writer, evidence->capability_digest,
+                 sizeof(evidence->capability_digest));
+}
+
+static void read_transition_vote_evidence(
+    byte_reader_t *reader,
+    ucn_v6_cluster_transition_vote_evidence_t *evidence)
+{
+    uint8_t valid;
+    memset(evidence, 0, sizeof(*evidence));
+    valid = reader_u8(reader);
+    if (valid > 1U || !reader_zero(reader, 3U)) return;
+    evidence->valid = valid != 0U;
+    read_binding(reader, &evidence->session.binding);
+    reader_bytes(reader, evidence->session.principal.bytes,
+                 sizeof(evidence->session.principal.bytes));
+    evidence->session.session_generation = reader_u32(reader);
+    evidence->ingress_link_id = reader_u16(reader);
+    if (!reader_zero(reader, 2U)) return;
+    evidence->ingress_link_generation = reader_u32(reader);
+    evidence->capability_generation = reader_u32(reader);
+    reader_bytes(reader, evidence->capability_digest,
+                 sizeof(evidence->capability_digest));
+}
+
 static void write_transition(
     byte_writer_t *writer,
     const ucn_v6_cluster_transition_proof_t *transition)
 {
+    size_t index;
     writer_u8(writer, transition->valid ? 1U : 0U);
     writer_u8(writer, transition->ready ? 1U : 0U);
     writer_u8(writer, (uint8_t)transition->kind);
     writer_skip(writer, 1U);
     if (transition->valid) {
         writer_u64(writer, transition->transaction_id);
+        writer_u32(writer, transition->started_boot_incarnation);
+        writer_u64(writer, transition->deadline_us);
         write_epoch(writer, &transition->old_epoch);
         write_epoch(writer, &transition->target_epoch);
         writer_u32(writer, transition->target_config_id);
@@ -770,6 +985,16 @@ static void write_transition(
         write_config(writer, &transition->target_config);
         writer_u32(writer, transition->old_voter_bitmap);
         writer_u32(writer, transition->new_voter_bitmap);
+        for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_VOTERS; ++index) {
+            write_transition_vote_evidence(
+                writer, &transition->old_vote_evidence[index]);
+        }
+        for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_VOTERS; ++index) {
+            write_transition_vote_evidence(
+                writer, &transition->new_vote_evidence[index]);
+        }
+        writer_u32(writer, transition->target_authority_proof.proof_id);
+        writer_u32(writer, transition->target_authority_proof.generation);
     } else {
         writer_skip(writer, TRANSITION_BODY_BYTES);
     }
@@ -779,6 +1004,7 @@ static void read_transition(
     byte_reader_t *reader,
     ucn_v6_cluster_transition_proof_t *transition)
 {
+    size_t index;
     uint8_t valid;
     uint8_t ready;
     uint8_t kind;
@@ -793,6 +1019,8 @@ static void read_transition(
     transition->ready = ready != 0U;
     transition->kind = (ucn_v6_cluster_transition_kind_t)kind;
     transition->transaction_id = reader_u64(reader);
+    transition->started_boot_incarnation = reader_u32(reader);
+    transition->deadline_us = reader_u64(reader);
     read_epoch(reader, &transition->old_epoch);
     read_epoch(reader, &transition->target_epoch);
     transition->target_config_id = reader_u32(reader);
@@ -800,6 +1028,16 @@ static void read_transition(
     read_config(reader, &transition->target_config);
     transition->old_voter_bitmap = reader_u32(reader);
     transition->new_voter_bitmap = reader_u32(reader);
+    for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_VOTERS; ++index) {
+        read_transition_vote_evidence(
+            reader, &transition->old_vote_evidence[index]);
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_VOTERS; ++index) {
+        read_transition_vote_evidence(
+            reader, &transition->new_vote_evidence[index]);
+    }
+    transition->target_authority_proof.proof_id = reader_u32(reader);
+    transition->target_authority_proof.generation = reader_u32(reader);
 }
 
 ucn_v6_result_t ucn_v6_cluster_snapshot_encode(
@@ -981,6 +1219,13 @@ static bool control_is_valid(const ucn_v6_cluster_control_t *control)
         !serial_valid(control->backup_generation)) {
         return false;
     }
+    if (control->kind == UCN_V6_CLUSTER_CTL_HANDOVER_READY) {
+        if (!authority_proof_ref_is_valid(&control->authority_proof)) {
+            return false;
+        }
+    } else if (!authority_proof_ref_is_zero(&control->authority_proof)) {
+        return false;
+    }
     return true;
 }
 
@@ -1010,6 +1255,8 @@ ucn_v6_result_t ucn_v6_cluster_control_encode(
     writer_u32(&writer, control->backup_generation);
     writer_u32(&writer, control->old_voter_bitmap);
     writer_u32(&writer, control->new_voter_bitmap);
+    writer_u32(&writer, control->authority_proof.proof_id);
+    writer_u32(&writer, control->authority_proof.generation);
     writer_skip(&writer, 4U);
     if (!writer.ok || writer.offset != CONTROL_BODY_BYTES) {
         return UCN_V6_ERR_EXHAUSTED;
@@ -1059,6 +1306,8 @@ ucn_v6_result_t ucn_v6_cluster_control_decode(
     decoded.backup_generation = reader_u32(&reader);
     decoded.old_voter_bitmap = reader_u32(&reader);
     decoded.new_voter_bitmap = reader_u32(&reader);
+    decoded.authority_proof.proof_id = reader_u32(&reader);
+    decoded.authority_proof.generation = reader_u32(&reader);
     if (!reader_zero(&reader, 4U) || !reader.ok ||
         reader.offset != CONTROL_BODY_BYTES ||
         !control_is_valid(&decoded)) {
@@ -1079,6 +1328,7 @@ static bool directory_wire_is_valid(
            ucn_v6_binding_key_is_valid(&entry->next_hop.binding) &&
            serial_valid(entry->next_hop.session_generation) &&
            serial_valid(entry->route_generation) && entry->path_id != 0U &&
+           entry->path_id <= UCN_V6_PATH_ID_MAX &&
            serial_valid(entry->path_generation) &&
            entry->authority_proof.proof_id != 0U &&
            serial_valid(entry->authority_proof.generation) &&
@@ -1581,6 +1831,113 @@ static bool voter_live(const ucn_v6_cluster_owner_t *owner,
            slot->value.voter;
 }
 
+static void set_local_vote_evidence(
+    const ucn_v6_cluster_owner_t *owner,
+    ucn_v6_cluster_transition_vote_evidence_t *evidence)
+{
+    memset(evidence, 0, sizeof(*evidence));
+    evidence->valid = true;
+    evidence->session.principal = owner->local_principal;
+    evidence->session.binding = owner->local_binding;
+    evidence->session.session_generation = owner->local_session_generation;
+}
+
+static void set_member_vote_evidence(
+    const ucn_v6_cluster_member_slot_t *slot,
+    ucn_v6_cluster_transition_vote_evidence_t *evidence)
+{
+    memset(evidence, 0, sizeof(*evidence));
+    evidence->valid = true;
+    evidence->session = slot->value.session;
+    evidence->ingress_link_id = slot->value.ingress_link_id;
+    evidence->ingress_link_generation =
+        slot->value.ingress_link_generation;
+    evidence->capability_generation = slot->value.capability_generation;
+    memcpy(evidence->capability_digest, slot->capability_digest,
+           sizeof(evidence->capability_digest));
+}
+
+static bool vote_evidence_is_live(
+    const ucn_v6_cluster_owner_t *owner,
+    const ucn_v6_cluster_voter_t *voter,
+    const ucn_v6_cluster_transition_vote_evidence_t *evidence,
+    uint64_t now_us)
+{
+    const ucn_v6_cluster_member_slot_t *slot;
+    if (!transition_vote_evidence_is_valid(evidence, voter, true)) {
+        return false;
+    }
+    if (principal_equal(&voter->principal, &owner->local_principal) &&
+        binding_equal(&voter->binding, &owner->local_binding)) {
+        return evidence->ingress_link_id == 0U &&
+               evidence->session.session_generation ==
+                   owner->local_session_generation;
+    }
+    slot = find_member_slot_const(owner, &voter->principal, &voter->binding);
+    return slot != NULL && slot->value.voter &&
+           member_is_live(owner, &slot->value, slot->capability_digest,
+                          now_us) &&
+           session_equal(&slot->value.session, &evidence->session) &&
+           slot->value.ingress_link_id == evidence->ingress_link_id &&
+           slot->value.ingress_link_generation ==
+               evidence->ingress_link_generation &&
+           slot->value.capability_generation ==
+               evidence->capability_generation &&
+           memcmp(slot->capability_digest, evidence->capability_digest,
+                  sizeof(evidence->capability_digest)) == 0;
+}
+
+static uint32_t config_live_vote_bitmap(
+    const ucn_v6_cluster_owner_t *owner,
+    const ucn_v6_cluster_config_t *config,
+    const ucn_v6_cluster_transition_vote_evidence_t *evidence,
+    uint32_t votes, uint64_t now_us)
+{
+    uint32_t bitmap = 0U;
+    size_t index;
+    for (index = 0U; index < config->voter_count; ++index) {
+        uint32_t bit = UINT32_C(1) << (uint32_t)index;
+        if ((votes & bit) != 0U &&
+            vote_evidence_is_live(owner, &config->voters[index],
+                                  &evidence[index], now_us)) {
+            bitmap |= bit;
+        }
+    }
+    return bitmap;
+}
+
+static bool clear_transition_votes_for_identity(
+    ucn_v6_cluster_snapshot_t *snapshot,
+    const ucn_v6_principal_t *principal,
+    const ucn_v6_binding_key_t *binding)
+{
+    int index;
+    bool changed = false;
+    if (snapshot == NULL || !snapshot->transition.valid) return false;
+    index = config_voter_index(&snapshot->stable_config, principal, binding);
+    if (index >= 0 &&
+        (snapshot->transition.old_voter_bitmap &
+         (UINT32_C(1) << (uint32_t)index)) != 0U) {
+        snapshot->transition.old_voter_bitmap &=
+            ~(UINT32_C(1) << (uint32_t)index);
+        memset(&snapshot->transition.old_vote_evidence[index], 0,
+               sizeof(snapshot->transition.old_vote_evidence[index]));
+        changed = true;
+    }
+    index = config_voter_index(&snapshot->transition.target_config,
+                               principal, binding);
+    if (index >= 0 &&
+        (snapshot->transition.new_voter_bitmap &
+         (UINT32_C(1) << (uint32_t)index)) != 0U) {
+        snapshot->transition.new_voter_bitmap &=
+            ~(UINT32_C(1) << (uint32_t)index);
+        memset(&snapshot->transition.new_vote_evidence[index], 0,
+               sizeof(snapshot->transition.new_vote_evidence[index]));
+        changed = true;
+    }
+    return changed;
+}
+
 static uint32_t config_live_bitmap(const ucn_v6_cluster_owner_t *owner,
                                    const ucn_v6_cluster_config_t *config,
                                    uint64_t now_us)
@@ -1614,6 +1971,68 @@ static bool bitmap_has_quorum(uint32_t bitmap, uint8_t voter_count)
     uint32_t allowed = voter_count == 32U ? UINT32_MAX :
         ((UINT32_C(1) << voter_count) - 1U);
     return (bitmap & ~allowed) == 0U && bit_count(bitmap) >= required;
+}
+
+/* EN: A transition vote is a promise by one exact, currently admitted voter.
+ * Expired capability/session state permanently consumes that promise: the bit
+ * is removed durably before a later re-admission can vote again.
+ * 中文：转换票属于一个精确且当前已准入的投票者。Capability/Session 过期后，
+ * 必须先持久清除旧票，后续重新准入不能让历史票自动复活。 */
+static ucn_v6_result_t transition_revalidate_live_votes(
+    ucn_v6_cluster_owner_t *owner, uint64_t now_us, bool *has_quorum)
+{
+    uint32_t old_live;
+    uint32_t new_live;
+    uint32_t old_votes;
+    uint32_t new_votes;
+
+    if (owner == NULL || has_quorum == NULL ||
+        !owner->durable.transition.valid) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    old_live = config_live_vote_bitmap(
+        owner, &owner->durable.stable_config,
+        owner->durable.transition.old_vote_evidence,
+        owner->durable.transition.old_voter_bitmap, now_us);
+    new_live = config_live_vote_bitmap(
+        owner, &owner->durable.transition.target_config,
+        owner->durable.transition.new_vote_evidence,
+        owner->durable.transition.new_voter_bitmap, now_us);
+    old_votes = old_live;
+    new_votes = new_live;
+    if (old_votes != owner->durable.transition.old_voter_bitmap ||
+        new_votes != owner->durable.transition.new_voter_bitmap) {
+        owner->staging = owner->durable;
+        owner->staging.transition.old_voter_bitmap = old_votes;
+        owner->staging.transition.new_voter_bitmap = new_votes;
+        {
+            size_t index;
+            for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_VOTERS; ++index) {
+                uint32_t bit = UINT32_C(1) << (uint32_t)index;
+                if ((old_votes & bit) == 0U) {
+                    memset(&owner->staging.transition.old_vote_evidence[index],
+                           0, sizeof(owner->staging.transition
+                                         .old_vote_evidence[index]));
+                }
+                if ((new_votes & bit) == 0U) {
+                    memset(&owner->staging.transition.new_vote_evidence[index],
+                           0, sizeof(owner->staging.transition
+                                         .new_vote_evidence[index]));
+                }
+            }
+        }
+        *has_quorum = false;
+        {
+            ucn_v6_result_t result = persist_snapshot(owner, &owner->staging);
+            return result == UCN_V6_OK ? UCN_V6_ERR_ACCESS : result;
+        }
+    }
+    *has_quorum =
+        bitmap_has_quorum(old_votes,
+                          owner->durable.stable_config.voter_count) &&
+        bitmap_has_quorum(
+            new_votes, owner->durable.transition.target_config.voter_count);
+    return UCN_V6_OK;
 }
 
 static bool authority_proof_ref_equal(
@@ -1723,6 +2142,52 @@ static bool resolve_authority_proof(
     return true;
 }
 
+static bool resolve_handover_authority_proof(
+    ucn_v6_cluster_owner_t *owner,
+    const ucn_v6_cluster_transition_proof_t *transition,
+    const ucn_v6_cluster_authority_proof_ref_t *ref,
+    uint64_t now_us)
+{
+    const ucn_v6_cluster_member_t *member;
+    ucn_v6_cluster_authority_proof_view_t candidate;
+    uint64_t violations_before = 0U;
+    ucn_v6_result_t result;
+
+    if (owner == NULL || transition == NULL || !transition->valid ||
+        transition->kind != UCN_V6_CLUSTER_TRANSITION_HANDOVER ||
+        !authority_proof_ref_is_valid(ref) ||
+        owner->authority_proof_owner.resolve_verified == NULL) {
+        return false;
+    }
+    member = find_member_const(owner, &transition->target_epoch.head_principal,
+                               &transition->target_epoch.head_binding);
+    if (!member_value_is_live(owner, member, now_us) || !member->voter ||
+        (member->capability_feature_bits & UCN_V6_FEATURE_CLUSTER) == 0U) {
+        return false;
+    }
+    memset(&candidate, 0, sizeof(candidate));
+    result = gate_enter(owner, &violations_before);
+    if (result != UCN_V6_OK) {
+        return false;
+    }
+    result = owner->authority_proof_owner.resolve_verified(
+        owner->authority_proof_owner.context, ref, now_us, &candidate);
+    result = gate_finish(owner, violations_before, result);
+    return result == UCN_V6_OK && candidate.valid &&
+           authority_proof_ref_equal(&candidate.ref, ref) &&
+           epoch_equal(&candidate.epoch, &transition->target_epoch) &&
+           candidate.stable_config_id == transition->target_config_id &&
+           candidate.stable_config_generation ==
+               transition->target_config_generation &&
+           candidate.stable_quorum_verified && !candidate.joint_valid &&
+           candidate.joint_config_id == 0U &&
+           candidate.joint_config_generation == 0U &&
+           !candidate.joint_quorum_verified &&
+           bytes_nonzero(candidate.evidence_digest,
+                         sizeof(candidate.evidence_digest)) &&
+           candidate.lease_deadline_us > now_us;
+}
+
 static bool config_has_live_quorum(const ucn_v6_cluster_owner_t *owner,
                                    const ucn_v6_cluster_config_t *config,
                                    uint64_t now_us)
@@ -1744,6 +2209,13 @@ static bool authority_is_live(const ucn_v6_cluster_owner_t *owner,
                          &owner->local_principal) ||
         !binding_equal(&owner->durable.active_epoch.head_binding,
                        &owner->local_binding)) {
+        return false;
+    }
+    if (owner->durable.phase == UCN_V6_CLUSTER_PHASE_HANDOVER &&
+        (!owner->durable.transition.valid ||
+         owner->durable.transition.started_boot_incarnation !=
+             owner->durable.boot_incarnation ||
+         now_us >= owner->durable.transition.deadline_us)) {
         return false;
     }
     stable_quorum = config_has_live_quorum(owner,
@@ -1875,10 +2347,44 @@ ucn_v6_result_t ucn_v6_cluster_owner_init_in_place(
     uint64_t violations_before = 0U;
     ucn_v6_result_t witness_result;
     ucn_v6_result_t result;
-    if (owner != NULL) {
-        *owner = NULL;
+    if (owner == NULL ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, owner,
+                                     sizeof(*owner))) {
+        return UCN_V6_ERR_ARGUMENT;
     }
-    if (owner == NULL || local_principal == NULL || local_binding == NULL ||
+    *owner = NULL;
+    if (ucn_v6_memory_ranges_overlap(storage, storage_bytes, manifest,
+                                     sizeof(*manifest)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, local_principal,
+                                     sizeof(*local_principal)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, local_binding,
+                                     sizeof(*local_binding)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, capability_owner,
+                                     capability_owner != NULL ? 1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, route_owner,
+                                     route_owner != NULL ? 1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, authority_proof_owner,
+            authority_proof_owner != NULL ?
+                sizeof(*authority_proof_owner) : 0U) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, store,
+                                     sizeof(*store)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, callback_gate,
+                                     sizeof(*callback_gate)) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes,
+            authority_proof_owner != NULL ? authority_proof_owner->context : NULL,
+            authority_proof_owner != NULL &&
+                    authority_proof_owner->context != NULL ?
+                1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, store != NULL ? store->context : NULL,
+            store != NULL && store->context != NULL ? 1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes,
+            callback_gate != NULL ? callback_gate->context : NULL,
+            callback_gate != NULL && callback_gate->context != NULL ? 1U : 0U) ||
+        local_principal == NULL || local_binding == NULL ||
         !ucn_v6_principal_is_valid(local_principal) ||
         !ucn_v6_binding_key_is_valid(local_binding) ||
         !serial_valid(local_session_generation) ||
@@ -2094,6 +2600,23 @@ ucn_v6_result_t ucn_v6_cluster_admit_member(
     }
     if (slot == NULL) {
         return UCN_V6_ERR_NO_SPACE;
+    }
+    if (owner->durable.transition.valid) {
+        bool votes_cleared;
+        owner->staging = owner->durable;
+        votes_cleared = clear_transition_votes_for_identity(
+            &owner->staging, &source_session.principal,
+            &source_session.binding);
+        if (slot->keyed) {
+            votes_cleared = clear_transition_votes_for_identity(
+                &owner->staging, &slot->value.session.principal,
+                &slot->value.session.binding) || votes_cleared;
+        }
+        if (votes_cleared) {
+            ucn_v6_result_t persist_result =
+                persist_snapshot(owner, &owner->staging);
+            if (persist_result != UCN_V6_OK) return persist_result;
+        }
     }
     memset(&replacement, 0, sizeof(replacement));
     replacement.occupied = true;
@@ -2327,22 +2850,50 @@ ucn_v6_result_t ucn_v6_cluster_abort_joint(
     return result;
 }
 
-static void transition_initialize(
+static bool transition_deadline(uint64_t now_us, uint64_t *deadline_us)
+{
+    if (deadline_us == NULL ||
+        UINT64_MAX - now_us < UCN_V6_CONFIG_CLUSTER_TRANSITION_TIMEOUT_US) {
+        return false;
+    }
+    *deadline_us = now_us + UCN_V6_CONFIG_CLUSTER_TRANSITION_TIMEOUT_US;
+    return *deadline_us != 0U;
+}
+
+static bool transition_is_runtime_live(
+    const ucn_v6_cluster_owner_t *owner, uint64_t now_us)
+{
+    return owner != NULL && owner->durable.transition.valid &&
+           owner->durable.transition.started_boot_incarnation ==
+               owner->durable.boot_incarnation &&
+           now_us < owner->durable.transition.deadline_us;
+}
+
+static bool transition_initialize(
     ucn_v6_cluster_transition_proof_t *transition,
     ucn_v6_cluster_transition_kind_t kind, uint64_t transaction_id,
     const ucn_v6_cluster_epoch_t *old_epoch,
     const ucn_v6_cluster_epoch_t *target_epoch,
-    const ucn_v6_cluster_config_t *target_config)
+    const ucn_v6_cluster_config_t *target_config,
+    uint32_t boot_incarnation, uint64_t now_us)
 {
+    uint64_t deadline_us;
+    if (transition == NULL || !serial_valid(boot_incarnation) ||
+        !transition_deadline(now_us, &deadline_us)) {
+        return false;
+    }
     memset(transition, 0, sizeof(*transition));
     transition->valid = true;
     transition->kind = kind;
     transition->transaction_id = transaction_id;
+    transition->started_boot_incarnation = boot_incarnation;
+    transition->deadline_us = deadline_us;
     transition->old_epoch = *old_epoch;
     transition->target_epoch = *target_epoch;
     transition->target_config_id = target_config->config_id;
     transition->target_config_generation = target_config->generation;
     transition->target_config = *target_config;
+    return true;
 }
 
 ucn_v6_result_t ucn_v6_cluster_begin_takeover(
@@ -2383,12 +2934,19 @@ ucn_v6_result_t ucn_v6_cluster_begin_takeover(
     next->transaction_high_water = transaction_id;
     next->phase = UCN_V6_CLUSTER_PHASE_TAKEOVER;
     next->role = UCN_V6_CLUSTER_BACKUP;
-    transition_initialize(&next->transition,
-                          UCN_V6_CLUSTER_TRANSITION_TAKEOVER,
-                          transaction_id, &owner->durable.active_epoch,
-                          &target, &owner->durable.stable_config);
+    if (!transition_initialize(&next->transition,
+                               UCN_V6_CLUSTER_TRANSITION_TAKEOVER,
+                               transaction_id, &owner->durable.active_epoch,
+                               &target, &owner->durable.stable_config,
+                               owner->durable.boot_incarnation, now_us)) {
+        return UCN_V6_ERR_EXHAUSTED;
+    }
     next->transition.old_voter_bitmap = UINT32_C(1) << (uint32_t)self_index;
     next->transition.new_voter_bitmap = next->transition.old_voter_bitmap;
+    set_local_vote_evidence(
+        owner, &next->transition.old_vote_evidence[self_index]);
+    set_local_vote_evidence(
+        owner, &next->transition.new_vote_evidence[self_index]);
     memset(&next->last_vote, 0, sizeof(next->last_vote));
     next->last_vote.valid = true;
     next->last_vote.source_epoch = owner->durable.active_epoch;
@@ -2423,6 +2981,9 @@ ucn_v6_result_t ucn_v6_cluster_record_transition_vote(
          owner->durable.phase != UCN_V6_CLUSTER_PHASE_RECOVERY)) {
         increment_saturated(&owner->rejected_security);
         return UCN_V6_ERR_ACCESS;
+    }
+    if (!transition_is_runtime_live(owner, now_us)) {
+        return UCN_V6_ERR_STATE;
     }
     if (!opened_cluster_control(
             opened,
@@ -2466,9 +3027,14 @@ ucn_v6_result_t ucn_v6_cluster_record_transition_vote(
         &source_session.binding);
     if (old_index < 0 && new_index < 0) return UCN_V6_ERR_ACCESS;
     {
-        const ucn_v6_cluster_member_t *member = find_member_const(
-            owner, &source_session.principal, &source_session.binding);
-        if (!member_value_is_live(owner, member, now_us) || !member->voter) {
+        const ucn_v6_cluster_member_slot_t *member_slot =
+            find_member_slot_const(owner, &source_session.principal,
+                                   &source_session.binding);
+        if (member_slot == NULL ||
+            !member_is_live(owner, &member_slot->value,
+                            member_slot->capability_digest, now_us) ||
+            !member_slot->value.voter ||
+            !session_equal(&member_slot->value.session, &source_session)) {
             return UCN_V6_ERR_ACCESS;
         }
     }
@@ -2484,18 +3050,23 @@ ucn_v6_result_t ucn_v6_cluster_record_transition_vote(
     next = &owner->staging;
     next->transition.old_voter_bitmap |= old_bit;
     next->transition.new_voter_bitmap |= new_bit;
-    return persist_snapshot(owner, next);
-}
-
-static bool transition_has_quorum(const ucn_v6_cluster_snapshot_t *snapshot)
-{
-    if (!snapshot->transition.valid ||
-        !bitmap_has_quorum(snapshot->transition.old_voter_bitmap,
-                           snapshot->stable_config.voter_count)) {
-        return false;
+    {
+        const ucn_v6_cluster_member_slot_t *member_slot =
+            find_member_slot_const(owner, &source_session.principal,
+                                   &source_session.binding);
+        if (member_slot == NULL) return UCN_V6_ERR_ACCESS;
+        if (old_index >= 0) {
+            set_member_vote_evidence(
+                member_slot,
+                &next->transition.old_vote_evidence[old_index]);
+        }
+        if (new_index >= 0) {
+            set_member_vote_evidence(
+                member_slot,
+                &next->transition.new_vote_evidence[new_index]);
+        }
     }
-    return bitmap_has_quorum(snapshot->transition.new_voter_bitmap,
-                             snapshot->transition.target_config.voter_count);
+    return persist_snapshot(owner, next);
 }
 
 ucn_v6_result_t ucn_v6_cluster_commit_takeover(
@@ -2503,6 +3074,7 @@ ucn_v6_result_t ucn_v6_cluster_commit_takeover(
     uint64_t now_us)
 {
     ucn_v6_cluster_snapshot_t *next;
+    bool has_quorum = false;
     ucn_v6_result_t result;
     if (!owner_is_valid(owner)) {
         return UCN_V6_ERR_ACCESS;
@@ -2514,11 +3086,16 @@ ucn_v6_result_t ucn_v6_cluster_commit_takeover(
         !owner->durable.transition.valid ||
         owner->durable.transition.kind !=
             UCN_V6_CLUSTER_TRANSITION_TAKEOVER ||
+        !transition_is_runtime_live(owner, now_us) ||
         !serial64_valid(transaction_id) ||
-        owner->durable.transition.transaction_id != transaction_id ||
-        !transition_has_quorum(&owner->durable)) {
+        owner->durable.transition.transaction_id != transaction_id) {
         increment_saturated(&owner->rejected_quorum);
         return UCN_V6_ERR_ACCESS;
+    }
+    result = transition_revalidate_live_votes(owner, now_us, &has_quorum);
+    if (result != UCN_V6_OK || !has_quorum) {
+        increment_saturated(&owner->rejected_quorum);
+        return result != UCN_V6_OK ? result : UCN_V6_ERR_ACCESS;
     }
     owner->staging = owner->durable;
     next = &owner->staging;
@@ -2584,16 +3161,20 @@ ucn_v6_result_t ucn_v6_cluster_begin_handover(
     next = &owner->staging;
     next->transaction_high_water = transaction_id;
     next->phase = UCN_V6_CLUSTER_PHASE_HANDOVER;
-    transition_initialize(&next->transition,
-                          UCN_V6_CLUSTER_TRANSITION_HANDOVER,
-                          transaction_id, &owner->durable.active_epoch,
-                          target_epoch, target_config);
+    if (!transition_initialize(&next->transition,
+                               UCN_V6_CLUSTER_TRANSITION_HANDOVER,
+                               transaction_id, &owner->durable.active_epoch,
+                               target_epoch, target_config,
+                               owner->durable.boot_incarnation, now_us)) {
+        return UCN_V6_ERR_EXHAUSTED;
+    }
     return persist_snapshot(owner, next);
 }
 
 ucn_v6_result_t ucn_v6_cluster_handover_ready(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened)
+    const ucn_v6_security_open_result_t *opened,
+    uint64_t now_us)
 {
     ucn_v6_cluster_control_t decoded;
     const ucn_v6_cluster_control_t *ready = &decoded;
@@ -2605,6 +3186,7 @@ ucn_v6_result_t ucn_v6_cluster_handover_ready(
                                 &decoded) ||
         owner->durable.phase != UCN_V6_CLUSTER_PHASE_HANDOVER ||
         !owner->durable.transition.valid ||
+        !transition_is_runtime_live(owner, now_us) ||
         ready->kind != UCN_V6_CLUSTER_CTL_HANDOVER_READY ||
         owner->durable.transition.transaction_id != ready->transaction_id ||
         !epoch_equal(&owner->durable.transition.old_epoch,
@@ -2617,26 +3199,39 @@ ucn_v6_result_t ucn_v6_cluster_handover_ready(
         !principal_equal(&source_session.principal,
                          &owner->durable.transition.target_epoch.head_principal) ||
         !binding_equal(&source_session.binding,
-                       &owner->durable.transition.target_epoch.head_binding)) {
+                       &owner->durable.transition.target_epoch.head_binding) ||
+        !resolve_handover_authority_proof(
+            owner, &owner->durable.transition, &ready->authority_proof,
+            now_us)) {
         return UCN_V6_ERR_ACCESS;
     }
-    if (owner->durable.transition.ready) return UCN_V6_OK;
+    if (owner->durable.transition.ready) {
+        return authority_proof_ref_equal(
+                   &owner->durable.transition.target_authority_proof,
+                   &ready->authority_proof) ? UCN_V6_OK : UCN_V6_ERR_REPLAY;
+    }
     owner->staging = owner->durable;
     next = &owner->staging;
     next->transition.ready = true;
+    next->transition.target_authority_proof = ready->authority_proof;
     return persist_snapshot(owner, next);
 }
 
 ucn_v6_result_t ucn_v6_cluster_commit_handover(
-    ucn_v6_cluster_owner_t *owner, uint64_t transaction_id)
+    ucn_v6_cluster_owner_t *owner, uint64_t transaction_id,
+    uint64_t now_us)
 {
     ucn_v6_cluster_snapshot_t *next;
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
         owner->durable.phase != UCN_V6_CLUSTER_PHASE_HANDOVER ||
         !owner->durable.transition.valid ||
         !owner->durable.transition.ready ||
+        !transition_is_runtime_live(owner, now_us) ||
         !serial64_valid(transaction_id) ||
-        owner->durable.transition.transaction_id != transaction_id) {
+        owner->durable.transition.transaction_id != transaction_id ||
+        !resolve_handover_authority_proof(
+            owner, &owner->durable.transition,
+            &owner->durable.transition.target_authority_proof, now_us)) {
         return UCN_V6_ERR_STATE;
     }
     owner->staging = owner->durable;
@@ -2713,10 +3308,13 @@ ucn_v6_result_t ucn_v6_cluster_begin_recovery(
     next->phase = UCN_V6_CLUSTER_PHASE_RECOVERY;
     next->role = UCN_V6_CLUSTER_RECOVERY_HEAD;
     next->authority_fenced = false;
-    transition_initialize(&next->transition,
-                          UCN_V6_CLUSTER_TRANSITION_RECOVERY,
-                          transaction_id, &owner->durable.active_epoch,
-                          target_epoch, &owner->durable.stable_config);
+    if (!transition_initialize(&next->transition,
+                               UCN_V6_CLUSTER_TRANSITION_RECOVERY,
+                               transaction_id, &owner->durable.active_epoch,
+                               target_epoch, &owner->durable.stable_config,
+                               owner->durable.boot_incarnation, now_us)) {
+        return UCN_V6_ERR_EXHAUSTED;
+    }
     {
         int self_index = config_voter_index(
             &owner->durable.stable_config, &owner->local_principal,
@@ -2725,6 +3323,10 @@ ucn_v6_result_t ucn_v6_cluster_begin_recovery(
             uint32_t self_bit = UINT32_C(1) << (uint32_t)self_index;
             next->transition.old_voter_bitmap = self_bit;
             next->transition.new_voter_bitmap = self_bit;
+            set_local_vote_evidence(
+                owner, &next->transition.old_vote_evidence[self_index]);
+            set_local_vote_evidence(
+                owner, &next->transition.new_vote_evidence[self_index]);
         }
     }
     return persist_snapshot(owner, next);
@@ -2735,6 +3337,7 @@ ucn_v6_result_t ucn_v6_cluster_commit_recovery(
     uint64_t now_us)
 {
     ucn_v6_cluster_snapshot_t *next;
+    bool has_quorum = false;
     ucn_v6_result_t result;
     if (!owner_is_valid(owner)) {
         return UCN_V6_ERR_ACCESS;
@@ -2744,11 +3347,16 @@ ucn_v6_result_t ucn_v6_cluster_commit_recovery(
     }
     if (owner->durable.phase != UCN_V6_CLUSTER_PHASE_RECOVERY ||
         !owner->durable.transition.valid ||
+        !transition_is_runtime_live(owner, now_us) ||
         !serial64_valid(transaction_id) ||
-        owner->durable.transition.transaction_id != transaction_id ||
-        !transition_has_quorum(&owner->durable)) {
+        owner->durable.transition.transaction_id != transaction_id) {
         increment_saturated(&owner->rejected_quorum);
         return UCN_V6_ERR_ACCESS;
+    }
+    result = transition_revalidate_live_votes(owner, now_us, &has_quorum);
+    if (result != UCN_V6_OK || !has_quorum) {
+        increment_saturated(&owner->rejected_quorum);
+        return result != UCN_V6_OK ? result : UCN_V6_ERR_ACCESS;
     }
     owner->staging = owner->durable;
     next = &owner->staging;
@@ -2773,6 +3381,75 @@ ucn_v6_result_t ucn_v6_cluster_commit_recovery(
         recompute_authority(owner, now_us);
     }
     return result;
+}
+
+static ucn_v6_result_t abort_current_transition(
+    ucn_v6_cluster_owner_t *owner, uint64_t now_us)
+{
+    ucn_v6_cluster_snapshot_t *next;
+    ucn_v6_cluster_transition_kind_t kind;
+    bool ready;
+    ucn_v6_result_t result;
+
+    if (owner == NULL || !owner->durable.transition.valid) {
+        return UCN_V6_ERR_STATE;
+    }
+    kind = owner->durable.transition.kind;
+    ready = owner->durable.transition.ready;
+    if (kind != UCN_V6_CLUSTER_TRANSITION_TAKEOVER &&
+        kind != UCN_V6_CLUSTER_TRANSITION_HANDOVER &&
+        kind != UCN_V6_CLUSTER_TRANSITION_RECOVERY) {
+        return UCN_V6_ERR_STATE;
+    }
+
+    owner->staging = owner->durable;
+    next = &owner->staging;
+    next->phase = UCN_V6_CLUSTER_PHASE_STABLE;
+    if (kind == UCN_V6_CLUSTER_TRANSITION_TAKEOVER) {
+        next->role = UCN_V6_CLUSTER_BACKUP;
+        next->authority_fenced = false;
+    } else if (kind == UCN_V6_CLUSTER_TRANSITION_RECOVERY) {
+        next->role = UCN_V6_CLUSTER_OBSERVER;
+        next->authority_fenced = false;
+    } else if (ready) {
+        next->role = UCN_V6_CLUSTER_FENCED;
+        next->authority_fenced = true;
+    } else {
+        next->role = UCN_V6_CLUSTER_HEAD;
+        next->authority_fenced = false;
+    }
+    memset(&next->transition, 0, sizeof(next->transition));
+    result = persist_snapshot(owner, next);
+    if (result == UCN_V6_OK) {
+        recompute_authority(owner, now_us);
+    }
+    return result;
+}
+
+ucn_v6_result_t ucn_v6_cluster_abort_transition(
+    ucn_v6_cluster_owner_t *owner,
+    ucn_v6_cluster_transition_kind_t expected_kind,
+    uint64_t transaction_id,
+    const ucn_v6_cluster_epoch_t *expected_target_epoch,
+    const ucn_v6_cluster_config_t *expected_target_config,
+    uint64_t now_us)
+{
+    if (!owner_is_valid(owner) || !gate_is_available(owner) ||
+        expected_kind < UCN_V6_CLUSTER_TRANSITION_TAKEOVER ||
+        expected_kind > UCN_V6_CLUSTER_TRANSITION_RECOVERY ||
+        !serial64_valid(transaction_id) ||
+        !ucn_v6_cluster_epoch_is_valid(expected_target_epoch) ||
+        !ucn_v6_cluster_config_is_valid(expected_target_config) ||
+        !owner->durable.transition.valid ||
+        owner->durable.transition.kind != expected_kind ||
+        owner->durable.transition.transaction_id != transaction_id ||
+        !epoch_equal(&owner->durable.transition.target_epoch,
+                     expected_target_epoch) ||
+        !config_equal(&owner->durable.transition.target_config,
+                      expected_target_config)) {
+        return UCN_V6_ERR_STATE;
+    }
+    return abort_current_transition(owner, now_us);
 }
 
 ucn_v6_result_t ucn_v6_cluster_rekey(
@@ -2835,6 +3512,7 @@ static bool directory_entry_is_valid(
            ucn_v6_binding_key_is_valid(&entry->next_hop.binding) &&
            serial_valid(entry->next_hop.session_generation) &&
            serial_valid(entry->route_generation) && entry->path_id != 0U &&
+           entry->path_id <= UCN_V6_PATH_ID_MAX &&
            serial_valid(entry->path_generation) &&
            entry->authority_proof.proof_id != 0U &&
            serial_valid(entry->authority_proof.generation) &&
@@ -3219,6 +3897,13 @@ ucn_v6_result_t ucn_v6_cluster_step(
     if (!owner_is_valid(owner) || !gate_is_available(owner)) {
         return UCN_V6_ERR_STATE;
     }
+    if (owner->durable.transition.valid &&
+        !transition_is_runtime_live(owner, now_us)) {
+        ucn_v6_result_t result = abort_current_transition(owner, now_us);
+        if (result != UCN_V6_OK) {
+            return result;
+        }
+    }
     for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_MEMBERS; ++index) {
         ucn_v6_cluster_member_slot_t *slot = &owner->members[index];
         if (slot->value.occupied &&
@@ -3300,9 +3985,32 @@ ucn_v6_result_t ucn_v6_cluster_apply_invalidation(
 {
     size_t index;
     bool member_revoked = false;
+    bool votes_cleared = false;
     if (!owner_is_valid(owner) || !gate_is_available(owner) ||
         !ucn_v6_stack_invalidation_is_valid(invalidation)) {
         return UCN_V6_ERR_ARGUMENT;
+    }
+    if (owner->durable.transition.valid) {
+        owner->staging = owner->durable;
+        for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_MEMBERS; ++index) {
+            const ucn_v6_cluster_member_t *member =
+                &owner->members[index].value;
+            if (owner->members[index].keyed &&
+                invalidation->type != UCN_V6_STACK_INVALIDATE_PATH &&
+                invalidation_matches_dependency(
+                    invalidation, member->ingress_link_id,
+                    member->ingress_link_generation, &member->session,
+                    member->capability_generation, 0U, 0U)) {
+                votes_cleared = clear_transition_votes_for_identity(
+                    &owner->staging, &member->session.principal,
+                    &member->session.binding) || votes_cleared;
+            }
+        }
+        if (votes_cleared) {
+            ucn_v6_result_t persist_result =
+                persist_snapshot(owner, &owner->staging);
+            if (persist_result != UCN_V6_OK) return persist_result;
+        }
     }
     for (index = 0U; index < UCN_V6_CONFIG_CLUSTER_MEMBERS; ++index) {
         ucn_v6_cluster_member_t *member = &owner->members[index].value;

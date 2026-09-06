@@ -258,6 +258,7 @@ static bool bootstrap_transcript_is_valid(
            transcript->authority_binding_generation <=
                UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            transcript->selected_link_instance_id != 0U &&
+           transcript->selected_link_instance_id <= UCN_V6_LINK_ID_MAX &&
            !bytes_are_zero(transcript->binding_lease_id,
                            sizeof(transcript->binding_lease_id)) &&
            transcript->binding_lease_duration_us != 0U &&
@@ -1433,7 +1434,7 @@ static ucn_v6_result_t persist_candidate(
     ucn_v6_security_manager_t *manager,
     ucn_v6_security_snapshot_t *candidate)
 {
-    ucn_v6_security_snapshot_t verified;
+    ucn_v6_security_snapshot_t *verified = &manager->verify;
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
     ucn_v6_durable_generation_witness_t witness = {0};
@@ -1491,17 +1492,17 @@ static ucn_v6_result_t persist_candidate(
         }
     }
     if (result == UCN_V6_OK) {
-        memset(&verified, 0, sizeof(verified));
-        result = manager->store.load(manager->store.context, &verified);
+        memset(verified, 0, sizeof(*verified));
+        result = manager->store.load(manager->store.context, verified);
         if (!callback_scope_is_clean(manager->callback_gate, manager,
                                      violations_before) ||
             !callback_result_is_declared(result)) {
             result = UCN_V6_ERR_STATE;
         }
         if (result != UCN_V6_OK ||
-            !snapshot_is_valid(&verified, manager->committed.realm_id,
+            !snapshot_is_valid(verified, manager->committed.realm_id,
                                &manager->committed.local_principal, false) ||
-            !snapshot_equal(candidate, &verified)) {
+            !snapshot_equal(candidate, verified)) {
             result = UCN_V6_ERR_STATE;
         }
     }
@@ -1519,7 +1520,8 @@ static ucn_v6_result_t persist_candidate(
         manager->faulted = true;
         return leave_result;
     }
-    manager->committed = verified;
+    manager->committed = *verified;
+    memset(&manager->verify, 0, sizeof(manager->verify));
     return UCN_V6_OK;
 }
 
@@ -1534,8 +1536,7 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
     ucn_v6_callback_gate_t *callback_gate,
     ucn_v6_security_manager_t **manager_out)
 {
-    ucn_v6_security_manager_t initialized;
-    ucn_v6_security_snapshot_t loaded;
+    ucn_v6_security_snapshot_t *loaded;
     ucn_v6_security_manager_t *manager;
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
@@ -1563,15 +1564,43 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
     if (result != UCN_V6_OK) {
         return result;
     }
+    if (ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     manager_out,
+                                     sizeof(*manager_out)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     manifest, sizeof(*manifest)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     local_principal,
+                                     sizeof(*local_principal)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     store, sizeof(*store)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     crypto, sizeof(*crypto)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     callback_gate,
+                                     sizeof(*callback_gate)) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, store->context,
+            store->context != NULL ? 1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, crypto->context,
+            crypto->context != NULL ? 1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, callback_gate->context,
+            callback_gate->context != NULL ? 1U : 0U)) {
+        return UCN_V6_ERR_CONFIG;
+    }
     manager = (ucn_v6_security_manager_t *)storage;
     violations_before = ucn_v6_callback_gate_violation_count(callback_gate);
     if (violations_before == UINT64_MAX ||
         ucn_v6_callback_gate_try_enter(callback_gate, manager) != UCN_V6_OK) {
         return UCN_V6_ERR_STATE;
     }
-    memset(&loaded, 0, sizeof(loaded));
+    memset(manager, 0, sizeof(*manager));
+    loaded = &manager->staging;
+    memset(loaded, 0, sizeof(*loaded));
     memset(&witness, 0, sizeof(witness));
-    result = store->load(store->context, &loaded);
+    result = store->load(store->context, loaded);
     if (!callback_scope_is_clean(callback_gate, manager,
                                  violations_before) ||
         !callback_result_is_declared(result)) {
@@ -1588,8 +1617,8 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
     }
     if (result == UCN_V6_ERR_NOT_FOUND &&
         witness_result == UCN_V6_ERR_NOT_FOUND) {
-        snapshot_make_factory(&loaded, realm_id, local_principal);
-        loaded.snapshot_generation = 1U;
+        snapshot_make_factory(loaded, realm_id, local_principal);
+        loaded->snapshot_generation = 1U;
         witness_make_factory(&witness);
         pending = witness;
         pending.flags = UCN_V6_DURABLE_WITNESS_COMMISSIONED;
@@ -1598,7 +1627,7 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
             store, &witness, &pending, callback_gate, manager,
             violations_before);
         if (result == UCN_V6_OK) {
-            result = store->submit(store->context, &loaded);
+            result = store->submit(store->context, loaded);
             if (!callback_scope_is_clean(callback_gate, manager,
                                          violations_before) ||
                 !callback_result_is_declared(result)) {
@@ -1606,8 +1635,8 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
             }
         }
         if (result == UCN_V6_OK) {
-            memset(&loaded, 0, sizeof(loaded));
-            result = store->load(store->context, &loaded);
+            memset(loaded, 0, sizeof(*loaded));
+            result = store->load(store->context, loaded);
             if (!callback_scope_is_clean(callback_gate, manager,
                                          violations_before) ||
                 !callback_result_is_declared(result)) {
@@ -1615,8 +1644,8 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
             }
         }
         if (result == UCN_V6_OK &&
-            (!snapshot_is_valid(&loaded, realm_id, local_principal, false) ||
-             loaded.snapshot_generation != 1U)) {
+            (!snapshot_is_valid(loaded, realm_id, local_principal, false) ||
+             loaded->snapshot_generation != 1U)) {
             result = UCN_V6_ERR_STATE;
         }
         if (result == UCN_V6_OK) {
@@ -1635,8 +1664,8 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
         result = UCN_V6_ERR_STATE;
     } else if (witness.pending_generation != 0U) {
         if (result == UCN_V6_OK &&
-            snapshot_is_valid(&loaded, realm_id, local_principal, false) &&
-            loaded.snapshot_generation == witness.pending_generation) {
+            snapshot_is_valid(loaded, realm_id, local_principal, false) &&
+            loaded->snapshot_generation == witness.pending_generation) {
             committed = witness;
             committed.committed_generation = witness.pending_generation;
             committed.pending_generation = 0U;
@@ -1645,9 +1674,9 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
                 violations_before);
             witness = committed;
         } else if (result == UCN_V6_OK &&
-                   snapshot_is_valid(&loaded, realm_id, local_principal,
+                   snapshot_is_valid(loaded, realm_id, local_principal,
                                      false) &&
-                   loaded.snapshot_generation ==
+                   loaded->snapshot_generation ==
                        witness.committed_generation) {
             committed = witness;
             committed.pending_generation = 0U;
@@ -1665,17 +1694,17 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
              * 中文：首次初始化快照可能在独立 pending witness 落盘后撕裂。
              * 此时只能重交同一个规范 generation-1 工厂快照；精确回读成功
              * 前不得分配 generation 2，也不得清除 witness。 */
-            snapshot_make_factory(&loaded, realm_id, local_principal);
-            loaded.snapshot_generation = 1U;
-            result = store->submit(store->context, &loaded);
+            snapshot_make_factory(loaded, realm_id, local_principal);
+            loaded->snapshot_generation = 1U;
+            result = store->submit(store->context, loaded);
             if (!callback_scope_is_clean(callback_gate, manager,
                                          violations_before) ||
                 !callback_result_is_declared(result)) {
                 result = UCN_V6_ERR_STATE;
             }
             if (result == UCN_V6_OK) {
-                memset(&loaded, 0, sizeof(loaded));
-                result = store->load(store->context, &loaded);
+                memset(loaded, 0, sizeof(*loaded));
+                result = store->load(store->context, loaded);
                 if (!callback_scope_is_clean(callback_gate, manager,
                                              violations_before) ||
                     !callback_result_is_declared(result)) {
@@ -1683,9 +1712,9 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
                 }
             }
             if (result == UCN_V6_OK &&
-                (!snapshot_is_valid(&loaded, realm_id, local_principal,
+                (!snapshot_is_valid(loaded, realm_id, local_principal,
                                     false) ||
-                 loaded.snapshot_generation != 1U)) {
+                 loaded->snapshot_generation != 1U)) {
                 result = UCN_V6_ERR_STATE;
             }
             if (result == UCN_V6_OK) {
@@ -1703,9 +1732,9 @@ ucn_v6_result_t ucn_v6_security_init_in_place(
             result = UCN_V6_ERR_STATE;
         }
     } else if (result != UCN_V6_OK ||
-               !snapshot_is_valid(&loaded, realm_id, local_principal,
+               !snapshot_is_valid(loaded, realm_id, local_principal,
                                   false) ||
-               loaded.snapshot_generation != witness.committed_generation) {
+               loaded->snapshot_generation != witness.committed_generation) {
         result = UCN_V6_ERR_STATE;
     }
 callback_done:
@@ -1715,7 +1744,7 @@ callback_done:
         return leave_result;
     }
     for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
-        ucn_v6_security_session_record_t *session = &loaded.sessions[index];
+        ucn_v6_security_session_record_t *session = &loaded->sessions[index];
         if (session->occupied &&
             session->hop_tx_next_sequence <=
                 session->hop_tx_reserved_through) {
@@ -1753,7 +1782,7 @@ callback_done:
         for (key_index = 0U;
              key_index < UCN_V6_CONFIG_GROUP_KEY_SLOTS; ++key_index) {
             ucn_v6_group_key_slot_t *key =
-                &loaded.group_keys[index][key_index];
+                &loaded->group_keys[index][key_index];
             if (key->state == UCN_V6_GROUP_KEY_ACTIVE &&
                 key->tx_next_sequence <= key->tx_reserved_through) {
                 if (key->tx_reserved_through >=
@@ -1769,19 +1798,18 @@ callback_done:
             }
         }
     }
-    memset(loaded.group_replay_sources, 0,
-           sizeof(loaded.group_replay_sources));
-    memset(&initialized, 0, sizeof(initialized));
-    initialized.magic = UCN_V6_SECURITY_MANAGER_MAGIC;
-    initialized.schema = UCN_V6_STORAGE_LAYOUT;
-    initialized.layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
-    initialized.committed = loaded;
-    initialized.store = *store;
-    initialized.crypto = *crypto;
-    initialized.callback_gate = callback_gate;
-    initialized.initialized = true;
-    initialized.canary = UCN_V6_SECURITY_MANAGER_CANARY;
-    *manager = initialized;
+    memset(loaded->group_replay_sources, 0,
+           sizeof(loaded->group_replay_sources));
+    manager->committed = *loaded;
+    memset(&manager->staging, 0, sizeof(manager->staging));
+    manager->magic = UCN_V6_SECURITY_MANAGER_MAGIC;
+    manager->schema = UCN_V6_STORAGE_LAYOUT;
+    manager->layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
+    manager->store = *store;
+    manager->crypto = *crypto;
+    manager->callback_gate = callback_gate;
+    manager->initialized = true;
+    manager->canary = UCN_V6_SECURITY_MANAGER_CANARY;
     *manager_out = manager;
     return UCN_V6_OK;
 }
@@ -2194,7 +2222,7 @@ ucn_v6_result_t ucn_v6_security_commit_join(
     uint8_t receipt_canonical[UCN_V6_JOIN_RECEIPT_CANONICAL_BYTES];
     size_t canonical_length = 0U;
     size_t receipt_canonical_length = 0U;
-    ucn_v6_security_snapshot_t candidate;
+    ucn_v6_security_snapshot_t *candidate;
     ucn_v6_security_session_record_t *slot;
     const ucn_v6_principal_t *peer;
     bool local_is_joining;
@@ -2204,6 +2232,7 @@ ucn_v6_result_t ucn_v6_security_commit_join(
     bool invalidation_needs_push = false;
     authority_floor_relation_t floor_relation;
     uint64_t local_lease_deadline_us = 0U;
+    ucn_v6_bootstrap_pending_t bootstrap_pending;
     ucn_v6_stack_invalidation_t invalidation;
     ucn_v6_result_t result;
     ucn_v6_result_t leave_result;
@@ -2251,8 +2280,17 @@ ucn_v6_result_t ucn_v6_security_commit_join(
             commit->e2e_selector.key_id ||
         commit->transcript.selected_e2e_key_generation !=
             commit->e2e_selector.key_generation ||
-        commit->authority_challenge_started_local_us > now_us) {
+        bootstrap_owner == NULL || bootstrap_key == NULL) {
         return UCN_V6_ERR_SECURITY;
+    }
+    memset(&bootstrap_pending, 0, sizeof(bootstrap_pending));
+    result = ucn_v6_bootstrap_copy_pending(
+        bootstrap_owner, commit->transcript.flow, bootstrap_key,
+        &bootstrap_pending);
+    if (result != UCN_V6_OK || !bootstrap_pending.occupied ||
+        bootstrap_pending.phase != UCN_V6_BOOTSTRAP_FINAL_DURABLE ||
+        bootstrap_pending.challenge_started_local_us > now_us) {
+        return UCN_V6_ERR_STATE;
     }
     floor_relation = authority_floor_compare(&manager->committed,
                                              &commit->authority_epoch);
@@ -2260,19 +2298,17 @@ ucn_v6_result_t ucn_v6_security_commit_join(
         return UCN_V6_ERR_REPLAY;
     }
     result = ucn_v6_lease_deadline_build(
-        commit->authority_challenge_started_local_us,
+        bootstrap_pending.challenge_started_local_us,
         commit->authority_freshness.max_remaining_lease_us,
         &commit->authority_lease_policy, &local_lease_deadline_us);
     if (result != UCN_V6_OK ||
         !ucn_v6_lease_deadline_is_live(now_us, local_lease_deadline_us)) {
         return result == UCN_V6_OK ? UCN_V6_ERR_TIMEOUT : result;
     }
-    if (bootstrap_owner != NULL && bootstrap_key != NULL) {
-        result = ucn_v6_bootstrap_validate_final(
-            bootstrap_owner, commit->transcript.flow, bootstrap_key,
-            &commit->transcript, now_us);
-        bootstrap_final = result == UCN_V6_OK;
-    }
+    result = ucn_v6_bootstrap_validate_final(
+        bootstrap_owner, commit->transcript.flow, bootstrap_key,
+        &commit->transcript, now_us);
+    bootstrap_final = result == UCN_V6_OK;
     recovery_receipt =
         commit->peer_durable_receipt_proof != NULL &&
         commit->peer_durable_receipt_proof_length != 0U &&
@@ -2281,9 +2317,7 @@ ucn_v6_result_t ucn_v6_security_commit_join(
         commit->peer_durable_receipt_generation != 0U &&
         commit->peer_durable_receipt_generation <=
             UCN_V6_SERIAL64_ROTATION_THRESHOLD;
-    if (!bootstrap_final &&
-        (commit->transcript.flow != UCN_V6_BOOTSTRAP_FLOW_JOIN ||
-         !recovery_receipt)) {
+    if (!bootstrap_final) {
         return UCN_V6_ERR_STATE;
     }
     local_is_joining = principal_equal(
@@ -2374,7 +2408,8 @@ ucn_v6_result_t ucn_v6_security_commit_join(
         return leave_result;
     }
 
-    candidate = manager->committed;
+    manager->staging = manager->committed;
+    candidate = &manager->staging;
     /* EN: An Authority transfer advances the durable admission floor, but it
      * does not retroactively shorten an already admitted Session's local,
      * conservative lease.  Existing Sessions may run until that deadline.
@@ -2384,16 +2419,16 @@ ucn_v6_result_t ucn_v6_security_commit_join(
      * 的本地保守租期。既有 Session 可运行到该截止期；重启会统一要求
      * REAUTH，所有新 JOIN/REAUTH 也会在密码和 Provider I/O 前先核对高水位。 */
     if (floor_relation != AUTHORITY_FLOOR_EXACT) {
-        candidate.authority_floor_valid = true;
-        candidate.authority_floor = commit->authority_epoch;
+        candidate->authority_floor_valid = true;
+        candidate->authority_floor = commit->authority_epoch;
     }
-    if (candidate.local_binding_valid &&
-        !binding_equal(&candidate.local_binding, &commit->local_binding)) {
+    if (candidate->local_binding_valid &&
+        !binding_equal(&candidate->local_binding, &commit->local_binding)) {
         return UCN_V6_ERR_STATE;
     }
-    candidate.local_binding_valid = true;
-    candidate.local_binding = commit->local_binding;
-    slot = find_session_slot(&candidate, peer, true);
+    candidate->local_binding_valid = true;
+    candidate->local_binding = commit->local_binding;
+    slot = find_session_slot(candidate, peer, true);
     if (slot == NULL) {
         return UCN_V6_ERR_NO_SPACE;
     }
@@ -2486,7 +2521,7 @@ ucn_v6_result_t ucn_v6_security_commit_join(
     slot->e2e_current = commit->e2e_selector;
     slot->hop_tx_next_sequence = 1U;
     slot->e2e_tx_next_sequence = 1U;
-    result = persist_candidate(manager, &candidate);
+    result = persist_candidate(manager, candidate);
     if (emit_invalidation && invalidation_needs_push) {
         /* Capacity was reserved before Provider I/O.  The push itself cannot
          * fail, so durable replacement and old-session fencing have no
@@ -2536,7 +2571,7 @@ ucn_v6_result_t ucn_v6_security_apply_link_invalidation(
     ucn_v6_security_manager_t *manager,
     const ucn_v6_stack_invalidation_t *link_invalidation)
 {
-    ucn_v6_security_snapshot_t candidate;
+    ucn_v6_security_snapshot_t *candidate;
     ucn_v6_stack_invalidation_t child;
     uint8_t changed_bitmap[
         (UCN_V6_CONFIG_SECURITY_SESSIONS + 7U) / 8U];
@@ -2555,11 +2590,12 @@ ucn_v6_result_t ucn_v6_security_apply_link_invalidation(
         return UCN_V6_ERR_STATE;
     }
 
-    candidate = manager->committed;
+    manager->staging = manager->committed;
+    candidate = &manager->staging;
     memset(changed_bitmap, 0, sizeof(changed_bitmap));
     for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
         ucn_v6_security_session_record_t *session =
-            &candidate.sessions[index];
+            &candidate->sessions[index];
         if (!session->occupied || session->revoked ||
             session->link_instance_id != link_invalidation->link_id ||
             session->link_instance_generation !=
@@ -2596,11 +2632,11 @@ ucn_v6_result_t ucn_v6_security_apply_link_invalidation(
         UCN_V6_SECURITY_INVALIDATION_DEPTH - manager->invalidation_count) {
         return UCN_V6_ERR_NO_SPACE;
     }
-    if (snapshot_equal(&candidate, &manager->committed)) {
+    if (snapshot_equal(candidate, &manager->committed)) {
         return UCN_V6_OK;
     }
 
-    result = persist_candidate(manager, &candidate);
+    result = persist_candidate(manager, candidate);
     if (result != UCN_V6_OK) {
         return result;
     }
@@ -2695,7 +2731,7 @@ ucn_v6_result_t ucn_v6_security_set_acl(
     size_t admin_proof_length)
 {
     uint8_t canonical[UCN_V6_ACL_CANONICAL_BYTES];
-    ucn_v6_security_snapshot_t candidate;
+    ucn_v6_security_snapshot_t *candidate;
     ucn_v6_acl_entry_t *target = NULL;
     size_t index;
     ucn_v6_result_t result;
@@ -2735,15 +2771,16 @@ ucn_v6_result_t ucn_v6_security_set_acl(
     if (leave_result != UCN_V6_OK) {
         return leave_result;
     }
-    candidate = manager->committed;
+    manager->staging = manager->committed;
+    candidate = &manager->staging;
     for (index = 0U; index < UCN_V6_CONFIG_ACL_ENTRIES; ++index) {
-        if (candidate.acl_entries[index].occupied &&
-            acl_key_equal(&candidate.acl_entries[index].key, &entry->key)) {
-            target = &candidate.acl_entries[index];
+        if (candidate->acl_entries[index].occupied &&
+            acl_key_equal(&candidate->acl_entries[index].key, &entry->key)) {
+            target = &candidate->acl_entries[index];
             break;
         }
-        if (!candidate.acl_entries[index].occupied && target == NULL) {
-            target = &candidate.acl_entries[index];
+        if (!candidate->acl_entries[index].occupied && target == NULL) {
+            target = &candidate->acl_entries[index];
         }
     }
     if (target == NULL) {
@@ -2751,7 +2788,7 @@ ucn_v6_result_t ucn_v6_security_set_acl(
     }
     memset(target, 0, sizeof(*target));
     *target = *entry;
-    return persist_candidate(manager, &candidate);
+    return persist_candidate(manager, candidate);
 }
 
 static ucn_v6_result_t verify_admin_change(
@@ -2814,7 +2851,7 @@ ucn_v6_result_t ucn_v6_security_set_group_policy(
     size_t admin_proof_length)
 {
     uint8_t canonical[48U];
-    ucn_v6_security_snapshot_t candidate;
+    ucn_v6_security_snapshot_t *candidate;
     const ucn_v6_group_policy_slot_t *current;
     size_t index;
     ucn_v6_result_t result;
@@ -2866,12 +2903,13 @@ ucn_v6_result_t ucn_v6_security_set_group_policy(
     if (result != UCN_V6_OK) {
         return result;
     }
-    candidate = manager->committed;
-    candidate.groups[group_slot] = *policy;
-    memset(candidate.group_keys[group_slot], 0,
-           sizeof(candidate.group_keys[group_slot]));
-    clear_group_replay_sources(&candidate, policy->group_id);
-    return persist_candidate(manager, &candidate);
+    manager->staging = manager->committed;
+    candidate = &manager->staging;
+    candidate->groups[group_slot] = *policy;
+    memset(candidate->group_keys[group_slot], 0,
+           sizeof(candidate->group_keys[group_slot]));
+    clear_group_replay_sources(candidate, policy->group_id);
+    return persist_candidate(manager, candidate);
 }
 
 ucn_v6_result_t ucn_v6_security_set_group_key(
@@ -2885,7 +2923,7 @@ ucn_v6_result_t ucn_v6_security_set_group_key(
     size_t admin_proof_length)
 {
     uint8_t canonical[64U];
-    ucn_v6_security_snapshot_t candidate;
+    ucn_v6_security_snapshot_t *candidate;
     const ucn_v6_group_policy_slot_t *group;
     const ucn_v6_group_key_slot_t *current;
     ucn_v6_group_key_slot_t next;
@@ -2972,13 +3010,14 @@ ucn_v6_result_t ucn_v6_security_set_group_key(
     if (result != UCN_V6_OK) {
         return result;
     }
-    candidate = manager->committed;
-    candidate.group_keys[group_slot][key_slot] = next;
+    manager->staging = manager->committed;
+    candidate = &manager->staging;
+    candidate->group_keys[group_slot][key_slot] = next;
     if (next.state == UCN_V6_GROUP_KEY_RETIRED) {
         for (index = 0U;
              index < UCN_V6_CONFIG_GROUP_REPLAY_SOURCES; ++index) {
             ucn_v6_group_replay_source_t *source =
-                &candidate.group_replay_sources[index];
+                &candidate->group_replay_sources[index];
             if (source->occupied && source->group_id == next.group_id &&
                 source->group_generation == next.group_generation &&
                 source->key_id == next.key_id) {
@@ -2986,7 +3025,7 @@ ucn_v6_result_t ucn_v6_security_set_group_key(
             }
         }
     }
-    return persist_candidate(manager, &candidate);
+    return persist_candidate(manager, candidate);
 }
 
 static ucn_v6_result_t deadline_add(
@@ -3015,7 +3054,7 @@ ucn_v6_result_t ucn_v6_security_rotate_session_keys(
 {
     uint8_t canonical[80U];
     uint64_t deadline_us;
-    ucn_v6_security_snapshot_t candidate;
+    ucn_v6_security_snapshot_t *candidate;
     ucn_v6_security_session_record_t *session;
     ucn_v6_result_t result;
 
@@ -3025,8 +3064,9 @@ ucn_v6_result_t ucn_v6_security_rotate_session_keys(
         deadline_add(now_us, previous_grace_us, &deadline_us) != UCN_V6_OK) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    candidate = manager->committed;
-    session = find_session_slot(&candidate, peer_principal, false);
+    manager->staging = manager->committed;
+    candidate = &manager->staging;
+    session = find_session_slot(candidate, peer_principal, false);
     if (session == NULL || session->revoked || !session->admitted ||
         next_hop->suite_id != session->hop_current.suite_id ||
         next_hop->key_id != session->hop_current.key_id ||
@@ -3081,7 +3121,7 @@ ucn_v6_result_t ucn_v6_security_rotate_session_keys(
     session->e2e_current = *next_e2e;
     memset(&session->e2e_replay_current, 0,
            sizeof(session->e2e_replay_current));
-    return persist_candidate(manager, &candidate);
+    return persist_candidate(manager, candidate);
 }
 
 ucn_v6_result_t ucn_v6_security_revoke_session(
@@ -3092,7 +3132,7 @@ ucn_v6_result_t ucn_v6_security_revoke_session(
     size_t admin_proof_length)
 {
     uint8_t canonical[32U];
-    ucn_v6_security_snapshot_t candidate;
+    ucn_v6_security_snapshot_t *candidate;
     ucn_v6_security_session_record_t *session;
     ucn_v6_stack_invalidation_t invalidation;
     bool needs_push = false;
@@ -3101,8 +3141,9 @@ ucn_v6_result_t ucn_v6_security_revoke_session(
         !ucn_v6_principal_is_valid(peer_principal)) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    candidate = manager->committed;
-    session = find_session_slot(&candidate, peer_principal, false);
+    manager->staging = manager->committed;
+    candidate = &manager->staging;
+    session = find_session_slot(candidate, peer_principal, false);
     if (session == NULL || session->revoked) {
         return UCN_V6_ERR_NOT_FOUND;
     }
@@ -3124,7 +3165,7 @@ ucn_v6_result_t ucn_v6_security_revoke_session(
     session->admitted = false;
     session->revoked = true;
     session->requires_reauth = false;
-    result = persist_candidate(manager, &candidate);
+    result = persist_candidate(manager, candidate);
     if (needs_push) {
         invalidation_push(manager, &invalidation);
     }
@@ -3573,7 +3614,7 @@ ucn_v6_result_t ucn_v6_security_open_frame(
     ucn_v6_security_open_result_t *result_out)
 {
     ucn_v6_security_open_result_t opened;
-    ucn_v6_security_snapshot_t candidate;
+    ucn_v6_security_snapshot_t *candidate;
     ucn_v6_security_session_record_t *hop_session;
     ucn_v6_security_session_record_t *e2e_session;
     ucn_v6_group_replay_source_t *group_source;
@@ -3597,7 +3638,13 @@ ucn_v6_result_t ucn_v6_security_open_frame(
         ingress_link_instance_id == UINT16_MAX ||
         ingress_link_instance_generation == 0U ||
         ingress_link_instance_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        encoded_frame == NULL || result_out == NULL) {
+        encoded_frame == NULL || result_out == NULL ||
+        buffer_ranges_overlap(encoded_frame, encoded_length,
+                              plaintext_storage, plaintext_capacity) ||
+        buffer_ranges_overlap(encoded_frame, encoded_length,
+                              result_out, sizeof(*result_out)) ||
+        buffer_ranges_overlap(plaintext_storage, plaintext_capacity,
+                              result_out, sizeof(*result_out))) {
         return UCN_V6_ERR_ARGUMENT;
     }
     memset(&opened, 0, sizeof(opened));
@@ -3609,11 +3656,12 @@ ucn_v6_result_t ucn_v6_security_open_frame(
         encoded_length < UCN_V6_SECURITY_TAG_BYTES + 4U) {
         return UCN_V6_ERR_MALFORMED;
     }
-    candidate = manager->committed;
+    manager->staging = manager->committed;
+    candidate = &manager->staging;
     link_tag_offset = encoded_length - UCN_V6_SECURITY_TAG_BYTES - 4U;
     if ((opened.frame.flags & UCN_V6_FLAG_GROUP_CONTEXT) != 0U) {
         group_key = find_group_key_const(
-            &candidate, opened.frame.group.group_id,
+            candidate, opened.frame.group.group_id,
             opened.frame.group.group_generation, opened.frame.group.key_id,
             opened.frame.group.key_generation);
         if (group_key == NULL) {
@@ -3633,7 +3681,7 @@ ucn_v6_result_t ucn_v6_security_open_frame(
         if (rc != UCN_V6_OK) {
             return rc;
         }
-        group_source = find_group_replay_source(&candidate, &opened.frame, true);
+        group_source = find_group_replay_source(candidate, &opened.frame, true);
         if (group_source == NULL) {
             return UCN_V6_ERR_NO_SPACE;
         }
@@ -3662,7 +3710,7 @@ ucn_v6_result_t ucn_v6_security_open_frame(
             return rc;
         }
         group_source->replay = replay_next;
-        manager->committed = candidate;
+        manager->committed = *candidate;
         opened.group_discovery_only = true;
         *result_out = opened;
         return UCN_V6_OK;
@@ -3672,7 +3720,7 @@ ucn_v6_result_t ucn_v6_security_open_frame(
         return UCN_V6_ERR_SECURITY;
     }
     hop_session = find_session_by_principal(
-        &candidate, authenticated_peer_principal);
+        candidate, authenticated_peer_principal);
     wire_hop_selector.suite_id = opened.frame.peer_hop.suite_id;
     wire_hop_selector.key_id = opened.frame.peer_hop.key_id;
     wire_hop_selector.key_generation = opened.frame.peer_hop.key_generation;
@@ -3712,14 +3760,14 @@ ucn_v6_result_t ucn_v6_security_open_frame(
     opened.ingress_peer_session.session_generation =
         hop_session->session_generation;
     opened.hop_authenticated = true;
-    local_target = candidate.local_binding_valid &&
-                   candidate.local_binding.realm_id == opened.frame.realm_id &&
-                   candidate.local_binding.node_address ==
+    local_target = candidate->local_binding_valid &&
+                   candidate->local_binding.realm_id == opened.frame.realm_id &&
+                   candidate->local_binding.node_address ==
                        opened.frame.destination_address &&
-                   candidate.local_binding.binding_generation ==
+                   candidate->local_binding.binding_generation ==
                        opened.frame.destination_binding_generation;
     e2e_session = local_target ?
-        find_e2e_inbound_session(&candidate, &opened.frame) : NULL;
+        find_e2e_inbound_session(candidate, &opened.frame) : NULL;
     if (local_target) {
         if ((opened.frame.flags & UCN_V6_FLAG_E2E_CONTEXT) == 0U &&
             peer_discovery_contract_is_valid(&opened.frame)) {
@@ -3727,7 +3775,7 @@ ucn_v6_result_t ucn_v6_security_open_frame(
                 hop_session->session_generation) {
                 return UCN_V6_ERR_REPLAY;
             }
-            manager->committed = candidate;
+            manager->committed = *candidate;
             *result_out = opened;
             return UCN_V6_OK;
         }
@@ -3786,7 +3834,7 @@ ucn_v6_result_t ucn_v6_security_open_frame(
         }
         acl_request_from_frame(&request, &e2e_session->peer_principal,
                                &opened.frame, UCN_V6_SECURITY_INBOUND);
-        if (!acl_allows(&candidate, &request)) {
+        if (!acl_allows(candidate, &request)) {
             return UCN_V6_ERR_ACCESS;
         }
         opened.frame.payload = opened.frame.payload_length == 0U ?
@@ -3799,7 +3847,7 @@ ucn_v6_result_t ucn_v6_security_open_frame(
      * explicit rekey, so accepting one frame never requires a full-snapshot
      * flash write. / 重放窗口刻意保持为易失状态；每次重启都会要求 Peer
      * 重新认证并要求 Group 换钥，因此正常收帧不再触发整份快照写 Flash。 */
-    manager->committed = candidate;
+    manager->committed = *candidate;
     *result_out = opened;
     return UCN_V6_OK;
 }
@@ -3858,10 +3906,28 @@ ucn_v6_result_t ucn_v6_security_protect_peer_discovery(
         return rc;
     }
     if (frame_work_capacity < encoded_length ||
-        output_capacity < encoded_length ||
-        buffer_ranges_overlap(frame_work, encoded_length,
-                              output, encoded_length)) {
+        output_capacity < encoded_length) {
         return UCN_V6_ERR_NO_SPACE;
+    }
+    if (buffer_ranges_overlap(frame->payload, frame->payload_length,
+                              frame_work, encoded_length) ||
+        buffer_ranges_overlap(frame->payload, frame->payload_length,
+                              output, encoded_length) ||
+        buffer_ranges_overlap(frame_work, encoded_length,
+                              output, encoded_length) ||
+        buffer_ranges_overlap(frame, sizeof(*frame), frame_work,
+                              encoded_length) ||
+        buffer_ranges_overlap(frame, sizeof(*frame), output,
+                              encoded_length) ||
+        buffer_ranges_overlap(frame->payload, frame->payload_length,
+                              output_length, sizeof(*output_length)) ||
+        buffer_ranges_overlap(frame, sizeof(*frame), output_length,
+                              sizeof(*output_length)) ||
+        buffer_ranges_overlap(output_length, sizeof(*output_length),
+                              frame_work, encoded_length) ||
+        buffer_ranges_overlap(output_length, sizeof(*output_length),
+                              output, encoded_length)) {
+        return UCN_V6_ERR_ARGUMENT;
     }
     rc = reserve_session_tx_sequence(manager, peer_principal, true,
                                      &sequence);
@@ -3898,15 +3964,16 @@ static ucn_v6_result_t reserve_session_tx_sequence(
     bool hop_domain,
     uint32_t *sequence)
 {
-    ucn_v6_security_snapshot_t candidate;
+    ucn_v6_security_snapshot_t *candidate;
     ucn_v6_security_session_record_t *session;
     uint32_t reserved;
     ucn_v6_result_t rc;
-    candidate = manager->committed;
+    manager->staging = manager->committed;
+    candidate = &manager->staging;
     uint32_t *next_sequence;
     uint32_t *reserved_through;
 
-    session = find_session_by_principal(&candidate, peer);
+    session = find_session_by_principal(candidate, peer);
     if (session == NULL || !session->admitted || session->revoked ||
         session->requires_reauth) {
         return UCN_V6_ERR_ACCESS;
@@ -3927,7 +3994,7 @@ static ucn_v6_result_t reserve_session_tx_sequence(
             reserved = UCN_V6_SERIAL_ROTATION_THRESHOLD;
         }
         *reserved_through = reserved;
-        rc = persist_candidate(manager, &candidate);
+        rc = persist_candidate(manager, candidate);
         if (rc != UCN_V6_OK) {
             return rc;
         }
@@ -4027,14 +4094,38 @@ ucn_v6_result_t ucn_v6_security_protect_frame(
         return rc;
     }
     if (frame_work_capacity < encoded_length ||
-        output_capacity < encoded_length ||
+        output_capacity < encoded_length) {
+        return UCN_V6_ERR_NO_SPACE;
+    }
+    if (buffer_ranges_overlap(frame->payload, sealed.payload_length,
+                              payload_work, sealed.payload_length) ||
+        buffer_ranges_overlap(frame->payload, sealed.payload_length,
+                              frame_work, encoded_length) ||
+        buffer_ranges_overlap(frame->payload, sealed.payload_length,
+                              output, encoded_length) ||
         buffer_ranges_overlap(payload_work, sealed.payload_length,
                               frame_work, encoded_length) ||
         buffer_ranges_overlap(payload_work, sealed.payload_length,
                               output, encoded_length) ||
         buffer_ranges_overlap(frame_work, encoded_length,
+                              output, encoded_length) ||
+        buffer_ranges_overlap(frame, sizeof(*frame), payload_work,
+                              sealed.payload_length) ||
+        buffer_ranges_overlap(frame, sizeof(*frame), frame_work,
+                              encoded_length) ||
+        buffer_ranges_overlap(frame, sizeof(*frame), output,
+                              encoded_length) ||
+        buffer_ranges_overlap(frame->payload, sealed.payload_length,
+                              output_length, sizeof(*output_length)) ||
+        buffer_ranges_overlap(payload_work, sealed.payload_length,
+                              output_length, sizeof(*output_length)) ||
+        buffer_ranges_overlap(frame, sizeof(*frame), output_length,
+                              sizeof(*output_length)) ||
+        buffer_ranges_overlap(output_length, sizeof(*output_length),
+                              frame_work, encoded_length) ||
+        buffer_ranges_overlap(output_length, sizeof(*output_length),
                               output, encoded_length)) {
-        return UCN_V6_ERR_NO_SPACE;
+        return UCN_V6_ERR_ARGUMENT;
     }
     rc = reserve_session_tx_sequence(manager, next_hop_principal, true,
                                      &hop_sequence);
@@ -4125,7 +4216,33 @@ ucn_v6_result_t ucn_v6_security_relay_frame(
         verified_ingress == NULL || relayed_frame == NULL ||
         buffer_ranges_overlap(encoded_frame, encoded_length,
                               frame_work, encoded_length) ||
+        buffer_ranges_overlap(encoded_frame, encoded_length,
+                              output, encoded_length) ||
         buffer_ranges_overlap(frame_work, encoded_length,
+                              output, encoded_length) ||
+        buffer_ranges_overlap(encoded_frame, encoded_length,
+                              verified_ingress, sizeof(*verified_ingress)) ||
+        buffer_ranges_overlap(encoded_frame, encoded_length,
+                              relayed_frame, sizeof(*relayed_frame)) ||
+        buffer_ranges_overlap(frame_work, encoded_length,
+                              verified_ingress, sizeof(*verified_ingress)) ||
+        buffer_ranges_overlap(frame_work, encoded_length,
+                              relayed_frame, sizeof(*relayed_frame)) ||
+        buffer_ranges_overlap(output, encoded_length,
+                              verified_ingress, sizeof(*verified_ingress)) ||
+        buffer_ranges_overlap(output, encoded_length,
+                              relayed_frame, sizeof(*relayed_frame)) ||
+        buffer_ranges_overlap(verified_ingress, sizeof(*verified_ingress),
+                              relayed_frame, sizeof(*relayed_frame)) ||
+        buffer_ranges_overlap(encoded_frame, encoded_length,
+                              output_length, sizeof(*output_length)) ||
+        buffer_ranges_overlap(verified_ingress, sizeof(*verified_ingress),
+                              output_length, sizeof(*output_length)) ||
+        buffer_ranges_overlap(relayed_frame, sizeof(*relayed_frame),
+                              output_length, sizeof(*output_length)) ||
+        buffer_ranges_overlap(output_length, sizeof(*output_length),
+                              frame_work, encoded_length) ||
+        buffer_ranges_overlap(output_length, sizeof(*output_length),
                               output, encoded_length) ||
         frame_work_capacity < encoded_length ||
         output_capacity < encoded_length) {
@@ -4221,12 +4338,13 @@ static ucn_v6_result_t reserve_group_tx_sequence(
     size_t key_slot,
     uint32_t *sequence)
 {
-    ucn_v6_security_snapshot_t candidate;
+    ucn_v6_security_snapshot_t *candidate;
     ucn_v6_group_key_slot_t *key;
     uint32_t reserved;
     ucn_v6_result_t rc;
-    candidate = manager->committed;
-    key = &candidate.group_keys[group_slot][key_slot];
+    manager->staging = manager->committed;
+    candidate = &manager->staging;
+    key = &candidate->group_keys[group_slot][key_slot];
     if (key->state != UCN_V6_GROUP_KEY_ACTIVE ||
         key->tx_next_sequence == 0U ||
         key->tx_next_sequence >= UCN_V6_SERIAL_ROTATION_THRESHOLD) {
@@ -4240,7 +4358,7 @@ static ucn_v6_result_t reserve_group_tx_sequence(
             reserved = UCN_V6_SERIAL_ROTATION_THRESHOLD;
         }
         key->tx_reserved_through = reserved;
-        rc = persist_candidate(manager, &candidate);
+        rc = persist_candidate(manager, candidate);
         if (rc != UCN_V6_OK) {
             return rc;
         }
@@ -4310,10 +4428,28 @@ ucn_v6_result_t ucn_v6_security_protect_group_hello(
         return rc;
     }
     if (frame_work_capacity < encoded_length ||
-        output_capacity < encoded_length ||
-        buffer_ranges_overlap(frame_work, encoded_length,
-                              output, encoded_length)) {
+        output_capacity < encoded_length) {
         return UCN_V6_ERR_NO_SPACE;
+    }
+    if (buffer_ranges_overlap(frame->payload, frame->payload_length,
+                              frame_work, encoded_length) ||
+        buffer_ranges_overlap(frame->payload, frame->payload_length,
+                              output, encoded_length) ||
+        buffer_ranges_overlap(frame_work, encoded_length,
+                              output, encoded_length) ||
+        buffer_ranges_overlap(frame, sizeof(*frame), frame_work,
+                              encoded_length) ||
+        buffer_ranges_overlap(frame, sizeof(*frame), output,
+                              encoded_length) ||
+        buffer_ranges_overlap(frame->payload, frame->payload_length,
+                              output_length, sizeof(*output_length)) ||
+        buffer_ranges_overlap(frame, sizeof(*frame), output_length,
+                              sizeof(*output_length)) ||
+        buffer_ranges_overlap(output_length, sizeof(*output_length),
+                              frame_work, encoded_length) ||
+        buffer_ranges_overlap(output_length, sizeof(*output_length),
+                              output, encoded_length)) {
+        return UCN_V6_ERR_ARGUMENT;
     }
     rc = reserve_group_tx_sequence(manager, group_slot, key_slot, &sequence);
     if (rc != UCN_V6_OK) {

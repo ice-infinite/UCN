@@ -87,6 +87,12 @@ typedef struct ucn_v6_bootstrap_pending {
     ucn_v6_bootstrap_key_t key;
     ucn_v6_bootstrap_transcript_t transcript;
     ucn_v6_binding_key_t existing_binding;
+    /* EN: Local monotonic time captured by the Bootstrap Owner when the
+     * authenticated Cookie opens this transaction.  Security lease admission
+     * must derive from this immutable value, never from a later caller input.
+     * 中文：认证 Cookie 打开事务时由 Bootstrap Owner 捕获的本地单调时间。
+     * Security 租约准入必须由此不可变值派生，禁止由后续调用方指定。 */
+    uint64_t challenge_started_local_us;
     uint64_t deadline_us;
 } ucn_v6_bootstrap_pending_t;
 

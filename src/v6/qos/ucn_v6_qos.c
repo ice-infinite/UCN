@@ -155,7 +155,9 @@ static bool opened_is_schedulable(const ucn_v6_security_open_result_t *opened)
            frame->session_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            (frame->flags & UCN_V6_FLAG_MESSAGE_CONTEXT) != 0U &&
            frame->message.source_endpoint != 0U &&
-           frame->message.destination_endpoint != 0U;
+           frame->message.source_endpoint <= UCN_V6_ENDPOINT_ID_MAX &&
+           frame->message.destination_endpoint != 0U &&
+           frame->message.destination_endpoint <= UCN_V6_ENDPOINT_ID_MAX;
 }
 
 static ucn_v6_session_key_t source_session(
@@ -202,6 +204,14 @@ ucn_v6_result_t ucn_v6_qos_owner_init_in_place(
         ucn_v6_storage_validate(storage, storage_bytes,
                                 UCN_V6_QOS_OWNER_STORAGE_BYTES,
                                 UCN_V6_STORAGE_ALIGNMENT) != UCN_V6_OK) {
+        return UCN_V6_ERR_CONFIG;
+    }
+    if (ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     owner_out, sizeof(*owner_out)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     manifest, sizeof(*manifest)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     policy, sizeof(*policy))) {
         return UCN_V6_ERR_CONFIG;
     }
     owner = (ucn_v6_qos_owner_t *)storage;

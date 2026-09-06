@@ -1030,6 +1030,28 @@ ucn_v6_result_t ucn_v6_operation_id_allocator_init_in_place(
     if (result != UCN_V6_OK) {
         return result;
     }
+    if (ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     allocator_out,
+                                     sizeof(*allocator_out)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     manifest,
+                                     sizeof(ucn_v6_feature_manifest_t)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     store, sizeof(*store)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     callback_gate,
+                                     sizeof(*callback_gate)) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, store->context,
+            store->context != NULL ? 1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, store->lifecycle.context,
+            store->lifecycle.context != NULL ? 1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, callback_gate->context,
+            callback_gate->context != NULL ? 1U : 0U)) {
+        return UCN_V6_ERR_CONFIG;
+    }
     allocator = (ucn_v6_operation_id_allocator_t *)storage;
     result = callback_scope_enter(callback_gate, allocator,
                                   &violations_before);
@@ -1172,11 +1194,10 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
     ucn_v6_callback_gate_t *callback_gate,
     ucn_v6_operation_journal_t **journal_out)
 {
-    ucn_v6_operation_journal_t initialized = {0};
     ucn_v6_operation_journal_t *journal;
-    ucn_v6_operation_journal_snapshot_t loaded = {0};
-    ucn_v6_operation_journal_snapshot_t migrated = {0};
-    ucn_v6_operation_journal_snapshot_t verified = {0};
+    ucn_v6_operation_journal_snapshot_t *loaded;
+    ucn_v6_operation_journal_snapshot_t *migrated;
+    ucn_v6_operation_journal_snapshot_t *verified;
     ucn_v6_message_witness_t witness = {0};
     ucn_v6_message_witness_t witness_candidate = {0};
     ucn_v6_message_witness_t witness_verified = {0};
@@ -1203,12 +1224,38 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
     if (result != UCN_V6_OK) {
         return result;
     }
+    if (ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     journal_out,
+                                     sizeof(*journal_out)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     manifest,
+                                     sizeof(ucn_v6_feature_manifest_t)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     store, sizeof(*store)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     callback_gate,
+                                     sizeof(*callback_gate)) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, store->context,
+            store->context != NULL ? 1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, store->lifecycle.context,
+            store->lifecycle.context != NULL ? 1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, callback_gate->context,
+            callback_gate->context != NULL ? 1U : 0U)) {
+        return UCN_V6_ERR_CONFIG;
+    }
     journal = (ucn_v6_operation_journal_t *)storage;
     result = callback_scope_enter(callback_gate, journal,
                                   &violations_before);
     if (result != UCN_V6_OK) {
         return result;
     }
+    memset(journal, 0, sizeof(*journal));
+    loaded = &journal->committed;
+    migrated = &journal->staging;
+    verified = &journal->verify;
     result = load_witness_under_gate(store, &witness, callback_gate, journal,
                                      violations_before);
     if (result == UCN_V6_ERR_NOT_FOUND) {
@@ -1219,13 +1266,13 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
         result = UCN_V6_ERR_STATE;
     }
     if (result == UCN_V6_OK) {
-        result = load_under_gate(store, &loaded, callback_gate, journal,
+        result = load_under_gate(store, loaded, callback_gate, journal,
                                  violations_before);
         if (result == UCN_V6_ERR_NOT_FOUND) {
-            snapshot_make_factory(&loaded);
+            snapshot_make_factory(loaded);
             result = UCN_V6_OK;
         } else if (result == UCN_V6_OK &&
-                   snapshot_is_valid(&loaded, false)) {
+                   snapshot_is_valid(loaded, false)) {
             journal_found = true;
         } else {
             result = UCN_V6_ERR_STATE;
@@ -1233,12 +1280,12 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
     }
     if (result == UCN_V6_OK &&
         (witness.flags & UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED) == 0U) {
-        if (journal_found || loaded.snapshot_generation != 0U) {
+        if (journal_found || loaded->snapshot_generation != 0U) {
             result = UCN_V6_ERR_STATE;
         }
     } else if (result == UCN_V6_OK &&
                witness.journal_pending_generation != 0U) {
-        if ((journal_found && loaded.snapshot_generation ==
+        if ((journal_found && loaded->snapshot_generation ==
                                   witness.journal_pending_generation)) {
             witness_candidate = witness;
             witness_candidate.journal_committed_generation =
@@ -1246,7 +1293,7 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
             witness_candidate.journal_pending_generation = 0U;
         } else if ((!journal_found &&
                     witness.journal_committed_generation == 0U) ||
-                   (journal_found && loaded.snapshot_generation ==
+                   (journal_found && loaded->snapshot_generation ==
                                          witness.journal_committed_generation)) {
             witness_candidate = witness;
             witness_candidate.journal_pending_generation = 0U;
@@ -1268,26 +1315,26 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
             }
         }
     } else if (result == UCN_V6_OK &&
-               (!journal_found || loaded.snapshot_generation !=
+               (!journal_found || loaded->snapshot_generation !=
                                      witness.journal_committed_generation)) {
         result = UCN_V6_ERR_STATE;
     }
     if (result == UCN_V6_OK) {
-        migrated = loaded;
+        *migrated = *loaded;
         for (index = 0U; index < UCN_V6_OPERATION_JOURNAL_SLOTS; ++index) {
-            if (migrated.slots[index].occupied &&
-                migrated.slots[index].phase ==
+            if (migrated->slots[index].occupied &&
+                migrated->slots[index].phase ==
                     UCN_V6_OPERATION_PHASE_EXECUTING) {
-                migrated.slots[index].phase =
+                migrated->slots[index].phase =
                     UCN_V6_OPERATION_PHASE_IN_DOUBT;
                 changed = true;
             }
         }
         if (changed) {
-            result = serial64_checked_next(loaded.snapshot_generation,
+            result = serial64_checked_next(loaded->snapshot_generation,
                                            &next_generation);
             if (result == UCN_V6_OK) {
-                migrated.snapshot_generation = next_generation;
+                migrated->snapshot_generation = next_generation;
                 witness_candidate = witness;
                 witness_candidate.flags |=
                     UCN_V6_MESSAGE_WITNESS_JOURNAL_COMMISSIONED;
@@ -1301,8 +1348,8 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
             }
             if (result == UCN_V6_OK) {
                 witness = witness_verified;
-                result = submit_and_verify_under_gate(store, &migrated,
-                                                       &verified,
+                result = submit_and_verify_under_gate(store, migrated,
+                                                       verified,
                                                        callback_gate, journal,
                                                        violations_before);
             }
@@ -1317,7 +1364,7 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
                                                     callback_gate, journal,
                                                     violations_before);
                 if (result == UCN_V6_OK) {
-                    loaded = verified;
+                    *loaded = *verified;
                     witness = witness_verified;
                 }
             }
@@ -1328,17 +1375,16 @@ ucn_v6_result_t ucn_v6_operation_journal_init_in_place(
     if (result != UCN_V6_OK) {
         return result;
     }
-    memset(&initialized, 0, sizeof(initialized));
-    initialized.magic = UCN_V6_OPERATION_JOURNAL_OBJECT_MAGIC;
-    initialized.schema = UCN_V6_STORAGE_LAYOUT;
-    initialized.layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
-    initialized.committed = loaded;
-    initialized.witness = witness;
-    initialized.store = *store;
-    initialized.callback_gate = callback_gate;
-    initialized.initialized = true;
-    initialized.canary = UCN_V6_OPERATION_JOURNAL_CANARY;
-    *journal = initialized;
+    memset(&journal->staging, 0, sizeof(journal->staging));
+    memset(&journal->verify, 0, sizeof(journal->verify));
+    journal->magic = UCN_V6_OPERATION_JOURNAL_OBJECT_MAGIC;
+    journal->schema = UCN_V6_STORAGE_LAYOUT;
+    journal->layout_hash = UCN_V6_COMPILED_LAYOUT_HASH;
+    journal->witness = witness;
+    journal->store = *store;
+    journal->callback_gate = callback_gate;
+    journal->initialized = true;
+    journal->canary = UCN_V6_OPERATION_JOURNAL_CANARY;
     *journal_out = journal;
     return UCN_V6_OK;
 }

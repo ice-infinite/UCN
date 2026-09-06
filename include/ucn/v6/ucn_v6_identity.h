@@ -232,8 +232,8 @@ typedef struct ucn_v6_identity_store_ops {
 typedef struct ucn_v6_identity_authority ucn_v6_identity_authority_t;
 #ifndef UCN_V6_IDENTITY_AUTHORITY_STORAGE_BYTES
 #define UCN_V6_IDENTITY_AUTHORITY_STORAGE_BYTES                       \
-    ((size_t)(512U + UCN_V6_CONFIG_MAX_BINDINGS * 128U +             \
-              UCN_V6_CONFIG_MAX_ACTIVE_GROUPS * 8U))
+    ((size_t)(1536U + UCN_V6_CONFIG_MAX_BINDINGS * 384U +            \
+              UCN_V6_CONFIG_MAX_ACTIVE_GROUPS * 24U))
 #endif
 typedef union ucn_v6_identity_authority_storage {
     uint64_t alignment_u64;
@@ -345,6 +345,7 @@ ucn_v6_result_t ucn_v6_identity_authority_install_epoch(
     const ucn_v6_authority_epoch_t *epoch,
     const ucn_v6_authority_freshness_t *freshness,
     uint64_t challenge_started_local_us,
+    uint64_t trusted_now_us,
     const ucn_v6_lease_verifier_policy_t *lease_policy,
     const ucn_v6_authority_proof_t *proof);
 /* EN: Allocates or retires Binding ownership with persist-before-publish.

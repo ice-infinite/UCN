@@ -1,5 +1,7 @@
 # UCN RT-Thread 快速使用
 
+> `ARCHIVED / NOT CURRENT`：本文仅保留 v5 RT-Thread 接入记录；v6 请从[当前用户手册](../../用户手册/README.md)开始。
+
 > 适用：RT-Thread BSP 和设备框架。当前仓库已有独立、SDK 无关的 `ucn_port_rtthread` C99 外壳；产品仍需把 Hook 映射到静态线程、互斥量、信号量/事件和真实设备驱动，不修改 C99 Core。
 
 > 当前 API：V5-62 Port API V2 要求所有 `ucn_port_ops_t` 具名填写 `struct_size/api_version`；旧位置初始化与旧对象不兼容。Transfer 还必须配置权威时钟并使用无时间参数的 `ucn_transfer_step()`。迁移见[总览](README.md)。

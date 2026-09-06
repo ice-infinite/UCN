@@ -1,5 +1,7 @@
 # UCN Zephyr 快速使用
 
+> `ARCHIVED / NOT CURRENT`：本文仅保留 v5 Zephyr 接入记录；v6 请从[当前用户手册](../../用户手册/README.md)开始。
+
 > 适用：Zephyr 应用。当前仓库已有独立、SDK 无关的 `ucn_port_zephyr` C99 外壳；产品仍需把它的 Hook 映射到实际 Zephyr 线程、同步原语和驱动。不要把该外壳称作“已合入的 Zephyr 驱动”。
 
 > 当前 API：V5-62 Port API V2 要求所有 `ucn_port_ops_t` 具名填写 `struct_size/api_version`；旧位置初始化与旧对象不兼容。Transfer 还必须配置权威时钟并使用无时间参数的 `ucn_transfer_step()`。迁移见[总览](README.md)。

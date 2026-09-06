@@ -1,5 +1,10 @@
 # UCN V6-11 Realtime 生产集成实现报告
 
+> `SUPERSEDED IMPLEMENTATION SNAPSHOT`：本文记录 V6-11 当时的 48 B
+> `TIME_FOLLOW_UP` 采样模型。当前源码已由 V6X-S28 破坏性替换为 12 B announce、40 B
+> T1/T4 response 与标准 Runtime 绑定的本地 T2/T3 四事件模型；当前合同见
+> [官方 Realtime 文档](../../official/06-Realtime/01-时间同步、uncertainty与Deadline.md)。
+
 ## 1. 范围与边界
 
 V6-11 把已经完成安全整改的实时语义重新接到 v6 Identity、Security、Capability 和固定

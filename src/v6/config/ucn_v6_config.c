@@ -148,3 +148,26 @@ ucn_v6_result_t ucn_v6_storage_validate(
     }
     return UCN_V6_OK;
 }
+
+bool ucn_v6_memory_ranges_overlap(
+    const void *left, size_t left_bytes,
+    const void *right, size_t right_bytes)
+{
+    uintptr_t left_start;
+    uintptr_t right_start;
+    uintptr_t left_end;
+    uintptr_t right_end;
+    if (left == NULL || right == NULL || left_bytes == 0U ||
+        right_bytes == 0U) {
+        return false;
+    }
+    left_start = (uintptr_t)left;
+    right_start = (uintptr_t)right;
+    if (left_bytes > UINTPTR_MAX - left_start ||
+        right_bytes > UINTPTR_MAX - right_start) {
+        return true;
+    }
+    left_end = left_start + left_bytes;
+    right_end = right_start + right_bytes;
+    return left_start < right_end && right_start < left_end;
+}

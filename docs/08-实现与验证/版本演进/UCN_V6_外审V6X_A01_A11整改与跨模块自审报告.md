@@ -1,5 +1,12 @@
 # UCN V6 外审 V6X-A01～A11 整改与跨模块自审报告
 
+> `SUPERSEDED IMPLEMENTATION SNAPSHOT`：本文中的 V6X-A04 48 B Realtime Sample 是
+> 当时整改证据，已由 V6X-S28 的真实 T1/T2/T3/T4 事件模型替代；请勿把旧 API 或 Payload
+> 当作当前发布合同。
+>
+> 本文后部“没有仍开放的软件 P0/P1”也是当时的自审结论，已被后续外审 AUD-01～05 取代。
+> 当前状态见[最新整改报告](../../09-审计与整改/UCN_V6_外审AUD_01_05整改与自审报告_2026-09-06.md)。
+
 > 状态：`REMEDIATION IMPLEMENTED / SELF-REVIEW PASS / EXTERNAL RE-REVIEW PENDING`
 >
 > 范围：v6 软件实现、Host 模型、构建与静态门禁。本文不把 Host Fake Store、Host 并发、

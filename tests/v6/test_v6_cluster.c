@@ -516,6 +516,10 @@ static ucn_v6_cluster_control_t transition_control(
     if (snapshot->last_vote.valid) {
         value.backup_generation = snapshot->last_vote.backup_generation;
     }
+    if (kind == UCN_V6_CLUSTER_CTL_HANDOVER_READY) {
+        value.authority_proof.proof_id = 77U;
+        value.authority_proof.generation = 1U;
+    }
     return value;
 }
 
@@ -889,6 +893,8 @@ static int test_record_validation_ignores_c_padding(void)
     semantic_zero_epoch_with_dirty_padding(&padded.transition.target_epoch);
     semantic_zero_config_with_dirty_padding(
         &padded.transition.target_config);
+    padded.transition.target_authority_proof.proof_id = 0U;
+    padded.transition.target_authority_proof.generation = 0U;
     CHECK(ucn_v6_cluster_snapshot_encode(&canonical, canonical_bytes) ==
           UCN_V6_OK);
     CHECK(ucn_v6_cluster_snapshot_encode(&padded, padded_bytes) ==
@@ -1014,6 +1020,16 @@ static int test_joint_authority_directory_and_tunnel(void)
     directory.path_id = 1U;
     directory.path_generation = 1U;
     directory.lease_duration_us = 50U;
+    {
+        ucn_v6_cluster_directory_entry_t invalid = directory;
+        uint8_t unchanged[UCN_V6_CLUSTER_DIRECTORY_BYTES];
+        memset(directory_payload, 0xA5, sizeof(directory_payload));
+        memcpy(unchanged, directory_payload, sizeof(unchanged));
+        invalid.path_id = UINT16_MAX;
+        CHECK(ucn_v6_cluster_directory_encode(&invalid, directory_payload) ==
+              UCN_V6_ERR_ARGUMENT);
+        CHECK(memcmp(directory_payload, unchanged, sizeof(unchanged)) == 0);
+    }
     CHECK(bind_directory_payload(&open2, &directory, directory_payload) ==
           UCN_V6_OK);
     {
@@ -1249,11 +1265,14 @@ static int test_takeover_recovery_rekey_and_handover(void)
     ucn_v6_cluster_owner_storage_t storage;
     ucn_v6_cluster_owner_storage_t reload_storage;
     ucn_v6_cluster_owner_storage_t recovery_storage;
+    ucn_v6_cluster_owner_storage_t crash_reload_storage;
     ucn_v6_cluster_owner_t *owner = NULL;
     ucn_v6_cluster_owner_t *reloaded = NULL;
     ucn_v6_cluster_owner_t *recovery_reloaded = NULL;
+    ucn_v6_cluster_owner_t *crash_reloaded = NULL;
     ucn_v6_callback_gate_t gate = {0};
     ucn_v6_callback_gate_t recovery_gate;
+    ucn_v6_callback_gate_t crash_reload_gate = {0};
     fake_store_t fake;
     ucn_v6_cluster_config_t config = config3();
     ucn_v6_security_open_result_t open1 = opened(0x10U, 1U);
@@ -1266,6 +1285,7 @@ static int test_takeover_recovery_rekey_and_handover(void)
     ucn_v6_cluster_epoch_t target;
     ucn_v6_cluster_control_t message;
     uint8_t control_payload[UCN_V6_CLUSTER_CONTROL_BYTES];
+    uint64_t expired_at = 0U;
     memset(&fake, 0, sizeof(fake));
     CHECK(ucn_v6_callback_gate_init(&gate, NULL, gate_lock, gate_unlock) ==
           UCN_V6_OK);
@@ -1338,14 +1358,35 @@ static int test_takeover_recovery_rekey_and_handover(void)
           UCN_V6_OK);
     CHECK(ucn_v6_cluster_record_transition_vote(reloaded, &open3, 299U) ==
           UCN_V6_OK);
-    CHECK(ucn_v6_cluster_commit_takeover(reloaded, 200U, 299U) == UCN_V6_OK);
+    /* Re-admission is a new promise domain even when the caller replays the
+     * same visible Session/Capability values.  It must durably clear the old
+     * vote before Commit can observe the refreshed lease. */
+    CHECK(ucn_v6_cluster_admit_member(reloaded, &open3, &cap3, 300U, 100U) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &snapshot) == UCN_V6_OK);
+    CHECK(snapshot.transition.old_voter_bitmap == 2U &&
+          snapshot.transition.new_voter_bitmap == 2U);
+    CHECK(ucn_v6_cluster_commit_takeover(reloaded, 200U, 300U) ==
+          UCN_V6_ERR_ACCESS);
+    CHECK(ucn_v6_cluster_record_transition_vote(reloaded, &open3, 300U) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_cluster_commit_takeover(reloaded, 200U, 400U) ==
+          UCN_V6_ERR_ACCESS);
+    CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &snapshot) == UCN_V6_OK);
+    CHECK(snapshot.transition.old_voter_bitmap == 2U &&
+          snapshot.transition.new_voter_bitmap == 2U);
+    CHECK(ucn_v6_cluster_admit_member(reloaded, &open3, &cap3, 400U, 100U) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_cluster_record_transition_vote(reloaded, &open3, 400U) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_cluster_commit_takeover(reloaded, 200U, 400U) == UCN_V6_OK);
     CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &snapshot) == UCN_V6_OK);
     CHECK(snapshot.role == UCN_V6_CLUSTER_HEAD &&
           snapshot.active_epoch.term == 2U);
 
-    CHECK(ucn_v6_cluster_admit_member(reloaded, &open1, &cap1, 300U, 10U) ==
+    CHECK(ucn_v6_cluster_admit_member(reloaded, &open1, &cap1, 500U, 10U) ==
           UCN_V6_OK);
-    CHECK(ucn_v6_cluster_rekey(reloaded, 201U, 2U, 300U) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_rekey(reloaded, 201U, 2U, 500U) == UCN_V6_OK);
     CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &snapshot) == UCN_V6_OK);
     CHECK(snapshot.active_epoch.cluster_id == 2U &&
           snapshot.tombstone_count == 1U &&
@@ -1364,23 +1405,66 @@ static int test_takeover_recovery_rekey_and_handover(void)
         CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &before) == UCN_V6_OK);
         CHECK(ucn_v6_cluster_begin_handover(
           reloaded, 300U, &nonvoter, &snapshot.stable_config,
-                  300U) == UCN_V6_ERR_STATE);
+                  500U) == UCN_V6_ERR_STATE);
         CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &after) == UCN_V6_OK);
         CHECK(memcmp(&before, &after, sizeof(before)) == 0);
     }
+    /* An exact durable abort retires all partial proof before a transaction
+     * number can be reused; before READY the old Head remains authoritative. */
     CHECK(ucn_v6_cluster_begin_handover(
-              reloaded, 300U, &target, &snapshot.stable_config, 300U) ==
+              reloaded, 299U, &target, &snapshot.stable_config, 500U) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &snapshot) == UCN_V6_OK);
+    CHECK(snapshot.transition.deadline_us > 500U);
+    CHECK(ucn_v6_cluster_abort_transition(
+              reloaded, UCN_V6_CLUSTER_TRANSITION_HANDOVER, 299U,
+              &target, &snapshot.stable_config, 500U) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &snapshot) == UCN_V6_OK);
+    CHECK(snapshot.transition.kind == UCN_V6_CLUSTER_TRANSITION_NONE &&
+          snapshot.role == UCN_V6_CLUSTER_HEAD &&
+          !snapshot.authority_fenced);
+    CHECK(ucn_v6_cluster_commit_handover(reloaded, 299U, 500U) ==
+          UCN_V6_ERR_STATE);
+    CHECK(ucn_v6_cluster_begin_handover(
+              reloaded, 300U, &target, &snapshot.stable_config, 500U) ==
           UCN_V6_OK);
     CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &snapshot) == UCN_V6_OK);
     message = transition_control(&snapshot, UCN_V6_CLUSTER_CTL_HANDOVER_READY);
+    memset(&fake.proof, 0, sizeof(fake.proof));
+    fake.proof.valid = true;
+    fake.proof.ref = message.authority_proof;
+    fake.proof.epoch = snapshot.transition.target_epoch;
+    fake.proof.stable_config_id = snapshot.transition.target_config_id;
+    fake.proof.stable_config_generation =
+        snapshot.transition.target_config_generation;
+    fake.proof.stable_quorum_verified = true;
+    memset(fake.proof.evidence_digest, 0x5AU,
+           sizeof(fake.proof.evidence_digest));
+    fake.proof.lease_deadline_us = 700U;
+    fake.proof_valid = true;
+    {
+        ucn_v6_cluster_snapshot_t before_ready;
+        ucn_v6_cluster_snapshot_t after_ready;
+        CHECK(bind_control_payload(&open1, &message, control_payload) ==
+              UCN_V6_OK);
+        CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &before_ready) ==
+              UCN_V6_OK);
+        CHECK(ucn_v6_cluster_handover_ready(reloaded, &open1, 511U) ==
+              UCN_V6_ERR_ACCESS);
+        CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &after_ready) ==
+              UCN_V6_OK);
+        CHECK(memcmp(&before_ready, &after_ready, sizeof(before_ready)) == 0);
+    }
+    CHECK(ucn_v6_cluster_admit_member(reloaded, &open1, &cap1, 512U, 100U) ==
+          UCN_V6_OK);
     ++message.old_epoch.term;
     CHECK(bind_control_payload(&open1, &message, control_payload) == UCN_V6_OK);
-    CHECK(ucn_v6_cluster_handover_ready(reloaded, &open1) ==
+    CHECK(ucn_v6_cluster_handover_ready(reloaded, &open1, 512U) ==
           UCN_V6_ERR_ACCESS);
     --message.old_epoch.term;
     CHECK(bind_control_payload(&open1, &message, control_payload) == UCN_V6_OK);
-    CHECK(ucn_v6_cluster_handover_ready(reloaded, &open1) == UCN_V6_OK);
-    CHECK(ucn_v6_cluster_commit_handover(reloaded, 300U) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_handover_ready(reloaded, &open1, 512U) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_commit_handover(reloaded, 300U, 512U) == UCN_V6_OK);
     CHECK(ucn_v6_cluster_copy_snapshot(reloaded, &snapshot) == UCN_V6_OK);
     CHECK(snapshot.role == UCN_V6_CLUSTER_FENCED &&
           snapshot.authority_fenced);
@@ -1395,29 +1479,90 @@ static int test_takeover_recovery_rekey_and_handover(void)
     target.head_principal = principal(0x20U);
     target.head_binding = binding(2U);
     CHECK(ucn_v6_cluster_begin_recovery(recovery_reloaded, 400U, &target,
-                                        400U) == UCN_V6_ERR_ACCESS);
+                                        600U) == UCN_V6_ERR_ACCESS);
     CHECK(ucn_v6_cluster_admit_member(recovery_reloaded, &open1, &cap1,
-                                      400U, 10U) == UCN_V6_OK);
+                                      600U, 10U) == UCN_V6_OK);
     CHECK(ucn_v6_cluster_begin_recovery(recovery_reloaded, 400U, &target,
-                                        400U) == UCN_V6_ERR_ACCESS);
+                                        600U) == UCN_V6_ERR_ACCESS);
     CHECK(ucn_v6_cluster_admit_member(recovery_reloaded, &open3, &cap3,
-                                      411U, 100U) == UCN_V6_OK);
+                                      611U, 100U) == UCN_V6_OK);
     CHECK(ucn_v6_cluster_begin_recovery(recovery_reloaded, 400U, &target,
-                                        411U) ==
+                                        611U) ==
           UCN_V6_OK);
     CHECK(ucn_v6_cluster_copy_snapshot(recovery_reloaded, &snapshot) ==
           UCN_V6_OK);
     message = transition_control(&snapshot, UCN_V6_CLUSTER_CTL_RECOVERY_VOTE);
     CHECK(bind_control_payload(&open3, &message, control_payload) == UCN_V6_OK);
     CHECK(ucn_v6_cluster_record_transition_vote(recovery_reloaded, &open3,
-                                                411U) == UCN_V6_OK);
-    CHECK(ucn_v6_cluster_commit_recovery(recovery_reloaded, 400U, 411U) ==
+                                                611U) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_admit_member(recovery_reloaded, &open3, &cap3,
+                                      612U, 99U) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_commit_recovery(recovery_reloaded, 400U, 612U) ==
+          UCN_V6_ERR_ACCESS);
+    CHECK(ucn_v6_cluster_record_transition_vote(recovery_reloaded, &open3,
+                                                612U) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_commit_recovery(recovery_reloaded, 400U, 711U) ==
+          UCN_V6_ERR_ACCESS);
+    CHECK(ucn_v6_cluster_admit_member(recovery_reloaded, &open3, &cap3,
+                                      711U, 100U) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_record_transition_vote(recovery_reloaded, &open3,
+                                                711U) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_commit_recovery(recovery_reloaded, 400U, 711U) ==
           UCN_V6_OK);
     CHECK(ucn_v6_cluster_copy_snapshot(recovery_reloaded, &snapshot) ==
           UCN_V6_OK);
     CHECK(snapshot.active_epoch.cluster_id == 3U &&
           snapshot.role == UCN_V6_CLUSTER_HEAD &&
           !snapshot.authority_fenced && snapshot.tombstone_count == 2U);
+    /* The exact half-open deadline is fail-closed and durable. A late commit
+     * cannot resurrect the expired Recovery Head's next Handover proof. */
+    target = snapshot.active_epoch;
+    target.term = snapshot.active_epoch.term + 1U;
+    target.head_principal = snapshot.stable_config.voters[0].principal;
+    target.head_binding = snapshot.stable_config.voters[0].binding;
+    CHECK(ucn_v6_cluster_admit_member(
+              recovery_reloaded, &open1, &cap1, 800U,
+              UCN_V6_CONFIG_CLUSTER_TRANSITION_TIMEOUT_US + 100U) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_cluster_copy_snapshot(recovery_reloaded, &snapshot) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_cluster_begin_handover(
+              recovery_reloaded, 401U, &target, &snapshot.stable_config,
+              800U) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_copy_snapshot(recovery_reloaded, &snapshot) ==
+          UCN_V6_OK);
+    {
+        expired_at = snapshot.transition.deadline_us;
+        CHECK(ucn_v6_cluster_step(recovery_reloaded, expired_at) == UCN_V6_OK);
+        CHECK(ucn_v6_cluster_copy_snapshot(recovery_reloaded, &snapshot) ==
+              UCN_V6_OK);
+        CHECK(snapshot.transition.kind == UCN_V6_CLUSTER_TRANSITION_NONE &&
+              snapshot.role == UCN_V6_CLUSTER_HEAD &&
+              !snapshot.authority_fenced);
+        CHECK(ucn_v6_cluster_commit_handover(
+                  recovery_reloaded, 401U, expired_at) == UCN_V6_ERR_STATE);
+    }
+    /* A crash/restart advances boot incarnation. The pre-restart durable
+     * transition is abort-only: no late commit may promote it. */
+    target = snapshot.active_epoch;
+    target.term = snapshot.active_epoch.term + 1U;
+    target.head_principal = snapshot.stable_config.voters[0].principal;
+    target.head_binding = snapshot.stable_config.voters[0].binding;
+    CHECK(ucn_v6_cluster_begin_handover(
+              recovery_reloaded, 402U, &target, &snapshot.stable_config,
+              expired_at + 1U) == UCN_V6_OK);
+    CHECK(ucn_v6_callback_gate_init(&crash_reload_gate, NULL, gate_lock,
+                                    gate_unlock) == UCN_V6_OK);
+    CHECK(init_owner(&crash_reload_storage, &fake, &crash_reload_gate,
+                     0x20U, 2U, &crash_reloaded) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_commit_handover(
+              crash_reloaded, 402U, expired_at + 2U) == UCN_V6_ERR_STATE);
+    CHECK(ucn_v6_cluster_step(crash_reloaded, expired_at + 2U) == UCN_V6_OK);
+    CHECK(ucn_v6_cluster_copy_snapshot(crash_reloaded, &snapshot) ==
+          UCN_V6_OK);
+    CHECK(snapshot.transition.kind == UCN_V6_CLUSTER_TRANSITION_NONE &&
+          snapshot.role == UCN_V6_CLUSTER_HEAD &&
+          !snapshot.authority_fenced);
     (void)open2;
     (void)cap2;
     return 0;

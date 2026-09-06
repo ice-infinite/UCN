@@ -179,9 +179,11 @@ static bool route_path_is_valid(const ucn_v6_route_domain_t *domain,
                                 const ucn_v6_route_path_t *path)
 {
     return domain_is_valid(domain) && path != NULL &&
-           path->path_id != 0U && path->path_generation != 0U &&
+           path->path_id != 0U && path->path_id <= UCN_V6_PATH_ID_MAX &&
+           path->path_generation != 0U &&
            path->path_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            session_is_valid(&path->next_hop) && path->egress_link_id != 0U &&
+           path->egress_link_id <= UCN_V6_LINK_ID_MAX &&
            path->egress_link_generation != 0U &&
            path->egress_link_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            path->next_hop_capability_generation != 0U &&
@@ -604,6 +606,14 @@ ucn_v6_result_t ucn_v6_route_owner_init_in_place(
                                 UCN_V6_STORAGE_ALIGNMENT) != UCN_V6_OK) {
         return UCN_V6_ERR_CONFIG;
     }
+    if (ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     owner_out, sizeof(*owner_out)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     manifest, sizeof(*manifest)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     capability_owner, 1U)) {
+        return UCN_V6_ERR_CONFIG;
+    }
     owner = (ucn_v6_route_owner_t *)storage;
     memset(owner, 0, sizeof(*owner));
     owner->magic = UCN_V6_ROUTE_OWNER_MAGIC;
@@ -745,7 +755,8 @@ ucn_v6_result_t ucn_v6_route_candidate_record_probe(
     ucn_v6_route_candidate_view_t *candidate;
     size_t index;
     if (!owner_is_valid(owner) || !domain_is_valid(domain) ||
-        path_id == 0U || path_generation == 0U ||
+        path_id == 0U || path_id > UCN_V6_PATH_ID_MAX ||
+        path_generation == 0U ||
         path_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
         return UCN_V6_ERR_ARGUMENT;
     }
@@ -1321,7 +1332,8 @@ ucn_v6_result_t ucn_v6_route_mark_error(
     if (!owner_is_valid(owner) || !domain_is_valid(domain) ||
         route_generation == 0U ||
         route_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        path_id == 0U || path_generation == 0U ||
+        path_id == 0U || path_id > UCN_V6_PATH_ID_MAX ||
+        path_generation == 0U ||
         path_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
         return UCN_V6_ERR_ARGUMENT;
     }

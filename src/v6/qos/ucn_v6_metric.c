@@ -63,7 +63,8 @@ static bool key_is_valid(const ucn_v6_metric_key_t *key)
     return key != NULL && domain_is_valid(&key->domain) &&
            key->route_generation != 0U &&
            key->route_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
-           key->path_id != 0U && key->path_generation != 0U &&
+           key->path_id != 0U && key->path_id <= UCN_V6_PATH_ID_MAX &&
+           key->path_generation != 0U &&
            key->path_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD;
 }
 
@@ -318,6 +319,14 @@ ucn_v6_result_t ucn_v6_metric_owner_init_in_place(
         ucn_v6_storage_validate(storage, storage_bytes,
                                 UCN_V6_METRIC_OWNER_STORAGE_BYTES,
                                 UCN_V6_STORAGE_ALIGNMENT) != UCN_V6_OK) {
+        return UCN_V6_ERR_CONFIG;
+    }
+    if (ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     owner_out, sizeof(*owner_out)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     manifest, sizeof(*manifest)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     policy, sizeof(*policy))) {
         return UCN_V6_ERR_CONFIG;
     }
     owner = (ucn_v6_metric_owner_t *)storage;

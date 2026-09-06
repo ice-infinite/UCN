@@ -218,6 +218,7 @@ ucn_v6_result_t ucn_v6_transfer_sack_decode(
 static bool credit_is_valid(const ucn_v6_transfer_credit_update_t *credit)
 {
     return credit != NULL && credit->link_id != 0U &&
+           credit->link_id <= UCN_V6_LINK_ID_MAX &&
            credit->link_generation != 0U &&
            credit->link_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
            (credit->traffic_class == UCN_V6_TRAFFIC_Q2 ||

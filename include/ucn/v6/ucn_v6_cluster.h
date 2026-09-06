@@ -8,10 +8,10 @@
 extern "C" {
 #endif
 
-#define UCN_V6_CLUSTER_RECORD_VERSION UINT16_C(1)
-#define UCN_V6_CLUSTER_RECORD_BYTES ((size_t)4096U)
+#define UCN_V6_CLUSTER_RECORD_VERSION UINT16_C(3)
+#define UCN_V6_CLUSTER_RECORD_BYTES ((size_t)8192U)
 #define UCN_V6_CLUSTER_CONTROL_VERSION ((uint8_t)1U)
-#define UCN_V6_CLUSTER_CONTROL_BYTES ((size_t)112U)
+#define UCN_V6_CLUSTER_CONTROL_BYTES ((size_t)120U)
 #define UCN_V6_CLUSTER_DIRECTORY_VERSION ((uint8_t)1U)
 #define UCN_V6_CLUSTER_DIRECTORY_BYTES ((size_t)108U)
 #define UCN_V6_CLUSTER_AUTHORITY_PROOF_DIGEST_BYTES ((size_t)16U)
@@ -99,11 +99,40 @@ typedef struct ucn_v6_cluster_backup {
     uint32_t acknowledged_config_generation;
 } ucn_v6_cluster_backup_t;
 
+typedef struct ucn_v6_cluster_authority_proof_ref {
+    /* EN: Wire-visible certificate identity.  This is not a local array
+     * index.  proof_id is stable within one remote Epoch and generation is
+     * strictly non-decreasing; the verifier resolves both in the
+     * authenticated remote-Cluster proof namespace.
+     * 中文：Wire 可见的证书身份；它不是本地数组下标。同一远端 Epoch 内
+     * proof_id 固定且 generation 严格不回退，验证器在经过认证的远端
+     * Cluster 证明命名空间中解析二者。 */
+    uint32_t proof_id;
+    uint32_t generation;
+} ucn_v6_cluster_authority_proof_ref_t;
+
+/* EN: Durable identity of the exact admission/capability instance that cast
+ * one transition vote.  A bitmap bit without matching evidence is invalid;
+ * re-admission, Link/session replacement or Capability replacement cannot
+ * revive the old promise.
+ * 中文：一张转换票对应的精确准入/Capability 实例持久证据。没有匹配证据的
+ * bitmap 位无效；重新准入、Link/Session 或 Capability 替换都不能复活旧承诺。 */
+typedef struct ucn_v6_cluster_transition_vote_evidence {
+    bool valid;
+    ucn_v6_session_key_t session;
+    uint16_t ingress_link_id;
+    uint32_t ingress_link_generation;
+    uint32_t capability_generation;
+    uint8_t capability_digest[UCN_V6_CAPABILITY_DIGEST_BYTES];
+} ucn_v6_cluster_transition_vote_evidence_t;
+
 typedef struct ucn_v6_cluster_transition_proof {
     bool valid;
     bool ready;
     ucn_v6_cluster_transition_kind_t kind;
     uint64_t transaction_id;
+    uint32_t started_boot_incarnation;
+    uint64_t deadline_us;
     ucn_v6_cluster_epoch_t old_epoch;
     ucn_v6_cluster_epoch_t target_epoch;
     uint32_t target_config_id;
@@ -111,6 +140,11 @@ typedef struct ucn_v6_cluster_transition_proof {
     ucn_v6_cluster_config_t target_config;
     uint32_t old_voter_bitmap;
     uint32_t new_voter_bitmap;
+    ucn_v6_cluster_transition_vote_evidence_t
+        old_vote_evidence[UCN_V6_CONFIG_CLUSTER_VOTERS];
+    ucn_v6_cluster_transition_vote_evidence_t
+        new_vote_evidence[UCN_V6_CONFIG_CLUSTER_VOTERS];
+    ucn_v6_cluster_authority_proof_ref_t target_authority_proof;
 } ucn_v6_cluster_transition_proof_t;
 
 typedef struct ucn_v6_cluster_tombstone {
@@ -168,19 +202,8 @@ typedef struct ucn_v6_cluster_control {
     uint32_t backup_generation;
     uint32_t old_voter_bitmap;
     uint32_t new_voter_bitmap;
+    ucn_v6_cluster_authority_proof_ref_t authority_proof;
 } ucn_v6_cluster_control_t;
-
-typedef struct ucn_v6_cluster_authority_proof_ref {
-    /* EN: Wire-visible certificate identity.  This is not a local array
-     * index.  proof_id is stable within one remote Epoch and generation is
-     * strictly non-decreasing; the verifier resolves both in the
-     * authenticated remote-Cluster proof namespace.
-     * 中文：Wire 可见的证书身份；它不是本地数组下标。同一远端 Epoch 内
-     * proof_id 固定且 generation 严格不回退，验证器在经过认证的远端
-     * Cluster 证明命名空间中解析二者。 */
-    uint32_t proof_id;
-    uint32_t generation;
-} ucn_v6_cluster_authority_proof_ref_t;
 
 /* EN: A trusted proof Owner returns this complete, immutable verification
  * result only after checking the voter evidence/signatures for both Stable
@@ -401,11 +424,13 @@ ucn_v6_result_t ucn_v6_cluster_begin_handover(
  * 中文：记录来自精确目标权威的认证 READY。 */
 ucn_v6_result_t ucn_v6_cluster_handover_ready(
     ucn_v6_cluster_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened);
+    const ucn_v6_security_open_result_t *opened,
+    uint64_t now_us);
 /* EN: Commits handover and permanently fences the old local authority.
  * 中文：提交 Handover，并永久围栏旧本地权威。 */
 ucn_v6_result_t ucn_v6_cluster_commit_handover(
-    ucn_v6_cluster_owner_t *owner, uint64_t transaction_id);
+    ucn_v6_cluster_owner_t *owner, uint64_t transaction_id,
+    uint64_t now_us);
 
 /* EN: Starts Recovery with a new identity and no inherited authority.
  * 中文：以新身份启动 Recovery，不继承旧权威。 */
@@ -416,6 +441,19 @@ ucn_v6_result_t ucn_v6_cluster_begin_recovery(
  * 中文：仅在 Stable 投票者法定人数证明后提交 Recovery。 */
 ucn_v6_result_t ucn_v6_cluster_commit_recovery(
     ucn_v6_cluster_owner_t *owner, uint64_t transaction_id,
+    uint64_t now_us);
+
+/* EN: Durably aborts the exact pending Takeover/Handover/Recovery. Expired
+ * or pre-restart transactions remain abortable but never committable. A
+ * READY Handover abort permanently fences the old Head.
+ * 中文：持久中止精确匹配的 Takeover/Handover/Recovery。已超时或属于重启前
+ * 的事务仍可中止但绝不能提交；READY 后的 Handover 中止会永久围栏旧 Head。 */
+ucn_v6_result_t ucn_v6_cluster_abort_transition(
+    ucn_v6_cluster_owner_t *owner,
+    ucn_v6_cluster_transition_kind_t expected_kind,
+    uint64_t transaction_id,
+    const ucn_v6_cluster_epoch_t *expected_target_epoch,
+    const ucn_v6_cluster_config_t *expected_target_config,
     uint64_t now_us);
 /* EN: Rekeys into a never-retired Cluster identity and writes a Tombstone.
  * 中文：迁移到从未退休的 Cluster 身份并写入 Tombstone。 */

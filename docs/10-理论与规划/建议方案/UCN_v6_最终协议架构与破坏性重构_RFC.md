@@ -588,6 +588,12 @@ v6 不采用任意 TLV 链。MCU Decoder 根据 Flags 以固定顺序处理有�
 7. Hop Scheduling Context：`initial_budget_us + remaining_budget_us`；
 8. 以后新增扩展必须升级协议版本或使用明确的扩展容器。
 
+所有 16-bit Endpoint ID、Link Instance ID 与 Path ID 使用同一数值边界：可用值固定为
+`1..65534`，`0` 表示缺省/未绑定，`65535` 永久保留为无效或耗尽哨兵。该规则同时约束
+Wire、Bootstrap transcript、Adapter 注册、Security Session/ACL、Capability、Route、QoS、
+Transfer、Realtime 与 Cluster Directory；任一独立入口都必须自行拒绝越界值，不能依赖
+后续模块代为拦截。Protocol Opcode 拥有独立命名空间，不从这条 ID 规则推导。
+
 `Frame Type` 只标识 `DATA/CONTROL/TRANSFER/DIAGNOSTIC/BOOTSTRAP` 大类；控制和传输的
 具体 Opcode 只编码在固定宽度 Protocol Context 中。Opcode 的解释域固定为
 `{protocol_version, frame_type, protocol_opcode}`，不能藏在可由业务自由解释的 Payload、

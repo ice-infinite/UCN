@@ -23,6 +23,10 @@ struct ucn_v6_identity_authority {
     ucn_v6_identity_authority_verifier_ops_t verifier;
     ucn_v6_identity_store_ops_t store;
     ucn_v6_callback_gate_t *callback_gate;
+    /* Fixed owner-local transaction workspaces.  Public operations must not
+     * place a complete persistent snapshot on the MCU task stack. */
+    ucn_v6_identity_snapshot_t staging;
+    ucn_v6_identity_snapshot_t verify;
     bool epoch_valid;
     bool faulted;
     uint64_t canary;

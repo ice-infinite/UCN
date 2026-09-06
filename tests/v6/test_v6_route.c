@@ -792,6 +792,18 @@ static int test_route_hop_count_matches_capability_width(void)
     CHECK(ucn_v6_route_copy_candidate(
               fixture.route_owner, 901U, &fixture.route_domain,
               &candidate_before) == UCN_V6_OK);
+    path.path_id = UINT16_MAX;
+    path.capability.path_id = UINT16_MAX;
+    CHECK(ucn_v6_route_candidate_add_path(
+              fixture.route_owner, 11U, 901U, &fixture.route_domain,
+              &path) != UCN_V6_OK);
+    CHECK(ucn_v6_route_copy_candidate(
+              fixture.route_owner, 901U, &fixture.route_domain,
+              &candidate_after) == UCN_V6_OK);
+    CHECK(memcmp(&candidate_before, &candidate_after,
+                 sizeof(candidate_before)) == 0);
+    path.path_id = 62U;
+    path.capability.path_id = 62U;
     path.hop_count = UINT16_MAX;
     path.capability.hop_count = UINT16_MAX;
     CHECK(ucn_v6_route_candidate_add_path(

@@ -9,6 +9,9 @@
 #include "ucn/v6/ucn_v6_qos.h"
 #include "ucn/v6/ucn_v6_realtime.h"
 #include "ucn/v6/ucn_v6_route.h"
+#if UCN_V6_FEATURE_ADAPTER_ENABLED
+#include "ucn/v6/ucn_v6_runtime.h"
+#endif
 #include "ucn/v6/ucn_v6_security.h"
 #include "ucn/v6/ucn_v6_transfer.h"
 
@@ -47,6 +50,10 @@ CHECK_STORAGE(ucn_v6_cluster_owner_storage_t,
               UCN_V6_CLUSTER_OWNER_STORAGE_BYTES);
 CHECK_STORAGE(ucn_v6_adapter_owner_storage_t,
               UCN_V6_ADAPTER_OWNER_STORAGE_BYTES);
+#if UCN_V6_FEATURE_ADAPTER_ENABLED
+CHECK_STORAGE(ucn_v6_runtime_owner_storage_t,
+              UCN_V6_RUNTIME_OWNER_STORAGE_BYTES);
+#endif
 CHECK_STORAGE(ucn_v6_freertos_port_storage_t,
               UCN_V6_FREERTOS_PORT_STORAGE_BYTES);
 
@@ -87,6 +94,9 @@ int main(void)
     print_storage("realtime", sizeof(ucn_v6_realtime_owner_storage_t));
     print_storage("cluster", sizeof(ucn_v6_cluster_owner_storage_t));
     print_storage("adapter", sizeof(ucn_v6_adapter_owner_storage_t));
+#if UCN_V6_FEATURE_ADAPTER_ENABLED
+    print_storage("runtime", sizeof(ucn_v6_runtime_owner_storage_t));
+#endif
     print_storage("freertos_port", sizeof(ucn_v6_freertos_port_storage_t));
     return 0;
 }

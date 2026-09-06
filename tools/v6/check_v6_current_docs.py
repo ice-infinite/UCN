@@ -31,6 +31,14 @@ def main() -> int:
     errors: list[str] = []
     checked_links = 0
     documents = active_documents(root)
+    legacy_entry = root / "docs" / "01-入门与使用"
+    legacy_documents = sorted(legacy_entry.rglob("*.md"))
+    for document in legacy_documents:
+        prefix = "\n".join(document.read_text(encoding="utf-8").splitlines()[:8])
+        if "ARCHIVED / NOT CURRENT" not in prefix:
+            errors.append(
+                f"legacy v5 document lacks archive fence: {document.relative_to(root)}"
+            )
     for document in documents:
         if not document.is_file():
             errors.append(f"missing active document: {document.relative_to(root)}")
@@ -58,7 +66,10 @@ def main() -> int:
         for error in errors:
             print(f"V6_DOC_ERROR {error}")
         return 1
-    print(f"V6_DOCS_OK documents={len(documents)} links={checked_links}")
+    print(
+        f"V6_DOCS_OK documents={len(documents)} "
+        f"legacy_fenced={len(legacy_documents)} links={checked_links}"
+    )
     return 0
 
 

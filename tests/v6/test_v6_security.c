@@ -3,6 +3,9 @@
 #include "ucn/v6/ucn_v6_adapter.h"
 #endif
 #include "ucn/v6/ucn_v6_qos.h"
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
+#include "ucn/v6/ucn_v6_runtime.h"
+#endif
 #include "ucn/v6/ucn_v6_security.h"
 #include "ucn/v6/ucn_v6_transfer.h"
 
@@ -164,6 +167,42 @@ static ucn_v6_transfer_owner_storage_t pipeline_transfer_storage;
 static ucn_v6_capability_owner_storage_t pipeline_capability_storage;
 static ucn_v6_route_owner_storage_t pipeline_route_storage;
 
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
+typedef struct runtime_time_driver {
+    ucn_v6_adapter_owner_t *adapter;
+    uint8_t frame[UCN_V6_CONFIG_ADAPTER_FRAME_BYTES];
+    size_t frame_length;
+    ucn_v6_driver_event_key_t key;
+    bool request_timestamp;
+    unsigned submit_calls;
+} runtime_time_driver_t;
+
+typedef struct runtime_time_store {
+    bool valid;
+    ucn_v6_realtime_domain_record_t record;
+} runtime_time_store_t;
+
+typedef struct runtime_time_app {
+    ucn_v6_security_manager_t *security;
+    ucn_v6_principal_t peer;
+    ucn_v6_route_path_ref_t reverse_ref;
+    ucn_v6_runtime_time_handle_t member_handle;
+    uint64_t next_buffer_token;
+    ucn_v6_result_t callback_result;
+    bool auto_send_delay_request;
+    unsigned sync_frames;
+    unsigned delay_requests;
+    unsigned delay_responses;
+    unsigned releases;
+} runtime_time_app_t;
+
+static ucn_v6_adapter_owner_storage_t runtime_time_adapter_storage[2];
+static ucn_v6_runtime_owner_storage_t runtime_time_runtime_storage[2];
+static ucn_v6_capability_owner_storage_t runtime_time_capability_storage[2];
+static ucn_v6_route_owner_storage_t runtime_time_route_storage[2];
+static ucn_v6_realtime_owner_storage_t runtime_time_realtime_storage;
+#endif
+
 static ucn_v6_capability_record_t pipeline_capability_record(
     uint32_t generation, uint32_t link_generation)
 {
@@ -264,6 +303,124 @@ static ucn_v6_result_t pipeline_cancel(
 static ucn_v6_result_t pipeline_quiesce(void *context)
 {
     (void)context;
+    return UCN_V6_OK;
+}
+#endif
+
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
+static ucn_v6_result_t runtime_time_submit(
+    void *context, const ucn_v6_driver_event_key_t *key,
+    const uint8_t *frame, size_t frame_length,
+    uint8_t hardware_priority, bool request_timestamp)
+{
+    runtime_time_driver_t *driver = (runtime_time_driver_t *)context;
+    (void)hardware_priority;
+    if (driver == NULL || key == NULL || frame == NULL || frame_length == 0U ||
+        frame_length > sizeof(driver->frame)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memcpy(driver->frame, frame, frame_length);
+    driver->frame_length = frame_length;
+    driver->key = *key;
+    driver->request_timestamp = request_timestamp;
+    ++driver->submit_calls;
+    return UCN_V6_OK;
+}
+
+static ucn_v6_result_t runtime_time_load_domain(
+    void *context, uint16_t clock_domain_id,
+    ucn_v6_realtime_domain_record_t *record)
+{
+    runtime_time_store_t *store = (runtime_time_store_t *)context;
+    if (store == NULL || record == NULL) return UCN_V6_ERR_ARGUMENT;
+    if (!store->valid ||
+        store->record.config.clock_domain_id != clock_domain_id) {
+        return UCN_V6_ERR_NOT_FOUND;
+    }
+    *record = store->record;
+    return UCN_V6_OK;
+}
+
+static ucn_v6_result_t runtime_time_reserve_domain(
+    void *context, const ucn_v6_realtime_domain_record_t *record)
+{
+    runtime_time_store_t *store = (runtime_time_store_t *)context;
+    if (store == NULL || record == NULL) return UCN_V6_ERR_ARGUMENT;
+    store->record = *record;
+    store->valid = true;
+    return UCN_V6_OK;
+}
+
+static ucn_v6_result_t runtime_time_release(
+    void *context, uint64_t buffer_token, ucn_v6_result_t result,
+    const ucn_v6_driver_timestamp_t *timestamp)
+{
+    runtime_time_app_t *app = (runtime_time_app_t *)context;
+    (void)buffer_token;
+    (void)result;
+    (void)timestamp;
+    if (app == NULL) return UCN_V6_ERR_ARGUMENT;
+    ++app->releases;
+    return UCN_V6_OK;
+}
+
+static ucn_v6_result_t runtime_time_ingress(
+    void *context, ucn_v6_runtime_owner_t *runtime, uint64_t now_us,
+    const uint8_t *encoded_frame, size_t encoded_length,
+    const ucn_v6_driver_rx_view_t *rx,
+    ucn_v6_runtime_ingress_disposition_t *disposition)
+{
+    runtime_time_app_t *app = (runtime_time_app_t *)context;
+    ucn_v6_security_open_result_t opened;
+    uint8_t plaintext[UCN_V6_CONFIG_ADAPTER_FRAME_BYTES];
+    ucn_v6_result_t result;
+    if (app == NULL || runtime == NULL || encoded_frame == NULL ||
+        rx == NULL || disposition == NULL) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(&opened, 0, sizeof(opened));
+    result = ucn_v6_security_open_frame(
+        app->security, now_us, rx->key.link_id, rx->key.link_generation,
+        &app->peer, encoded_frame, encoded_length, plaintext,
+        sizeof(plaintext), &opened);
+    if (result != UCN_V6_OK) {
+        fprintf(stderr, "runtime time security open failed: %d\n",
+                (int)result);
+        app->callback_result = result;
+        return result;
+    }
+    switch (opened.frame.protocol_opcode) {
+    case UCN_V6_PROTOCOL_OPCODE_TIME_SYNC:
+        ++app->sync_frames;
+        result = ucn_v6_runtime_time_observe_sync(
+            runtime, &opened, rx, &app->reverse_ref, now_us,
+            &app->member_handle);
+        if (result == UCN_V6_OK && app->auto_send_delay_request) {
+            result = ucn_v6_runtime_time_send_delay_request(
+                runtime, &app->member_handle, app->next_buffer_token++,
+                now_us);
+        }
+        break;
+    case UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_REQUEST:
+        ++app->delay_requests;
+        result = ucn_v6_runtime_time_respond_delay_request(
+            runtime, &opened, rx, app->next_buffer_token++, now_us);
+        break;
+    case UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE:
+        ++app->delay_responses;
+        result = ucn_v6_runtime_time_complete(runtime, &opened, rx, now_us);
+        break;
+    default:
+        result = UCN_V6_ERR_STATE;
+        break;
+    }
+    app->callback_result = result;
+    if (result != UCN_V6_OK) {
+        fprintf(stderr, "runtime time opcode %u failed: %d\n",
+                (unsigned)opened.frame.protocol_opcode, (int)result);
+        return result;
+    }
+    *disposition = UCN_V6_RUNTIME_INGRESS_CONSUMED;
     return UCN_V6_OK;
 }
 #endif
@@ -640,7 +797,6 @@ static ucn_v6_join_commit_t make_join(
     commit.e2e_selector.key_id = transcript->selected_e2e_key_id;
     commit.e2e_selector.key_generation =
         transcript->selected_e2e_key_generation;
-    commit.authority_challenge_started_local_us = 0U;
     commit.authority_lease_policy.local_timer_resolution_us = 1U;
     commit.authority_lease_policy.timer_read_uncertainty_known = true;
     commit.authority_lease_policy.local_policy_max_lease_us =
@@ -1014,6 +1170,178 @@ static ucn_v6_acl_entry_t make_control_acl(
     return entry;
 }
 
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
+static ucn_v6_acl_entry_t make_runtime_time_acl(
+    const ucn_v6_principal_t *source_principal,
+    const ucn_v6_binding_key_t *source_binding,
+    const ucn_v6_binding_key_t *destination_binding,
+    uint16_t opcode, ucn_v6_security_direction_t direction)
+{
+    ucn_v6_acl_entry_t entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.occupied = true;
+    entry.key.device_principal = *source_principal;
+    entry.key.source_binding = *source_binding;
+    entry.key.destination_binding = *destination_binding;
+    entry.key.session_generation = 1U;
+    entry.key.frame_type = UCN_V6_FRAME_CONTROL;
+    entry.key.protocol_opcode = opcode;
+    entry.key.traffic_class = UCN_V6_TRAFFIC_Q0;
+    entry.key.delivery_guarantee = UCN_V6_DELIVERY_RELIABLE;
+    entry.key.interaction_role = UCN_V6_INTERACTION_ONE_WAY;
+    entry.key.operation_id_policy = UCN_V6_OPERATION_ID_NONE;
+    entry.key.direction = direction;
+    return entry;
+}
+
+static int install_runtime_time_route(
+    ucn_v6_capability_owner_t *capability,
+    ucn_v6_route_owner_t *route,
+    const ucn_v6_principal_t *local_principal,
+    const ucn_v6_binding_key_t *local_binding,
+    const ucn_v6_principal_t *peer_principal,
+    const ucn_v6_binding_key_t *peer_binding,
+    uint16_t path_id, uint64_t now_us,
+    ucn_v6_route_path_ref_t *reference)
+{
+    ucn_v6_capability_record_t record =
+        pipeline_capability_record(1U, 6U);
+    ucn_v6_security_open_result_t opened;
+    ucn_v6_cached_peer_capability_t cached;
+    ucn_v6_path_capability_t path;
+    ucn_v6_route_domain_t domain;
+    ucn_v6_route_path_t route_path;
+    ucn_v6_route_activation_t activation;
+    uint8_t payload[UCN_V6_CAPABILITY_RECORD_BYTES];
+    uint64_t transaction_id = UINT64_C(0x70000000) + path_id;
+
+    CHECK(ucn_v6_capability_record_encode(&record, payload) == UCN_V6_OK);
+    memset(&opened, 0, sizeof(opened));
+    opened.authenticated_principal = *peer_principal;
+    opened.ingress_peer_session.principal = *peer_principal;
+    opened.ingress_peer_session.binding = *peer_binding;
+    opened.ingress_peer_session.session_generation = 1U;
+    opened.ingress_link_instance_id = 1U;
+    opened.ingress_link_instance_generation = 6U;
+    opened.hop_authenticated = true;
+    opened.frame.address_class = UCN_V6_ADDRESS_CLASS_A0;
+    opened.frame.frame_type = UCN_V6_FRAME_CONTROL;
+    opened.frame.flags = UCN_V6_FLAG_PEER_HOP_CONTEXT |
+                         UCN_V6_FLAG_PROTOCOL_CONTEXT;
+    opened.frame.traffic_class = UCN_V6_TRAFFIC_Q2;
+    opened.frame.delivery_guarantee = UCN_V6_DELIVERY_RELIABLE;
+    opened.frame.hop_limit = 1U;
+    opened.frame.header_contract = UCN_V6_HEADER_CONTRACT_1;
+    opened.frame.realm_id = peer_binding->realm_id;
+    opened.frame.source_address = peer_binding->node_address;
+    opened.frame.destination_address = local_binding->node_address;
+    opened.frame.source_binding_generation =
+        peer_binding->binding_generation;
+    opened.frame.destination_binding_generation =
+        local_binding->binding_generation;
+    opened.frame.session_generation = 1U;
+    opened.frame.protocol_opcode =
+        UCN_V6_PROTOCOL_OPCODE_CAPABILITY_ADVERTISE;
+    opened.frame.payload = payload;
+    opened.frame.payload_length = sizeof(payload);
+    CHECK(ucn_v6_capability_ingest_advertise(
+              capability, now_us, &opened, &record) == UCN_V6_OK);
+    CHECK(ucn_v6_capability_copy_peer(
+              capability, now_us, peer_principal, peer_binding, 1U, 6U,
+              &cached) == UCN_V6_OK);
+
+    memset(&path, 0, sizeof(path));
+    path.valid = true;
+    path.immutable_for_realtime = true;
+    path.destination_principal = *peer_principal;
+    path.destination_binding = *peer_binding;
+    path.destination_session_generation = 1U;
+    path.destination_capability_generation =
+        cached.record.capability_generation;
+    memcpy(path.destination_capability_digest, cached.digest,
+           sizeof(path.destination_capability_digest));
+    path.destination_realtime_mode_bits =
+        cached.record.peer.realtime_mode_bits;
+    path.destination_clock_domain_id =
+        cached.record.peer.clock_domain_id;
+    path.destination_clock_domain_generation =
+        cached.record.peer.clock_domain_generation;
+    path.local_parent_session.principal = *peer_principal;
+    path.local_parent_session.binding = *peer_binding;
+    path.local_parent_session.session_generation = 1U;
+    path.local_parent_link_id = 1U;
+    path.local_parent_link_generation = 6U;
+    path.local_parent_capability_generation =
+        cached.record.capability_generation;
+    memcpy(path.local_parent_capability_digest, cached.digest,
+           sizeof(path.local_parent_capability_digest));
+    path.route_generation = 1U;
+    path.path_id = path_id;
+    path.path_generation = 1U;
+    path.hop_count = 1U;
+    path.path_frame_mtu = cached.record.link.processing_frame_mtu;
+    path.payload_budget = 160U;
+    path.fragment_data_budget = 128U;
+    path.feature_bits = cached.record.peer.feature_bits;
+    path.hop_suite_bits = cached.record.peer.hop_suite_bits;
+    path.e2e_suite_bits = cached.record.peer.e2e_suite_bits;
+    path.max_message_class = cached.record.peer.max_message_class;
+    path.max_window = cached.record.peer.max_rx_window;
+    path.max_concurrency = cached.record.peer.max_concurrent_transfers;
+    path.timestamp_capability_bits =
+        cached.record.link.timestamp_capability_bits;
+    path.timestamp_uncertainty_us =
+        cached.record.link.timestamp_uncertainty_us;
+    path.deadline_us = now_us + UINT64_C(100000);
+    CHECK(ucn_v6_capability_install_path(capability, now_us, &path) ==
+          UCN_V6_OK);
+
+    memset(&domain, 0, sizeof(domain));
+    domain.origin_principal = *local_principal;
+    domain.origin_binding = *local_binding;
+    domain.origin_session_generation = 1U;
+    domain.destination_principal = *peer_principal;
+    domain.destination_binding = *peer_binding;
+    domain.destination_session_generation = 1U;
+    memset(&route_path, 0, sizeof(route_path));
+    route_path.path_id = path_id;
+    route_path.path_generation = 1U;
+    route_path.next_hop = path.local_parent_session;
+    route_path.egress_link_id = 1U;
+    route_path.egress_link_generation = 6U;
+    route_path.next_hop_capability_generation =
+        path.local_parent_capability_generation;
+    route_path.hop_count = 1U;
+    route_path.priority = 1U;
+    route_path.weight = 1U;
+    route_path.available = true;
+    route_path.capability = path;
+    CHECK(ucn_v6_route_candidate_begin(
+              route, now_us + 1U, transaction_id, &domain, 1U) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_add_path(
+              route, now_us + 2U, transaction_id, &domain, &route_path) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_record_probe(
+              route, now_us + 3U, transaction_id, &domain, path_id, 1U) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_prepare_activation(
+              route, now_us + 4U, transaction_id, &domain, &activation) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_record_activation_send(
+              route, now_us + 4U, transaction_id, &domain, true) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_commit_ack(
+              route, now_us + 5U, &activation) == UCN_V6_OK);
+    memset(reference, 0, sizeof(*reference));
+    reference->domain = domain;
+    reference->route_generation = 1U;
+    reference->path_id = path_id;
+    reference->path_generation = 1U;
+    return 0;
+}
+#endif
+
 static ucn_v6_frame_t make_data_frame(const uint8_t *payload, size_t length)
 {
     ucn_v6_frame_t frame;
@@ -1041,6 +1369,394 @@ static ucn_v6_frame_t make_data_frame(const uint8_t *payload, size_t length)
     frame.payload_length = (uint16_t)length;
     return frame;
 }
+
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
+static int runtime_time_service_timestamped_tx(
+    const ucn_v6_stack_hooks_t *hooks, runtime_time_driver_t *driver,
+    uint64_t now_us, uint64_t timestamp_us)
+{
+    ucn_v6_stack_phase_result_t phase;
+    ucn_v6_driver_timestamp_t timestamp;
+    bool submitted = false;
+    CHECK(hooks->qos_tx(hooks->context, now_us, 1U, &phase) == UCN_V6_OK);
+    CHECK(driver->submit_calls != 0U && driver->request_timestamp);
+    memset(&timestamp, 0, sizeof(timestamp));
+    timestamp.timestamp_us = timestamp_us;
+    timestamp.uncertainty_us = 2U;
+    timestamp.valid = true;
+    timestamp.hardware = true;
+    CHECK(ucn_v6_adapter_publish_tx_completion(
+              driver->adapter, &driver->key, UCN_V6_OK, &timestamp, false) ==
+          UCN_V6_OK);
+    CHECK(hooks->tx_completion(hooks->context, now_us + 1U, 1U, &phase) ==
+          UCN_V6_OK);
+    CHECK(hooks->tx_completion(hooks->context, now_us + 2U, 1U, &phase) ==
+          UCN_V6_OK);
+    (void)submitted;
+    return 0;
+}
+
+static int runtime_time_service_untimestamped_tx(
+    const ucn_v6_stack_hooks_t *hooks, runtime_time_driver_t *driver,
+    uint64_t now_us)
+{
+    ucn_v6_stack_phase_result_t phase;
+    CHECK(hooks->qos_tx(hooks->context, now_us, 1U, &phase) == UCN_V6_OK);
+    CHECK(driver->submit_calls != 0U && !driver->request_timestamp);
+    return 0;
+}
+
+static int runtime_time_deliver(
+    ucn_v6_adapter_owner_t *adapter,
+    const ucn_v6_stack_hooks_t *hooks,
+    const runtime_time_driver_t *source,
+    uint64_t now_us, uint64_t timestamp_us)
+{
+    ucn_v6_stack_phase_result_t phase;
+    ucn_v6_driver_timestamp_t timestamp;
+    ucn_v6_driver_event_key_t key;
+    ucn_v6_result_t result;
+    memset(&timestamp, 0, sizeof(timestamp));
+    timestamp.timestamp_us = timestamp_us;
+    timestamp.uncertainty_us = 2U;
+    timestamp.valid = true;
+    timestamp.hardware = true;
+    CHECK(ucn_v6_adapter_publish_rx(
+              adapter, 1U, 6U, source->frame, source->frame_length,
+              &timestamp, false, &key) == UCN_V6_OK);
+    result = hooks->rx_ingress(hooks->context, now_us, 1U, &phase);
+    if (result != UCN_V6_OK) {
+        fprintf(stderr, "runtime time RX failed: %d at %llu\n", (int)result,
+                (unsigned long long)now_us);
+    }
+    CHECK(result == UCN_V6_OK);
+    CHECK(phase.work_done == 1U);
+    return 0;
+}
+
+static int test_runtime_owned_four_event_exchange(void)
+{
+    static const uint8_t admin_proof[] = { UCN_V6_PROOF_REALM_ADMIN };
+    ucn_v6_principal_t a = make_principal(0x11U);
+    ucn_v6_principal_t b = make_principal(0x31U);
+    ucn_v6_principal_t admin = make_principal(0xA1U);
+    ucn_v6_binding_key_t a_binding = { 1U, 10U, 1U };
+    ucn_v6_binding_key_t b_binding = { 1U, 20U, 2U };
+    fake_store_t security_stores[2];
+    fake_crypto_t cryptos[2];
+    ucn_v6_security_store_ops_t security_store_ops[2];
+    ucn_v6_security_crypto_ops_t security_crypto_ops[2];
+    ucn_v6_callback_gate_t security_gates[2];
+    ucn_v6_security_manager_storage_t security_storage[2];
+    ucn_v6_security_manager_t *security[2] = { NULL, NULL };
+    ucn_v6_capability_record_t local_capability;
+    ucn_v6_capability_owner_t *capability[2] = { NULL, NULL };
+    ucn_v6_route_owner_t *route[2] = { NULL, NULL };
+    ucn_v6_route_path_ref_t a_to_b;
+    ucn_v6_route_path_ref_t b_to_a;
+    pipeline_runtime_t adapter_locks[2];
+    runtime_time_driver_t drivers[2];
+    ucn_v6_driver_runtime_ops_t adapter_ops[2];
+    ucn_v6_driver_link_config_t link;
+    ucn_v6_adapter_owner_t *adapter[2] = { NULL, NULL };
+    runtime_time_store_t time_store;
+    ucn_v6_realtime_generation_store_ops_t time_store_ops;
+    ucn_v6_callback_gate_t time_gate = UCN_V6_CALLBACK_GATE_INITIALIZER;
+    ucn_v6_realtime_owner_t *realtime = NULL;
+    ucn_v6_time_domain_config_t domain;
+    runtime_time_app_t apps[2];
+    ucn_v6_runtime_config_t runtime_config;
+    ucn_v6_runtime_owner_t *runtime[2] = { NULL, NULL };
+    ucn_v6_stack_hooks_t hooks[2];
+    ucn_v6_acl_entry_t acl;
+    ucn_v6_time_sync_announce_t announce;
+    ucn_v6_runtime_time_handle_t master_handle;
+    ucn_v6_runtime_time_handle_t forged_handle = {
+        { UINT64_C(4), UINT64_C(5) }
+    };
+    ucn_v6_realtime_clock_view_t clock_view;
+    ucn_v6_runtime_view_t runtime_view;
+    uint8_t dummy[2] = {0U, 0U};
+    unsigned before_submits;
+    size_t index;
+
+    memset(security_stores, 0, sizeof(security_stores));
+    memset(cryptos, 0, sizeof(cryptos));
+    memset(security_gates, 0, sizeof(security_gates));
+    memset(security_storage, 0, sizeof(security_storage));
+    for (index = 0U; index < 2U; ++index) {
+        security_store_ops[index] = store_ops(&security_stores[index]);
+        security_crypto_ops[index] = crypto_ops(&cryptos[index]);
+        CHECK(ucn_v6_callback_gate_init(
+                  &security_gates[index], NULL, no_lock, no_lock) ==
+              UCN_V6_OK);
+    }
+    CHECK(ucn_v6_security_init_in_place(
+              security_storage[0].bytes, sizeof(security_storage[0]),
+              ucn_v6_compiled_manifest(), 1U, &a, &security_store_ops[0],
+              &security_crypto_ops[0], &security_gates[0], &security[0]) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_init_in_place(
+              security_storage[1].bytes, sizeof(security_storage[1]),
+              ucn_v6_compiled_manifest(), 1U, &b, &security_store_ops[1],
+              &security_crypto_ops[1], &security_gates[1], &security[1]) ==
+          UCN_V6_OK);
+    CHECK(install_pair_session(
+              security[0], &a, 10U, 1U, &b, 20U, 2U, true, 501U, 51U) ==
+          0);
+    CHECK(install_pair_session(
+              security[1], &a, 10U, 1U, &b, 20U, 2U, false, 501U, 51U) ==
+          0);
+
+    acl = make_runtime_time_acl(
+        &a, &a_binding, &b_binding, UCN_V6_PROTOCOL_OPCODE_TIME_SYNC,
+        UCN_V6_SECURITY_OUTBOUND);
+    CHECK(ucn_v6_security_set_acl(
+              security[0], &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_OK);
+    acl.key.direction = UCN_V6_SECURITY_INBOUND;
+    CHECK(ucn_v6_security_set_acl(
+              security[1], &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_OK);
+    acl = make_runtime_time_acl(
+        &b, &b_binding, &a_binding,
+        UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_REQUEST,
+        UCN_V6_SECURITY_OUTBOUND);
+    CHECK(ucn_v6_security_set_acl(
+              security[1], &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_OK);
+    acl.key.direction = UCN_V6_SECURITY_INBOUND;
+    CHECK(ucn_v6_security_set_acl(
+              security[0], &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_OK);
+    acl = make_runtime_time_acl(
+        &a, &a_binding, &b_binding,
+        UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE,
+        UCN_V6_SECURITY_OUTBOUND);
+    CHECK(ucn_v6_security_set_acl(
+              security[0], &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_OK);
+    acl.key.direction = UCN_V6_SECURITY_INBOUND;
+    CHECK(ucn_v6_security_set_acl(
+              security[1], &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_OK);
+
+    local_capability = pipeline_capability_record(1U, 6U);
+    for (index = 0U; index < 2U; ++index) {
+        memset(&runtime_time_capability_storage[index], 0,
+               sizeof(runtime_time_capability_storage[index]));
+        memset(&runtime_time_route_storage[index], 0,
+               sizeof(runtime_time_route_storage[index]));
+        CHECK(ucn_v6_capability_owner_init_in_place(
+                  runtime_time_capability_storage[index].bytes,
+                  sizeof(runtime_time_capability_storage[index]),
+                  ucn_v6_compiled_manifest(), &local_capability,
+                  UINT64_C(100000), UINT64_C(100000),
+                  &capability[index]) == UCN_V6_OK);
+        CHECK(ucn_v6_route_owner_init_in_place(
+                  runtime_time_route_storage[index].bytes,
+                  sizeof(runtime_time_route_storage[index]),
+                  ucn_v6_compiled_manifest(), capability[index],
+                  UINT64_C(10000), UINT64_C(100), 3U,
+                  UINT64_C(1000), UINT64_C(1000), &route[index]) ==
+              UCN_V6_OK);
+    }
+    CHECK(install_runtime_time_route(
+              capability[0], route[0], &a, &a_binding, &b, &b_binding,
+              2U, 50U, &a_to_b) == 0);
+    CHECK(install_runtime_time_route(
+              capability[1], route[1], &b, &b_binding, &a, &a_binding,
+              3U, 50U, &b_to_a) == 0);
+
+    memset(&time_store, 0, sizeof(time_store));
+    memset(&time_store_ops, 0, sizeof(time_store_ops));
+    time_store_ops.context = &time_store;
+    time_store_ops.load_domain_record = runtime_time_load_domain;
+    time_store_ops.reserve_domain_record = runtime_time_reserve_domain;
+    CHECK(ucn_v6_callback_gate_init(
+              &time_gate, NULL, no_lock, no_lock) == UCN_V6_OK);
+    memset(&runtime_time_realtime_storage, 0,
+           sizeof(runtime_time_realtime_storage));
+    CHECK(ucn_v6_realtime_owner_init_in_place(
+              runtime_time_realtime_storage.bytes,
+              sizeof(runtime_time_realtime_storage),
+              ucn_v6_compiled_manifest(), route[1], &time_store_ops,
+              &time_gate, &realtime) == UCN_V6_OK);
+    memset(&domain, 0, sizeof(domain));
+    domain.clock_domain_id = 1U;
+    domain.domain_generation = 1U;
+    domain.master_principal = a;
+    domain.master_binding = a_binding;
+    domain.master_session_generation = 1U;
+    domain.lock_sample_count = 1U;
+    domain.sync_timeout_us = UINT64_C(1000);
+    domain.max_holdover_us = UINT64_C(2000);
+    domain.max_offset_jump_us = 1000U;
+    domain.oscillator_uncertainty_ppb = 1000U;
+    domain.timer_resolution_bound_us = 1U;
+    domain.filter_residual_bound_us = 1U;
+    domain.arithmetic_rounding_bound_us = 1U;
+    domain.sample_capture_bound_us = 1U;
+    CHECK(ucn_v6_realtime_bind_domain(
+              realtime, &domain, &b_to_a, 60U) == UCN_V6_OK);
+
+    memset(adapter_locks, 0, sizeof(adapter_locks));
+    memset(drivers, 0, sizeof(drivers));
+    memset(adapter_ops, 0, sizeof(adapter_ops));
+    for (index = 0U; index < 2U; ++index) {
+        adapter_ops[index].context = &adapter_locks[index];
+        adapter_ops[index].lock_task = pipeline_lock_task;
+        adapter_ops[index].try_lock_from_isr = pipeline_try_lock_from_isr;
+        adapter_ops[index].unlock_task = pipeline_unlock;
+        adapter_ops[index].unlock_from_isr = pipeline_unlock;
+        adapter_ops[index].post_owner_event = pipeline_post;
+        memset(&runtime_time_adapter_storage[index], 0,
+               sizeof(runtime_time_adapter_storage[index]));
+        CHECK(ucn_v6_adapter_init_in_place(
+                  runtime_time_adapter_storage[index].bytes,
+                  sizeof(runtime_time_adapter_storage[index]),
+                  ucn_v6_compiled_manifest(), &adapter_ops[index],
+                  &adapter[index]) == UCN_V6_OK);
+        drivers[index].adapter = adapter[index];
+        memset(&link, 0, sizeof(link));
+        link.link_id = 1U;
+        link.initial_generation = 6U;
+        link.bearer = UCN_V6_BEARER_CUSTOM;
+        link.nominal_bitrate_bps = UINT32_C(3000000);
+        link.carrier_mtu = UCN_V6_CONFIG_ADAPTER_FRAME_BYTES;
+        link.link_frame_mtu = UCN_V6_CONFIG_ADAPTER_FRAME_BYTES;
+        link.hardware_priority_count = 4U;
+        link.rx_slot_quota = 2U;
+        link.tx_slot_quota = 2U;
+        link.rx_timestamp_hardware = true;
+        link.tx_timestamp_hardware = true;
+        link.ops.struct_size = sizeof(link.ops);
+        link.ops.api_version = UCN_V6_ADAPTER_API_VERSION;
+        link.ops.context = &drivers[index];
+        link.ops.submit = runtime_time_submit;
+        link.ops.cancel = pipeline_cancel;
+        link.ops.quiesce = pipeline_quiesce;
+        CHECK(ucn_v6_adapter_register_link(adapter[index], &link) ==
+              UCN_V6_OK);
+        CHECK(ucn_v6_adapter_set_link_readiness(
+                  adapter[index], 1U, 6U, UCN_V6_LINK_READY) == UCN_V6_OK);
+    }
+
+    memset(apps, 0, sizeof(apps));
+    apps[0].security = security[0];
+    apps[0].peer = b;
+    apps[0].reverse_ref = a_to_b;
+    apps[0].next_buffer_token = UINT64_C(1000);
+    apps[0].auto_send_delay_request = true;
+    apps[1].security = security[1];
+    apps[1].peer = a;
+    apps[1].reverse_ref = b_to_a;
+    apps[1].next_buffer_token = UINT64_C(2000);
+    apps[1].auto_send_delay_request = true;
+    for (index = 0U; index < 2U; ++index) {
+        memset(&runtime_config, 0, sizeof(runtime_config));
+        runtime_config.runtime_instance_generation = index + 1U;
+        runtime_config.adapter = adapter[index];
+        runtime_config.bootstrap =
+            (ucn_v6_bootstrap_owner_t *)&dummy[index];
+        runtime_config.security = security[index];
+        runtime_config.capability = capability[index];
+        runtime_config.route = route[index];
+        runtime_config.metric = (ucn_v6_metric_owner_t *)&dummy[index];
+        runtime_config.qos = (ucn_v6_qos_owner_t *)&dummy[index];
+        runtime_config.transfer = (ucn_v6_transfer_owner_t *)&dummy[index];
+        runtime_config.realtime = index == 1U ? realtime :
+            (ucn_v6_realtime_owner_t *)&dummy[index];
+#if UCN_V6_FEATURE_CLUSTER_ENABLED
+        runtime_config.cluster = (ucn_v6_cluster_owner_t *)&dummy[index];
+#endif
+        runtime_config.app.context = &apps[index];
+        runtime_config.app.handle_ingress = runtime_time_ingress;
+        runtime_config.app.release_buffer = runtime_time_release;
+        memset(&runtime_time_runtime_storage[index], 0,
+               sizeof(runtime_time_runtime_storage[index]));
+        CHECK(ucn_v6_runtime_init_in_place(
+                  runtime_time_runtime_storage[index].bytes,
+                  sizeof(runtime_time_runtime_storage[index]),
+                  ucn_v6_compiled_manifest(), &runtime_config,
+                  &runtime[index]) == UCN_V6_OK);
+        CHECK(ucn_v6_runtime_make_stack_hooks(runtime[index], &hooks[index]) ==
+              UCN_V6_OK);
+    }
+
+    before_submits = drivers[1].submit_calls;
+    CHECK(ucn_v6_runtime_time_send_delay_request(
+              runtime[1], &forged_handle, UINT64_C(999), 99U) ==
+          UCN_V6_ERR_NOT_FOUND);
+    CHECK(drivers[1].submit_calls == before_submits);
+
+    memset(&announce, 0, sizeof(announce));
+    announce.clock_domain_id = 1U;
+    announce.domain_generation = 1U;
+    announce.sync_sequence = 1U;
+    CHECK(ucn_v6_runtime_time_start_sync(
+              runtime[0], &a_to_b, &announce, UINT64_C(101), 100U,
+              &master_handle) == UCN_V6_OK);
+    CHECK(ucn_v6_runtime_time_send_delay_request(
+              runtime[1], &master_handle, UINT64_C(998), 100U) ==
+          UCN_V6_ERR_NOT_FOUND);
+    CHECK(runtime_time_service_timestamped_tx(
+              &hooks[0], &drivers[0], 105U, 110U) == 0);
+    CHECK(runtime_time_deliver(
+              adapter[1], &hooks[1], &drivers[0], 121U, 120U) == 0);
+    CHECK(apps[1].callback_result == UCN_V6_OK &&
+          apps[1].sync_frames == 1U);
+    CHECK(runtime_time_service_timestamped_tx(
+              &hooks[1], &drivers[1], 125U, 130U) == 0);
+    CHECK(runtime_time_deliver(
+              adapter[0], &hooks[0], &drivers[1], 141U, 140U) == 0);
+    CHECK(apps[0].callback_result == UCN_V6_OK &&
+          apps[0].delay_requests == 1U);
+    CHECK(runtime_time_service_untimestamped_tx(
+              &hooks[0], &drivers[0], 145U) == 0);
+    CHECK(runtime_time_deliver(
+              adapter[1], &hooks[1], &drivers[0], 151U, 150U) == 0);
+    CHECK(apps[1].callback_result == UCN_V6_OK &&
+          apps[1].delay_responses == 1U);
+    CHECK(ucn_v6_realtime_get_clock(realtime, 1U, 160U, &clock_view) ==
+          UCN_V6_OK);
+    CHECK(clock_view.available && clock_view.domain_generation == 1U &&
+          clock_view.domain_time_us == 160U);
+    CHECK(ucn_v6_runtime_copy_view(runtime[1], &runtime_view) == UCN_V6_OK);
+    CHECK(runtime_view.realtime_exchanges_started == 1U &&
+          runtime_view.realtime_tx_timestamps_captured == 1U &&
+          runtime_view.realtime_exchanges_completed == 1U);
+
+#if UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGES > 1U
+    /* Profiles with a second concurrent exchange slot can observe another
+     * authenticated Sync while the Master intentionally retains the first
+     * response for exact duplicate replay. Only the Runtime-issued handle is
+     * usable, and the half-open deadline rejects it without Adapter effects.
+     * A one-slot Nano profile already completed the full T1/T2/T3/T4 path
+     * above; its sole Master slot remains occupied until replay expiry. */
+    apps[1].auto_send_delay_request = false;
+    announce.sync_sequence = 2U;
+    CHECK(ucn_v6_runtime_time_start_sync(
+              runtime[0], &a_to_b, &announce, UINT64_C(102), 200U,
+              &master_handle) == UCN_V6_OK);
+    CHECK(runtime_time_service_timestamped_tx(
+              &hooks[0], &drivers[0], 205U, 210U) == 0);
+    CHECK(runtime_time_deliver(
+              adapter[1], &hooks[1], &drivers[0], 221U, 220U) == 0);
+    CHECK(apps[1].sync_frames == 2U);
+    before_submits = drivers[1].submit_calls;
+    CHECK(ucn_v6_runtime_time_send_delay_request(
+              runtime[0], &apps[1].member_handle, UINT64_C(997), 221U) ==
+          UCN_V6_ERR_NOT_FOUND);
+    CHECK(ucn_v6_runtime_time_send_delay_request(
+              runtime[1], &apps[1].member_handle, UINT64_C(996),
+              221U + UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGE_TIMEOUT_US) ==
+          UCN_V6_ERR_TIMEOUT);
+    CHECK(drivers[1].submit_calls == before_submits);
+#endif
+    return 0;
+}
+#endif
 
 static int test_join_acl_aead_replay(void)
 {
@@ -1156,16 +1872,17 @@ static int test_join_acl_aead_replay(void)
                   &incomplete_join) == UCN_V6_ERR_STATE);
         CHECK(device_store.submits == 1U);
     }
-    device_join.authority_challenge_started_local_us = 101U;
-    CHECK(ucn_v6_security_commit_join(
-              device_manager, device_bootstrap, &bootstrap_key, 100U,
-              &device_join) == UCN_V6_ERR_SECURITY);
-    CHECK(device_store.submits == 1U);
-    device_join.authority_challenge_started_local_us = 0U;
+    {
+        ucn_v6_bootstrap_pending_t pending = {0};
+        CHECK(ucn_v6_bootstrap_copy_pending(
+                  device_bootstrap, UCN_V6_BOOTSTRAP_FLOW_JOIN,
+                  &bootstrap_key, &pending) == UCN_V6_OK);
+        CHECK(pending.challenge_started_local_us == 10U);
+    }
 
-    /* The peer can issue a recovery receipt only from its exact, durably
-     * reloaded ADMITTED session.  The device then completes the same JOIN
-     * without relying on volatile Bootstrap state. */
+    /* A durable peer receipt may supplement proof, but it must never replace
+     * the receiver's own live Bootstrap transaction because that local Owner
+     * is the only source of the lease start time. */
     CHECK(ucn_v6_security_commit_join(
               authority_manager, authority_bootstrap, &bootstrap_key, 100U,
               &authority_join) == UCN_V6_OK);
@@ -1209,8 +1926,9 @@ static int test_join_acl_aead_replay(void)
     device_join.peer_durable_receipt_generation =
         durable_receipt_generation;
     CHECK(ucn_v6_security_commit_join(
-              device_manager, NULL, NULL, 100U, &device_join) == UCN_V6_OK);
-    CHECK(device_store.submits == 2U && authority_store.submits == 2U);
+              device_manager, NULL, NULL, 100U, &device_join) ==
+          UCN_V6_ERR_SECURITY);
+    CHECK(device_store.submits == 1U && authority_store.submits == 2U);
     CHECK(ucn_v6_security_commit_join(
               device_manager, device_bootstrap, &bootstrap_key, 101U,
               &device_join) == UCN_V6_OK);
@@ -1233,6 +1951,64 @@ static int test_join_acl_aead_replay(void)
 
     frame = make_data_frame(payload, sizeof(payload));
     {
+        typedef union frame_length_alias {
+            ucn_v6_frame_t frame;
+            size_t length;
+        } frame_length_alias_t;
+        frame_length_alias_t alias;
+        frame_length_alias_t alias_before;
+        uint8_t alias_payload_work[32U];
+        uint8_t alias_frame_work[256U];
+        uint8_t alias_output[256U];
+        uint8_t payload_before[sizeof(alias_payload_work)];
+        uint8_t work_before[sizeof(alias_frame_work)];
+        uint8_t output_before[sizeof(alias_output)];
+        unsigned submits_before = device_store.submits;
+
+        memset(&alias, 0, sizeof(alias));
+        alias.frame = frame;
+        memcpy(&alias_before, &alias, sizeof(alias_before));
+        memset(alias_payload_work, 0x31, sizeof(alias_payload_work));
+        memset(alias_frame_work, 0x42, sizeof(alias_frame_work));
+        memset(alias_output, 0x53, sizeof(alias_output));
+        memcpy(payload_before, alias_payload_work, sizeof(payload_before));
+        memcpy(work_before, alias_frame_work, sizeof(work_before));
+        memcpy(output_before, alias_output, sizeof(output_before));
+        CHECK(ucn_v6_security_protect_frame(
+                  device_manager, 149U, &authority, &authority,
+                  &alias.frame, alias_payload_work,
+                  sizeof(alias_payload_work), alias_frame_work,
+                  sizeof(alias_frame_work), alias_output,
+                  sizeof(alias_output), &alias.length) ==
+              UCN_V6_ERR_ARGUMENT);
+        CHECK(memcmp(&alias, &alias_before, sizeof(alias)) == 0);
+        CHECK(memcmp(alias_payload_work, payload_before,
+                     sizeof(payload_before)) == 0);
+        CHECK(memcmp(alias_frame_work, work_before, sizeof(work_before)) == 0);
+        CHECK(memcmp(alias_output, output_before, sizeof(output_before)) == 0);
+        CHECK(device_store.submits == submits_before);
+    }
+    {
+        uint8_t alias[32U];
+        uint8_t alias_before[sizeof(alias)];
+        ucn_v6_frame_t alias_frame;
+        ucn_v6_frame_t frame_before;
+        size_t length_before = 91U;
+        unsigned submits_before = device_store.submits;
+        memset(alias, 0x5AU, sizeof(alias));
+        memcpy(alias_before, alias, sizeof(alias));
+        alias_frame = make_data_frame(alias, sizeof(payload));
+        frame_before = alias_frame;
+        CHECK(ucn_v6_security_protect_frame(
+                  device_manager, 149U, &authority, &authority, &alias_frame,
+                  alias + 1U, sizeof(alias) - 1U, frame_work,
+                  sizeof(frame_work), encoded, sizeof(encoded),
+                  &length_before) == UCN_V6_ERR_ARGUMENT);
+        CHECK(memcmp(alias, alias_before, sizeof(alias)) == 0 &&
+              memcmp(&alias_frame, &frame_before, sizeof(alias_frame)) == 0 &&
+              length_before == 91U && device_store.submits == submits_before);
+    }
+    {
         ucn_v6_frame_t frame_before = frame;
         uint8_t output_before[sizeof(encoded)];
         size_t length_before = 77U;
@@ -1253,6 +2029,12 @@ static int test_join_acl_aead_replay(void)
     CHECK(frame.origin_sequence == 1U && frame.hop_sequence == 1U);
     CHECK(memcmp(cipher, payload, sizeof(payload)) != 0);
     memset(&opened, 0, sizeof(opened));
+    sentinel = opened;
+    CHECK(ucn_v6_security_open_frame(
+              authority_manager, 200U, 1U, 6U, &device, encoded, encoded_length,
+              encoded + 1U, encoded_length - 1U, &opened) ==
+          UCN_V6_ERR_ARGUMENT);
+    CHECK(memcmp(&opened, &sentinel, sizeof(opened)) == 0);
     CHECK(ucn_v6_security_open_frame(
               authority_manager, 200U, 1U, 6U, &device, encoded, encoded_length,
               plaintext, sizeof(plaintext), &opened) == UCN_V6_OK);
@@ -1374,6 +2156,38 @@ static int test_join_acl_aead_replay(void)
         CHECK(memcmp(&hello, &before, sizeof(hello)) == 0);
         CHECK(memcmp(encoded, output_before, sizeof(encoded)) == 0);
         CHECK(length_before == 91U);
+        {
+            typedef union frame_length_alias {
+                ucn_v6_frame_t frame;
+                size_t length;
+            } frame_length_alias_t;
+            frame_length_alias_t alias;
+            frame_length_alias_t alias_before;
+            uint8_t local_work[256U];
+            uint8_t local_output[256U];
+            uint8_t work_before[sizeof(local_work)];
+            uint8_t output_before_alias[sizeof(local_output)];
+            unsigned submits_before = device_store.submits;
+
+            memset(&alias, 0, sizeof(alias));
+            alias.frame = hello;
+            memcpy(&alias_before, &alias, sizeof(alias_before));
+            memset(local_work, 0x64, sizeof(local_work));
+            memset(local_output, 0x75, sizeof(local_output));
+            memcpy(work_before, local_work, sizeof(work_before));
+            memcpy(output_before_alias, local_output,
+                   sizeof(output_before_alias));
+            CHECK(ucn_v6_security_protect_peer_discovery(
+                      device_manager, 260U, &authority, &alias.frame,
+                      local_work, sizeof(local_work), local_output,
+                      sizeof(local_output), &alias.length) ==
+                  UCN_V6_ERR_ARGUMENT);
+            CHECK(memcmp(&alias, &alias_before, sizeof(alias)) == 0);
+            CHECK(memcmp(local_work, work_before, sizeof(work_before)) == 0);
+            CHECK(memcmp(local_output, output_before_alias,
+                         sizeof(output_before_alias)) == 0);
+            CHECK(device_store.submits == submits_before);
+        }
         CHECK(ucn_v6_security_protect_peer_discovery(
                   device_manager, 260U, &authority, &hello, frame_work,
                   sizeof(frame_work), encoded, sizeof(encoded),
@@ -1547,6 +2361,36 @@ static int test_join_acl_aead_replay(void)
                          sizeof(hello_encoded)) == 0);
             CHECK(length_before == 88U);
         }
+        {
+            typedef union frame_length_alias {
+                ucn_v6_frame_t frame;
+                size_t length;
+            } frame_length_alias_t;
+            frame_length_alias_t alias;
+            frame_length_alias_t alias_before;
+            uint8_t local_work[160U];
+            uint8_t local_output[160U];
+            uint8_t work_before[sizeof(local_work)];
+            uint8_t output_before[sizeof(local_output)];
+            unsigned submits_before = device_store.submits;
+
+            memset(&alias, 0, sizeof(alias));
+            alias.frame = hello;
+            memcpy(&alias_before, &alias, sizeof(alias_before));
+            memset(local_work, 0x86, sizeof(local_work));
+            memset(local_output, 0x97, sizeof(local_output));
+            memcpy(work_before, local_work, sizeof(work_before));
+            memcpy(output_before, local_output, sizeof(output_before));
+            CHECK(ucn_v6_security_protect_group_hello(
+                      device_manager, 0U, 0U, &alias.frame, local_work,
+                      sizeof(local_work), local_output, sizeof(local_output),
+                      &alias.length) == UCN_V6_ERR_ARGUMENT);
+            CHECK(memcmp(&alias, &alias_before, sizeof(alias)) == 0);
+            CHECK(memcmp(local_work, work_before, sizeof(work_before)) == 0);
+            CHECK(memcmp(local_output, output_before,
+                         sizeof(output_before)) == 0);
+            CHECK(device_store.submits == submits_before);
+        }
         CHECK(ucn_v6_security_protect_group_hello(
                   device_manager, 0U, 0U, &hello, hello_work,
                   sizeof(hello_work), hello_encoded, sizeof(hello_encoded),
@@ -1664,9 +2508,9 @@ static int test_independent_sequence_domains_and_verified_relay(void)
 #endif
     uint8_t work_a[256U];
     uint8_t work_b[256U];
-    uint8_t encoded_c[256U];
+    uint8_t encoded_c[256U] = {0};
 #if UCN_V6_CONFIG_SECURITY_SESSIONS >= 3U
-    uint8_t encoded_d[256U];
+    uint8_t encoded_d[256U] = {0};
 #endif
     uint8_t relayed_encoded[256U];
     uint8_t plaintext[sizeof(transfer_payload)];
@@ -2021,6 +2865,33 @@ static int test_independent_sequence_domains_and_verified_relay(void)
                      sizeof(ingress_before)) == 0);
         CHECK(memcmp(&relayed, &frame_before, sizeof(frame_before)) == 0);
         CHECK(length_before == 73U);
+    }
+
+    {
+        typedef union ingress_length_alias {
+            ucn_v6_security_open_result_t ingress;
+            size_t length;
+        } ingress_length_alias_t;
+        ingress_length_alias_t alias;
+        ingress_length_alias_t alias_before;
+        ucn_v6_frame_t frame_before;
+        uint8_t output_before[sizeof(relayed_encoded)];
+
+        memset(&alias, 0x4DU, sizeof(alias));
+        memcpy(&alias_before, &alias, sizeof(alias_before));
+        memset(&relayed, 0xC8, sizeof(relayed));
+        frame_before = relayed;
+        memset(relayed_encoded, 0x97, sizeof(relayed_encoded));
+        memcpy(output_before, relayed_encoded, sizeof(output_before));
+        CHECK(ucn_v6_security_relay_frame(
+                  managers[1], 108U, 1U, 6U, &a, &c, 5U,
+                  encoded_c, encoded_c_length, work_b, sizeof(work_b),
+                  relayed_encoded, sizeof(relayed_encoded), &alias.length,
+                  &alias.ingress, &relayed) == UCN_V6_ERR_ARGUMENT);
+        CHECK(memcmp(&alias, &alias_before, sizeof(alias)) == 0);
+        CHECK(memcmp(&relayed, &frame_before, sizeof(frame_before)) == 0);
+        CHECK(memcmp(relayed_encoded, output_before, sizeof(output_before)) ==
+              0);
     }
 
     {
@@ -3152,6 +4023,9 @@ static int test_callback_violations_fail_closed(void)
 int main(void)
 {
     CHECK(test_join_acl_aead_replay() == 0);
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
+    CHECK(test_runtime_owned_four_event_exchange() == 0);
+#endif
     CHECK(test_independent_sequence_domains_and_verified_relay() == 0);
     CHECK(test_five_node_verified_relay_chain() == 0);
     CHECK(test_group_fixed_slots_and_replay() == 0);

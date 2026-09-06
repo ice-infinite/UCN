@@ -1,5 +1,7 @@
 # UCN 使用与调用手册
 
+> `ARCHIVED / NOT CURRENT`：本文描述 v5 API；当前 v6 调用方式请见 [v6 用户手册](../用户手册/README.md)。
+
 > 适用版本：`codex/v5-adaptive-wire` 当前工作树的 UCN Core 5.0.0 / 线协议 v5，已包含 V5-35 静态标准 Preset Resolver。Nano/Lite/Full 都解析 W0～W3；默认固定 W3，产品可在注册 Link/安装 Security 前使用“最低够用 TX/W3 RX”，或显式开启路由感知自动选档。产品工程的 Adapter、密钥、板级引脚和业务 Endpoint 仍需自行实现。
 > 目标：让业务代码只关心“发给哪个 Node 的哪个 Endpoint、什么 QoS”，而不关心数据当前经过 Wi-Fi、UART、CAN、BLE 或其他 Bearer。
 

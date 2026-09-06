@@ -28,6 +28,7 @@
 
 #if UCN_V6_FEATURE_ADAPTER_ENABLED
 #include "ucn/v6/ucn_v6_adapter.h"
+#include "ucn/v6/ucn_v6_runtime.h"
 #include "ucn/v6/adapters/ucn_v6_can.h"
 #include "ucn/v6/adapters/ucn_v6_uart.h"
 #include "ucn/v6/adapters/ucn_v6_usb.h"

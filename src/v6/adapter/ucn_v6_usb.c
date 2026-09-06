@@ -17,6 +17,7 @@ ucn_v6_result_t ucn_v6_usb_link_config_init(
     ucn_v6_driver_link_config_t next;
     uint16_t mtu;
     if (settings == NULL || config == NULL || settings->base.link_id == 0U ||
+        settings->base.link_id > UCN_V6_LINK_ID_MAX ||
         settings->base.initial_generation == 0U ||
         settings->base.initial_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
         return UCN_V6_ERR_ARGUMENT;

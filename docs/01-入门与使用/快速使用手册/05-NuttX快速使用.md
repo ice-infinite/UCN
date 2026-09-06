@@ -1,5 +1,7 @@
 # UCN NuttX 快速使用
 
+> `ARCHIVED / NOT CURRENT`：本文仅保留 v5 NuttX 接入记录；v6 请从[当前用户手册](../../用户手册/README.md)开始。
+
 > 适用：NuttX 应用或 PX4 风格的 NuttX 板级产品。当前仓库已有独立、SDK 无关的 `ucn_port_nuttx` C99 外壳；产品仍需映射真实 NuttX Task/同步/驱动。本页不替代你的 NuttX 版本、BSP 或驱动配置。
 
 > 当前 API：V5-62 Port API V2 要求所有 `ucn_port_ops_t` 具名填写 `struct_size/api_version`；旧位置初始化与旧对象不兼容。Transfer 还必须配置权威时钟并使用无时间参数的 `ucn_transfer_step()`。迁移见[总览](README.md)。

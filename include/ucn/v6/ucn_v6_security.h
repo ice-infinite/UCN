@@ -262,7 +262,6 @@ typedef struct ucn_v6_join_commit {
     uint32_t link_instance_generation;
     ucn_v6_key_selector_t hop_selector;
     ucn_v6_key_selector_t e2e_selector;
-    uint64_t authority_challenge_started_local_us;
     ucn_v6_lease_verifier_policy_t authority_lease_policy;
     const uint8_t *device_proof;
     size_t device_proof_length;
@@ -464,10 +463,12 @@ ucn_v6_result_t ucn_v6_security_invalidation_ack(
     const ucn_v6_stack_invalidation_t *invalidation);
 
 /* EN: Verifies hop/group auth, replay, optional E2E protection, and exact ACL.
+ * Encoded input, plaintext storage, and result must be pairwise disjoint.
  * Plaintext storage is caller-owned and may be modified on a rejected AEAD
- * operation; result is never written on rejection.
- * 中文：验证逐跳/组认证、重放、可选 E2E 与精确 ACL。AEAD 被拒绝时调用方
- * 明文暂存区可能改变，但 result 保持不写回。 */
+ * operation after this admission check; result is never written on rejection.
+ * 中文：验证逐跳/组认证、重放、可选 E2E 与精确 ACL。编码输入、明文暂存区
+ * 与 result 必须两两互不重叠；AEAD 被拒绝时明文暂存区可能改变，但 result
+ * 保持不写回。 */
 ucn_v6_result_t ucn_v6_security_open_frame(
     ucn_v6_security_manager_t *manager,
     uint64_t now_us,
@@ -481,9 +482,11 @@ ucn_v6_result_t ucn_v6_security_open_frame(
     ucn_v6_security_open_result_t *result);
 
 /* EN: Reserves a persistent sequence, seals E2E, then applies the next-hop
- * tag. Work storage must be at least the final frame size and may change on
- * failure; output is copied only after every security step succeeds.
- * 中文：持久预留 Sequence，完成 E2E 封装后生成下一跳 Tag。工作区在失败时
+ * tag. Frame, input payload, every work/output buffer, and output-length
+ * object must be pairwise disjoint. Work storage may change on failure;
+ * output is copied only after every security step succeeds.
+ * 中文：持久预留 Sequence，完成 E2E 封装后生成下一跳 Tag。Frame、输入
+ * Payload、各工作/输出缓冲区与长度对象必须两两互不重叠；工作区在失败时
  * 可改变，最终输出仅在全部安全步骤成功后写入。 */
 ucn_v6_result_t ucn_v6_security_protect_frame(
     ucn_v6_security_manager_t *manager,
@@ -505,16 +508,16 @@ ucn_v6_result_t ucn_v6_security_protect_frame(
  * tag are used. verified_ingress returns the Security-produced in-process
  * admission result for immediate Route/QoS use; this API never accepts a
  * caller-supplied result as proof. Its frame payload borrows encoded_frame and
- * must not outlive or out-mutate that storage. frame_work must not overlap
- * either the raw ingress bytes or output; rejected calls never write
- * output/result objects.
+ * must not outlive or out-mutate that storage. Ingress bytes, frame_work,
+ * output, output-length and both result objects must be pairwise disjoint;
+ * rejected calls never write output/result objects.
  * 中文：先在 Security 内部验证原始入站帧与重放状态，再仅替换可变
  * 逐跳状态。原始 Source、Origin 序号、密文和 E2E Tag 保持不变，
  * 并使用新的下一跳序号与 Link Tag。verified_ingress 是供 Route/QoS 立即
  * 使用的进程内准入结果，本 API 不接受调用方预先传入的结果充当证明；其中
  * 的帧 Payload 借用 encoded_frame，不得超过或改写该存储的生命周期。
- * frame_work 不得与原始入站字节或 output 重叠；拒绝路径不会写回输出或
- * 结果对象。 */
+ * 原始入站字节、frame_work、output、长度对象与两个结果对象必须两两互不
+ * 重叠；拒绝路径不会写回输出或结果对象。 */
 ucn_v6_result_t ucn_v6_security_relay_frame(
     ucn_v6_security_manager_t *manager,
     uint64_t now_us,
@@ -534,9 +537,11 @@ ucn_v6_result_t ucn_v6_security_relay_frame(
     ucn_v6_frame_t *relayed_frame);
 
 /* EN: Protects one exact hop-authenticated HELLO/Capability control frame.
- * This path never grants Endpoint ACL or admission authority.
- * 中文：保护一帧精确定义的逐跳认证 HELLO/Capability 控制帧；该路径绝不
- * 授予 Endpoint ACL 或准入权。 */
+ * Frame, payload, work/output bytes, and output-length must be pairwise
+ * disjoint. This path never grants Endpoint ACL or admission authority.
+ * 中文：保护一帧精确定义的逐跳认证 HELLO/Capability 控制帧；Frame、
+ * Payload、工作/输出字节与长度对象必须两两互不重叠；该路径绝不授予
+ * Endpoint ACL 或准入权。 */
 ucn_v6_result_t ucn_v6_security_protect_peer_discovery(
     ucn_v6_security_manager_t *manager,
     uint64_t now_us,
@@ -548,8 +553,10 @@ ucn_v6_result_t ucn_v6_security_protect_peer_discovery(
     size_t output_capacity,
     size_t *output_length);
 
-/* EN: Protects the unique non-forwardable Group HELLO contract.
- * 中文：保护唯一、禁止转发的 Group HELLO 合同。 */
+/* EN: Protects the unique non-forwardable Group HELLO contract. Frame,
+ * payload, work/output bytes, and output-length must be pairwise disjoint.
+ * 中文：保护唯一、禁止转发的 Group HELLO 合同；Frame、Payload、工作/
+ * 输出字节与长度对象必须两两互不重叠。 */
 ucn_v6_result_t ucn_v6_security_protect_group_hello(
     ucn_v6_security_manager_t *manager,
     size_t group_slot,

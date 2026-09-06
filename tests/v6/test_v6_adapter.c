@@ -241,10 +241,13 @@ static int test_reference_profiles_and_rx(void)
     can.owner = adapter;
 
     memset(&uart_settings, 0, sizeof(uart_settings));
-    uart_settings.base.link_id = 1U;
+    uart_settings.base.link_id = UINT16_MAX;
     uart_settings.base.initial_generation = 1U;
     uart_settings.base.ops = driver_ops(&uart);
     uart_settings.rx_timestamp_hardware = true;
+    CHECK(ucn_v6_uart_link_config_init(
+              &uart_settings, &uart_config) == UCN_V6_ERR_ARGUMENT);
+    uart_settings.base.link_id = 1U;
     CHECK(ucn_v6_uart_link_config_init(
               &uart_settings, &uart_config) == UCN_V6_OK);
     CHECK(uart_config.nominal_bitrate_bps == UINT32_C(3000000));
@@ -485,6 +488,67 @@ static int test_tx_lifecycle_and_reopen(void)
               adapter, 9U, 4U, frame, sizeof(frame), NULL,
               true, &key4) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_retire_rx(adapter, &key4) == UCN_V6_OK);
+    return 0;
+}
+
+static int test_offline_link_does_not_block_ready_link(void)
+{
+    fake_environment_t environment;
+    fake_driver_t offline_driver;
+    fake_driver_t ready_driver;
+    ucn_v6_adapter_owner_t *adapter = NULL;
+    ucn_v6_uart_link_settings_t settings;
+    ucn_v6_driver_link_config_t config;
+    ucn_v6_driver_event_key_t offline_key;
+    ucn_v6_driver_event_key_t ready_key;
+    uint8_t frame[8];
+    bool submitted = false;
+
+    memset(&environment, 0, sizeof(environment));
+    memset(&offline_driver, 0, sizeof(offline_driver));
+    memset(&ready_driver, 0, sizeof(ready_driver));
+    memset(frame, 0x3C, sizeof(frame));
+    offline_driver.submit_result = UCN_V6_OK;
+    offline_driver.cancel_result = UCN_V6_OK;
+    offline_driver.quiesce_result = UCN_V6_OK;
+    ready_driver = offline_driver;
+    CHECK(init_adapter(&environment, &adapter) == UCN_V6_OK);
+    offline_driver.owner = adapter;
+    ready_driver.owner = adapter;
+
+    memset(&settings, 0, sizeof(settings));
+    settings.base.link_id = 30U;
+    settings.base.initial_generation = 1U;
+    settings.base.ops = driver_ops(&offline_driver);
+    CHECK(ucn_v6_uart_link_config_init(&settings, &config) == UCN_V6_OK);
+    CHECK(ucn_v6_adapter_register_link(adapter, &config) == UCN_V6_OK);
+    CHECK(ucn_v6_adapter_set_link_readiness(
+              adapter, 30U, 1U, UCN_V6_LINK_READY) == UCN_V6_OK);
+
+    settings.base.link_id = 31U;
+    settings.base.ops = driver_ops(&ready_driver);
+    CHECK(ucn_v6_uart_link_config_init(&settings, &config) == UCN_V6_OK);
+    CHECK(ucn_v6_adapter_register_link(adapter, &config) == UCN_V6_OK);
+    CHECK(ucn_v6_adapter_set_link_readiness(
+              adapter, 31U, 1U, UCN_V6_LINK_READY) == UCN_V6_OK);
+
+    CHECK(ucn_v6_adapter_enqueue_tx(
+              adapter, 30U, 301U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q1,
+              false, &offline_key) == UCN_V6_OK);
+    CHECK(ucn_v6_adapter_enqueue_tx(
+              adapter, 31U, 302U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q1,
+              false, &ready_key) == UCN_V6_OK);
+    CHECK(ucn_v6_adapter_set_link_readiness(
+              adapter, 30U, 1U, UCN_V6_LINK_OFFLINE) == UCN_V6_OK);
+
+    CHECK(ucn_v6_adapter_service_tx(adapter, &submitted) == UCN_V6_OK);
+    CHECK(submitted && offline_driver.submit_calls == 0U &&
+          ready_driver.submit_calls == 1U &&
+          key_equal(&ready_driver.last_key, &ready_key));
+    submitted = true;
+    CHECK(ucn_v6_adapter_service_tx(adapter, &submitted) == UCN_V6_OK);
+    CHECK(!submitted && offline_driver.submit_calls == 0U);
+    CHECK(ucn_v6_adapter_cancel_tx(adapter, &offline_key) == UCN_V6_OK);
     return 0;
 }
 
@@ -780,6 +844,7 @@ int main(void)
     CHECK(test_reference_profiles_and_rx() == 0);
     CHECK(test_esp32s3_reference_configuration() == 0);
     CHECK(test_tx_lifecycle_and_reopen() == 0);
+    CHECK(test_offline_link_does_not_block_ready_link() == 0);
     CHECK(test_freertos_budget_preflight_is_non_destructive() == 0);
     CHECK(test_freertos_notification_owner() == 0);
     printf("ucn v6 adapter and FreeRTOS port tests passed "

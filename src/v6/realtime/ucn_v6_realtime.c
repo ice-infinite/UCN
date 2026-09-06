@@ -59,29 +59,6 @@ static uint64_t read_u64(const uint8_t *input)
     return value;
 }
 
-static void write_i64(uint8_t *output, int64_t value)
-{
-    write_u64(output, (uint64_t)value);
-}
-
-static bool read_i64(const uint8_t *input, int64_t *value)
-{
-    const uint64_t raw = read_u64(input);
-    const uint64_t magnitude = (~raw) + 1U;
-
-    if (value == NULL) {
-        return false;
-    }
-    if (raw <= (uint64_t)INT64_MAX) {
-        *value = (int64_t)raw;
-    } else if (magnitude == (UINT64_C(1) << 63U)) {
-        *value = INT64_MIN;
-    } else {
-        *value = -(int64_t)magnitude;
-    }
-    return true;
-}
-
 static bool principal_equal(const ucn_v6_principal_t *left,
                             const ucn_v6_principal_t *right)
 {
@@ -331,83 +308,123 @@ ucn_v6_result_t ucn_v6_realtime_uncertainty_aggregate(
     return UCN_V6_OK;
 }
 
-ucn_v6_result_t ucn_v6_time_sync_sample_encode(
-    const ucn_v6_time_sync_sample_t *sample,
-    uint8_t output[UCN_V6_TIME_SYNC_SAMPLE_BYTES])
+ucn_v6_result_t ucn_v6_time_sync_announce_encode(
+    const ucn_v6_time_sync_announce_t *announce,
+    uint8_t output[UCN_V6_TIME_SYNC_ANNOUNCE_BYTES])
 {
-    uint8_t encoded[UCN_V6_TIME_SYNC_SAMPLE_BYTES];
-    uint32_t uncertainty;
-
-    if (sample == NULL || output == NULL || sample->clock_domain_id == 0U ||
-        sample->clock_domain_id > UCN_V6_REALTIME_DOMAIN_ID_MAX ||
-        sample->domain_generation == 0U ||
-        sample->domain_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        sample->local_sample_us == 0U ||
-        ucn_v6_realtime_uncertainty_aggregate(&sample->uncertainty,
-                                              &uncertainty) != UCN_V6_OK) {
+    uint8_t encoded[UCN_V6_TIME_SYNC_ANNOUNCE_BYTES];
+    if (announce == NULL || output == NULL ||
+        announce->clock_domain_id == 0U ||
+        announce->clock_domain_id > UCN_V6_REALTIME_DOMAIN_ID_MAX ||
+        announce->domain_generation == 0U ||
+        announce->domain_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        announce->sync_sequence == 0U ||
+        announce->sync_sequence > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    (void)uncertainty;
     memset(encoded, 0, sizeof(encoded));
-    write_u16(&encoded[0], sample->clock_domain_id);
-    write_u32(&encoded[2], sample->domain_generation);
-    write_u64(&encoded[6], sample->local_sample_us);
-    write_i64(&encoded[14], sample->offset_us);
-    write_u32(&encoded[22], sample->uncertainty.timer_resolution_bound_us);
-    write_u32(&encoded[26],
-              sample->uncertainty.link_timestamp_capture_bound_us);
-    write_u32(&encoded[30], sample->uncertainty.filter_residual_bound_us);
-    write_u32(&encoded[34], sample->uncertainty.arithmetic_rounding_bound_us);
-    write_u32(&encoded[38], sample->uncertainty.sample_capture_bound_us);
-    write_u32(&encoded[42], sample->uncertainty.path_asymmetry_bound_us);
-    encoded[46] = sample->uncertainty.known_mask;
+    encoded[0] = 1U;
+    write_u16(&encoded[2], announce->clock_domain_id);
+    write_u32(&encoded[4], announce->domain_generation);
+    write_u32(&encoded[8], announce->sync_sequence);
     memcpy(output, encoded, sizeof(encoded));
     return UCN_V6_OK;
 }
 
-ucn_v6_result_t ucn_v6_time_sync_sample_decode(
-    const uint8_t *input,
-    size_t input_length,
-    ucn_v6_time_sync_sample_t *sample)
+ucn_v6_result_t ucn_v6_time_sync_announce_decode(
+    const uint8_t *input, size_t input_length,
+    ucn_v6_time_sync_announce_t *announce)
 {
-    ucn_v6_time_sync_sample_t decoded;
-    uint32_t uncertainty;
-
-    if (input == NULL || sample == NULL ||
-        input_length != UCN_V6_TIME_SYNC_SAMPLE_BYTES || input[47] != 0U) {
+    ucn_v6_time_sync_announce_t decoded;
+    if (input == NULL || announce == NULL ||
+        input_length != UCN_V6_TIME_SYNC_ANNOUNCE_BYTES ||
+        input[0] != 1U || input[1] != 0U) {
         return UCN_V6_ERR_MALFORMED;
     }
-    memset(&decoded, 0, sizeof(decoded));
-    decoded.clock_domain_id = read_u16(&input[0]);
-    decoded.domain_generation = read_u32(&input[2]);
-    decoded.local_sample_us = read_u64(&input[6]);
-    if (!read_i64(&input[14], &decoded.offset_us)) {
-        return UCN_V6_ERR_MALFORMED;
-    }
-    decoded.uncertainty.timer_resolution_bound_us = read_u32(&input[22]);
-    decoded.uncertainty.link_timestamp_capture_bound_us = read_u32(&input[26]);
-    decoded.uncertainty.filter_residual_bound_us = read_u32(&input[30]);
-    decoded.uncertainty.arithmetic_rounding_bound_us = read_u32(&input[34]);
-    decoded.uncertainty.sample_capture_bound_us = read_u32(&input[38]);
-    decoded.uncertainty.path_asymmetry_bound_us = read_u32(&input[42]);
-    decoded.uncertainty.known_mask = input[46];
+    decoded.clock_domain_id = read_u16(&input[2]);
+    decoded.domain_generation = read_u32(&input[4]);
+    decoded.sync_sequence = read_u32(&input[8]);
     if (decoded.clock_domain_id == 0U ||
         decoded.clock_domain_id > UCN_V6_REALTIME_DOMAIN_ID_MAX ||
         decoded.domain_generation == 0U ||
         decoded.domain_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
-        decoded.local_sample_us == 0U ||
-        ucn_v6_realtime_uncertainty_aggregate(&decoded.uncertainty,
-                                              &uncertainty) != UCN_V6_OK) {
+        decoded.sync_sequence == 0U ||
+        decoded.sync_sequence > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
         return UCN_V6_ERR_MALFORMED;
     }
-    (void)uncertainty;
-    *sample = decoded;
+    *announce = decoded;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_time_sync_response_encode(
+    const ucn_v6_time_sync_response_t *response,
+    uint8_t output[UCN_V6_TIME_SYNC_RESPONSE_BYTES])
+{
+    uint8_t encoded[UCN_V6_TIME_SYNC_RESPONSE_BYTES];
+    if (response == NULL || output == NULL ||
+        response->clock_domain_id == 0U ||
+        response->clock_domain_id > UCN_V6_REALTIME_DOMAIN_ID_MAX ||
+        response->domain_generation == 0U ||
+        response->domain_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        response->sync_sequence == 0U ||
+        response->sync_sequence > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        response->t1_master_tx_us == 0U ||
+        response->t4_master_rx_us == 0U ||
+        response->t1_uncertainty_us == 0U ||
+        response->t4_uncertainty_us == 0U) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(encoded, 0, sizeof(encoded));
+    encoded[0] = 1U;
+    write_u16(&encoded[2], response->clock_domain_id);
+    write_u32(&encoded[4], response->domain_generation);
+    write_u32(&encoded[8], response->sync_sequence);
+    write_u64(&encoded[12], response->t1_master_tx_us);
+    write_u64(&encoded[20], response->t4_master_rx_us);
+    write_u32(&encoded[28], response->t1_uncertainty_us);
+    write_u32(&encoded[32], response->t4_uncertainty_us);
+    memcpy(output, encoded, sizeof(encoded));
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_time_sync_response_decode(
+    const uint8_t *input, size_t input_length,
+    ucn_v6_time_sync_response_t *response)
+{
+    ucn_v6_time_sync_response_t decoded;
+    if (input == NULL || response == NULL ||
+        input_length != UCN_V6_TIME_SYNC_RESPONSE_BYTES ||
+        input[0] != 1U || input[1] != 0U || input[36] != 0U ||
+        input[37] != 0U || input[38] != 0U || input[39] != 0U) {
+        return UCN_V6_ERR_MALFORMED;
+    }
+    memset(&decoded, 0, sizeof(decoded));
+    decoded.clock_domain_id = read_u16(&input[2]);
+    decoded.domain_generation = read_u32(&input[4]);
+    decoded.sync_sequence = read_u32(&input[8]);
+    decoded.t1_master_tx_us = read_u64(&input[12]);
+    decoded.t4_master_rx_us = read_u64(&input[20]);
+    decoded.t1_uncertainty_us = read_u32(&input[28]);
+    decoded.t4_uncertainty_us = read_u32(&input[32]);
+    if (decoded.clock_domain_id == 0U ||
+        decoded.clock_domain_id > UCN_V6_REALTIME_DOMAIN_ID_MAX ||
+        decoded.domain_generation == 0U ||
+        decoded.domain_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        decoded.sync_sequence == 0U ||
+        decoded.sync_sequence > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        decoded.t1_master_tx_us == 0U || decoded.t4_master_rx_us == 0U ||
+        decoded.t1_uncertainty_us == 0U ||
+        decoded.t4_uncertainty_us == 0U) {
+        return UCN_V6_ERR_MALFORMED;
+    }
+    *response = decoded;
     return UCN_V6_OK;
 }
 
 static bool policy_is_valid(const ucn_v6_realtime_endpoint_policy_t *policy)
 {
     if (policy == NULL || policy->destination_endpoint == 0U ||
+        policy->destination_endpoint > UCN_V6_ENDPOINT_ID_MAX ||
         (uint32_t)policy->mode > (uint32_t)UCN_V6_REALTIME_DEADLINE ||
         (uint32_t)policy->requirement >
             (uint32_t)UCN_V6_REALTIME_REQUIRED) {
@@ -447,7 +464,11 @@ static bool domain_config_is_valid(const ucn_v6_time_domain_config_t *config)
            config->sync_timeout_us != 0U && config->max_holdover_us != 0U &&
            UINT64_MAX - config->sync_timeout_us >= config->max_holdover_us &&
            config->max_offset_jump_us != 0U &&
-           config->oscillator_uncertainty_ppb != 0U;
+           config->oscillator_uncertainty_ppb != 0U &&
+           config->timer_resolution_bound_us != 0U &&
+           config->filter_residual_bound_us != 0U &&
+           config->arithmetic_rounding_bound_us != 0U &&
+           config->sample_capture_bound_us != 0U;
 }
 
 static bool domain_config_equal(const ucn_v6_time_domain_config_t *left,
@@ -466,7 +487,15 @@ static bool domain_config_equal(const ucn_v6_time_domain_config_t *left,
            left->max_holdover_us == right->max_holdover_us &&
            left->max_offset_jump_us == right->max_offset_jump_us &&
            left->oscillator_uncertainty_ppb ==
-               right->oscillator_uncertainty_ppb;
+               right->oscillator_uncertainty_ppb &&
+           left->timer_resolution_bound_us ==
+               right->timer_resolution_bound_us &&
+           left->filter_residual_bound_us ==
+               right->filter_residual_bound_us &&
+           left->arithmetic_rounding_bound_us ==
+               right->arithmetic_rounding_bound_us &&
+           left->sample_capture_bound_us ==
+               right->sample_capture_bound_us;
 }
 
 static bool route_domain_equal(const ucn_v6_route_domain_t *left,
@@ -495,6 +524,25 @@ static bool route_ref_equal(const ucn_v6_route_path_ref_t *left,
            left->route_generation == right->route_generation &&
            left->path_id == right->path_id &&
            left->path_generation == right->path_generation;
+}
+
+static bool route_refs_are_reverse(
+    const ucn_v6_route_path_ref_t *forward,
+    const ucn_v6_route_path_ref_t *reverse)
+{
+    return forward != NULL && reverse != NULL &&
+           principal_equal(&forward->domain.origin_principal,
+                           &reverse->domain.destination_principal) &&
+           ucn_v6_binding_key_equal(&forward->domain.origin_binding,
+                                    &reverse->domain.destination_binding) &&
+           forward->domain.origin_session_generation ==
+               reverse->domain.destination_session_generation &&
+           principal_equal(&forward->domain.destination_principal,
+                           &reverse->domain.origin_principal) &&
+           ucn_v6_binding_key_equal(&forward->domain.destination_binding,
+                                    &reverse->domain.origin_binding) &&
+           forward->domain.destination_session_generation ==
+               reverse->domain.origin_session_generation;
 }
 
 static bool realtime_session_equal(const ucn_v6_session_key_t *left,
@@ -785,7 +833,15 @@ static bool domain_record_session_recovery_is_valid(
         previous->config.max_offset_jump_us !=
             next->config.max_offset_jump_us ||
         previous->config.oscillator_uncertainty_ppb !=
-            next->config.oscillator_uncertainty_ppb) {
+            next->config.oscillator_uncertainty_ppb ||
+        previous->config.timer_resolution_bound_us !=
+            next->config.timer_resolution_bound_us ||
+        previous->config.filter_residual_bound_us !=
+            next->config.filter_residual_bound_us ||
+        previous->config.arithmetic_rounding_bound_us !=
+            next->config.arithmetic_rounding_bound_us ||
+        previous->config.sample_capture_bound_us !=
+            next->config.sample_capture_bound_us) {
         return false;
     }
     return true;
@@ -837,6 +893,25 @@ ucn_v6_result_t ucn_v6_realtime_owner_init_in_place(
         ucn_v6_storage_validate(storage, storage_bytes,
                                 UCN_V6_REALTIME_OWNER_STORAGE_BYTES,
                                 UCN_V6_STORAGE_ALIGNMENT) != UCN_V6_OK) {
+        return UCN_V6_ERR_CONFIG;
+    }
+    if (ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     owner, sizeof(*owner)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     manifest, sizeof(*manifest)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     route_owner, 1U) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     generation_store,
+                                     sizeof(*generation_store)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     callback_gate, sizeof(*callback_gate)) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, generation_store->context,
+            generation_store->context != NULL ? 1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, callback_gate->context,
+            callback_gate->context != NULL ? 1U : 0U)) {
         return UCN_V6_ERR_CONFIG;
     }
     /* A recursive init from a generation-store callback must be observable by
@@ -1234,71 +1309,78 @@ static bool apply_offset(uint64_t local, int64_t offset, uint64_t *domain)
     return true;
 }
 
-ucn_v6_result_t ucn_v6_realtime_ingest_sample(
-    ucn_v6_realtime_owner_t *owner,
-    const ucn_v6_security_open_result_t *opened,
-    uint64_t now_us)
+static bool time_capture_is_valid(
+    const ucn_v6_time_local_capture_t *capture, uint64_t now_us)
 {
-    ucn_v6_time_sync_sample_t decoded;
-    const ucn_v6_time_sync_sample_t *sample = &decoded;
-    ucn_v6_time_domain_slot_t *slot;
+    return capture != NULL && capture->link_id != 0U &&
+           capture->link_id <= UCN_V6_LINK_ID_MAX &&
+           capture->link_generation != 0U &&
+           capture->link_generation <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           capture->event_token != 0U &&
+           capture->event_token <= UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           capture->timestamp_us != 0U && capture->timestamp_us <= now_us &&
+           capture->uncertainty_us != 0U && capture->hardware;
+}
+
+static bool signed_delta_u64(uint64_t left, uint64_t right, int64_t *delta)
+{
+    uint64_t magnitude;
+    if (delta == NULL) return false;
+    if (left >= right) {
+        magnitude = left - right;
+        if (magnitude > (uint64_t)INT64_MAX) return false;
+        *delta = (int64_t)magnitude;
+        return true;
+    }
+    magnitude = right - left;
+    if (magnitude > (uint64_t)INT64_MAX + 1U) return false;
+    *delta = magnitude == (uint64_t)INT64_MAX + 1U ?
+        INT64_MIN : -(int64_t)magnitude;
+    return true;
+}
+
+static bool sum_i64(int64_t left, int64_t right, int64_t *sum)
+{
+    if (sum == NULL ||
+        (right > 0 && left > INT64_MAX - right) ||
+        (right < 0 && left < INT64_MIN - right)) {
+        return false;
+    }
+    *sum = left + right;
+    return true;
+}
+
+static bool add_u32_checked(uint32_t left, uint32_t right, uint32_t *sum)
+{
+    if (sum == NULL || UINT32_MAX - left < right) return false;
+    *sum = left + right;
+    return true;
+}
+
+static ucn_v6_result_t ingest_derived_sample(
+    ucn_v6_realtime_owner_t *owner, ucn_v6_time_domain_slot_t *slot,
+    uint64_t local_sample_us, int64_t offset_us,
+    const ucn_v6_realtime_uncertainty_t *components, uint64_t now_us)
+{
     uint32_t uncertainty;
     int64_t next_offset;
     int64_t offset_delta;
     uint64_t candidate_time;
-    if (!owner_is_valid(owner) || opened == NULL ||
-        opened->frame.frame_type != UCN_V6_FRAME_CONTROL ||
-        (opened->frame.flags & UCN_V6_FLAG_PROTOCOL_CONTEXT) == 0U ||
-        opened->frame.protocol_opcode !=
-            UCN_V6_PROTOCOL_OPCODE_TIME_FOLLOW_UP ||
-        ucn_v6_time_sync_sample_decode(opened->frame.payload,
-                                       opened->frame.payload_length,
-                                       &decoded) != UCN_V6_OK) {
-        return UCN_V6_ERR_ARGUMENT;
-    }
-    if (!owner_api_is_available(owner)) {
-        return UCN_V6_ERR_STATE;
-    }
-    slot = find_domain(owner, sample->clock_domain_id);
-    if (slot != NULL && expire_domain_dependencies(owner, slot, now_us)) {
-        increment_saturated(&owner->stats.rejected_samples);
-        return UCN_V6_ERR_ACCESS;
-    }
-    if (slot == NULL || slot->phase == UCN_V6_TIME_FAULT ||
-        sample->local_sample_us > now_us ||
-        sample->domain_generation != slot->config.domain_generation ||
-        !opened->hop_authenticated || !opened->endpoint_authorized ||
-        (opened->frame.flags & UCN_V6_FLAG_E2E_CONTEXT) == 0U ||
-        !principal_equal(&opened->authenticated_principal,
-                         &slot->config.master_principal) ||
-        opened->frame.realm_id != slot->config.master_binding.realm_id ||
-        opened->frame.source_address != slot->config.master_binding.node_address ||
-        opened->frame.source_binding_generation !=
-            slot->config.master_binding.binding_generation ||
-        opened->frame.session_generation !=
-            slot->config.master_session_generation ||
-        (opened->frame.flags & (UCN_V6_FLAG_ROUTE_CONTEXT |
-                                UCN_V6_FLAG_PATH_CONTEXT)) !=
-            (UCN_V6_FLAG_ROUTE_CONTEXT | UCN_V6_FLAG_PATH_CONTEXT) ||
-        opened->frame.route_generation != slot->route_ref.route_generation ||
-        opened->frame.path.path_id != slot->route_ref.path_id ||
-        opened->frame.path.path_generation !=
-            slot->route_ref.path_generation ||
+    if (owner == NULL || slot == NULL || components == NULL ||
+        local_sample_us == 0U || local_sample_us > now_us ||
         (slot->has_sample_high_water &&
-         sample->local_sample_us <= slot->last_sample_local_us) ||
-        ucn_v6_realtime_uncertainty_aggregate(
-            &sample->uncertainty, &uncertainty) != UCN_V6_OK) {
-        increment_saturated(&owner->stats.rejected_samples);
+         local_sample_us <= slot->last_sample_local_us) ||
+        ucn_v6_realtime_uncertainty_aggregate(components, &uncertainty) !=
+            UCN_V6_OK) {
         return UCN_V6_ERR_ACCESS;
     }
     if (slot->sample_count != 0U &&
-        (!difference_i64(sample->offset_us, slot->offset_us,
-                         &offset_delta) ||
+        (!difference_i64(offset_us, slot->offset_us, &offset_delta) ||
          magnitude_i64(offset_delta) > slot->config.max_offset_jump_us)) {
         fault_domain(owner, slot);
         return UCN_V6_ERR_STATE;
     }
-    slot->offsets[slot->sample_cursor] = sample->offset_us;
+    slot->offsets[slot->sample_cursor] = offset_us;
     slot->sample_cursor = (uint8_t)((slot->sample_cursor + 1U) %
                                     UCN_V6_REALTIME_SAMPLE_WINDOW);
     if (slot->sample_count < UCN_V6_REALTIME_SAMPLE_WINDOW) {
@@ -1308,15 +1390,14 @@ ucn_v6_result_t ucn_v6_realtime_ingest_sample(
         ++slot->consecutive_samples;
     }
     next_offset = median_offset(slot);
-    if (!apply_offset(sample->local_sample_us, next_offset,
-                      &candidate_time) ||
+    if (!apply_offset(local_sample_us, next_offset, &candidate_time) ||
         (slot->has_output_high_water &&
          candidate_time < slot->last_output_domain_us)) {
         fault_domain(owner, slot);
         return UCN_V6_ERR_STATE;
     }
     slot->offset_us = next_offset;
-    slot->last_sample_local_us = sample->local_sample_us;
+    slot->last_sample_local_us = local_sample_us;
     slot->base_uncertainty_us = uncertainty;
     slot->has_sample_high_water = true;
     if (slot->consecutive_samples >= slot->config.lock_sample_count &&
@@ -1328,6 +1409,140 @@ ucn_v6_result_t ucn_v6_realtime_ingest_sample(
     }
     increment_saturated(&owner->stats.accepted_samples);
     return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_realtime_ingest_exchange(
+    ucn_v6_realtime_owner_t *owner,
+    const ucn_v6_security_open_result_t *opened,
+    const ucn_v6_time_sync_observation_t *observation,
+    uint64_t now_us)
+{
+    ucn_v6_time_sync_response_t response;
+    ucn_v6_time_domain_slot_t *slot;
+    ucn_v6_route_resolution_t reverse_resolution;
+    ucn_v6_realtime_uncertainty_t components;
+    int64_t first_delta;
+    int64_t second_delta;
+    int64_t sum;
+    int64_t offset;
+    uint32_t link_uncertainty;
+    uint32_t path_uncertainty;
+
+    if (!owner_is_valid(owner) || opened == NULL || observation == NULL ||
+        opened->frame.frame_type != UCN_V6_FRAME_CONTROL ||
+        (opened->frame.flags & UCN_V6_FLAG_PROTOCOL_CONTEXT) == 0U ||
+        opened->frame.protocol_opcode !=
+            UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE ||
+        ucn_v6_time_sync_response_decode(
+            opened->frame.payload, opened->frame.payload_length,
+            &response) != UCN_V6_OK ||
+        observation->sync_sequence != response.sync_sequence ||
+        !route_ref_is_valid(&observation->forward_route_ref) ||
+        !route_ref_is_valid(&observation->reverse_route_ref) ||
+        !route_refs_are_reverse(&observation->forward_route_ref,
+                                &observation->reverse_route_ref) ||
+        !time_capture_is_valid(&observation->t2_member_rx, now_us) ||
+        !time_capture_is_valid(&observation->t3_member_tx, now_us) ||
+        observation->t3_member_tx.timestamp_us <
+            observation->t2_member_rx.timestamp_us ||
+        observation->t2_member_rx.event_token ==
+            observation->t3_member_tx.event_token) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (!owner_api_is_available(owner)) return UCN_V6_ERR_STATE;
+    slot = find_domain(owner, response.clock_domain_id);
+    if (slot != NULL && expire_domain_dependencies(owner, slot, now_us)) {
+        increment_saturated(&owner->stats.rejected_samples);
+        return UCN_V6_ERR_ACCESS;
+    }
+    if (slot == NULL || slot->phase == UCN_V6_TIME_FAULT ||
+        response.domain_generation != slot->config.domain_generation ||
+        !opened->hop_authenticated || !opened->endpoint_authorized ||
+        (opened->frame.flags & UCN_V6_FLAG_E2E_CONTEXT) == 0U ||
+        !principal_equal(&opened->authenticated_principal,
+                         &slot->config.master_principal) ||
+        opened->frame.realm_id != slot->config.master_binding.realm_id ||
+        opened->frame.source_address !=
+            slot->config.master_binding.node_address ||
+        opened->frame.source_binding_generation !=
+            slot->config.master_binding.binding_generation ||
+        opened->frame.session_generation !=
+            slot->config.master_session_generation ||
+        (opened->frame.flags & (UCN_V6_FLAG_ROUTE_CONTEXT |
+                                UCN_V6_FLAG_PATH_CONTEXT)) !=
+            (UCN_V6_FLAG_ROUTE_CONTEXT | UCN_V6_FLAG_PATH_CONTEXT) ||
+        !principal_equal(
+            &observation->forward_route_ref.domain.origin_principal,
+            &slot->config.master_principal) ||
+        !ucn_v6_binding_key_equal(
+            &observation->forward_route_ref.domain.origin_binding,
+            &slot->config.master_binding) ||
+        observation->forward_route_ref.domain.origin_session_generation !=
+            slot->config.master_session_generation ||
+        opened->frame.route_generation !=
+            observation->forward_route_ref.route_generation ||
+        opened->frame.path.path_id !=
+            observation->forward_route_ref.path_id ||
+        opened->frame.path.path_generation !=
+            observation->forward_route_ref.path_generation ||
+        observation->t2_member_rx.link_id !=
+            opened->ingress_link_instance_id ||
+        observation->t2_member_rx.link_generation !=
+            opened->ingress_link_instance_generation ||
+        !copy_current_domain_dependencies(
+            owner, &slot->config, &observation->reverse_route_ref, now_us,
+            &reverse_resolution) ||
+        observation->t3_member_tx.link_id !=
+            reverse_resolution.path.egress_link_id ||
+        observation->t3_member_tx.link_generation !=
+            reverse_resolution.path.egress_link_generation ||
+        !signed_delta_u64(response.t1_master_tx_us,
+                          observation->t2_member_rx.timestamp_us,
+                          &first_delta) ||
+        !signed_delta_u64(response.t4_master_rx_us,
+                          observation->t3_member_tx.timestamp_us,
+                          &second_delta) ||
+        !sum_i64(first_delta, second_delta, &sum)) {
+        increment_saturated(&owner->stats.rejected_samples);
+        return UCN_V6_ERR_ACCESS;
+    }
+    offset = sum / 2;
+    if (!add_u32_checked(response.t1_uncertainty_us,
+                         response.t4_uncertainty_us, &link_uncertainty) ||
+        !add_u32_checked(link_uncertainty,
+                         observation->t2_member_rx.uncertainty_us,
+                         &link_uncertainty) ||
+        !add_u32_checked(link_uncertainty,
+                         observation->t3_member_tx.uncertainty_us,
+                         &link_uncertainty) ||
+        !add_u32_checked(slot->path_proof.timestamp_uncertainty_us,
+                         reverse_resolution.path.capability
+                             .timestamp_uncertainty_us,
+                         &path_uncertainty)) {
+        increment_saturated(&owner->stats.rejected_samples);
+        return UCN_V6_ERR_EXHAUSTED;
+    }
+    memset(&components, 0, sizeof(components));
+    components.timer_resolution_bound_us =
+        slot->config.timer_resolution_bound_us;
+    components.link_timestamp_capture_bound_us = link_uncertainty;
+    components.filter_residual_bound_us =
+        slot->config.filter_residual_bound_us;
+    components.arithmetic_rounding_bound_us =
+        slot->config.arithmetic_rounding_bound_us;
+    components.sample_capture_bound_us =
+        slot->config.sample_capture_bound_us;
+    components.path_asymmetry_bound_us = path_uncertainty;
+    components.known_mask = UCN_V6_REALTIME_KN_ALL;
+    {
+        ucn_v6_result_t result = ingest_derived_sample(
+            owner, slot, observation->t2_member_rx.timestamp_us, offset,
+            &components, now_us);
+        if (result != UCN_V6_OK) {
+            increment_saturated(&owner->stats.rejected_samples);
+        }
+        return result;
+    }
 }
 
 static void clear_acquisition(ucn_v6_time_domain_slot_t *slot)
@@ -1514,7 +1729,9 @@ ucn_v6_result_t ucn_v6_realtime_prepare_payload(
     uint8_t encoded[UCN_V6_REALTIME_ENVELOPE_BYTES];
     uint64_t sender_uncertainty;
     if (!owner_is_valid(owner) ||
-        destination_endpoint == 0U || local_capture_us == 0U ||
+        destination_endpoint == 0U ||
+        destination_endpoint > UCN_V6_ENDPOINT_ID_MAX ||
+        local_capture_us == 0U ||
         business_payload == NULL || business_length == 0U ||
         output == NULL || result == NULL) {
         return UCN_V6_ERR_ARGUMENT;
@@ -1606,6 +1823,7 @@ static ucn_v6_result_t evaluate_payload(
     uint64_t age;
     if (!owner_is_valid(owner) || opened == NULL || view == NULL ||
         opened->frame.message.destination_endpoint == 0U ||
+        opened->frame.message.destination_endpoint > UCN_V6_ENDPOINT_ID_MAX ||
         opened->frame.payload == NULL || opened->frame.payload_length == 0U) {
         return UCN_V6_ERR_ARGUMENT;
     }

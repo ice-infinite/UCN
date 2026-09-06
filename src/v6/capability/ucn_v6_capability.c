@@ -649,6 +649,14 @@ ucn_v6_result_t ucn_v6_capability_owner_init_in_place(
         ucn_v6_capability_digest(local_record, digest) != UCN_V6_OK) {
         return UCN_V6_ERR_CONFIG;
     }
+    if (ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     owner_out, sizeof(*owner_out)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     manifest, sizeof(*manifest)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     local_record, sizeof(*local_record))) {
+        return UCN_V6_ERR_CONFIG;
+    }
     owner = (ucn_v6_capability_owner_t *)storage;
     memset(owner, 0, sizeof(*owner));
     owner->magic = UCN_V6_CAPABILITY_OWNER_MAGIC;

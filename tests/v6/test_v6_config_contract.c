@@ -125,6 +125,13 @@ int main(void)
     CHECK(ucn_v6_storage_validate(
               storage.bytes, 7U, 8U,
               UCN_V6_STORAGE_ALIGNMENT) == UCN_V6_ERR_CONFIG);
+    CHECK(ucn_v6_memory_ranges_overlap(storage.bytes, 8U,
+                                       storage.bytes + 7U, 8U));
+    CHECK(!ucn_v6_memory_ranges_overlap(storage.bytes, 8U,
+                                        storage.bytes + 8U, 8U));
+    CHECK(!ucn_v6_memory_ranges_overlap(NULL, 8U, storage.bytes, 8U));
+    CHECK(!ucn_v6_memory_ranges_overlap(storage.bytes, 0U,
+                                        storage.bytes, 8U));
     puts("ucn v6 config contract tests passed");
     return 0;
 }

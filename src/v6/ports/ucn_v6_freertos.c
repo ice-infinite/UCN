@@ -119,8 +119,28 @@ ucn_v6_result_t ucn_v6_freertos_port_init_in_place(
     ucn_v6_freertos_port_t *port;
     ucn_v6_owner_lock_ops_t owner_ops;
     ucn_v6_result_t result;
-    if (port_out != NULL) *port_out = NULL;
-    if (port_out == NULL || !ops_valid(ops) || stack_hooks == NULL ||
+    if (port_out == NULL ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, port_out,
+                                     sizeof(*port_out))) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    *port_out = NULL;
+    if (ucn_v6_memory_ranges_overlap(storage, storage_bytes, manifest,
+                                     sizeof(*manifest)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, ops,
+                                     sizeof(*ops)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, stack_hooks,
+                                     sizeof(*stack_hooks)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, stack_budget,
+                                     sizeof(*stack_budget)) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, ops != NULL ? ops->context : NULL,
+            ops != NULL && ops->context != NULL ? 1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes,
+            stack_hooks != NULL ? stack_hooks->context : NULL,
+            stack_hooks != NULL && stack_hooks->context != NULL ? 1U : 0U) ||
+        !ops_valid(ops) || stack_hooks == NULL ||
         !ucn_v6_stack_budget_is_valid(manifest, stack_budget)) {
         return UCN_V6_ERR_CONFIG;
     }

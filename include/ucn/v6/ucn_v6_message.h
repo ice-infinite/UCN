@@ -227,8 +227,8 @@ typedef struct ucn_v6_operation_journal ucn_v6_operation_journal_t;
 #endif
 #ifndef UCN_V6_OPERATION_JOURNAL_STORAGE_BYTES
 #define UCN_V6_OPERATION_JOURNAL_STORAGE_BYTES                         \
-    ((size_t)(512U + UCN_V6_CONFIG_OPERATION_SLOTS * 256U +          \
-              UCN_V6_CONFIG_OPERATION_HIGH_WATERS * 64U))
+    ((size_t)(1024U + 3U * (UCN_V6_CONFIG_OPERATION_SLOTS * 256U +   \
+                            UCN_V6_CONFIG_OPERATION_HIGH_WATERS * 64U)))
 #endif
 typedef union ucn_v6_operation_id_allocator_storage {
     uint64_t alignment_u64;

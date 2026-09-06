@@ -732,6 +732,7 @@ static int test_credit_and_session_fence(void)
     ucn_v6_stack_invalidation_t event;
     ucn_v6_transfer_invalidation_result_t invalidation;
     uint8_t encoded[UCN_V6_TRANSFER_CREDIT_BYTES];
+    uint8_t encoded_before[UCN_V6_TRANSFER_CREDIT_BYTES];
     uint64_t retired[2];
     size_t retired_count = 77U;
     CHECK(fixture_init(&fixture) == 0);
@@ -744,6 +745,13 @@ static int test_credit_and_session_fence(void)
     credit.available_credit = 2U;
     credit.maximum_credit = 2U;
     credit.lease_duration_us = 100U;
+    memset(encoded, 0xA5, sizeof(encoded));
+    memcpy(encoded_before, encoded, sizeof(encoded_before));
+    credit.link_id = UINT16_MAX;
+    CHECK(ucn_v6_transfer_credit_encode(&credit, encoded) ==
+          UCN_V6_ERR_ARGUMENT);
+    CHECK(memcmp(encoded, encoded_before, sizeof(encoded)) == 0);
+    credit.link_id = 3U;
     CHECK(ucn_v6_transfer_credit_encode(&credit, encoded) == UCN_V6_OK);
     opened = opened_credit(&peer, encoded);
     CHECK(ucn_v6_transfer_ingest_credit(

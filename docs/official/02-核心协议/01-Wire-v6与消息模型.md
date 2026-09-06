@@ -15,6 +15,11 @@ Hop Limit 使用 16-bit 网络序，与 Capability/Route/QoS 的累计跳数共�
 `1..65534` 域；`0` 和 `65535` 必须拒绝。这只是编码能力上限，产品
 Manifest 应根据端到端时延和控制面开销收窄实际最大跳数。
 
+16-bit Endpoint ID、Link Instance ID 和 Path ID 也统一使用 `1..65534`；`0` 表示不存在或
+尚未绑定，`65535` 是无效/耗尽哨兵。Wire、Adapter 和每个上层 Owner 都在自己的公开入口
+重复执行该检查，因此不会出现“底层接受，但 Security/Route 永远无法消费”的半合法对象。
+Protocol Opcode 属于独立命名空间，不套用这条 ID 规则。
+
 ## 2. 可见字段与扩展
 
 公共头携带版本、Flags、地址类、Frame Type、`origin_sequence`、`hop_sequence` 和长度。

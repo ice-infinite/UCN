@@ -158,6 +158,30 @@ if(UCN_FEATURE_ADAPTER)
     target_link_libraries(ucn_v6_adapter PUBLIC
         ucn_v6_config ucn_v6_wire ucn_v6_owner)
     list(APPEND UCN_EXPORT_TARGETS ucn_v6_adapter)
+
+    add_library(ucn_v6_runtime STATIC
+        src/v6/runtime/ucn_v6_runtime.c)
+    ucn_target_defaults(ucn_v6_runtime)
+    target_link_libraries(ucn_v6_runtime PUBLIC
+        ucn_v6_adapter ucn_v6_identity ucn_v6_security
+        ucn_v6_capability ucn_v6_route ucn_v6_qos ucn_v6_transfer)
+    if(UCN_FEATURE_REALTIME)
+        target_link_libraries(ucn_v6_runtime PUBLIC ucn_v6_realtime)
+    endif()
+    if(UCN_FEATURE_CLUSTER)
+        target_link_libraries(ucn_v6_runtime PUBLIC ucn_v6_cluster)
+    endif()
+    list(APPEND UCN_EXPORT_TARGETS ucn_v6_runtime)
+endif()
+
+# GCC emits one deterministic .su record per compiled v6 source.  The gate is
+# deliberately attached only to library targets: test fixtures may place many
+# independent opaque-storage objects on their Host stack, while production v6
+# entry points must stay within the MCU task-stack budget.
+if(UCN_BUILD_TESTS AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    foreach(ucn_stack_target IN LISTS UCN_EXPORT_TARGETS)
+        target_compile_options(${ucn_stack_target} PRIVATE -fstack-usage)
+    endforeach()
 endif()
 
 add_library(ucn INTERFACE)
@@ -173,7 +197,7 @@ if(UCN_FEATURE_CLUSTER)
     target_link_libraries(ucn INTERFACE ucn_v6_cluster)
 endif()
 if(UCN_FEATURE_ADAPTER)
-    target_link_libraries(ucn INTERFACE ucn_v6_adapter)
+    target_link_libraries(ucn INTERFACE ucn_v6_adapter ucn_v6_runtime)
 endif()
 list(APPEND UCN_EXPORT_TARGETS ucn)
 
@@ -183,7 +207,40 @@ install(TARGETS ${UCN_EXPORT_TARGETS}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES include/ucn/ucn.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ucn)
-install(DIRECTORY include/ucn/v6 DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ucn)
+set(UCN_V6_BASE_PUBLIC_HEADERS
+    include/ucn/v6/ucn_v6_bootstrap.h
+    include/ucn/v6/ucn_v6_capability.h
+    include/ucn/v6/ucn_v6_config.h
+    include/ucn/v6/ucn_v6_identity.h
+    include/ucn/v6/ucn_v6_message.h
+    include/ucn/v6/ucn_v6_owner.h
+    include/ucn/v6/ucn_v6_qos.h
+    include/ucn/v6/ucn_v6_route.h
+    include/ucn/v6/ucn_v6_security.h
+    include/ucn/v6/ucn_v6_transfer.h
+    include/ucn/v6/ucn_v6_types.h
+    include/ucn/v6/ucn_v6_wire.h)
+install(FILES ${UCN_V6_BASE_PUBLIC_HEADERS}
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ucn/v6)
+if(UCN_FEATURE_REALTIME)
+    install(FILES include/ucn/v6/ucn_v6_realtime.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ucn/v6)
+endif()
+if(UCN_FEATURE_CLUSTER)
+    install(FILES include/ucn/v6/ucn_v6_cluster.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ucn/v6)
+endif()
+if(UCN_FEATURE_ADAPTER)
+    install(FILES
+        include/ucn/v6/ucn_v6_adapter.h
+        include/ucn/v6/ucn_v6_runtime.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ucn/v6)
+    install(DIRECTORY
+        include/ucn/v6/adapters
+        include/ucn/v6/ports
+        include/ucn/v6/reference
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ucn/v6)
+endif()
 install(EXPORT UCNTargets
     FILE UCNTargets.cmake
     NAMESPACE UCN::
@@ -236,6 +293,17 @@ if(UCN_BUILD_TESTS)
             --root ${CMAKE_CURRENT_SOURCE_DIR}
             --output ${CMAKE_CURRENT_SOURCE_DIR}/docs/源码阅读指南/06-公共函数签名索引.md
             --check)
+    add_test(NAME v6_init_overlap_guard_gate
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_init_overlap_guards.py
+            --root ${CMAKE_CURRENT_SOURCE_DIR})
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        add_test(NAME v6_stack_usage_gate
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
+                --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+                --limit-bytes 3072)
+    endif()
     add_test(NAME v6_removed_cmake_surface_gate
         COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_removed_cmake_surface.py
@@ -289,6 +357,8 @@ if(UCN_BUILD_TESTS)
     if(UCN_FEATURE_ADAPTER)
         ucn_add_test(ucn_v6_adapter_tests tests/v6/test_v6_adapter.c
             ucn_v6_adapter)
+        ucn_add_test(ucn_v6_runtime_tests tests/v6/test_v6_runtime.c
+            ucn_v6_runtime)
         if(UNIX)
             find_package(Threads REQUIRED)
             ucn_add_test(ucn_v6_adapter_concurrency_tests
@@ -330,6 +400,10 @@ if(UCN_BUILD_TESTS)
             -DUCN_CONSUMER_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/v6/install_consumer
             -DUCN_CONSUMER_WORK_DIR=${UCN_CONSUMER_WORK_DIR}
             -DUCN_TEST_GENERATOR=${CMAKE_GENERATOR}
+            -DUCN_TEST_CONFIGURATION=$<CONFIG>
+            -DUCN_EXPECT_REALTIME=${UCN_FEATURE_REALTIME}
+            -DUCN_EXPECT_CLUSTER=${UCN_FEATURE_CLUSTER}
+            -DUCN_EXPECT_ADAPTER=${UCN_FEATURE_ADAPTER}
             "-DUCN_TEST_C_FLAGS=${CMAKE_C_FLAGS}"
             "-DUCN_TEST_EXE_LINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}"
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/test_v6_install_consumer.cmake)

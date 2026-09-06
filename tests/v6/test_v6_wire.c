@@ -289,6 +289,141 @@ static int expect_encode_reject_no_write(const ucn_v6_frame_t *frame)
     return 0;
 }
 
+static int test_encode_rejects_partial_payload_overlap(void)
+{
+    uint8_t storage[256U];
+    uint8_t before[sizeof(storage)];
+    ucn_v6_frame_t frame = rich_data_frame();
+    size_t output_length = SIZE_MAX;
+
+    memset(storage, 0x5AU, sizeof(storage));
+    frame.payload = storage;
+    frame.payload_length = 8U;
+    memcpy(before, storage, sizeof(storage));
+    CHECK(ucn_v6_wire_encode(&frame, storage + 1U, sizeof(storage) - 1U,
+                             &output_length) == UCN_V6_ERR_ARGUMENT);
+    CHECK(memcmp(storage, before, sizeof(storage)) == 0);
+    CHECK(output_length == SIZE_MAX);
+    return 0;
+}
+
+static int test_wire_api_overlap_contract(void)
+{
+    typedef union aligned_wire_storage {
+        ucn_v6_frame_t frame;
+        uint8_t bytes[512U];
+    } aligned_wire_storage_t;
+    typedef union aligned_scalar_storage {
+        size_t scalar;
+        uint8_t bytes[32U];
+    } aligned_scalar_storage_t;
+    typedef union frame_length_alias {
+        ucn_v6_frame_t frame;
+        size_t length;
+    } frame_length_alias_t;
+    ucn_v6_frame_t frame = rich_data_frame();
+    ucn_v6_frame_t frame_before;
+    aligned_wire_storage_t overlap;
+    aligned_wire_storage_t overlap_before;
+    aligned_scalar_storage_t scalar_overlap;
+    aligned_scalar_storage_t scalar_before;
+    frame_length_alias_t frame_length_overlap;
+    frame_length_alias_t frame_length_before;
+    uint8_t wire[256U];
+    uint8_t wire_before[sizeof(wire)];
+    size_t wire_length = 0U;
+    size_t output_length = SIZE_MAX;
+
+    frame_before = frame;
+    CHECK(ucn_v6_wire_encoded_size(
+              &frame, (size_t *)&frame.message.operation_id) ==
+          UCN_V6_ERR_ARGUMENT);
+    CHECK(memcmp(&frame, &frame_before, sizeof(frame)) == 0);
+
+    memset(&scalar_overlap, 0x3CU, sizeof(scalar_overlap));
+    memcpy(&scalar_before, &scalar_overlap, sizeof(scalar_before));
+    frame.payload = scalar_overlap.bytes;
+    frame.payload_length = 16U;
+    CHECK(ucn_v6_wire_encoded_size(&frame, &scalar_overlap.scalar) ==
+          UCN_V6_ERR_ARGUMENT);
+    CHECK(memcmp(&scalar_overlap, &scalar_before,
+                 sizeof(scalar_overlap)) == 0);
+
+    memset(wire, 0x6DU, sizeof(wire));
+    memcpy(wire_before, wire, sizeof(wire));
+    CHECK(ucn_v6_wire_encode(&frame, wire, sizeof(wire),
+                             &scalar_overlap.scalar) ==
+          UCN_V6_ERR_ARGUMENT);
+    CHECK(memcmp(&scalar_overlap, &scalar_before,
+                 sizeof(scalar_overlap)) == 0);
+    CHECK(memcmp(wire, wire_before, sizeof(wire)) == 0);
+
+    frame = rich_data_frame();
+
+    CHECK(ucn_v6_wire_encode(&frame, wire, sizeof(wire), &wire_length) ==
+          UCN_V6_OK);
+    memset(&overlap, 0xA5, sizeof(overlap));
+    CHECK(wire_length <= sizeof(overlap.bytes) - 1U);
+    memcpy(overlap.bytes + 1U, wire, wire_length);
+    overlap_before = overlap;
+    CHECK(ucn_v6_wire_decode(overlap.bytes + 1U, wire_length,
+                             &overlap.frame) == UCN_V6_ERR_MALFORMED);
+    CHECK(memcmp(&overlap, &overlap_before, sizeof(overlap)) == 0);
+
+    memset(&overlap, 0, sizeof(overlap));
+    overlap.frame = frame;
+    overlap_before = overlap;
+    CHECK(ucn_v6_wire_write_canonical_aad(
+              &overlap.frame, overlap.bytes + 1U,
+              sizeof(overlap.bytes) - 1U, &output_length) ==
+          UCN_V6_ERR_ARGUMENT);
+    CHECK(output_length == SIZE_MAX);
+    CHECK(memcmp(&overlap, &overlap_before, sizeof(overlap)) == 0);
+
+    memset(wire, 0x7EU, sizeof(wire));
+    memcpy(wire_before, wire, sizeof(wire));
+    memset(&frame_length_overlap, 0, sizeof(frame_length_overlap));
+    frame_length_overlap.frame = frame;
+    memcpy(&frame_length_before, &frame_length_overlap,
+           sizeof(frame_length_before));
+    CHECK(ucn_v6_wire_write_canonical_aad(
+              &frame_length_overlap.frame, wire, sizeof(wire),
+              &frame_length_overlap.length) == UCN_V6_ERR_ARGUMENT);
+    CHECK(memcmp(&frame_length_overlap, &frame_length_before,
+                 sizeof(frame_length_overlap)) == 0);
+    CHECK(memcmp(wire, wire_before, sizeof(wire)) == 0);
+
+    /* Canonical AAD must never overwrite the payload it authenticates, nor
+     * may its length result alias that payload.  Both failures are atomic. */
+    {
+        uint8_t payload_and_output[UCN_V6_CANONICAL_AAD_BYTES + 16U];
+        uint8_t payload_before[sizeof(payload_and_output)];
+        size_t aad_length = SIZE_MAX;
+        frame = rich_data_frame();
+        memset(payload_and_output, 0x4BU, sizeof(payload_and_output));
+        frame.payload = payload_and_output;
+        frame.payload_length = 16U;
+        memcpy(payload_before, payload_and_output,
+               sizeof(payload_and_output));
+        CHECK(ucn_v6_wire_write_canonical_aad(
+                  &frame, payload_and_output + 1U,
+                  UCN_V6_CANONICAL_AAD_BYTES, &aad_length) ==
+              UCN_V6_ERR_ARGUMENT);
+        CHECK(aad_length == SIZE_MAX);
+        CHECK(memcmp(payload_and_output, payload_before,
+                     sizeof(payload_and_output)) == 0);
+
+        aad_length = SIZE_MAX;
+        CHECK(ucn_v6_wire_write_canonical_aad(
+                  &frame, wire, sizeof(wire),
+                  (size_t *)(void *)(payload_and_output + 4U)) ==
+              UCN_V6_ERR_ARGUMENT);
+        CHECK(memcmp(payload_and_output, payload_before,
+                     sizeof(payload_and_output)) == 0);
+    }
+    return 0;
+}
+
 static int test_semantic_negative_matrix(void)
 {
     ucn_v6_frame_t base = rich_data_frame();
@@ -345,6 +480,15 @@ static int test_semantic_negative_matrix(void)
     CHECK(expect_encode_reject_no_write(&bad) == 0);
     bad = base;
     bad.message.operation_id = UINT64_MAX;
+    CHECK(expect_encode_reject_no_write(&bad) == 0);
+    bad = base;
+    bad.message.source_endpoint = UINT16_MAX;
+    CHECK(expect_encode_reject_no_write(&bad) == 0);
+    bad = base;
+    bad.message.destination_endpoint = UINT16_MAX;
+    CHECK(expect_encode_reject_no_write(&bad) == 0);
+    bad = base;
+    bad.path.path_id = UINT16_MAX;
     CHECK(expect_encode_reject_no_write(&bad) == 0);
     bad = base;
     bad.hop_limit = UINT16_MAX;
@@ -540,6 +684,8 @@ int main(void)
     CHECK(test_output_capacity_rejection_is_atomic() == 0);
     CHECK(test_full_context_round_trip_and_aad() == 0);
     CHECK(test_semantic_negative_matrix() == 0);
+    CHECK(test_encode_rejects_partial_payload_overlap() == 0);
+    CHECK(test_wire_api_overlap_contract() == 0);
     CHECK(test_raw_negative_matrix() == 0);
     CHECK(test_group_hello_contract() == 0);
     CHECK(test_peer_control_route_contract() == 0);

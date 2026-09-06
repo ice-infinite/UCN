@@ -9,3 +9,6 @@ find_package(UCN 6 CONFIG REQUIRED)
 
 add_executable(ucn_v6_install_consumer main.c)
 target_link_libraries(ucn_v6_install_consumer PRIVATE UCN::ucn)
+
+enable_testing()
+add_test(NAME ucn_v6_install_consumer_runs COMMAND ucn_v6_install_consumer)

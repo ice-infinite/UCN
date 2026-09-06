@@ -1,5 +1,7 @@
 # UCN 通用 RTOS 快速使用
 
+> `ARCHIVED / NOT CURRENT`：本文仅保留 v5 RTOS 接入记录；v6 请从[当前用户手册](../../用户手册/README.md)开始。
+
 > 适用：任意有任务、互斥锁和有界队列的 RTOS。当前仓库没有一个通用的 `UcnServiceRtosPort`；本页给出应实现的最小适配边界，保持 C99 Core 不依赖具体 RTOS。
 
 > 当前 API：V5-62 Port API V2 要求所有 `ucn_port_ops_t` 具名填写 `struct_size/api_version`；旧位置初始化与旧对象不兼容。Transfer 还必须配置权威时钟并使用无时间参数的 `ucn_transfer_step()`。迁移见[总览](README.md)。

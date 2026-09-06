@@ -30,6 +30,8 @@ struct ucn_v6_operation_journal {
     uint16_t reserved;
     uint64_t layout_hash;
     ucn_v6_operation_journal_snapshot_t committed;
+    ucn_v6_operation_journal_snapshot_t staging;
+    ucn_v6_operation_journal_snapshot_t verify;
     ucn_v6_message_witness_t witness;
     ucn_v6_message_store_ops_t store;
     ucn_v6_callback_gate_t *callback_gate;

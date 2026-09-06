@@ -144,8 +144,20 @@ ucn_v6_result_t ucn_v6_adapter_init_in_place(
 {
     ucn_v6_adapter_owner_t *owner;
     ucn_v6_result_t result;
-    if (owner_out != NULL) *owner_out = NULL;
-    if (owner_out == NULL || !runtime_ops_valid(runtime_ops) ||
+    if (owner_out == NULL ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, owner_out,
+                                     sizeof(*owner_out))) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    *owner_out = NULL;
+    if (!runtime_ops_valid(runtime_ops) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, manifest,
+                                     sizeof(*manifest)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes, runtime_ops,
+                                     sizeof(*runtime_ops)) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, runtime_ops->context,
+            runtime_ops->context != NULL ? 1U : 0U) ||
         ucn_v6_manifest_validate_exact(manifest) != UCN_V6_OK ||
         (manifest->feature_bits & UCN_V6_FEATURE_ADAPTER) == 0U) {
         return UCN_V6_ERR_CONFIG;
@@ -179,6 +191,7 @@ ucn_v6_result_t ucn_v6_adapter_register_link(
     size_t index;
     ucn_v6_adapter_link_slot_t *free_slot = NULL;
     if (!owner_valid(owner) || config == NULL || config->link_id == 0U ||
+        config->link_id > UCN_V6_LINK_ID_MAX ||
         !serial_valid(config->initial_generation) ||
         config->bearer < UCN_V6_BEARER_UART ||
         (config->bearer > UCN_V6_BEARER_USB &&
@@ -480,6 +493,32 @@ ucn_v6_result_t ucn_v6_adapter_enqueue_tx(
     return UCN_V6_OK;
 }
 
+static ucn_v6_adapter_tx_slot_t *oldest_ready_queued_tx(
+    ucn_v6_adapter_owner_t *owner, bool *invariant_valid)
+{
+    ucn_v6_adapter_tx_slot_t *selected = NULL;
+    size_t index;
+    *invariant_valid = true;
+    for (index = 0U; index < UCN_V6_CONFIG_ADAPTER_TX_SLOTS; ++index) {
+        ucn_v6_adapter_link_slot_t *link;
+        if (!owner->tx[index].occupied ||
+            owner->tx[index].state != UCN_V6_DRIVER_TX_QUEUED) {
+            continue;
+        }
+        link = find_link(owner, owner->tx[index].key.link_id);
+        if (link == NULL || link->config.initial_generation !=
+                                owner->tx[index].key.link_generation) {
+            *invariant_valid = false;
+            return NULL;
+        }
+        if (link->readiness == UCN_V6_LINK_READY &&
+            (selected == NULL || owner->tx[index].order < selected->order)) {
+            selected = &owner->tx[index];
+        }
+    }
+    return selected;
+}
+
 static ucn_v6_adapter_tx_slot_t *oldest_tx_state(
     ucn_v6_adapter_owner_t *owner, ucn_v6_driver_tx_state_t state)
 {
@@ -504,13 +543,19 @@ ucn_v6_result_t ucn_v6_adapter_service_tx(
     ucn_v6_driver_event_key_t key;
     uint8_t priority;
     ucn_v6_result_t result;
+    bool invariant_valid;
     if (!owner_valid(owner) || submitted == NULL) return UCN_V6_ERR_ARGUMENT;
     if (!lock_owner(owner, false)) return UCN_V6_ERR_STATE;
     if (any_io_active(owner) || owner->stats.faulted) {
         unlock_owner(owner, false);
         return UCN_V6_ERR_STATE;
     }
-    slot = oldest_tx_state(owner, UCN_V6_DRIVER_TX_QUEUED);
+    slot = oldest_ready_queued_tx(owner, &invariant_valid);
+    if (!invariant_valid) {
+        owner->stats.faulted = true;
+        unlock_owner(owner, false);
+        return UCN_V6_ERR_STATE;
+    }
     if (slot == NULL) {
         *submitted = false;
         unlock_owner(owner, false);
@@ -519,6 +564,7 @@ ucn_v6_result_t ucn_v6_adapter_service_tx(
     link = find_link(owner, slot->key.link_id);
     if (link == NULL || link->readiness != UCN_V6_LINK_READY ||
         link->config.initial_generation != slot->key.link_generation) {
+        owner->stats.faulted = true;
         unlock_owner(owner, false);
         return UCN_V6_ERR_STATE;
     }

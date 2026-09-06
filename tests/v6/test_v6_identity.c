@@ -254,6 +254,7 @@ static ucn_v6_result_t verify_authority_epoch_transition(
         verifier->reenter_result = ucn_v6_identity_authority_install_epoch(
             verifier->authority, &request->proposed_epoch,
             &request->freshness, request->challenge_started_local_us,
+            request->challenge_started_local_us,
             &request->lease_policy, proof);
     }
     if (verifier->return_invalid_result) {
@@ -621,6 +622,7 @@ static ucn_v6_result_t identity_install_epoch_for_test(
         lease_policy, NULL, &proof);
     return ucn_v6_identity_authority_install_epoch(
         authority, epoch, freshness, challenge_started_local_us,
+        challenge_started_local_us,
         lease_policy, &proof);
 }
 
@@ -804,7 +806,7 @@ static int test_authority_persist_before_publish(void)
 {
     fake_store_t store;
     ucn_v6_identity_store_ops_t ops;
-    ucn_v6_identity_authority_storage_t authority_storage;
+    ucn_v6_identity_authority_storage_t authority_storage = {0};
     ucn_v6_identity_authority_t *authority = NULL;
     ucn_v6_identity_authority_view_t authority_view;
     ucn_v6_callback_gate_t gate = {0};
@@ -933,7 +935,7 @@ static int test_factory_epoch_requires_first_lease_sequence(void)
     fake_store_t store;
     ucn_v6_identity_store_ops_t ops;
     ucn_v6_callback_gate_t gate = {0};
-    ucn_v6_identity_authority_storage_t storage;
+    ucn_v6_identity_authority_storage_t storage = {0};
     ucn_v6_identity_authority_storage_t before;
     ucn_v6_identity_authority_t *authority = NULL;
     ucn_v6_authority_epoch_t skipped = authority_epoch(1U);
@@ -967,7 +969,7 @@ static int test_authority_renewal_and_transfer_preserve_bindings(void)
     fake_store_t store;
     ucn_v6_identity_store_ops_t ops;
     ucn_v6_callback_gate_t gate = {0};
-    ucn_v6_identity_authority_storage_t storage;
+    ucn_v6_identity_authority_storage_t storage = {0};
     ucn_v6_identity_authority_storage_t before;
     ucn_v6_identity_authority_t *authority = NULL;
     ucn_v6_identity_authority_view_t old_view;
@@ -1122,7 +1124,7 @@ static int test_same_lease_freshness_cannot_extend_deadline(void)
     fake_store_t store;
     ucn_v6_identity_store_ops_t ops;
     ucn_v6_callback_gate_t gate = {0};
-    ucn_v6_identity_authority_storage_t storage;
+    ucn_v6_identity_authority_storage_t storage = {0};
     ucn_v6_identity_authority_storage_t before;
     ucn_v6_identity_authority_t *authority = NULL;
     ucn_v6_identity_authority_view_t view;
@@ -1186,9 +1188,9 @@ static int test_opaque_storage_preflight_and_corruption(void)
     fake_store_t store;
     ucn_v6_identity_store_ops_t ops;
     ucn_v6_callback_gate_t gate = {0};
-    ucn_v6_identity_authority_storage_t authority_storage;
+    ucn_v6_identity_authority_storage_t authority_storage = {0};
     ucn_v6_identity_authority_storage_t authority_before;
-    ucn_v6_bootstrap_owner_storage_t bootstrap_storage;
+    ucn_v6_bootstrap_owner_storage_t bootstrap_storage = {0};
     ucn_v6_bootstrap_owner_storage_t bootstrap_before;
     ucn_v6_feature_manifest_t bad_manifest = *ucn_v6_compiled_manifest();
     ucn_v6_identity_authority_t *authority = NULL;
@@ -1247,9 +1249,9 @@ static int test_authority_restart_and_rollback_witness(void)
     fake_store_t store;
     ucn_v6_identity_store_ops_t ops;
     ucn_v6_callback_gate_t gate = {0};
-    ucn_v6_identity_authority_storage_t first_storage;
-    ucn_v6_identity_authority_storage_t restarted_storage;
-    ucn_v6_identity_authority_storage_t rejected_storage;
+    ucn_v6_identity_authority_storage_t first_storage = {0};
+    ucn_v6_identity_authority_storage_t restarted_storage = {0};
+    ucn_v6_identity_authority_storage_t rejected_storage = {0};
     ucn_v6_identity_authority_storage_t rejected_before;
     ucn_v6_identity_authority_t *first = NULL;
     ucn_v6_identity_authority_t *restarted = NULL;
@@ -1318,8 +1320,8 @@ static int test_authority_torn_write_recovers_pending(void)
     fake_store_t store;
     ucn_v6_identity_store_ops_t ops;
     ucn_v6_callback_gate_t gate = {0};
-    ucn_v6_identity_authority_storage_t storage;
-    ucn_v6_identity_authority_storage_t reboot_storage;
+    ucn_v6_identity_authority_storage_t storage = {0};
+    ucn_v6_identity_authority_storage_t reboot_storage = {0};
     ucn_v6_identity_authority_t *authority = NULL;
     ucn_v6_identity_authority_t *rebooted = NULL;
     ucn_v6_identity_authority_view_t view;
@@ -1360,9 +1362,9 @@ static int test_first_commissioning_recovers_every_torn_boundary(void)
         fake_store_t store;
         ucn_v6_identity_store_ops_t ops;
         ucn_v6_callback_gate_t gate = {0};
-        ucn_v6_identity_authority_storage_t failed_storage;
-        ucn_v6_identity_authority_storage_t reboot_storage;
-        ucn_v6_identity_authority_storage_t verify_storage;
+        ucn_v6_identity_authority_storage_t failed_storage = {0};
+        ucn_v6_identity_authority_storage_t reboot_storage = {0};
+        ucn_v6_identity_authority_storage_t verify_storage = {0};
         ucn_v6_identity_authority_t *failed = NULL;
         ucn_v6_identity_authority_t *rebooted = NULL;
         ucn_v6_identity_authority_t *verified = NULL;
@@ -1423,35 +1425,53 @@ static int test_first_commissioning_recovers_every_torn_boundary(void)
 
 static int test_bootstrap_open_binds_exact_selected_link(void)
 {
-    ucn_v6_bootstrap_owner_storage_t owner_storage;
-    ucn_v6_bootstrap_owner_storage_t before;
+    ucn_v6_bootstrap_owner_storage_t owner_storage = {0};
+    uint8_t before[UCN_V6_BOOTSTRAP_OWNER_STORAGE_BYTES];
     ucn_v6_bootstrap_owner_t *owner = NULL;
-    ucn_v6_bootstrap_config_t config = {
-        UCN_V6_CONFIG_BOOTSTRAP_PENDING, 1U, 2U, 1U,
-        UINT64_C(3000000)
-    };
+    ucn_v6_bootstrap_config_t config;
     ucn_v6_bootstrap_transcript_t value = transcript(UINT64_C(901));
     ucn_v6_bootstrap_key_t key = bootstrap_key(&value, 1U, 9U);
     ucn_v6_binding_key_t binding = {
         UINT32_C(0x10203040), 7U, 3U
     };
 
+    memset(&config, 0, sizeof(config));
+    config.max_pending = UCN_V6_CONFIG_BOOTSTRAP_PENDING;
+    config.max_pending_per_link = 1U;
+    config.token_burst = 2U;
+    config.tokens_per_second = 1U;
+    config.pending_timeout_us = UINT64_C(3000000);
     CHECK(ucn_v6_bootstrap_owner_init_in_place(
               owner_storage.bytes, sizeof(owner_storage),
               ucn_v6_compiled_manifest(), &config, &owner) == UCN_V6_OK);
-    before = owner_storage;
+    memcpy(before, owner_storage.bytes, sizeof(before));
+    key.ingress_link_id = UINT16_MAX;
+    CHECK(ucn_v6_bootstrap_open_after_cookie(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value, NULL,
+              true, 10U) == UCN_V6_ERR_SECURITY);
+    CHECK(memcmp(owner_storage.bytes, before, sizeof(before)) == 0);
+
+    key = bootstrap_key(&value, 1U, 9U);
+    value.selected_link_instance_id = UINT16_MAX;
+    CHECK(ucn_v6_bootstrap_open_after_cookie(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value, NULL,
+              true, 10U) == UCN_V6_ERR_SECURITY);
+    CHECK(memcmp(owner_storage.bytes, before, sizeof(before)) == 0);
+
+    value = transcript(UINT64_C(901));
+    key = bootstrap_key(&value, 1U, 9U);
     key.ingress_link_generation = 2U;
     CHECK(ucn_v6_bootstrap_open_after_cookie(
               owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value, NULL,
               true, 10U) == UCN_V6_ERR_SECURITY);
-    CHECK(memcmp(&owner_storage, &before, sizeof(owner_storage)) == 0);
+    CHECK(memcmp(owner_storage.bytes, before, sizeof(before)) == 0);
 
     key = bootstrap_key(&value, 1U, 9U);
     key.ingress_link_id = 2U;
     CHECK(ucn_v6_bootstrap_open_after_cookie(
               owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value, NULL,
               true, 10U) == UCN_V6_ERR_SECURITY);
-    CHECK(memcmp(&owner_storage, &before, sizeof(owner_storage)) == 0);
+    CHECK(memcmp(owner_storage.bytes, before, sizeof(before)) == 0);
 
     value = transcript(UINT64_C(902));
     value.flow = UCN_V6_BOOTSTRAP_FLOW_REAUTH;
@@ -1460,20 +1480,20 @@ static int test_bootstrap_open_binds_exact_selected_link(void)
     CHECK(ucn_v6_bootstrap_open_after_cookie(
               owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &value,
               &binding, true, 11U) == UCN_V6_ERR_SECURITY);
-    CHECK(memcmp(&owner_storage, &before, sizeof(owner_storage)) == 0);
+    CHECK(memcmp(owner_storage.bytes, before, sizeof(before)) == 0);
 
     key = bootstrap_key(&value, 3U, 10U);
     value.selected_link_instance_id = 2U;
     CHECK(ucn_v6_bootstrap_open_after_cookie(
               owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &key, &value,
               &binding, true, 11U) == UCN_V6_ERR_SECURITY);
-    CHECK(memcmp(&owner_storage, &before, sizeof(owner_storage)) == 0);
+    CHECK(memcmp(owner_storage.bytes, before, sizeof(before)) == 0);
     return 0;
 }
 
 static int test_bootstrap_resource_and_state_contract(void)
 {
-    ucn_v6_bootstrap_owner_storage_t owner_storage;
+    ucn_v6_bootstrap_owner_storage_t owner_storage = {0};
     ucn_v6_bootstrap_owner_t *owner = NULL;
     ucn_v6_bootstrap_config_t config = {
         UCN_V6_CONFIG_BOOTSTRAP_PENDING,
@@ -1601,7 +1621,7 @@ static int test_bootstrap_resource_and_state_contract(void)
 
 static int test_bootstrap_cross_flow_capacity_contract(void)
 {
-    ucn_v6_bootstrap_owner_storage_t owner_storage;
+    ucn_v6_bootstrap_owner_storage_t owner_storage = {0};
     ucn_v6_bootstrap_owner_t *owner = NULL;
 #if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 4U
     ucn_v6_bootstrap_config_t config = {
@@ -1680,7 +1700,7 @@ static int test_bootstrap_cross_flow_capacity_contract(void)
 
 static int test_bootstrap_exact_link_instance_budget(void)
 {
-    ucn_v6_bootstrap_owner_storage_t owner_storage;
+    ucn_v6_bootstrap_owner_storage_t owner_storage = {0};
     ucn_v6_bootstrap_owner_t *owner = NULL;
 #if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 4U
     ucn_v6_bootstrap_config_t config = {
@@ -1744,7 +1764,7 @@ static int test_bootstrap_exact_link_instance_budget(void)
 
 static int test_bootstrap_budget_generation_churn_reclaims_idle_slots(void)
 {
-    ucn_v6_bootstrap_owner_storage_t owner_storage;
+    ucn_v6_bootstrap_owner_storage_t owner_storage = {0};
     ucn_v6_bootstrap_owner_t *owner = NULL;
     ucn_v6_bootstrap_config_t config = {
         2U, 1U, 2U, 1U, UINT64_C(1000)
@@ -1791,7 +1811,7 @@ static int test_bootstrap_budget_generation_churn_reclaims_idle_slots(void)
 
 static int test_bootstrap_trusted_verifier_fail_closed(void)
 {
-    ucn_v6_bootstrap_owner_storage_t storage;
+    ucn_v6_bootstrap_owner_storage_t storage = {0};
     ucn_v6_bootstrap_owner_t *owner = NULL;
     ucn_v6_bootstrap_config_t config = {
         2U, 1U, 2U, 1U, UINT64_C(1000)
@@ -1902,9 +1922,9 @@ static int test_authority_trusted_verifier_and_canonical_domain(void)
     ucn_v6_identity_authority_verifier_ops_t invalid_verifier = {0};
     ucn_v6_callback_gate_t gate = {0};
     ucn_v6_callback_gate_t fresh_gate = {0};
-    ucn_v6_identity_authority_storage_t storage;
-    ucn_v6_identity_authority_storage_t fresh_storage;
-    ucn_v6_identity_authority_storage_t rejected_storage;
+    ucn_v6_identity_authority_storage_t storage = {0};
+    ucn_v6_identity_authority_storage_t fresh_storage = {0};
+    ucn_v6_identity_authority_storage_t rejected_storage = {0};
     ucn_v6_identity_authority_storage_t before;
     ucn_v6_identity_authority_t *authority = NULL;
     ucn_v6_identity_authority_t *fresh_authority = NULL;
@@ -1917,6 +1937,7 @@ static int test_authority_trusted_verifier_and_canonical_domain(void)
     ucn_v6_authority_transition_request_t padded_a;
     ucn_v6_authority_transition_request_t padded_b;
     ucn_v6_authority_proof_t proof;
+    ucn_v6_authority_proof_t future_proof;
     ucn_v6_authority_proof_t wrong_proof;
     uint8_t canonical[UCN_V6_AUTHORITY_TRANSITION_CANONICAL_BYTES];
     uint8_t canonical_a[UCN_V6_AUTHORITY_TRANSITION_CANONICAL_BYTES];
@@ -2063,12 +2084,23 @@ static int test_authority_trusted_verifier_and_canonical_domain(void)
     CHECK_REQUEST_MUTATION(++padded_a.derived_local_deadline_us);
 #undef CHECK_REQUEST_MUTATION
 
+    CHECK(authority_proof_for_install(
+              authority, &epoch, &freshness, 100U, &policy, NULL,
+              &future_proof) == UCN_V6_OK);
+    before = storage;
+    submits_before = store.submit_calls;
+    CHECK(ucn_v6_identity_authority_install_epoch(
+              authority, &epoch, &freshness, 100U, 0U, &policy,
+              &future_proof) == UCN_V6_ERR_STATE);
+    CHECK(memcmp(&storage, &before, sizeof(storage)) == 0 &&
+          store.submit_calls == submits_before);
+
     wrong_proof = proof;
     wrong_proof.bytes[0] ^= UINT8_C(0x80);
     before = storage;
     submits_before = store.submit_calls;
     CHECK(ucn_v6_identity_authority_install_epoch(
-              authority, &epoch, &freshness, 0U, &policy,
+              authority, &epoch, &freshness, 0U, 0U, &policy,
               &wrong_proof) == UCN_V6_ERR_SECURITY);
     CHECK(memcmp(&storage, &before, sizeof(storage)) == 0 &&
           store.submit_calls == submits_before);
@@ -2076,21 +2108,21 @@ static int test_authority_trusted_verifier_and_canonical_domain(void)
     wrong_proof = proof;
     wrong_proof.bytes[wrong_proof.length] = UINT8_C(0x7E);
     CHECK(ucn_v6_identity_authority_install_epoch(
-              authority, &epoch, &freshness, 0U, &policy,
+              authority, &epoch, &freshness, 0U, 0U, &policy,
               &wrong_proof) == UCN_V6_ERR_SECURITY);
     CHECK(memcmp(&storage, &before, sizeof(storage)) == 0 &&
           store.submit_calls == submits_before);
 
     authority_verifier_context.forced_result = UCN_V6_ERR_STATE;
     CHECK(ucn_v6_identity_authority_install_epoch(
-              authority, &epoch, &freshness, 0U, &policy,
+              authority, &epoch, &freshness, 0U, 0U, &policy,
               &proof) == UCN_V6_ERR_SECURITY);
     CHECK(memcmp(&storage, &before, sizeof(storage)) == 0 &&
           store.submit_calls == submits_before);
     authority_verifier_context.forced_result = UCN_V6_OK;
     authority_verifier_context.return_invalid_result = true;
     CHECK(ucn_v6_identity_authority_install_epoch(
-              authority, &epoch, &freshness, 0U, &policy,
+              authority, &epoch, &freshness, 0U, 0U, &policy,
               &proof) == UCN_V6_ERR_SECURITY);
     CHECK(memcmp(&storage, &before, sizeof(storage)) == 0 &&
           store.submit_calls == submits_before);
@@ -2098,7 +2130,7 @@ static int test_authority_trusted_verifier_and_canonical_domain(void)
 
     authority_verifier_context.reenter_install = true;
     CHECK(ucn_v6_identity_authority_install_epoch(
-              authority, &epoch, &freshness, 0U, &policy,
+              authority, &epoch, &freshness, 0U, 0U, &policy,
               &proof) == UCN_V6_ERR_STATE);
     CHECK(authority_verifier_context.reenter_result == UCN_V6_ERR_STATE);
     CHECK(memcmp(&storage, &before, sizeof(storage)) == 0 &&
@@ -2116,7 +2148,7 @@ static int test_authority_trusted_verifier_and_canonical_domain(void)
     before = fresh_storage;
     submits_before = fresh_store.submit_calls;
     CHECK(ucn_v6_identity_authority_install_epoch(
-              fresh_authority, &changed_epoch, &freshness, 0U, &policy,
+              fresh_authority, &changed_epoch, &freshness, 0U, 0U, &policy,
               &proof) == UCN_V6_ERR_SECURITY);
     CHECK(memcmp(&fresh_storage, &before, sizeof(fresh_storage)) == 0 &&
           fresh_store.submit_calls == submits_before);

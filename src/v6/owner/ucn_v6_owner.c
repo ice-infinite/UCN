@@ -550,6 +550,22 @@ ucn_v6_result_t ucn_v6_stack_owner_init_in_place(
     if (result != UCN_V6_OK) {
         return result;
     }
+    if (ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     owner_out, sizeof(*owner_out)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     manifest, sizeof(*manifest)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     lock_ops, sizeof(*lock_ops)) ||
+        ucn_v6_memory_ranges_overlap(storage, storage_bytes,
+                                     hooks, sizeof(*hooks)) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, lock_ops->context,
+            lock_ops->context != NULL ? 1U : 0U) ||
+        ucn_v6_memory_ranges_overlap(
+            storage, storage_bytes, hooks->context,
+            hooks->context != NULL ? 1U : 0U)) {
+        return UCN_V6_ERR_CONFIG;
+    }
     memset(&initialized, 0, sizeof(initialized));
     result = mailbox_init(&initialized.mailbox, manifest, lock_ops);
     if (result != UCN_V6_OK) {
