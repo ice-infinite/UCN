@@ -564,7 +564,12 @@ def active_documents(root: Path) -> list[Path]:
     for name in ("official", "用户手册", "源码阅读指南", "reference", "evidence", "experimental", "calltree"):
         docs.extend(sorted((root / "docs" / name).rglob("*.md")))
     management = root / "docs" / "00-项目管理"
-    for name in ("00-任务表.md", "01-项目操作记录.md", "05-V6兼容删除清单.md"):
+    for name in (
+        "00-任务表.md",
+        "01-项目操作记录.md",
+        "05-V6兼容删除清单.md",
+        "06-V6简化版分支基线与实施入口.md",
+    ):
         docs.append(management / name)
     docs.extend(sorted((root / "docs" / "08-实现与验证" / "版本演进").glob("UCN_V6_*.md")))
     proposal = root / "docs" / "10-理论与规划" / "建议方案"
@@ -940,6 +945,7 @@ def validate_simplified_manifest(root: Path, errors: list[str]) -> None:
         root / "docs" / "00-项目管理" / "00-任务表.md",
         root / "docs" / "00-项目管理" / "01-项目操作记录.md",
         root / "docs" / "00-项目管理" / "04-UCN后续主要工作与分阶段实施路线图.md",
+        root / "docs" / "00-项目管理" / "06-V6简化版分支基线与实施入口.md",
         root / "docs" / "calltree" / "README.md",
         root / "docs" / "源码阅读指南" / "06-公共函数签名索引.md",
         root / "tools" / "v6" / "check_v6_current_docs.py",

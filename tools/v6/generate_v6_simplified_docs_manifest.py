@@ -23,6 +23,7 @@ BOUNDARY_AND_EVIDENCE = (
     "docs/00-项目管理/00-任务表.md",
     "docs/00-项目管理/01-项目操作记录.md",
     "docs/00-项目管理/04-UCN后续主要工作与分阶段实施路线图.md",
+    "docs/00-项目管理/06-V6简化版分支基线与实施入口.md",
     "docs/calltree/README.md",
     "docs/源码阅读指南/06-公共函数签名索引.md",
     "tools/v6/check_v6_current_docs.py",
