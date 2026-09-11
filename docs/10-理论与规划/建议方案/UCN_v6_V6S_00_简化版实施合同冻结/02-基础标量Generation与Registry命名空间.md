@@ -1,6 +1,6 @@
 # V6S-00-02 基础标量、Generation 与 Registry 命名空间
 
-> 状态：`DONE / SELF-REVIEW PASS / FINAL EXTERNAL REVIEW PENDING`
+> 状态：`DONE / SELF-REVIEW PASS / EXTERNAL REVIEW GO`
 >
 > 本文先冻结线上可见标量的宽度和所有权。`V6S-00-03` 只能把这些标量放入具体 offset，
 > 不能重新选择第二套宽度或重置规则。

@@ -1,6 +1,6 @@
 # V6S-00-06 Profile 容量公式与资源门禁
 
-> 状态：`DONE / SELF-REVIEW PASS / EXTERNAL REVIEW REQUIRED`
+> 状态：`DONE / SELF-REVIEW PASS / EXTERNAL REVIEW GO`
 >
 > 本文冻结容量档位、计算方法、失败行为和后续测量方法；表中 ceiling 是设计门禁，不是当前实现或 MCU 实测值。
 
@@ -242,4 +242,4 @@ stack-usage。某 Composition 的合法最低容量高于所选 override 时，�
 - 专用/共享资源、满载、清理进度和 Feature OFF 均失败关闭；
 - 本文没有把 Host 数据写成 MCU 结论，也没有放行代码实施。
 
-结论：`V6S-00-06 = DONE / SELF-REVIEW PASS / EXTERNAL REVIEW REQUIRED`。
+结论：`V6S-00-06 = DONE / SELF-REVIEW PASS / EXTERNAL REVIEW GO`。

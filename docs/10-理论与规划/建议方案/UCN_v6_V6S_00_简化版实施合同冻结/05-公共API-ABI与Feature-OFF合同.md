@@ -1,6 +1,6 @@
 # V6S-00-05 公共 API、ABI 与 Feature OFF 合同
 
-> 状态：`DONE / SELF-REVIEW PASS / EXTERNAL REVIEW REQUIRED`
+> 状态：`DONE / SELF-REVIEW PASS / EXTERNAL REVIEW GO`
 >
 > 本文冻结简化版的用户入口、静态存储、错误语义、生命周期和发布边界；不表示这些名称已经由当前源码实现。
 
@@ -282,4 +282,4 @@ Composition 与 Profile 正交。Feature OFF 的冻结行为：
 - Feature OFF 同时覆盖编译、安装、符号、Storage 与运行时意图拒绝；
 - 本文没有宣称当前完整 V6 API 已实现，也没有放行 `IMPL-00`。
 
-结论：`V6S-00-05 = DONE / SELF-REVIEW PASS / EXTERNAL REVIEW REQUIRED`。
+结论：`V6S-00-05 = DONE / SELF-REVIEW PASS / EXTERNAL REVIEW GO`。

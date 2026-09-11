@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import subprocess
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -36,6 +37,36 @@ SIMPLIFIED_REMEDIATION_FILES = (
     "tests/v6/test_v6_identity.c",
     "tests/v6/test_v6_security.c",
 )
+
+SIGNED_V6S_COMMIT = "0c8e55107d0a9f5c77c744d33e87d466da7f3088"
+SIGNED_V6S_MANIFEST_SHA256 = (
+    "AC97DF798655B1F986D9921A0FC180EBDE71116715F08582D240F26A60C85EC5"
+)
+SIGNED_V6S_ENTRY_COUNT = 61
+SIGNED_MIXED_EOL_PATH = "docs/00-项目管理/01-项目操作记录.md"
+SIGNED_CRLF_PATH = (
+    "docs/10-理论与规划/建议方案/UCN_v6_逻辑模型与伪代码/"
+    "13-故障恢复与对抗矩阵.md"
+)
+
+
+def restore_signed_worktree_eol(relative: str, data: bytes) -> bytes:
+    """Recreate signed Windows bytes after Git's text normalization."""
+    if relative == SIGNED_CRLF_PATH:
+        return data.replace(b"\n", b"\r\n")
+    if relative != SIGNED_MIXED_EOL_PATH:
+        return data
+    output = bytearray()
+    line_break_index = 0
+    for value in data:
+        if value == 0x0A and (line_break_index == 107 or line_break_index >= 1871):
+            output.append(0x0D)
+        output.append(value)
+        if value == 0x0A:
+            line_break_index += 1
+    if line_break_index != 5063:
+        return b""
+    return bytes(output)
 
 MERMAID_CANONICAL_EDGES = frozenset(("-->", "<-->", ".->", "->>", "-->>"))
 MERMAID_ANY_EDGE = re.compile(
@@ -1053,36 +1084,14 @@ def validate_simplified_manifest(root: Path, errors: list[str]) -> None:
         errors.append(f"missing simplified document manifest: {manifest}")
         return
 
-    proposal = root / "docs" / "10-理论与规划" / "建议方案"
-    logic = proposal / "UCN_v6_逻辑模型与伪代码"
-    expected = {proposal / "README.md"}
-    expected.update(proposal / name for name in PROPOSAL_NAMES)
-    expected.update(logic.glob("*.md"))
-    expected.update(
-        (proposal / "UCN_v6_V6S_00_简化版实施合同冻结").glob("*.md")
-    )
-    expected.update((
-        root / "docs" / "09-审计与整改" /
-        "UCN_V6_简化文档收口与全体自审报告_2026-09-08.md",
-        root / "docs" / "00-项目管理" / "00-任务表.md",
-        root / "docs" / "00-项目管理" / "01-项目操作记录.md",
-        root / "docs" / "00-项目管理" / "04-UCN后续主要工作与分阶段实施路线图.md",
-        root / "docs" / "00-项目管理" / "06-V6简化版分支基线与实施入口.md",
-        root / "docs" / "calltree" / "README.md",
-        root / "docs" / "源码阅读指南" / "06-公共函数签名索引.md",
-        root / "tools" / "v6" / "check_v6_current_docs.py",
-        root / "tools" / "v6" / "check_v6s_freeze_contracts.py",
-        root / "tools" / "v6" / "check_v6s_wire_contract.py",
-        root / "tools" / "v6" / "generate_v6_simplified_docs_manifest.py",
-    ))
-    expected.update(root / relative for relative in SIMPLIFIED_REMEDIATION_FILES)
-    expected_relative = {
-        path.resolve().relative_to(root).as_posix() for path in expected
-    }
+    manifest_bytes = manifest.read_bytes()
+    if hashlib.sha256(manifest_bytes).hexdigest().upper() != SIGNED_V6S_MANIFEST_SHA256:
+        errors.append("signed simplified manifest file hash mismatch")
 
     actual_relative: set[str] = set()
+    entries = 0
     for line_number, line in enumerate(
-            manifest.read_text(encoding="utf-8").splitlines(), start=1):
+            manifest_bytes.decode("utf-8").splitlines(), start=1):
         if not line or line.startswith("#"):
             continue
         parts = line.split("  ", 2)
@@ -1105,19 +1114,41 @@ def validate_simplified_manifest(root: Path, errors: list[str]) -> None:
             errors.append(f"duplicate simplified manifest path: {normalized}")
             continue
         actual_relative.add(normalized)
-        if not path.is_file():
-            errors.append(f"manifest file missing: {normalized}")
+        entries += 1
+        completed = subprocess.run(
+            ["git", "show", f"{SIGNED_V6S_COMMIT}:{normalized}"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0:
+            errors.append(f"signed manifest Git blob missing: {normalized}")
             continue
-        data = path.read_bytes()
+        data = restore_signed_worktree_eol(normalized, completed.stdout)
         if len(data) != expected_size:
-            errors.append(f"manifest size mismatch: {normalized}")
+            errors.append(f"signed manifest size mismatch: {normalized}")
         if hashlib.sha256(data).hexdigest().upper() != digest:
-            errors.append(f"manifest hash mismatch: {normalized}")
+            errors.append(f"signed manifest hash mismatch: {normalized}")
 
-    if actual_relative != expected_relative:
-        missing = sorted(expected_relative - actual_relative)
-        extra = sorted(actual_relative - expected_relative)
-        errors.append(f"simplified manifest membership mismatch missing={missing} extra={extra}")
+    if entries != SIGNED_V6S_ENTRY_COUNT:
+        errors.append(
+            f"signed simplified manifest entries={entries} "
+            f"expected={SIGNED_V6S_ENTRY_COUNT}"
+        )
+    for relative in SIMPLIFIED_REMEDIATION_FILES:
+        if relative not in actual_relative:
+            errors.append(f"signed manifest omits remediation file: {relative}")
+
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", SIGNED_V6S_COMMIT, "HEAD"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        errors.append("current HEAD is not descended from signed V6S candidate")
 
 
 def main() -> int:

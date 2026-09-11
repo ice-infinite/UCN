@@ -1,9 +1,9 @@
 # UCN v6 最终协议架构与破坏性重构 RFC
 
-> 文档级别：`SELF-REVIEWED / PRE-IMPLEMENTATION RFC / EXTERNAL REVIEW REQUIRED`
+> 文档级别：`SELF-REVIEWED / PRE-IMPLEMENTATION RFC / V6S-00 EXTERNAL REVIEW GO`
 > 目标版本：`UCN v6 Draft`，稳定后作为 `UCN 1.0` 的候选基础
 > 兼容策略：**不兼容现有 v4/v5 测试固件、Core Wire、Cluster Wire、公共对象 ABI 或持久化记录**
-> 当前状态：V6A-01～V6A-25 所在历史基线的顶层架构不变量曾获 `V6-00 = EXTERNAL FINAL REVIEW GO`；本文件在 2026-09-07～12 为低开销 Wire、模块化、用户意图、简化逻辑和 `V6S-00` 专项合同作了后续修订，**当前候选处于 `SELF-REVIEWED / EXTERNAL REVIEW REQUIRED`，不得沿用旧哈希的外审签字**。V6-01～V6-15 的既有软件实现和自审也不等于这些新合同已经实现。本文原第 6 章逐字节候选已失效；当前精确标量、线上布局和 Golden 候选权威为[V6S-00 简化版实施合同冻结](UCN_v6_V6S_00_简化版实施合同冻结/README.md)的 00-02～04，低开销 Wire 长文负责运行语义和场景说明。在 `V6S-00-08` 外审 GO 前不得替换当前生产 Codec/RX/TX。真实 Flash/掉电、生产密码 Provider、实机资源与长稳仍为发布阻断
+> 当前状态：V6A-01～V6A-25 所在历史基线的顶层架构不变量曾获 `V6-00 = EXTERNAL FINAL REVIEW GO`；本文件在 2026-09-07～12 为低开销 Wire、模块化、用户意图、简化逻辑和 `V6S-00` 专项合同作了后续修订。该专项候选已在提交 `0c8e55107d0a9f5c77c744d33e87d466da7f3088`、清单 SHA256 `AC97DF798655B1F986D9921A0FC180EBDE71116715F08582D240F26A60C85EC5` 上取得 `V6S-00 EXTERNAL REVIEW GO`。该签字只冻结实施合同，不表示 V6-01～V6-15 的既有软件已经实现新布局。本文原第 6 章逐字节候选已失效；当前精确标量、线上布局和 Golden 权威为[V6S-00 简化版实施合同冻结](UCN_v6_V6S_00_简化版实施合同冻结/README.md)的 00-02～04，低开销 Wire 长文负责运行语义和场景说明。真实 Flash/掉电、生产密码 Provider、实机资源与长稳仍为发布阻断
 > 日期：2026-09-07
 
 ## 1. 决策摘要

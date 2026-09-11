@@ -1,10 +1,13 @@
 # V6S-00 简化版实施合同冻结
 
-> 状态：`SELF-REVIEW PASS / EXTERNAL REVIEW REQUIRED / AUDIT HOLD`
+> 状态：`DONE / EXTERNAL REVIEW GO（实施合同冻结范围）`
 >
 > 适用分支：`v6-simplified`
 >
-> 实现门禁：`IMPL-00` 必须等待 `V6S-00-08` 外部复审 GO。
+> 实现门禁：`V6S-00-08` 已取得外部复审 GO，`IMPL-00` 已获准按任务边界启动。
+>
+> 签字工件：Git 提交 `0c8e55107d0a9f5c77c744d33e87d466da7f3088`；候选清单
+> SHA256 `AC97DF798655B1F986D9921A0FC180EBDE71116715F08582D240F26A60C85EC5`。
 
 ## 1. 为什么先做合同冻结
 
@@ -13,7 +16,8 @@
 offset、Generation 归属、Feature OFF 行为或 Persistence Envelope，后续必然出现二次搬迁、
 双语义和“为了兼容刚写出的中间版本”而保留的冗余。
 
-所以本目录先冻结实现必须服从的输入。这里的 `DONE` 只表示文档与合同经过本轮定向自审；
+所以本目录先冻结实现必须服从的输入。这里的 `DONE / EXTERNAL REVIEW GO` 只表示文档与合同
+在上述不可变 Git 工件上完成外审；
 不表示源码已经实现，更不表示真实 Flash、密码 Provider、MCU、Bearer、性能或长稳已经验证。
 
 ## 2. 权威顺序
@@ -21,7 +25,7 @@ offset、Generation 归属、Feature OFF 行为或 Persistence Envelope，后续
 发现冲突时按以下顺序停止并裁决：
 
 1. [V6 最终协议架构 RFC](../UCN_v6_最终协议架构与破坏性重构_RFC.md)中的 MCU-first、失败关闭和顶层安全不变量；
-2. `V6S-00-08` 取得外部复审 GO 后，本目录才成为专项精确冻结合同；届时对标量、Wire、API、资源和 Persistence 的 byte/bit/数值问题，本目录是 RFC 顶层原则的规范化细化；
+2. 本目录在上述签字工件中是专项精确冻结合同；对标量、Wire、API、资源和 Persistence 的 byte/bit/数值问题，本目录是 RFC 顶层原则的规范化细化；
 3. [全局不变量与模块对接登记表](../UCN_v6_逻辑模型与伪代码/26-全局不变量与模块对接登记表.md)；
 4. 对应模块的逻辑模型、状态图和伪代码；
 5. 当前完整 V6 源码仅作行为与测试参考，不能反向覆盖冻结合同。
@@ -75,6 +79,11 @@ V6S-00-04 = DONE / SELF-REVIEW PASS
 V6S-00-05 = DONE / SELF-REVIEW PASS
 V6S-00-06 = DONE / SELF-REVIEW PASS
 V6S-00-07 = DONE / SELF-REVIEW PASS
-V6S-00-08 = DONE / SELF-REVIEW PASS / EXTERNAL REVIEW REQUIRED / AUDIT HOLD
-IMPL-00 = BLOCKED
+V6S-00-08 = DONE / EXTERNAL REVIEW GO
+V6S-00 = DONE / EXTERNAL REVIEW GO（实施合同冻结范围）
+IMPL-00 = AUTHORIZED / IN PROGRESS
 ```
+
+后续只要签字候选 61 项中的任一当前文件发生变化，当前工作树便不再等同于外审候选；不得
+重写上述提交或沿用其签字描述。冻结门禁始终从签字提交读取并复算原始字节，后续变化按
+对应 `IMPL-*` 子任务、自审和差异外审另行管理。

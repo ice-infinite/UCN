@@ -1,6 +1,6 @@
 # V6S-00-07 Persistence Foundation 共同合同
 
-> 状态：`DONE / SELF-REVIEW PASS / EXTERNAL REVIEW REQUIRED`
+> 状态：`DONE / SELF-REVIEW PASS / EXTERNAL REVIEW GO`
 >
 > 本文只冻结所有 durable 模块共享的 Record Envelope、Provider、双槽、Witness、Proof 与恢复顺序；业务 Record Body 不在此处设计。
 
@@ -369,4 +369,4 @@ Host fault injection 证明状态机；真实 Flash/power-cut 才证明介质和
 - 业务 Body/transition 没有被提前塞入 Foundation；
 - Feature OFF、固定 staging、局部 Fault 和真实掉电证据边界完整。
 
-结论：`V6S-00-07 = DONE / SELF-REVIEW PASS / EXTERNAL REVIEW REQUIRED`。
+结论：`V6S-00-07 = DONE / SELF-REVIEW PASS / EXTERNAL REVIEW GO`。

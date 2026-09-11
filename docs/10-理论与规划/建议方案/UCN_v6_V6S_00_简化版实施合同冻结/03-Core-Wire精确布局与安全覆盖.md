@@ -1,6 +1,6 @@
 # V6S-00-03 Core Wire 精确布局与安全覆盖
 
-> 状态：`DONE / SELF-REVIEW PASS / FINAL EXTERNAL REVIEW PENDING`
+> 状态：`DONE / SELF-REVIEW PASS / EXTERNAL REVIEW GO`
 >
 > 本文冻结简化版 C0～C5 的 Core Packet ABI。它不实现 Encoder/Decoder；旧 V6 Contract 1
 > 的 9 B 前缀、Magic、固定 CRC 和 41～47 B 基础头不得混入本格式。

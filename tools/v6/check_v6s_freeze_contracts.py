@@ -41,6 +41,16 @@ REMEDIATION_CONTENT_FILES = tuple(sorted(
     ALLOWED_TEST_REMEDIATIONS | ALLOWED_PRODUCTION_REMEDIATIONS
 ))
 MANIFEST_RELATIVE = "docs/09-审计与整改/UCN_V6_简化文档候选清单.sha256"
+SIGNED_CANDIDATE_COMMIT = "0c8e55107d0a9f5c77c744d33e87d466da7f3088"
+SIGNED_MANIFEST_SHA256 = (
+    "AC97DF798655B1F986D9921A0FC180EBDE71116715F08582D240F26A60C85EC5"
+)
+SIGNED_ENTRY_COUNT = 61
+SIGNED_MIXED_EOL_PATH = "docs/00-项目管理/01-项目操作记录.md"
+SIGNED_CRLF_PATH = (
+    "docs/10-理论与规划/建议方案/UCN_v6_逻辑模型与伪代码/"
+    "13-故障恢复与对抗矩阵.md"
+)
 
 
 def require(text: str, token: str, label: str, errors: list[str]) -> None:
@@ -49,24 +59,28 @@ def require(text: str, token: str, label: str, errors: list[str]) -> None:
 
 
 def validate_readme_gate(readme: str) -> list[str]:
-    """Validate the implementation-release status independently of file loading."""
+    """Validate the post-review implementation authorization."""
     errors: list[str] = []
-    require(readme, "EXTERNAL REVIEW REQUIRED / AUDIT HOLD", "README", errors)
-    require(readme, "IMPL-00 = BLOCKED", "README", errors)
-    if "IMPL-00 = AUTHORIZED" in readme or "IMPL-00 = GO" in readme:
-        errors.append("README: implementation is authorized before external review")
+    require(readme, "DONE / EXTERNAL REVIEW GO", "README", errors)
+    require(readme, "IMPL-00 = AUTHORIZED / IN PROGRESS", "README", errors)
+    require(readme, SIGNED_CANDIDATE_COMMIT, "README", errors)
+    require(readme, SIGNED_MANIFEST_SHA256, "README", errors)
     return errors
 
 
 def selftest_readme_gate() -> list[str]:
-    """Prove that the gate rejects the exact premature-release mutation."""
+    """Prove that the gate rejects a missing external sign-off."""
     errors: list[str] = []
-    valid = "EXTERNAL REVIEW REQUIRED / AUDIT HOLD\nIMPL-00 = BLOCKED\n"
+    valid = (
+        "DONE / EXTERNAL REVIEW GO\n"
+        "IMPL-00 = AUTHORIZED / IN PROGRESS\n"
+        f"{SIGNED_CANDIDATE_COMMIT}\n{SIGNED_MANIFEST_SHA256}\n"
+    )
     if validate_readme_gate(valid):
-        errors.append("README gate self-test rejected the valid HOLD fixture")
-    mutated = valid.replace("IMPL-00 = BLOCKED", "IMPL-00 = AUTHORIZED")
+        errors.append("README gate self-test rejected the signed GO fixture")
+    mutated = valid.replace("DONE / EXTERNAL REVIEW GO", "AUDIT HOLD")
     if not validate_readme_gate(mutated):
-        errors.append("README gate self-test accepted premature IMPL-00 authorization")
+        errors.append("README gate self-test accepted authorization without external GO")
     return errors
 
 
@@ -96,36 +110,92 @@ def manifest_entry_matches(entry: tuple[str, int] | None, data: bytes) -> bool:
             entry[0] == hashlib.sha256(data).hexdigest().upper())
 
 
-def validate_remediation_manifest(root: Path, manifest: str) -> list[str]:
-    """Require exact bytes for every path allowed to change production/tests."""
-    entries, errors = parse_manifest(manifest)
-    for relative in REMEDIATION_CONTENT_FILES:
-        path = root / relative
-        if not path.is_file():
-            errors.append(f"candidate manifest: missing remediation file {relative}")
+def restore_signed_worktree_eol(relative: str, data: bytes) -> bytes | None:
+    """Recreate signed Windows bytes after Git's text normalization."""
+    if relative == SIGNED_CRLF_PATH:
+        return data.replace(b"\n", b"\r\n")
+    if relative != SIGNED_MIXED_EOL_PATH:
+        return data
+    output = bytearray()
+    line_break_index = 0
+    for value in data:
+        if value == 0x0A and (line_break_index == 107 or line_break_index >= 1871):
+            output.append(0x0D)
+        output.append(value)
+        if value == 0x0A:
+            line_break_index += 1
+    if line_break_index != 5063:
+        return None
+    return bytes(output)
+
+
+def git_blob(root: Path, relative: str) -> bytes | None:
+    completed = subprocess.run(
+        ["git", "show", f"{SIGNED_CANDIDATE_COMMIT}:{relative}"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    return restore_signed_worktree_eol(relative, completed.stdout)
+
+
+def validate_signed_manifest(root: Path, manifest_bytes: bytes) -> list[str]:
+    """Require the manifest to match every blob in the immutable signed commit."""
+    errors: list[str] = []
+    if hashlib.sha256(manifest_bytes).hexdigest().upper() != SIGNED_MANIFEST_SHA256:
+        errors.append("candidate manifest: signed manifest file hash mismatch")
+    try:
+        manifest = manifest_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return errors + ["candidate manifest: invalid UTF-8"]
+    entries, parse_errors = parse_manifest(manifest)
+    errors.extend(parse_errors)
+    if len(entries) != SIGNED_ENTRY_COUNT:
+        errors.append(
+            f"candidate manifest: entries={len(entries)} expected={SIGNED_ENTRY_COUNT}"
+        )
+    for relative, entry in entries.items():
+        data = git_blob(root, relative)
+        if data is None:
+            errors.append(f"candidate manifest: signed Git blob missing {relative}")
             continue
-        if not manifest_entry_matches(entries.get(relative), path.read_bytes()):
-            errors.append(
-                f"candidate manifest: stale/missing remediation entry {relative}"
-            )
+        if not manifest_entry_matches(entry, data):
+            errors.append(f"candidate manifest: signed Git blob mismatch {relative}")
+    for relative in REMEDIATION_CONTENT_FILES:
+        if relative not in entries:
+            errors.append(f"candidate manifest: missing remediation file {relative}")
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", SIGNED_CANDIDATE_COMMIT, "HEAD"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        errors.append("current HEAD is not descended from the signed candidate")
     return errors
 
 
 def selftest_remediation_manifest(root: Path, manifest: str) -> list[str]:
-    """Prove a same-size one-byte change cannot pass with the old manifest."""
+    """Prove every signed remediation blob rejects a same-size one-byte change."""
     entries, parse_errors = parse_manifest(manifest)
     if parse_errors:
         return ["candidate manifest self-test cannot parse valid fixture"]
-    relative = REMEDIATION_CONTENT_FILES[0]
-    data = (root / relative).read_bytes()
-    entry = entries.get(relative)
-    if not data or not manifest_entry_matches(entry, data):
-        return ["candidate manifest self-test rejected current remediation bytes"]
-    mutated = bytearray(data)
-    mutated[len(mutated) // 2] ^= 1
-    if manifest_entry_matches(entry, bytes(mutated)):
-        return ["candidate manifest self-test accepted one-byte remediation drift"]
-    return []
+    errors: list[str] = []
+    for relative in REMEDIATION_CONTENT_FILES:
+        data = git_blob(root, relative)
+        entry = entries.get(relative)
+        if not data or not manifest_entry_matches(entry, data):
+            errors.append(f"candidate manifest self-test rejected signed bytes {relative}")
+            continue
+        mutated = bytearray(data)
+        mutated[len(mutated) // 2] ^= 1
+        if manifest_entry_matches(entry, bytes(mutated)):
+            errors.append(f"candidate manifest self-test accepted drift {relative}")
+    return errors
 
 
 def main() -> int:
@@ -224,11 +294,13 @@ def main() -> int:
         lines = [line for line in task.splitlines() if line.startswith(f"| {task_id} |")]
         if len(lines) != 1:
             errors.append(f"task table: {task_id} occurs {len(lines)} times")
-        elif "DONE / SELF-REVIEW PASS" not in lines[0]:
+        elif index < 8 and "DONE / SELF-REVIEW PASS" not in lines[0]:
             errors.append(f"task table: {task_id} is not self-reviewed DONE")
-    require(task, "IMPL_00                 = BLOCKED BY V6S-00-08 EXTERNAL GO",
+        elif index == 8 and "DONE / EXTERNAL REVIEW GO" not in lines[0]:
+            errors.append(f"task table: {task_id} lacks external GO")
+    require(task, "IMPL_00                 = AUTHORIZED / IN PROGRESS",
             "task table", errors)
-    require(task, "V6S_00_CONTRACT_FREEZE = SELF-REVIEW PASS / EXTERNAL REVIEW REQUIRED / AUDIT HOLD",
+    require(task, "V6S_00_CONTRACT_FREEZE = DONE / EXTERNAL REVIEW GO",
             "task table", errors)
 
     readme = texts.get(README_NAME, "")
@@ -239,8 +311,9 @@ def main() -> int:
     if not manifest_path.is_file():
         errors.append(f"missing candidate manifest: {MANIFEST_RELATIVE}")
     else:
-        manifest = manifest_path.read_text(encoding="utf-8")
-        errors.extend(validate_remediation_manifest(root, manifest))
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = manifest_bytes.decode("utf-8")
+        errors.extend(validate_signed_manifest(root, manifest_bytes))
         errors.extend(selftest_remediation_manifest(root, manifest))
         manifest_generator = (
             root / "tools" / "v6" /
@@ -248,7 +321,8 @@ def main() -> int:
         )
         completed = subprocess.run(
             [sys.executable, str(manifest_generator), "--root", str(root),
-             "--output", MANIFEST_RELATIVE, "--check"],
+             "--output", MANIFEST_RELATIVE, "--check",
+             "--treeish", SIGNED_CANDIDATE_COMMIT],
             cwd=root,
             text=True,
             encoding="utf-8",
@@ -278,37 +352,13 @@ def main() -> int:
                 "wire oracle failed: " + (completed.stdout + completed.stderr).strip()
             )
 
-    changed = subprocess.run(
-        ["git", "-c", "core.quotepath=false", "status", "--short"],
-        cwd=root,
-        text=True,
-        encoding="utf-8",
-        capture_output=True,
-        check=False,
-    )
-    if changed.returncode != 0:
-        errors.append("git status failed while checking document-only scope")
-    else:
-        for line in changed.stdout.splitlines():
-            path_text = line[3:].strip().strip('"')
-            forbidden = (
-                path_text == "CMakeLists.txt" or
-                (path_text.startswith("src/") and
-                 path_text not in ALLOWED_PRODUCTION_REMEDIATIONS) or
-                path_text.startswith("include/") or
-                (path_text.startswith("tests/") and
-                 path_text not in ALLOWED_TEST_REMEDIATIONS)
-            )
-            if forbidden:
-                errors.append(f"unauthorized code scope changed during V6S-00: {path_text}")
-
     if errors:
         for error in errors:
             print(f"V6S_FREEZE_ERROR {error}")
         return 1
     print(
         "V6S_FREEZE_OK contracts=9 opcodes=94 "
-        "candidate_entries=61 remediation_files=5 "
+        "candidate_entries=61 remediation_files=5 signed_commit=0c8e551 "
         "readme_selftest=1 manifest_mutation_selftest=1"
     )
     return 0

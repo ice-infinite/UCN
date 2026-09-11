@@ -1,6 +1,6 @@
 # V6S-00-04 Golden、Negative、Fuzz 与属性测试合同
 
-> 状态：`DONE / SELF-REVIEW PASS / FINAL EXTERNAL REVIEW PENDING`
+> 状态：`DONE / SELF-REVIEW PASS / EXTERNAL REVIEW GO`
 >
 > 本文冻结测试 oracle，不使用未来 Codec 的 builder 生成 decoder fixture，也不以随机 fuzz
 > 代替字段级负向矩阵。
