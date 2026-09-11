@@ -11,6 +11,7 @@ from urllib.parse import unquote
 
 
 LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
+MARKDOWN_TABLE_SEPARATOR = re.compile(r"^:?-{3,}:?$")
 
 PROPOSAL_NAMES = (
     "UCN_v6_低开销统一Wire各Contract字段与运行机制详细设计.md",
@@ -26,6 +27,14 @@ SELF_REVIEWED_PROPOSALS = (
     "UCN_v6_可裁剪模块边界依赖资源与静态装配详细设计.md",
     "UCN_v6_面向用户意图的自动传输策略与配置接口详细设计.md",
     "UCN_v6_最终协议架构与破坏性重构_RFC.md",
+)
+
+SIMPLIFIED_REMEDIATION_FILES = (
+    "src/v6/identity/ucn_v6_bootstrap.c",
+    "src/v6/runtime/ucn_v6_runtime.c",
+    "src/v6/security/ucn_v6_security.c",
+    "tests/v6/test_v6_identity.c",
+    "tests/v6/test_v6_security.c",
 )
 
 MERMAID_CANONICAL_EDGES = frozenset(("-->", "<-->", ".->", "->>", "-->>"))
@@ -338,6 +347,114 @@ def owner_boundary_findings(
     )
 
 
+def _split_markdown_table_row(line: str) -> list[str] | None:
+    """Split one conventional pipe table row without counting escaped/code pipes."""
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return None
+    body = stripped[1:-1]
+    cells: list[str] = []
+    current: list[str] = []
+    code_fence = 0
+    index = 0
+    while index < len(body):
+        character = body[index]
+        if character == "\\" and index + 1 < len(body):
+            current.extend((character, body[index + 1]))
+            index += 2
+            continue
+        if character == "`":
+            run = 1
+            while index + run < len(body) and body[index + run] == "`":
+                run += 1
+            if code_fence == 0:
+                code_fence = run
+            elif code_fence == run:
+                code_fence = 0
+            current.extend("`" * run)
+            index += run
+            continue
+        if character == "|" and code_fence == 0:
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(character)
+        index += 1
+    cells.append("".join(current).strip())
+    return cells
+
+
+def markdown_table_findings(text: str) -> list[tuple[int, str]]:
+    """Return malformed maintained Markdown tables as line-scoped findings."""
+    findings: list[tuple[int, str]] = []
+    lines = text.splitlines()
+    in_fence = False
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            index += 1
+            continue
+        row = _split_markdown_table_row(lines[index]) if not in_fence else None
+        if row is None:
+            index += 1
+            continue
+
+        start = index
+        block: list[tuple[int, list[str], str]] = []
+        while index < len(lines):
+            candidate = _split_markdown_table_row(lines[index])
+            if candidate is None:
+                break
+            block.append((index + 1, candidate, lines[index].strip()))
+            index += 1
+
+        if len(block) < 2:
+            continue
+        separator_cells = block[1][1]
+        if not separator_cells or not all(
+                MARKDOWN_TABLE_SEPARATOR.fullmatch(cell) for cell in separator_cells):
+            continue
+        expected = len(block[0][1])
+        if len(separator_cells) != expected:
+            findings.append((block[1][0], block[1][2]))
+        for line_number, cells, raw in block[2:]:
+            if len(cells) != expected:
+                findings.append((line_number, raw))
+    return findings
+
+
+def validate_markdown_table_scanner_selftest(errors: list[str]) -> None:
+    """Prove the table gate rejects shape drift without rejecting literal pipes."""
+    good = """| A | B |
+| --- | ---: |
+| escaped \\| pipe | `x | y` |
+"""
+    if markdown_table_findings(good):
+        errors.append("markdown-table scanner rejected escaped/code-pipe fixture")
+
+    bad_fixtures = (
+        """| A | B |
+| --- | --- |
+| only one |
+""",
+        """| A | B |
+| --- | --- |
+| one | two | three |
+""",
+        """| A | B |
+| --- |
+| one | two |
+""",
+    )
+    for fixture_index, fixture in enumerate(bad_fixtures, start=1):
+        if not markdown_table_findings(fixture):
+            errors.append(
+                f"markdown-table scanner selftest missed bad fixture {fixture_index}"
+            )
+
+
 def validate_owner_boundary_scanner_selftest(errors: list[str]) -> None:
     """Mutation-style fixtures ensure the R15/R22 gate detects real bypasses."""
     bad_fixtures = (
@@ -575,6 +692,7 @@ def active_documents(root: Path) -> list[Path]:
     proposal = root / "docs" / "10-理论与规划" / "建议方案"
     docs.extend(proposal / name for name in PROPOSAL_NAMES)
     docs.extend(sorted((proposal / "UCN_v6_逻辑模型与伪代码").glob("*.md")))
+    docs.extend(sorted((proposal / "UCN_v6_V6S_00_简化版实施合同冻结").glob("*.md")))
     docs.append(
         root / "docs" / "09-审计与整改" /
         "UCN_V6_简化文档收口与全体自审报告_2026-09-08.md"
@@ -639,6 +757,7 @@ def validate_simplified_contract(root: Path, errors: list[str]) -> None:
 
     validate_owner_boundary_scanner_selftest(errors)
     validate_owner_connection_registry_selftest(errors)
+    validate_markdown_table_scanner_selftest(errors)
 
     for name in SELF_REVIEWED_PROPOSALS:
         path = proposal / name
@@ -939,6 +1058,9 @@ def validate_simplified_manifest(root: Path, errors: list[str]) -> None:
     expected = {proposal / "README.md"}
     expected.update(proposal / name for name in PROPOSAL_NAMES)
     expected.update(logic.glob("*.md"))
+    expected.update(
+        (proposal / "UCN_v6_V6S_00_简化版实施合同冻结").glob("*.md")
+    )
     expected.update((
         root / "docs" / "09-审计与整改" /
         "UCN_V6_简化文档收口与全体自审报告_2026-09-08.md",
@@ -949,8 +1071,11 @@ def validate_simplified_manifest(root: Path, errors: list[str]) -> None:
         root / "docs" / "calltree" / "README.md",
         root / "docs" / "源码阅读指南" / "06-公共函数签名索引.md",
         root / "tools" / "v6" / "check_v6_current_docs.py",
+        root / "tools" / "v6" / "check_v6s_freeze_contracts.py",
+        root / "tools" / "v6" / "check_v6s_wire_contract.py",
         root / "tools" / "v6" / "generate_v6_simplified_docs_manifest.py",
     ))
+    expected.update(root / relative for relative in SIMPLIFIED_REMEDIATION_FILES)
     expected_relative = {
         path.resolve().relative_to(root).as_posix() for path in expected
     }
@@ -1018,6 +1143,11 @@ def main() -> int:
             errors.append(f"missing active document: {document.relative_to(root)}")
             continue
         text = document.read_text(encoding="utf-8")
+        for line_number, statement in markdown_table_findings(text):
+            errors.append(
+                f"markdown table column mismatch: "
+                f"{document.relative_to(root)}:{line_number}: {statement}"
+            )
         is_migration = document.is_relative_to(root / "docs" / "official" / "13-迁移")
         if ((document.is_relative_to(root / "docs" / "official") and not is_migration) or
                 document.is_relative_to(root / "docs" / "用户手册")):

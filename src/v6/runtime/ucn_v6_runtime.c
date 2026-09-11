@@ -1168,7 +1168,7 @@ static ucn_v6_result_t apply_bootstrap_event_action(
     ucn_v6_bootstrap_event_t expected =
         runtime_bootstrap_expected_response(
             &runtime->bootstrap_ingress_work);
-    ucn_v6_bootstrap_phase_t response_phase;
+    ucn_v6_bootstrap_phase_t response_phase = UCN_V6_BOOTSTRAP_EMPTY;
     bool final_incoming =
         runtime->bootstrap_ingress_work.kind ==
             UCN_V6_RUNTIME_BOOTSTRAP_EVENT &&
@@ -1554,7 +1554,7 @@ static ucn_v6_result_t phase_route_authority(
     ucn_v6_runtime_owner_t *runtime = (ucn_v6_runtime_owner_t *)context;
     ucn_v6_runtime_tx_slot_t *slot;
     ucn_v6_runtime_tx_slot_t *replaced_slot;
-    ucn_v6_qos_enqueue_result_t enqueue;
+    ucn_v6_qos_enqueue_result_t enqueue = {0};
     uint64_t buffer_token = 0U;
     size_t encoded_length = 0U;
     ucn_v6_result_t call_result;
@@ -1817,11 +1817,12 @@ static ucn_v6_result_t phase_capability(
 {
     ucn_v6_runtime_owner_t *runtime = (ucn_v6_runtime_owner_t *)context;
     ucn_v6_capability_summary_t summary;
-    ucn_v6_capability_record_t record;
+    ucn_v6_capability_record_t record = {0};
     ucn_v6_capability_query_t query;
     uint8_t digest[UCN_V6_CAPABILITY_DIGEST_BYTES];
     uint8_t payload[UCN_V6_CAPABILITY_RECORD_BYTES];
-    ucn_v6_hello_disposition_t disposition;
+    ucn_v6_hello_disposition_t disposition =
+        (ucn_v6_hello_disposition_t)0;
     ucn_v6_result_t call_result;
     bool response_required = false;
     if (!runtime_is_valid(runtime) || budget == 0U || result == NULL) {
@@ -1852,6 +1853,11 @@ static ucn_v6_result_t phase_capability(
             call_result = ucn_v6_capability_ingest_peer_hello(
                 runtime->config.capability, now_us, &runtime->opened_rx,
                 &summary, &disposition);
+        }
+        if (call_result == UCN_V6_OK &&
+            disposition != UCN_V6_HELLO_MATCHED &&
+            disposition != UCN_V6_HELLO_QUERY_REQUIRED) {
+            call_result = UCN_V6_ERR_STATE;
         }
         if (call_result == UCN_V6_OK &&
             disposition == UCN_V6_HELLO_QUERY_REQUIRED) {
@@ -2322,7 +2328,7 @@ static ucn_v6_result_t prepare_selected_tx(
     ucn_v6_session_key_t *endpoint_parent)
 {
     ucn_v6_route_selection_t route;
-    ucn_v6_route_domain_t relay_domain;
+    ucn_v6_route_domain_t relay_domain = {0};
     ucn_v6_frame_t frame;
     uint64_t flow_id;
     uint64_t hop_budget_debit = 0U;
@@ -2460,6 +2466,9 @@ static ucn_v6_result_t prepare_selected_tx(
         relay_domain.destination_session_generation :
         slot->semantic.local.route_request.domain
             .destination_session_generation;
+    if (!runtime_session_is_valid(endpoint_parent)) {
+        return UCN_V6_ERR_STATE;
+    }
     return UCN_V6_OK;
 }
 
@@ -4563,7 +4572,7 @@ static ucn_v6_result_t phase_realtime(
     ucn_v6_runtime_time_handle_t handle;
     ucn_v6_route_path_ref_t reverse;
     ucn_v6_time_sync_announce_t announce;
-    uint64_t buffer_token;
+    uint64_t buffer_token = 0U;
     ucn_v6_result_t result;
     if (!runtime_is_valid(runtime) || budget == 0U || phase_result == NULL) {
         return UCN_V6_ERR_STATE;

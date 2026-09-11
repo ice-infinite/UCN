@@ -240,16 +240,16 @@ Optional Realtime policy
 
 建议稳态路由 Frame：
 
-| 字段 | 建议长度 |
-| --- | ---: |
-| Version + Contract | 1 B |
-| Type + Traffic + Delivery | 1 B |
-| Forwarding Label | 2 B |
-| Flow Context ID | 2 B |
-| Hop Limit | 1 B |
-| Hop Sequence | 4 B |
+| 字段 | 建议长度 | 说明 |
+| --- | ---: | --- |
+| Version + Contract | 1 B | — |
+| Type + Traffic + Delivery | 1 B | — |
+| Forwarding Label | 2 B | — |
+| Flow Context ID | 2 B | — |
+| Hop Limit | 1 B | — |
+| Hop Sequence | 4 B | — |
 | Origin Sequence | 0/4 B | 仅 E2E/可靠语义需要 |
-| Payload Length | 0～2 B |
+| Payload Length | 0～2 B | — |
 
 基础开销目标：
 

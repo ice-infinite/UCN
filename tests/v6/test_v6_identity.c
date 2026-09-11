@@ -13,6 +13,10 @@
         }                                                                       \
     } while (0)
 
+typedef char ucn_v6_bootstrap_cookie_challenge_fits_hello_buffer[
+    UCN_V6_BOOTSTRAP_COOKIE_CHALLENGE_BYTES <= UCN_V6_BOOTSTRAP_HELLO_BYTES ?
+        1 : -1];
+
 static bool all_bytes_equal(
     const uint8_t *bytes, size_t length, uint8_t value)
 {
@@ -1697,38 +1701,54 @@ static int test_bootstrap_exact_link_invalidation(void)
         4U, 2U, UINT64_C(3000000)
     };
     ucn_v6_bootstrap_transcript_t join = transcript(UINT64_C(8101));
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 3U
     ucn_v6_bootstrap_transcript_t reauth = transcript(UINT64_C(8102));
+#endif
     ucn_v6_bootstrap_transcript_t survivor = transcript(UINT64_C(8103));
     ucn_v6_bootstrap_key_t join_key = bootstrap_key(&join, 5U, 21U);
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 3U
     ucn_v6_bootstrap_key_t reauth_key = bootstrap_key(&reauth, 5U, 22U);
+#endif
     ucn_v6_bootstrap_key_t survivor_key =
         bootstrap_key(&survivor, 6U, 23U);
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 3U
     ucn_v6_binding_key_t existing = {
         UINT32_C(0x10203040), 7U, 3U
     };
+#endif
     ucn_v6_bootstrap_pending_t pending;
 
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 3U
     reauth.flow = UCN_V6_BOOTSTRAP_FLOW_REAUTH;
+#endif
     CHECK(ucn_v6_bootstrap_owner_init_in_place(
               storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
               &config, &owner) == UCN_V6_OK);
     CHECK(ucn_v6_bootstrap_open_after_cookie(
               owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &join_key, &join, NULL,
               true, 10U) == UCN_V6_OK);
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 3U
     CHECK(ucn_v6_bootstrap_open_after_cookie(
               owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &reauth_key, &reauth,
               &existing, true, 11U) == UCN_V6_OK);
+#endif
     CHECK(ucn_v6_bootstrap_open_after_cookie(
               owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &survivor_key, &survivor,
               NULL, true, 12U) == UCN_V6_OK);
 
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 3U
     CHECK(ucn_v6_bootstrap_invalidate_link(owner, 1U, 5U) == 2U);
+#else
+    CHECK(ucn_v6_bootstrap_invalidate_link(owner, 1U, 5U) == 1U);
+#endif
     CHECK(ucn_v6_bootstrap_copy_pending(
               owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &join_key, &pending) ==
           UCN_V6_ERR_NOT_FOUND);
+#if UCN_V6_CONFIG_BOOTSTRAP_PENDING >= 3U
     CHECK(ucn_v6_bootstrap_copy_pending(
               owner, UCN_V6_BOOTSTRAP_FLOW_REAUTH, &reauth_key, &pending) ==
           UCN_V6_ERR_NOT_FOUND);
+#endif
     CHECK(ucn_v6_bootstrap_copy_pending(
               owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &survivor_key, &pending) ==
           UCN_V6_OK);
@@ -1737,6 +1757,62 @@ static int test_bootstrap_exact_link_invalidation(void)
     CHECK(ucn_v6_bootstrap_copy_pending(
               owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &survivor_key, &pending) ==
           UCN_V6_OK);
+    return 0;
+}
+
+static int test_bootstrap_exact_link_invalidation_at_capacity(void)
+{
+    ucn_v6_bootstrap_owner_storage_t storage = {0};
+    ucn_v6_bootstrap_owner_t *owner = NULL;
+    ucn_v6_bootstrap_config_t config = {
+        2U, 2U, 4U, 2U, UINT64_C(3000000)
+    };
+    ucn_v6_bootstrap_transcript_t first = transcript(UINT64_C(8111));
+    ucn_v6_bootstrap_transcript_t second = transcript(UINT64_C(8112));
+    ucn_v6_bootstrap_transcript_t overflow = transcript(UINT64_C(8113));
+    ucn_v6_bootstrap_key_t first_key = bootstrap_key(&first, 5U, 31U);
+    ucn_v6_bootstrap_key_t second_key = bootstrap_key(&second, 5U, 32U);
+    ucn_v6_bootstrap_key_t overflow_key =
+        bootstrap_key(&overflow, 6U, 33U);
+    ucn_v6_bootstrap_pending_t first_before;
+    ucn_v6_bootstrap_pending_t second_before;
+    ucn_v6_bootstrap_pending_t after;
+
+    CHECK(ucn_v6_bootstrap_owner_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
+              &config, &owner) == UCN_V6_OK);
+    CHECK(ucn_v6_bootstrap_open_after_cookie(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &first_key, &first, NULL,
+              true, 20U) == UCN_V6_OK);
+    CHECK(ucn_v6_bootstrap_open_after_cookie(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &second_key, &second, NULL,
+              true, 21U) == UCN_V6_OK);
+    CHECK(ucn_v6_bootstrap_copy_pending(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &first_key,
+              &first_before) == UCN_V6_OK);
+    CHECK(ucn_v6_bootstrap_copy_pending(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &second_key,
+              &second_before) == UCN_V6_OK);
+
+    CHECK(ucn_v6_bootstrap_open_after_cookie(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &overflow_key, &overflow,
+              NULL, true, 22U) == UCN_V6_ERR_NO_SPACE);
+    CHECK(ucn_v6_bootstrap_copy_pending(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &first_key, &after) ==
+          UCN_V6_OK);
+    CHECK(memcmp(&after, &first_before, sizeof(after)) == 0);
+    CHECK(ucn_v6_bootstrap_copy_pending(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &second_key, &after) ==
+          UCN_V6_OK);
+    CHECK(memcmp(&after, &second_before, sizeof(after)) == 0);
+
+    CHECK(ucn_v6_bootstrap_invalidate_link(owner, 1U, 5U) == 2U);
+    CHECK(ucn_v6_bootstrap_copy_pending(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &first_key, &after) ==
+          UCN_V6_ERR_NOT_FOUND);
+    CHECK(ucn_v6_bootstrap_copy_pending(
+              owner, UCN_V6_BOOTSTRAP_FLOW_JOIN, &second_key, &after) ==
+          UCN_V6_ERR_NOT_FOUND);
     return 0;
 }
 
@@ -1900,11 +1976,15 @@ static int test_bootstrap_logical_fragment_contract(void)
         UCN_V6_BOOTSTRAP_FLOW_JOIN, &key, &value, NULL);
     ucn_v6_bootstrap_evidence_t decoded_evidence;
     ucn_v6_bootstrap_evidence_t before_evidence;
+    ucn_v6_bootstrap_evidence_t boundary_evidence;
+    ucn_v6_bootstrap_evidence_t boundary_decoded_evidence;
     uint8_t logical[UCN_V6_BOOTSTRAP_LOGICAL_MAX_BYTES];
+    uint8_t boundary_logical[UCN_V6_BOOTSTRAP_LOGICAL_MAX_BYTES];
     uint8_t encoded[UCN_V6_BOOTSTRAP_FRAGMENT_HEADER_BYTES +
                     UCN_V6_BOOTSTRAP_FRAGMENT_DATA_BYTES];
     uint8_t sentinel[UCN_V6_BOOTSTRAP_LOGICAL_MAX_BYTES];
     size_t logical_length = 0U;
+    size_t boundary_logical_length = 0U;
     size_t encoded_length = 0U;
     size_t last_fragment_length = 0U;
     size_t sentinel_length = 77U;
@@ -1941,6 +2021,46 @@ static int test_bootstrap_logical_fragment_contract(void)
               sentinel) == UCN_V6_OK);
     CHECK(memcmp(sentinel, logical,
                  UCN_V6_BOOTSTRAP_TRANSCRIPT_CANONICAL_BYTES) == 0);
+
+    memset(&boundary_evidence, 0, sizeof(boundary_evidence));
+    boundary_evidence.length = UCN_V6_BOOTSTRAP_EVIDENCE_MAX_BYTES;
+    fill_bytes(boundary_evidence.bytes, boundary_evidence.length, 0x31U);
+    memset(boundary_logical, 0xA5, sizeof(boundary_logical));
+    CHECK(ucn_v6_bootstrap_logical_encode(
+              UCN_V6_BOOTSTRAP_EVENT_FINAL_DURABLE,
+              UCN_V6_BOOTSTRAP_FINAL_DURABLE, &value, &boundary_evidence,
+              boundary_logical, sizeof(boundary_logical),
+              &boundary_logical_length) == UCN_V6_OK);
+    CHECK(boundary_logical_length ==
+              UCN_V6_BOOTSTRAP_TRANSCRIPT_CANONICAL_BYTES + 1U +
+                  UCN_V6_BOOTSTRAP_EVIDENCE_MAX_BYTES &&
+          boundary_logical[UCN_V6_BOOTSTRAP_TRANSCRIPT_CANONICAL_BYTES] ==
+              UINT8_C(0x80));
+    memset(&decoded_transcript, 0, sizeof(decoded_transcript));
+    memset(&boundary_decoded_evidence, 0,
+           sizeof(boundary_decoded_evidence));
+    CHECK(ucn_v6_bootstrap_logical_decode(
+              UCN_V6_PROTOCOL_OPCODE_BOOTSTRAP_FINAL_COMMIT,
+              UCN_V6_BOOTSTRAP_FINAL_DURABLE,
+              boundary_logical, boundary_logical_length,
+              &decoded_transcript, &boundary_decoded_evidence) == UCN_V6_OK);
+    CHECK(boundary_decoded_evidence.length ==
+              UCN_V6_BOOTSTRAP_EVIDENCE_MAX_BYTES &&
+          memcmp(boundary_decoded_evidence.bytes, boundary_evidence.bytes,
+                 UCN_V6_BOOTSTRAP_EVIDENCE_MAX_BYTES) == 0);
+
+    boundary_evidence.length =
+        (uint16_t)(UCN_V6_BOOTSTRAP_EVIDENCE_MAX_BYTES + 1U);
+    memset(boundary_logical, 0xA5, sizeof(boundary_logical));
+    boundary_logical_length = 77U;
+    CHECK(ucn_v6_bootstrap_logical_encode(
+              UCN_V6_BOOTSTRAP_EVENT_FINAL_DURABLE,
+              UCN_V6_BOOTSTRAP_FINAL_DURABLE, &value, &boundary_evidence,
+              boundary_logical, sizeof(boundary_logical),
+              &boundary_logical_length) == UCN_V6_ERR_ARGUMENT);
+    CHECK(all_bytes_equal(boundary_logical, sizeof(boundary_logical),
+                          0xA5U) &&
+          boundary_logical_length == 77U);
 
     fragment_count = (uint8_t)((logical_length +
                                 UCN_V6_BOOTSTRAP_FRAGMENT_DATA_BYTES - 1U) /
@@ -2192,7 +2312,6 @@ static int test_bootstrap_prestate_wire_contract(void)
     fill_bytes(challenge.cookie, challenge.cookie_length, 0x61U);
     CHECK(ucn_v6_bootstrap_cookie_challenge_encode(
               &challenge, challenge_bytes) == UCN_V6_OK);
-    CHECK(sizeof(challenge_bytes) <= sizeof(hello_bytes));
     memset(&decoded_challenge, 0, sizeof(decoded_challenge));
     CHECK(ucn_v6_bootstrap_cookie_challenge_decode(
               challenge_bytes, sizeof(challenge_bytes),
@@ -2796,6 +2915,7 @@ int main(void)
     CHECK(test_bootstrap_open_binds_exact_selected_link() == 0);
     CHECK(test_bootstrap_resource_and_state_contract() == 0);
     CHECK(test_bootstrap_exact_link_invalidation() == 0);
+    CHECK(test_bootstrap_exact_link_invalidation_at_capacity() == 0);
     CHECK(test_bootstrap_causal_transcript_freezes_each_stage() == 0);
     CHECK(test_bootstrap_transcript_canonical_codec() == 0);
     CHECK(test_bootstrap_logical_fragment_contract() == 0);

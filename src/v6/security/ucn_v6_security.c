@@ -4047,7 +4047,7 @@ ucn_v6_result_t ucn_v6_security_resolve_ingress_peer(
     const ucn_v6_frame_t *frame,
     ucn_v6_principal_t *peer_principal)
 {
-    ucn_v6_principal_t resolved;
+    ucn_v6_principal_t resolved = {{0U}};
     size_t index;
     bool matched = false;
     if (!manager_storage_is_valid(manager) || manager->faulted ||

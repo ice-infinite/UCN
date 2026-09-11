@@ -163,9 +163,13 @@ typedef struct pipeline_driver {
 static ucn_v6_adapter_owner_storage_t pipeline_adapter_storage;
 #endif
 static ucn_v6_qos_owner_storage_t pipeline_qos_storage;
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
 static ucn_v6_qos_owner_storage_t pipeline_runtime_qos_storage;
+#endif
 static ucn_v6_transfer_owner_storage_t pipeline_transfer_storage;
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
 static ucn_v6_transfer_owner_storage_t pipeline_runtime_transfer_storage;
+#endif
 static ucn_v6_capability_owner_storage_t pipeline_capability_storage;
 static ucn_v6_route_owner_storage_t pipeline_route_storage;
 
@@ -2748,8 +2752,10 @@ static int test_independent_sequence_domains_and_verified_relay(void)
 #endif
     ucn_v6_principal_t a = make_principal(0x10U);
     ucn_v6_principal_t b = make_principal(0x30U);
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
     unsigned before_submits;
     ucn_v6_result_t late_route_result;
+#endif
     ucn_v6_principal_t c = make_principal(0x50U);
 #if UCN_V6_CONFIG_SECURITY_SESSIONS >= 3U
     ucn_v6_principal_t d = make_principal(0x70U);
@@ -2765,7 +2771,9 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     ucn_v6_acl_entry_t acl;
     ucn_v6_transfer_fragment_t fragment;
     ucn_v6_frame_t frame_c;
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
     ucn_v6_frame_t frame_template;
+#endif
 #if UCN_V6_CONFIG_SECURITY_SESSIONS >= 3U
     ucn_v6_frame_t frame_d;
 #endif
@@ -2876,6 +2884,11 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     uint8_t relayed_encoded[256U];
     uint8_t plaintext[sizeof(transfer_payload)];
     uint8_t completed_payload[sizeof(payload_c)];
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED && \
+    UCN_V6_CONFIG_TRANSFER_RX_SLOTS >= 2U
+    uint8_t retained_completed_payload[sizeof(payload_c)];
+    ucn_v6_transfer_completed_t completed_201_before;
+#endif
     size_t encoded_c_length = 0U;
 #if UCN_V6_CONFIG_SECURITY_SESSIONS >= 3U
     size_t encoded_d_length = 0U;
@@ -3229,7 +3242,9 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     CHECK(route_selection.path.egress_link_id == 1U &&
           memcmp(route_selection.path.next_hop.principal.bytes, c.bytes,
                  sizeof(b.bytes)) == 0);
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
     frame_template = frame_c;
+#endif
     CHECK(ucn_v6_security_protect_frame(
               managers[0], 100U, &b, &c, &frame_c, cipher_c,
               sizeof(cipher_c), work_a, sizeof(work_a), encoded_c,
@@ -3488,6 +3503,17 @@ static int test_independent_sequence_domains_and_verified_relay(void)
               sizeof(completed_payload), &completed) == UCN_V6_OK);
     CHECK(completed.payload_length == sizeof(payload_c) &&
           memcmp(completed_payload, payload_c, sizeof(payload_c)) == 0);
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED && \
+    UCN_V6_CONFIG_TRANSFER_RX_SLOTS >= 2U
+    completed_201_before = completed;
+#endif
+#if UCN_V6_CONFIG_TRANSFER_RX_SLOTS == 1U
+    /* Nano has one RX slot.  Retire the copied result before starting the
+     * next sequential transfer; Lite/Full deliberately keep it to cover
+     * concurrent completed-result retention. */
+    CHECK(ucn_v6_transfer_retire_completed(
+              transfer_rx, 121U, &origin, 201U, 201U) == UCN_V6_OK);
+#endif
     CHECK(ucn_v6_qos_record_completion(
               qos, 900U, UCN_V6_QOS_COMPLETION_REMOTE_ACKED) == UCN_V6_OK);
     CHECK(ucn_v6_qos_record_completion(
@@ -3746,6 +3772,28 @@ static int test_independent_sequence_domains_and_verified_relay(void)
                   &runtime_fragment_opened, &runtime_rx_result) ==
               UCN_V6_OK);
         CHECK(runtime_rx_result.accepted);
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED && \
+    UCN_V6_CONFIG_TRANSFER_RX_SLOTS >= 2U
+        if (runtime_transfer_guard == 0U) {
+            memset(retained_completed_payload, 0xA5,
+                   sizeof(retained_completed_payload));
+            memset(&completed, 0, sizeof(completed));
+            CHECK(ucn_v6_transfer_copy_completed(
+                      transfer_rx, &origin, 201U, 201U,
+                      retained_completed_payload,
+                      sizeof(retained_completed_payload), &completed) ==
+                  UCN_V6_OK);
+            CHECK(completed.payload_length ==
+                      completed_201_before.payload_length &&
+                  completed.message_id == completed_201_before.message_id &&
+                  completed.operation_id ==
+                      completed_201_before.operation_id &&
+                  completed.message_crc32c ==
+                      completed_201_before.message_crc32c &&
+                  memcmp(retained_completed_payload, payload_c,
+                         sizeof(payload_c)) == 0);
+        }
+#endif
 
         CHECK(ucn_v6_adapter_publish_tx_completion(
                   adapter, &driver.key, UCN_V6_OK, &timestamp, false) ==
@@ -4226,6 +4274,96 @@ static int test_durable_session_transcript_and_link_generation_are_strict(void)
               &local, &corrupted_api, &crypto_api, &gate, &manager) ==
           UCN_V6_ERR_STATE);
     CHECK(manager == NULL);
+    return 0;
+}
+
+static int test_ingress_peer_resolution_is_unique_and_fail_closed(void)
+{
+    static const uint8_t payload[] = { 0x41U, 0x42U, 0x43U };
+    fake_store_t store;
+    fake_store_t corrupted;
+    fake_crypto_t crypto;
+    ucn_v6_security_store_ops_t store_api;
+    ucn_v6_security_store_ops_t corrupted_api;
+    ucn_v6_security_crypto_ops_t crypto_api;
+    ucn_v6_callback_gate_t gate = {0};
+    ucn_v6_security_manager_storage_t storage;
+    ucn_v6_security_manager_t *manager = NULL;
+    ucn_v6_principal_t local = make_principal(0x20U);
+    ucn_v6_principal_t peer_a = make_principal(0x40U);
+#if UCN_V6_CONFIG_SECURITY_SESSIONS >= 2U
+    ucn_v6_principal_t peer_b = make_principal(0x60U);
+#endif
+    ucn_v6_principal_t resolved = make_principal(0xD0U);
+    ucn_v6_principal_t sentinel = resolved;
+    ucn_v6_frame_t frame = make_data_frame(payload, sizeof(payload));
+    ucn_v6_security_view_t view_before;
+    ucn_v6_security_view_t view_after;
+    unsigned submits_before;
+
+    memset(&store, 0, sizeof(store));
+    memset(&crypto, 0, sizeof(crypto));
+    memset(&storage, 0, sizeof(storage));
+    store_api = store_ops(&store);
+    crypto_api = crypto_ops(&crypto);
+    CHECK(ucn_v6_callback_gate_init(&gate, NULL, no_lock, no_lock) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
+              1U, &local, &store_api, &crypto_api, &gate, &manager) ==
+          UCN_V6_OK);
+    CHECK(install_pair_session(manager, &peer_a, 20U, 1U, &local, 7U, 3U,
+                               false, 701U, 1U) == 0);
+    CHECK(store.snapshot.sessions[0].occupied);
+
+    CHECK(ucn_v6_security_copy_view(manager, &view_before) == UCN_V6_OK);
+    submits_before = store.submits;
+    frame.peer_hop.suite_id = UCN_V6_SUITE_HMAC_SHA256_128;
+    frame.peer_hop.key_id = UINT16_C(0x7FFF);
+    frame.peer_hop.key_generation = 1U;
+    CHECK(ucn_v6_security_resolve_ingress_peer(
+              manager, 100U, 1U, 6U, &frame, &resolved) ==
+          UCN_V6_ERR_SECURITY);
+    CHECK(memcmp(&resolved, &sentinel, sizeof(resolved)) == 0);
+    CHECK(store.submits == submits_before);
+    CHECK(ucn_v6_security_copy_view(manager, &view_after) == UCN_V6_OK);
+    CHECK(memcmp(&view_after, &view_before, sizeof(view_after)) == 0);
+
+    frame.peer_hop.suite_id =
+        store.snapshot.sessions[0].hop_current.suite_id;
+    frame.peer_hop.key_id = store.snapshot.sessions[0].hop_current.key_id;
+    frame.peer_hop.key_generation =
+        store.snapshot.sessions[0].hop_current.key_generation;
+    CHECK(ucn_v6_security_resolve_ingress_peer(
+              manager, 100U, 1U, 6U, &frame, &resolved) == UCN_V6_OK);
+    CHECK(memcmp(&resolved, &peer_a, sizeof(resolved)) == 0);
+    CHECK(store.submits == submits_before);
+
+#if UCN_V6_CONFIG_SECURITY_SESSIONS >= 2U
+    CHECK(install_pair_session(manager, &peer_b, 21U, 1U, &local, 7U, 3U,
+                               false, 702U, 2U) == 0);
+    CHECK(store.snapshot.sessions[1].occupied);
+    corrupted = store;
+    corrupted.snapshot.sessions[1].hop_current =
+        corrupted.snapshot.sessions[0].hop_current;
+    corrupted.snapshot.sessions[1]
+        .bootstrap_transcript.selected_hop_suite =
+        corrupted.snapshot.sessions[0].hop_current.suite_id;
+    corrupted.snapshot.sessions[1]
+        .bootstrap_transcript.selected_hop_key_id =
+        corrupted.snapshot.sessions[0].hop_current.key_id;
+    corrupted.snapshot.sessions[1]
+        .bootstrap_transcript.selected_hop_key_generation =
+        corrupted.snapshot.sessions[0].hop_current.key_generation;
+    corrupted_api = store_ops(&corrupted);
+    memset(&storage, 0, sizeof(storage));
+    manager = NULL;
+    CHECK(ucn_v6_security_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
+              1U, &local, &corrupted_api, &crypto_api, &gate, &manager) ==
+          UCN_V6_ERR_STATE);
+    CHECK(manager == NULL);
+#endif
     return 0;
 }
 
@@ -4860,6 +4998,7 @@ int main(void)
     CHECK(test_snapshot_padding_is_not_persistent_semantics() == 0);
     CHECK(test_authority_floor_transfer_and_old_authority_replay() == 0);
     CHECK(test_durable_session_transcript_and_link_generation_are_strict() == 0);
+    CHECK(test_ingress_peer_resolution_is_unique_and_fail_closed() == 0);
     CHECK(test_session_invalidation_queue_full_is_fail_closed() == 0);
     CHECK(test_link_invalidation_is_exact_durable_and_atomic() == 0);
     CHECK(test_link_invalidation_capacity_and_store_failure_are_atomic() == 0);

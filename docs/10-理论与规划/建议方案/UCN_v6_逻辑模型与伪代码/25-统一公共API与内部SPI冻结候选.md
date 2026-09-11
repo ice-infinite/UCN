@@ -5,6 +5,8 @@
 > 目标：将用户使用面、Driver 事实面、模块 Owner SPI 和诊断面彻底分开，让普通应用只需少量接口，高级能力不再把内部 FSM 暴露给用户。
 >
 > 本文是未来破坏性简化的 API 合同候选，不声称当前源码已实现这些名称或 ABI。
+>
+> 精确结果码、Handle、C99 Storage、Feature OFF 与 ABI 验收候选已收口到[V6S-00-05 公共 API、ABI 与 Feature OFF 合同](../UCN_v6_V6S_00_简化版实施合同冻结/05-公共API-ABI与Feature-OFF合同.md)；本文继续负责调用语义和 Owner SPI 说明。
 
 ## 1. 四个边界
 

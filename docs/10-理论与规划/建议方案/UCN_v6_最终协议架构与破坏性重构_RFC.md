@@ -3,7 +3,7 @@
 > 文档级别：`SELF-REVIEWED / PRE-IMPLEMENTATION RFC / EXTERNAL REVIEW REQUIRED`
 > 目标版本：`UCN v6 Draft`，稳定后作为 `UCN 1.0` 的候选基础
 > 兼容策略：**不兼容现有 v4/v5 测试固件、Core Wire、Cluster Wire、公共对象 ABI 或持久化记录**
-> 当前状态：V6A-01～V6A-25 所在历史基线的顶层架构不变量曾获 `V6-00 = EXTERNAL FINAL REVIEW GO`；本文件在 2026-09-07～08 为低开销 Wire、模块化、用户意图和简化逻辑作了后续修订并完成内部交叉自审，**当前修订版处于 `SELF-REVIEWED / EXTERNAL REVIEW REQUIRED`，不得沿用旧哈希的外审签字**。V6-01～V6-15 的既有软件实现和自审也不等于这些新合同已经实现。本文原第 6 章逐字节候选已失效；当前线上字段唯一候选权威改为[低开销统一 Wire 详细设计](UCN_v6_低开销统一Wire各Contract字段与运行机制详细设计.md)，其语义已自审但 Registry/Golden 仍未外审冻结，在此之前不得替换当前生产 Codec/RX/TX。真实 Flash/掉电、生产密码 Provider、实机资源与长稳仍为发布阻断
+> 当前状态：V6A-01～V6A-25 所在历史基线的顶层架构不变量曾获 `V6-00 = EXTERNAL FINAL REVIEW GO`；本文件在 2026-09-07～12 为低开销 Wire、模块化、用户意图、简化逻辑和 `V6S-00` 专项合同作了后续修订，**当前候选处于 `SELF-REVIEWED / EXTERNAL REVIEW REQUIRED`，不得沿用旧哈希的外审签字**。V6-01～V6-15 的既有软件实现和自审也不等于这些新合同已经实现。本文原第 6 章逐字节候选已失效；当前精确标量、线上布局和 Golden 候选权威为[V6S-00 简化版实施合同冻结](UCN_v6_V6S_00_简化版实施合同冻结/README.md)的 00-02～04，低开销 Wire 长文负责运行语义和场景说明。在 `V6S-00-08` 外审 GO 前不得替换当前生产 Codec/RX/TX。真实 Flash/掉电、生产密码 Provider、实机资源与长稳仍为发布阻断
 > 日期：2026-09-07
 
 ## 1. 决策摘要
@@ -141,7 +141,7 @@ Endpoint 不增加时间字节。
 | C1 Transport Parent Generation | 固定 32 bit | 一次 C1 Transfer 父域 | 仅 Transfer Setup、C1 Fragment/SACK | Security OFF 时仍提供 Transfer anti-ABA |
 | Origin Sequence | 固定 32 bit | 单 E2E/Group 重放域 | C1/C2/C4/C5 等适用数据 Contract | 跨中继保持不变，绑定端到端或 Group 消息身份 |
 | Hop Sequence | 固定 32 bit | 单下一跳 Peer Session | 仅 H1/H3 Trailer | 每跳重新分配，用于 Hop Replay 和重签 |
-| Bootstrap Transaction ID | 固定 64 bit | 单次一跳入网事务 | Bootstrap only | 区分未分配地址的并发设备 |
+| C0 Transaction ID | 固定 64 bit | 单次 Bootstrap/控制/Setup/Recovery 事务 | C0 only | 在精确父域中区分并发事务；Bootstrap 另有双方密码 nonce |
 
 Device Identity 不允许直接拿 MAC、串口号或 CAN ID 代替。MAC 可以参与出厂导入或
 诊断，但不能成为唯一安全身份。Node Address 可手动配置、持久租约分配或由受认证

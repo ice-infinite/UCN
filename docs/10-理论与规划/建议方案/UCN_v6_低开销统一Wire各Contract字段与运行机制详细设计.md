@@ -311,10 +311,10 @@ C0 不用于周期业务数据。它可以较大，因为它只在建立或修�
 | 9 | Destination Address | 2 B | 目标或 Link-local Authority 保留值 |
 | 11 | Source Binding Generation | 4 B | Source 地址绑定代际；未绑定时为 0 |
 | 15 | Destination Binding Generation | 4 B | Destination 地址绑定代际；未知/未绑定时为 0 |
-| 19 | Transaction ID | 4 B | 本控制事务内唯一；不回绕 |
-| 23 | Protocol Opcode | 2 B | 精确控制操作 |
-| 25 | Payload | N B | Opcode 固定定义 |
-| 25+N | Origin Tag | 0/16 B | O0/O1/O2 决定 |
+| 19 | Transaction ID | 8 B | 本控制事务内唯一；不回绕 |
+| 27 | Protocol Opcode | 2 B | 精确控制操作 |
+| 29 | Payload | N B | Opcode 固定定义 |
+| 29+N | Origin Tag | 0/16 B | O0/O1/O2 决定 |
 | Tail | Hop Protection | 0/16 B | H0/H1；Bootstrap 证明位于 Payload |
 
 Contract 专有字段数：7；加公共逻辑字段后共 15 个逻辑字段。
@@ -323,10 +323,10 @@ Contract 专有字段数：7；加公共逻辑字段后共 15 个逻辑字段。
 
 | Realm Address | C0 基础头 |
 | --- | ---: |
-| A0 / 1 B | 23 B |
-| A1 / 2 B | 25 B |
-| A2 / 3 B | 27 B |
-| A3 / 4 B | 29 B |
+| A0 / 1 B | 27 B |
+| A1 / 2 B | 29 B |
+| A2 / 3 B | 31 B |
+| A3 / 4 B | 33 B |
 
 ### 4.3 Bootstrap 保留地址
 
@@ -802,7 +802,7 @@ Group Completion 必须由 Context 中冻结的成员快照和 `ANY/ALL/QUORUM/S
 
 | Contract | 专有字段数 | 基础头 A1 | 稳态用途 | 主要限制 |
 | --- | ---: | ---: | --- | --- |
-| C0 ABSOLUTE | 7 | 25 B | Bootstrap/Setup/Recovery/Discovery | 不用于周期数据 |
+| C0 ABSOLUTE | 7 | 29 B | Bootstrap/Setup/Recovery/Discovery | 不用于周期数据 |
 | C1 STATELESS | 4 | 13 B | 无 Flow 普通数据 | 重复地址和 Service |
 | C2 DIRECT | 2 | 9 B | 高频一跳 Flow | 下一跳必须是最终目标 |
 | C3 ROUTED_HOP | 2 | 7 B | 最短多跳 Best Effort | 无 E2E/可靠/Latest |
@@ -950,7 +950,7 @@ Security Context generations。产品若没有 Persistence 或等价硬件单调
 Transfer；普通非 Transfer C1 不受影响。重启只能 reload 同一高水位继续分配，或先建立更高父
 Generation，不能把易失 boot counter、Link generation 或随机 32-bit 值冒充防 ABA 证明。
 
-`TRANSFER_SETUP` 的候选固定 Payload（不含随 A0～A3 变化的 C0 基础头；25 B 只是一项 A1
+`TRANSFER_SETUP` 的候选固定 Payload（不含随 A0～A3 变化的 C0 基础头；29 B 只是一项 A1
 示例，不是固定 C0 长度）为：
 
 | Offset | 字段 | 长度 | 约束 |
@@ -1096,13 +1096,13 @@ Sync v1 必须使用 C4 Flow，但 Local Stamp 不上线且不依赖 Flow；外�
 
 普通成员数据额外 0 B。只有 Cluster Control/Directory/Tunnel Payload 携带：
 
-| 字段 | 长度 |
-| --- | ---: |
+| 字段 | 长度 | 说明 |
+| --- | ---: | --- |
 | Protocol Opcode | 2 B | Cluster registry 中的非零 code；位于 C4/C5 Control Payload offset 0 |
-| Cluster Epoch/Term reference | 4 B |
-| Config Generation reference | 4 B |
-| Transaction ID | 4 B |
-| Opcode-specific payload | N B |
+| Cluster Epoch/Term reference | 4 B | 绑定当前 Cluster Authority 域 |
+| Config Generation reference | 4 B | 绑定解释本消息的 Config |
+| Transaction ID | 4 B | 绑定本次 Cluster 控制事务 |
+| Opcode-specific payload | N B | 由具体 Cluster Opcode 冻结 |
 
 公共字段数：4；固定公共部分 14 B。该 2 B Protocol Opcode 就是 11.0 的 Control 前缀，不得再
 在 Opcode-specific body 中重复一个 1 B Cluster Opcode。
@@ -1527,7 +1527,7 @@ Cluster 已启用，但普通遥测仍走 C2/C3/C4
 | 组件 | 长度 |
 | --- | ---: |
 | Common Header | 3 B |
-| C0 专有部分 A1 | 22 B |
+| C0 专有部分 A1 | 26 B |
 | C1 专有部分 A1 | 10 B |
 | C2 专有部分 | 6 B |
 | C3 专有部分 | 4 B |
@@ -1786,8 +1786,8 @@ Realtime 开销看起来仍然明显，但它只由明确启用 Timed Endpoint �
 
 | 场景 | 推荐组合 | 协议开销 |
 | --- | --- | ---: |
-| Link-local公开Bootstrap发现 | C0+H0+O0 | C0 A1 25 B + Opcode payload |
-| 已认证Peer Discovery | C0+H1+O0/O1 | 41 B 或 57 B + Opcode payload |
+| Link-local公开Bootstrap发现 | C0+H0+O0 | C0 A1 29 B + Opcode payload |
+| 已认证Peer Discovery | C0+H1+O0/O1 | 45 B 或 61 B + Opcode payload |
 | 受信Carrier Group发布 | C5+H0+O1/O2 | 29 B |
 | 不可信Link Group发布 | C5+H3+O1/O2 | 45 B |
 | 精确Principal签名Group控制 | C5安全开销+Payload签名 | 45 B + 签名/证书 |

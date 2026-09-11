@@ -7,6 +7,8 @@
 typedef char ucn_v6_bootstrap_storage_size_check[
     sizeof(ucn_v6_bootstrap_owner_t) <= UCN_V6_BOOTSTRAP_OWNER_STORAGE_BYTES ?
         1 : -1];
+typedef char ucn_v6_bootstrap_evidence_length_fits_u8[
+    UCN_V6_BOOTSTRAP_EVIDENCE_MAX_BYTES <= UINT8_MAX ? 1 : -1];
 
 static bool callback_result_is_declared(ucn_v6_result_t result)
 {
@@ -1083,7 +1085,8 @@ ucn_v6_result_t ucn_v6_bootstrap_logical_encode(
     if (result != UCN_V6_OK) return result;
     length = UCN_V6_BOOTSTRAP_TRANSCRIPT_CANONICAL_BYTES + 1U +
              evidence->length;
-    encoded[UCN_V6_BOOTSTRAP_TRANSCRIPT_CANONICAL_BYTES] = evidence->length;
+    encoded[UCN_V6_BOOTSTRAP_TRANSCRIPT_CANONICAL_BYTES] =
+        (uint8_t)evidence->length;
     memcpy(&encoded[UCN_V6_BOOTSTRAP_TRANSCRIPT_CANONICAL_BYTES + 1U],
            evidence->bytes, evidence->length);
     memcpy(output, encoded, length);
