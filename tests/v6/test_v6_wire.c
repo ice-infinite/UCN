@@ -594,6 +594,29 @@ static int test_group_hello_contract(void)
     return 0;
 }
 
+static int test_bound_bootstrap_reauth_contract(void)
+{
+    ucn_v6_frame_t frame = bootstrap_frame(UCN_V6_ADDRESS_CLASS_A1);
+    uint8_t wire[128];
+    size_t length = 0U;
+
+    frame.source_address = UINT16_C(0x1234);
+    frame.source_binding_generation = 7U;
+    frame.protocol_opcode =
+        UCN_V6_PROTOCOL_OPCODE_BOOTSTRAP_HELLO;
+    CHECK(ucn_v6_wire_encode(&frame, wire, sizeof(wire), &length) ==
+          UCN_V6_OK);
+    frame.source_binding_generation = 0U;
+    CHECK(expect_encode_reject_no_write(&frame) == 0);
+    frame.source_binding_generation = 7U;
+    frame.source_address = 0U;
+    CHECK(expect_encode_reject_no_write(&frame) == 0);
+    frame.source_address = UINT16_C(0x1234);
+    frame.destination_binding_generation = 1U;
+    CHECK(expect_encode_reject_no_write(&frame) == 0);
+    return 0;
+}
+
 static int test_peer_control_route_contract(void)
 {
     static const uint8_t payload[] = { 0x44U };
@@ -688,6 +711,7 @@ int main(void)
     CHECK(test_wire_api_overlap_contract() == 0);
     CHECK(test_raw_negative_matrix() == 0);
     CHECK(test_group_hello_contract() == 0);
+    CHECK(test_bound_bootstrap_reauth_contract() == 0);
     CHECK(test_peer_control_route_contract() == 0);
     CHECK(test_deterministic_fuzz_and_canonical_round_trip() == 0);
     puts("ucn v6 wire tests passed");

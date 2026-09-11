@@ -362,12 +362,12 @@ static int test_budget_and_invalidation(void)
     retired_count = 99U;
     CHECK(ucn_v6_qos_apply_invalidation(
               owner, &invalidation, retired, 0U, &retired_count) ==
-          UCN_V6_ERR_NO_SPACE);
-    CHECK(retired_count == 99U);
-    CHECK(ucn_v6_qos_apply_invalidation(
-              owner, &invalidation, retired, 2U, &retired_count) ==
           UCN_V6_OK);
-    CHECK(retired_count == 1U && retired[0] == 12U);
+    CHECK(retired_count == 0U);
+    CHECK(ucn_v6_qos_record_completion(
+              owner, 12U, UCN_V6_QOS_COMPLETION_PHYSICAL_COMPLETED) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_qos_retire_completion(owner, 12U) == UCN_V6_OK);
     CHECK(ucn_v6_qos_hardware_priority(UCN_V6_TRAFFIC_Q0, 8U) == 7U);
     CHECK(ucn_v6_qos_hardware_priority(UCN_V6_TRAFFIC_Q3, 8U) == 0U);
     return 0;
@@ -430,18 +430,14 @@ static int test_link_invalidation_and_arrival_no_wrap(void)
 
     invalidation = invalidation_from(&first,
                                      UCN_V6_STACK_INVALIDATE_LINK);
-    before = storage;
     CHECK(ucn_v6_qos_apply_invalidation(
               owner, &invalidation, retired, 1U, &retired_count) ==
-          UCN_V6_ERR_NO_SPACE);
-    CHECK(retired_count == 99U);
-    CHECK(memcmp(&storage, &before, sizeof(storage)) == 0);
-    CHECK(ucn_v6_qos_apply_invalidation(
-              owner, &invalidation, retired, 2U, &retired_count) ==
           UCN_V6_OK);
-    CHECK(retired_count == 2U);
-    CHECK((retired[0] == 100U && retired[1] == 102U) ||
-          (retired[0] == 102U && retired[1] == 100U));
+    CHECK(retired_count == 1U && retired[0] == 102U);
+    CHECK(ucn_v6_qos_record_completion(
+              owner, 100U, UCN_V6_QOS_COMPLETION_PHYSICAL_COMPLETED) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_qos_retire_completion(owner, 100U) == UCN_V6_OK);
     return 0;
 }
 
@@ -716,6 +712,53 @@ static int test_idle_flow_reclaim_preserves_rate_limit(void)
     return 0;
 }
 
+static int test_explicit_local_admission_and_cancel(void)
+{
+    static ucn_v6_qos_owner_storage_t storage;
+    static ucn_v6_qos_owner_storage_t before;
+    ucn_v6_qos_owner_t *owner = NULL;
+    ucn_v6_qos_policy_t policy;
+    ucn_v6_security_open_result_t opened = opened_frame(
+        42U, UCN_V6_TRAFFIC_Q0, UCN_V6_DELIVERY_RELIABLE,
+        42U, false, 0U, 0U);
+    ucn_v6_qos_admission_t admission;
+    ucn_v6_qos_enqueue_result_t enqueue;
+    ucn_v6_stack_invalidation_t invalidation;
+    uint64_t retired = UINT64_MAX;
+    size_t retired_count = SIZE_MAX;
+
+    memset(&storage, 0, sizeof(storage));
+    ucn_v6_qos_default_policy(&policy);
+    CHECK(ucn_v6_qos_owner_init_in_place(
+              storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
+              &policy, &owner) == UCN_V6_OK);
+    memset(&admission, 0, sizeof(admission));
+    admission.quota_identity = opened.ingress_peer_session;
+    admission.flow_id = UINT64_C(0x1234);
+    admission.traffic_class = UCN_V6_TRAFFIC_Q0;
+    admission.delivery_guarantee = UCN_V6_DELIVERY_RELIABLE;
+    admission.authenticated = true;
+    CHECK(ucn_v6_qos_enqueue_admitted(
+              owner, 0U, &admission, 700U, 16U, 0U, &enqueue) ==
+          UCN_V6_OK);
+    invalidation = invalidation_from(&opened, UCN_V6_STACK_INVALIDATE_LINK);
+    CHECK(ucn_v6_qos_apply_invalidation(
+              owner, &invalidation, &retired, 1U, &retired_count) ==
+          UCN_V6_OK);
+    CHECK(retired_count == 0U && retired == UINT64_MAX);
+    CHECK(ucn_v6_qos_cancel_queued(owner, 700U) == UCN_V6_OK);
+    CHECK(ucn_v6_qos_cancel_queued(owner, 700U) == UCN_V6_ERR_NOT_FOUND);
+
+    admission.parent_link_bound = true;
+    before = storage;
+    memset(&enqueue, 0xA5, sizeof(enqueue));
+    CHECK(ucn_v6_qos_enqueue_admitted(
+              owner, 1U, &admission, 701U, 16U, 0U, &enqueue) ==
+          UCN_V6_ERR_ARGUMENT);
+    CHECK(memcmp(&storage, &before, sizeof(storage)) == 0);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_metric() == 0);
@@ -728,6 +771,7 @@ int main(void)
     CHECK(test_multihop_e2e_identity_and_ingress_quota() == 0);
     CHECK(test_failed_select_is_fully_atomic() == 0);
     CHECK(test_idle_flow_reclaim_preserves_rate_limit() == 0);
+    CHECK(test_explicit_local_admission_and_cancel() == 0);
     puts("v6 metric/qos tests passed");
     return 0;
 }

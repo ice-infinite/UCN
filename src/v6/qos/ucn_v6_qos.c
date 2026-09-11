@@ -457,10 +457,10 @@ static bool reclaim_one_idle_flow(
     return false;
 }
 
-ucn_v6_result_t ucn_v6_qos_enqueue(
+ucn_v6_result_t ucn_v6_qos_enqueue_admitted(
     ucn_v6_qos_owner_t *owner,
     uint64_t now_us,
-    const ucn_v6_security_open_result_t *opened,
+    const ucn_v6_qos_admission_t *admission,
     uint64_t buffer_token,
     uint16_t payload_bytes,
     uint8_t local_priority,
@@ -475,34 +475,47 @@ ucn_v6_result_t ucn_v6_qos_enqueue(
     uint16_t tokens[4];
     uint64_t last_refill;
     size_t class_index;
-    if (!owner_is_valid(owner) || !opened_is_schedulable(opened) ||
+    if (!owner_is_valid(owner) || admission == NULL ||
+        !admission->authenticated ||
+        !session_is_valid(&admission->quota_identity) ||
+        admission->flow_id == 0U ||
+        (uint32_t)admission->traffic_class >
+            (uint32_t)UCN_V6_TRAFFIC_Q3 ||
+        (uint32_t)admission->delivery_guarantee >
+            (uint32_t)UCN_V6_DELIVERY_RELIABLE ||
+        (admission->parent_link_bound &&
+         (admission->parent_link_id == 0U ||
+          admission->parent_link_id > UCN_V6_LINK_ID_MAX ||
+          admission->parent_link_generation == 0U ||
+          admission->parent_link_generation >
+              UCN_V6_SERIAL_ROTATION_THRESHOLD)) ||
+        (!admission->parent_link_bound &&
+         (admission->parent_link_id != 0U ||
+          admission->parent_link_generation != 0U)) ||
         buffer_token == 0U || payload_bytes == 0U || local_priority > 7U ||
         result_out == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    if (token_exists(owner, buffer_token) ||
-        ucn_v6_qos_flow_id(opened, &flow_id) != UCN_V6_OK) {
+    flow_id = admission->flow_id;
+    if (token_exists(owner, buffer_token)) {
         return UCN_V6_ERR_REPLAY;
     }
-    class_index = (size_t)opened->frame.traffic_class;
-    if ((opened->frame.flags & UCN_V6_FLAG_HOP_BUDGET_CONTEXT) != 0U &&
-        (opened->frame.hop_budget.initial_budget_us == 0U ||
-         opened->frame.hop_budget.remaining_budget_us == 0U ||
-         opened->frame.hop_budget.remaining_budget_us >
-             opened->frame.hop_budget.initial_budget_us ||
-         opened->frame.hop_budget.initial_budget_us >
+    class_index = (size_t)admission->traffic_class;
+    if (admission->has_hop_budget &&
+        (admission->initial_budget_us == 0U ||
+         admission->remaining_budget_us == 0U ||
+         admission->remaining_budget_us > admission->initial_budget_us ||
+         admission->initial_budget_us >
              owner->policy.max_hop_budget_us[class_index])) {
         return UCN_V6_ERR_ACCESS;
     }
-    source = source_session(opened);
-    if (!session_is_valid(&source)) {
-        return UCN_V6_ERR_ARGUMENT;
-    }
+    source = admission->quota_identity;
     flow = find_flow(owner, &source, flow_id);
     if (flow != NULL &&
-        (flow->ingress_link_id != opened->ingress_link_instance_id ||
+        (flow->parent_link_bound != admission->parent_link_bound ||
+         flow->ingress_link_id != admission->parent_link_id ||
          flow->ingress_link_generation !=
-             opened->ingress_link_instance_generation)) {
+             admission->parent_link_generation)) {
         return UCN_V6_ERR_STATE;
     }
     if (flow == NULL) {
@@ -516,7 +529,7 @@ ucn_v6_result_t ucn_v6_qos_enqueue(
         saturating_increment(&owner->stats.rejected_quota[class_index]);
         return UCN_V6_ERR_NO_SPACE;
     }
-    queue = opened->frame.delivery_guarantee == UCN_V6_DELIVERY_LATEST ?
+    queue = admission->delivery_guarantee == UCN_V6_DELIVERY_LATEST ?
                 find_latest(owner, &source, flow_id) : NULL;
     if (queue != NULL && owner->selected &&
         (size_t)(queue - owner->queue) == owner->selected_queue_index) {
@@ -527,7 +540,7 @@ ucn_v6_result_t ucn_v6_qos_enqueue(
     }
     if (queue == NULL) {
         if (owner->stats.queued[class_index] >=
-                class_capacity(opened->frame.traffic_class) ||
+                class_capacity(admission->traffic_class) ||
             (queue = find_free_queue(owner)) == NULL) {
             return UCN_V6_ERR_NO_SPACE;
         }
@@ -564,9 +577,10 @@ ucn_v6_result_t ucn_v6_qos_enqueue(
         memset(flow, 0, sizeof(*flow));
         flow->occupied = true;
         flow->source = source;
-        flow->ingress_link_id = opened->ingress_link_instance_id;
+        flow->parent_link_bound = admission->parent_link_bound;
+        flow->ingress_link_id = admission->parent_link_id;
         flow->ingress_link_generation =
-            opened->ingress_link_instance_generation;
+            admission->parent_link_generation;
         flow->flow_id = flow_id;
         ++owner->stats.flow_slots;
     }
@@ -583,22 +597,55 @@ ucn_v6_result_t ucn_v6_qos_enqueue(
     queue->buffer_token = buffer_token;
     queue->flow_id = flow_id;
     queue->source = source;
-    queue->ingress_link_id = opened->ingress_link_instance_id;
+    queue->parent_link_bound = admission->parent_link_bound;
+    queue->ingress_link_id = admission->parent_link_id;
     queue->ingress_link_generation =
-        opened->ingress_link_instance_generation;
-    queue->traffic_class = opened->frame.traffic_class;
-    queue->delivery_guarantee = opened->frame.delivery_guarantee;
+        admission->parent_link_generation;
+    queue->traffic_class = admission->traffic_class;
+    queue->delivery_guarantee = admission->delivery_guarantee;
     queue->payload_bytes = payload_bytes;
     queue->local_priority = local_priority;
-    queue->has_hop_budget =
-        (opened->frame.flags & UCN_V6_FLAG_HOP_BUDGET_CONTEXT) != 0U;
-    queue->initial_budget_us = opened->frame.hop_budget.initial_budget_us;
-    queue->remaining_budget_us = opened->frame.hop_budget.remaining_budget_us;
+    queue->has_hop_budget = admission->has_hop_budget;
+    queue->initial_budget_us = admission->initial_budget_us;
+    queue->remaining_budget_us = admission->remaining_budget_us;
     queue->enqueued_at_us = now_us;
     queue->arrival_order = ++owner->next_arrival_order;
     saturating_increment(&owner->stats.enqueued[class_index]);
     *result_out = result;
     return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_qos_enqueue(
+    ucn_v6_qos_owner_t *owner,
+    uint64_t now_us,
+    const ucn_v6_security_open_result_t *opened,
+    uint64_t buffer_token,
+    uint16_t payload_bytes,
+    uint8_t local_priority,
+    ucn_v6_qos_enqueue_result_t *result_out)
+{
+    ucn_v6_qos_admission_t admission;
+    if (!opened_is_schedulable(opened)) return UCN_V6_ERR_ARGUMENT;
+    memset(&admission, 0, sizeof(admission));
+    admission.quota_identity = source_session(opened);
+    admission.parent_link_bound = true;
+    admission.parent_link_id = opened->ingress_link_instance_id;
+    admission.parent_link_generation =
+        opened->ingress_link_instance_generation;
+    if (ucn_v6_qos_flow_id(opened, &admission.flow_id) != UCN_V6_OK) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    admission.traffic_class = opened->frame.traffic_class;
+    admission.delivery_guarantee = opened->frame.delivery_guarantee;
+    admission.has_hop_budget =
+        (opened->frame.flags & UCN_V6_FLAG_HOP_BUDGET_CONTEXT) != 0U;
+    admission.initial_budget_us = opened->frame.hop_budget.initial_budget_us;
+    admission.remaining_budget_us =
+        opened->frame.hop_budget.remaining_budget_us;
+    admission.authenticated = true;
+    return ucn_v6_qos_enqueue_admitted(
+        owner, now_us, &admission, buffer_token, payload_bytes,
+        local_priority, result_out);
 }
 
 static bool flow_has_class_item(const ucn_v6_qos_owner_t *owner,
@@ -884,10 +931,8 @@ ucn_v6_result_t ucn_v6_qos_complete_selection(
         return UCN_V6_ERR_REPLAY;
     }
     class_index = (size_t)item->traffic_class;
-    if ((owner->selected_action == UCN_V6_QOS_ACTION_DROP_EXPIRED &&
-         result != UCN_V6_QOS_SELECTION_DROP_RETIRED) ||
-        (owner->selected_action == UCN_V6_QOS_ACTION_SEND &&
-         result == UCN_V6_QOS_SELECTION_DROP_RETIRED)) {
+    if (owner->selected_action == UCN_V6_QOS_ACTION_DROP_EXPIRED &&
+        result != UCN_V6_QOS_SELECTION_DROP_RETIRED) {
         return UCN_V6_ERR_STATE;
     }
     if (result == UCN_V6_QOS_SELECTION_LINK_SUBMITTED) {
@@ -901,6 +946,7 @@ ucn_v6_result_t ucn_v6_qos_complete_selection(
         inflight->buffer_token = item->buffer_token;
         inflight->flow_id = item->flow_id;
         inflight->source = item->source;
+        inflight->parent_link_bound = item->parent_link_bound;
         inflight->ingress_link_id = item->ingress_link_id;
         inflight->ingress_link_generation = item->ingress_link_generation;
         inflight->traffic_class = item->traffic_class;
@@ -909,10 +955,9 @@ ucn_v6_result_t ucn_v6_qos_complete_selection(
         saturating_increment(&owner->stats.link_submitted[class_index]);
         remove_queue_item(owner, owner->selected_queue_index);
     } else if (result == UCN_V6_QOS_SELECTION_DROP_RETIRED) {
-        if (owner->selected_action != UCN_V6_QOS_ACTION_DROP_EXPIRED) {
-            return UCN_V6_ERR_STATE;
+        if (owner->selected_action == UCN_V6_QOS_ACTION_DROP_EXPIRED) {
+            saturating_increment(&owner->stats.dropped_expired[class_index]);
         }
-        saturating_increment(&owner->stats.dropped_expired[class_index]);
         remove_queue_item(owner, owner->selected_queue_index);
     }
     owner->selected = false;
@@ -986,6 +1031,31 @@ ucn_v6_result_t ucn_v6_qos_retire_completion(
         --owner->stats.inflight;
     }
     return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_qos_cancel_queued(
+    ucn_v6_qos_owner_t *owner,
+    uint64_t buffer_token)
+{
+    size_t index;
+    if (!owner_is_valid(owner) || buffer_token == 0U) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    for (index = 0U; index < UCN_V6_QOS_QUEUE_CAPACITY; ++index) {
+        if (!owner->queue[index].occupied ||
+            owner->queue[index].buffer_token != buffer_token) {
+            continue;
+        }
+        if (owner->selected && owner->selected_queue_index == index) {
+            return UCN_V6_ERR_STATE;
+        }
+        remove_queue_item(owner, index);
+        return UCN_V6_OK;
+    }
+    if (find_inflight(owner, buffer_token) != NULL) {
+        return UCN_V6_ERR_STATE;
+    }
+    return UCN_V6_ERR_NOT_FOUND;
 }
 
 ucn_v6_result_t ucn_v6_qos_reclaim_idle_flows(
@@ -1074,11 +1144,13 @@ uint8_t ucn_v6_qos_hardware_priority(
 }
 
 static bool qos_parent_matches(
+    bool parent_link_bound,
     uint16_t link_id,
     uint32_t link_generation,
     const ucn_v6_session_key_t *session,
     const ucn_v6_stack_invalidation_t *invalidation)
 {
+    if (!parent_link_bound) return false;
     if (invalidation->type == UCN_V6_STACK_INVALIDATE_LINK) {
         return link_id == invalidation->link_id &&
                link_generation == invalidation->link_generation;
@@ -1106,17 +1178,10 @@ ucn_v6_result_t ucn_v6_qos_apply_invalidation(
     }
     for (index = 0U; index < UCN_V6_QOS_QUEUE_CAPACITY; ++index) {
         if (owner->queue[index].occupied &&
-            qos_parent_matches(owner->queue[index].ingress_link_id,
+            qos_parent_matches(owner->queue[index].parent_link_bound,
+                               owner->queue[index].ingress_link_id,
                                owner->queue[index].ingress_link_generation,
                                &owner->queue[index].source, invalidation)) {
-            ++count;
-        }
-    }
-    for (index = 0U; index < UCN_V6_CONFIG_QOS_INFLIGHT; ++index) {
-        if (owner->inflight[index].occupied &&
-            qos_parent_matches(owner->inflight[index].ingress_link_id,
-                               owner->inflight[index].ingress_link_generation,
-                               &owner->inflight[index].source, invalidation)) {
             ++count;
         }
     }
@@ -1126,7 +1191,8 @@ ucn_v6_result_t ucn_v6_qos_apply_invalidation(
     count = 0U;
     for (index = 0U; index < UCN_V6_QOS_QUEUE_CAPACITY; ++index) {
         if (owner->queue[index].occupied &&
-            qos_parent_matches(owner->queue[index].ingress_link_id,
+            qos_parent_matches(owner->queue[index].parent_link_bound,
+                               owner->queue[index].ingress_link_id,
                                owner->queue[index].ingress_link_generation,
                                &owner->queue[index].source, invalidation)) {
             retired_tokens[count++] = owner->queue[index].buffer_token;
@@ -1141,7 +1207,8 @@ ucn_v6_result_t ucn_v6_qos_apply_invalidation(
     }
     for (index = 0U; index < UCN_V6_CONFIG_QOS_FLOW_SLOTS; ++index) {
         if (owner->flows[index].occupied &&
-            qos_parent_matches(owner->flows[index].ingress_link_id,
+            qos_parent_matches(owner->flows[index].parent_link_bound,
+                               owner->flows[index].ingress_link_id,
                                owner->flows[index].ingress_link_generation,
                                &owner->flows[index].source, invalidation)) {
             memset(&owner->flows[index], 0, sizeof(owner->flows[index]));
@@ -1150,19 +1217,10 @@ ucn_v6_result_t ucn_v6_qos_apply_invalidation(
             }
         }
     }
-    for (index = 0U; index < UCN_V6_CONFIG_QOS_INFLIGHT; ++index) {
-        if (owner->inflight[index].occupied &&
-            qos_parent_matches(owner->inflight[index].ingress_link_id,
-                               owner->inflight[index].ingress_link_generation,
-                               &owner->inflight[index].source, invalidation)) {
-            retired_tokens[count++] = owner->inflight[index].buffer_token;
-            memset(&owner->inflight[index], 0,
-                   sizeof(owner->inflight[index]));
-            if (owner->stats.inflight != 0U) {
-                --owner->stats.inflight;
-            }
-        }
-    }
+    /* Inflight work is already Adapter-owned.  The Runtime cancellation path
+     * keeps its QoS completion record until the Adapter publishes and retires
+     * the exact cancellation completion; deleting it here would split buffer
+     * ownership and make the later completion unmatchable. */
     *retired_count = count;
     return UCN_V6_OK;
 }

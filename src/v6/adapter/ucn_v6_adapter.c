@@ -278,6 +278,7 @@ ucn_v6_result_t ucn_v6_adapter_publish_rx(
     ucn_v6_adapter_owner_t *owner,
     uint16_t link_id,
     uint32_t link_generation,
+    uint32_t local_peer_discriminator,
     const uint8_t *frame,
     size_t frame_length,
     const ucn_v6_driver_timestamp_t *timestamp,
@@ -288,7 +289,8 @@ ucn_v6_result_t ucn_v6_adapter_publish_rx(
     ucn_v6_adapter_rx_slot_t *slot = NULL;
     ucn_v6_driver_event_key_t key;
     size_t index;
-    if (!owner_valid(owner) || frame == NULL || frame_length == 0U ||
+    if (!owner_valid(owner) || local_peer_discriminator == 0U ||
+        frame == NULL || frame_length == 0U ||
         published_key == NULL) return UCN_V6_ERR_ARGUMENT;
     if (!lock_owner(owner, from_isr)) return UCN_V6_ERR_STATE;
     link = find_link(owner, link_id);
@@ -338,6 +340,7 @@ ucn_v6_result_t ucn_v6_adapter_publish_rx(
     slot->order = owner->next_order++;
     slot->key = key;
     slot->bearer = link->config.bearer;
+    slot->local_peer_discriminator = local_peer_discriminator;
     slot->frame_length = (uint16_t)frame_length;
     if (timestamp != NULL) slot->timestamp = *timestamp;
     memcpy(slot->frame, frame, frame_length);
@@ -387,6 +390,7 @@ ucn_v6_result_t ucn_v6_adapter_peek_rx(
     next.key = slot->key;
     next.timestamp = slot->timestamp;
     next.bearer = slot->bearer;
+    next.local_peer_discriminator = slot->local_peer_discriminator;
     next.frame_length = slot->frame_length;
     memcpy(frame, slot->frame, slot->frame_length);
     *view = next;
@@ -424,6 +428,7 @@ ucn_v6_result_t ucn_v6_adapter_retire_rx(
 ucn_v6_result_t ucn_v6_adapter_enqueue_tx(
     ucn_v6_adapter_owner_t *owner,
     uint16_t link_id,
+    uint32_t link_generation,
     uint64_t buffer_token,
     const uint8_t *frame,
     size_t frame_length,
@@ -435,14 +440,18 @@ ucn_v6_result_t ucn_v6_adapter_enqueue_tx(
     ucn_v6_adapter_tx_slot_t *slot = NULL;
     ucn_v6_driver_event_key_t next_key;
     size_t index;
-    if (!owner_valid(owner) || buffer_token == 0U || frame == NULL ||
+    if (!owner_valid(owner) || link_generation == 0U ||
+        link_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        buffer_token == 0U || frame == NULL ||
         frame_length == 0U || key == NULL ||
         (uint32_t)traffic_class > (uint32_t)UCN_V6_TRAFFIC_Q3) {
         return UCN_V6_ERR_ARGUMENT;
     }
     if (!lock_owner(owner, false)) return UCN_V6_ERR_STATE;
     link = find_link(owner, link_id);
-    if (link == NULL || link->readiness != UCN_V6_LINK_READY ||
+    if (link == NULL ||
+        link->config.initial_generation != link_generation ||
+        link->readiness != UCN_V6_LINK_READY ||
         any_io_active(owner) ||
         owner->stats.faulted) {
         unlock_owner(owner, false);

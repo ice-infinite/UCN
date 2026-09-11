@@ -1,12 +1,14 @@
 # UCN v6 Core Wire 精确格式 RFC
 
-> 状态：V6-03 隔离实现后的当前 v6-only 规范；本轮破坏性自审已同步双 Sequence 与 16-bit Hop Limit，等待统一外审。
-> 适用范围：`UCN_BUILD_V6_EXPERIMENTAL=ON` 的 default-OFF Codec。
-> 禁止事项：本 RFC 尚不授权生产 RX/TX、真实 Key 查找、Tag 验证或 Authority 副作用。
+> 状态：CURRENT IMPLEMENTED CONTRACT / SUPERSEDED FOR NEXT REDESIGN。本文精确描述当前 V6-03/V6-15 代码中的 Contract 1，但不再是下一轮低开销重构的目标字段权威。
+> 当前实现范围：现有 v6-only Codec、Golden 和相关测试。
+> 下一轮目标：[UCN v6 低开销统一 Wire](UCN_v6_低开销统一Wire各Contract字段与运行机制详细设计.md) 是 C0～C5 的唯一字段候选；其冻结和新实现完成前，不能把本文与新 Contract 混合编码，也不能声称当前固件已经采用低开销 Wire。
 
 ## 1. 目标与边界
 
-本文件把《UCN v6 最终协议架构与破坏性重构 RFC》第 6 章的逻辑字段冻结成唯一字节布局。
+本文件把《UCN v6 最终协议架构与破坏性重构 RFC》原第 6 章的历史逻辑字段冻结成当前
+已实现字节布局。它只对现有 Contract 1 代码和回归证据负责；下一轮实现不得从本文选取
+9 B 前缀、16-bit Hop Limit 或 41/43/45/47 B 基础头混入 C0～C5。
 所有多字节整数均为网络序（big-endian），没有 C 结构体直拷、隐式 padding 或本机字节序。
 Decoder 只接受 Version 6；使用相同 Magic 的 v4/v5 帧仍会因 Version/长度/合同不符被拒绝。
 

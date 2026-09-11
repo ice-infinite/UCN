@@ -9,6 +9,18 @@ extern "C" {
 
 #define UCN_V6_ROUTE_PROPOSAL_DIGEST_BYTES ((size_t)16U)
 #define UCN_V6_ROUTE_MAX_PATHS ((size_t)UCN_V6_CONFIG_ROUTE_PATHS_PER_SET)
+#define UCN_V6_ROUTE_PROTOCOL_SCHEMA ((uint8_t)1U)
+#define UCN_V6_ROUTE_PROTOCOL_MAX_BYTES ((size_t)155U)
+
+typedef enum ucn_v6_route_protocol_kind {
+    UCN_V6_ROUTE_DISCOVER_REQUEST = 1,
+    UCN_V6_ROUTE_DISCOVER_RESPONSE = 2,
+    UCN_V6_ROUTE_PATH_PROBE = 3,
+    UCN_V6_ROUTE_PATH_PROBE_ACK = 4,
+    UCN_V6_ROUTE_PATH_ACTIVATE = 5,
+    UCN_V6_ROUTE_PATH_ACTIVATE_ACK = 6,
+    UCN_V6_ROUTE_ERROR = 7
+} ucn_v6_route_protocol_kind_t;
 
 typedef enum ucn_v6_route_policy {
     UCN_V6_ROUTE_POLICY_PINNED = 1,
@@ -79,6 +91,91 @@ typedef struct ucn_v6_route_activation {
     uint32_t route_generation;
     uint8_t proposal_digest[UCN_V6_ROUTE_PROPOSAL_DIGEST_BYTES];
 } ucn_v6_route_activation_t;
+
+typedef struct ucn_v6_route_discover_request_body {
+    uint16_t maximum_hops;
+    uint32_t required_feature_bits;
+} ucn_v6_route_discover_request_body_t;
+
+typedef struct ucn_v6_route_discover_response_body {
+    uint16_t path_id;
+    uint32_t path_generation;
+    uint16_t hop_count;
+    uint16_t priority;
+    uint16_t weight;
+    uint32_t destination_capability_generation;
+    uint8_t destination_capability_digest[UCN_V6_CAPABILITY_DIGEST_BYTES];
+    uint16_t destination_realtime_mode_bits;
+    uint16_t destination_clock_domain_id;
+    uint32_t destination_clock_domain_generation;
+    uint32_t path_frame_mtu;
+    uint32_t payload_budget;
+    uint32_t fragment_data_budget;
+    uint32_t feature_bits;
+    uint32_t hop_suite_bits;
+    uint32_t e2e_suite_bits;
+    ucn_v6_message_class_t max_message_class;
+    uint16_t max_window;
+    uint16_t max_concurrency;
+    uint16_t timestamp_capability_bits;
+    uint32_t timestamp_uncertainty_us;
+} ucn_v6_route_discover_response_body_t;
+
+typedef struct ucn_v6_route_probe_body {
+    uint16_t path_id;
+    uint32_t path_generation;
+    uint8_t proposal_digest[UCN_V6_ROUTE_PROPOSAL_DIGEST_BYTES];
+} ucn_v6_route_probe_body_t;
+
+typedef struct ucn_v6_route_activation_body {
+    uint8_t proposal_digest[UCN_V6_ROUTE_PROPOSAL_DIGEST_BYTES];
+} ucn_v6_route_activation_body_t;
+
+typedef struct ucn_v6_route_error_body {
+    uint16_t path_id;
+    uint32_t path_generation;
+    uint8_t reason;
+} ucn_v6_route_error_body_t;
+
+/* EN: Immutable, authenticated Route control payload.  The common key binds
+ * every request, response, proof and ACK to one Route Domain and generation.
+ * A Discover Response carries only an end-to-end capability aggregate; the
+ * receiver derives the mutable next-Hop Session and Link from authenticated
+ * ingress state and never accepts them from Wire.
+ * 中文：不可变且必须认证的 Route 控制载荷。公共键把所有请求、响应、Probe
+ * 与 ACK 绑定到唯一 Route Domain 和代际。Discover Response 只携带端到端
+ * 能力聚合；接收端必须从已认证入站状态推导可变下一跳 Session/Link，绝不从
+ * Wire 接受这两个本地所有权字段。 */
+typedef struct ucn_v6_route_protocol_message {
+    ucn_v6_route_protocol_kind_t kind;
+    uint64_t candidate_transaction_id;
+    ucn_v6_route_domain_t domain;
+    uint32_t route_generation;
+    union {
+        ucn_v6_route_discover_request_body_t discover_request;
+        ucn_v6_route_discover_response_body_t discover_response;
+        ucn_v6_route_probe_body_t probe;
+        ucn_v6_route_activation_body_t activation;
+        ucn_v6_route_error_body_t error;
+    } body;
+} ucn_v6_route_protocol_message_t;
+
+/* EN: Maps a typed Route control message to its unique CONTROL opcode.
+ * 中文：把具名 Route 控制消息映射为唯一 CONTROL Opcode。 */
+uint16_t ucn_v6_route_protocol_opcode(
+    ucn_v6_route_protocol_kind_t kind);
+/* EN: Canonical big-endian Route control codec. Rejection never writes the
+ * output object, bytes, or length, and all input/output ranges must be
+ * disjoint.
+ * 中文：规范大端 Route 控制 Codec。拒绝时不得写回输出对象、字节或长度，
+ * 且输入输出内存必须完全不重叠。 */
+ucn_v6_result_t ucn_v6_route_protocol_encode(
+    const ucn_v6_route_protocol_message_t *message,
+    uint8_t *output, size_t output_capacity, size_t *output_length);
+ucn_v6_result_t ucn_v6_route_protocol_decode(
+    uint16_t protocol_opcode,
+    const uint8_t *input, size_t input_length,
+    ucn_v6_route_protocol_message_t *message);
 
 typedef struct ucn_v6_route_candidate_view {
     bool occupied;
@@ -220,6 +317,22 @@ ucn_v6_result_t ucn_v6_route_select(
     ucn_v6_route_owner_t *owner,
     uint64_t now_us,
     const ucn_v6_route_select_request_t *request,
+    ucn_v6_route_selection_t *selection);
+/* EN: Resolves a relay Route from immutable authenticated Wire identity. The
+ * caller cannot inject either endpoint Principal: Route Owner finds the one
+ * exact domain whose address/binding/session tuple matches the frame, admits
+ * its inbound Route generation, and selects a currently live egress Path.
+ * 中文：依据已认证 Wire 的不可变身份解析中继 Route。调用方不能注入任一端
+ * Principal；Route Owner 查找地址/Binding/Session 元组完全匹配的唯一域，
+ * 校验入站 Route 代际，再选择当前活跃出口 Path。 */
+ucn_v6_result_t ucn_v6_route_select_forward(
+    ucn_v6_route_owner_t *owner,
+    uint64_t now_us,
+    const ucn_v6_frame_t *authenticated_frame,
+    uint64_t flow_id,
+    uint64_t packet_sequence,
+    ucn_v6_route_policy_t policy,
+    ucn_v6_route_domain_t *resolved_domain,
     ucn_v6_route_selection_t *selection);
 /* EN: Resolves one exact immutable Route reference from the current
  * generation or the still-live previous generation.  This is the only

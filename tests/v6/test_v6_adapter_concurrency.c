@@ -92,7 +92,8 @@ static void *produce(void *context)
     for (index = 0U; index < 16U; ++index) {
         ucn_v6_driver_event_key_t key;
         ucn_v6_result_t result = ucn_v6_adapter_publish_rx(
-            producer->adapter, producer->link_id, 1U, frame, sizeof(frame),
+            producer->adapter, producer->link_id, 1U, 1U, frame,
+            sizeof(frame),
             NULL, producer->from_isr, &key);
         if (result == UCN_V6_OK) ++producer->accepted;
         else if (result == UCN_V6_ERR_STATE && producer->from_isr) {

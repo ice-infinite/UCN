@@ -11,6 +11,15 @@ extern "C" {
 #define UCN_V6_CAPABILITY_RECORD_BYTES ((size_t)68U)
 #define UCN_V6_CAPABILITY_HELLO_BYTES ((size_t)24U)
 #define UCN_V6_CAPABILITY_QUERY_BYTES ((size_t)20U)
+#define UCN_V6_CAPABILITY_KNOWN_FEATURES                                \
+    ((uint32_t)(UCN_V6_FEATURE_IDENTITY | UCN_V6_FEATURE_WIRE |        \
+                UCN_V6_FEATURE_MESSAGE | UCN_V6_FEATURE_SECURITY |     \
+                UCN_V6_FEATURE_ROUTE | UCN_V6_FEATURE_TRANSFER |       \
+                UCN_V6_FEATURE_REALTIME | UCN_V6_FEATURE_CLUSTER |     \
+                UCN_V6_FEATURE_CAPABILITY | UCN_V6_FEATURE_ADAPTER |   \
+                UCN_V6_FEATURE_QOS))
+#define UCN_V6_CAPABILITY_HOP_SUITE_BITS UINT32_C(0x00000002)
+#define UCN_V6_CAPABILITY_E2E_SUITE_BITS UINT32_C(0x0000000E)
 #define UCN_V6_GROUP_HINT_TIMEOUT_US UINT64_C(1000000)
 #define UCN_V6_GROUP_HINTS_PER_LINK ((uint8_t)2U)
 #define UCN_V6_PATH_HOP_LIMIT UCN_V6_HOP_COUNT_MAX
@@ -311,6 +320,16 @@ ucn_v6_result_t ucn_v6_capability_owner_init_in_place(
     uint64_t local_capability_lease_us,
     uint64_t discovery_lease_us,
     ucn_v6_capability_owner_t **owner);
+
+/* EN: Copies the immutable local capability record and its canonical digest.
+ * This is the only producer-facing view used to answer an authenticated
+ * Capability Query; it exposes no peer cache or mutable owner state.
+ * 中文：复制不可变的本机能力记录及其规范摘要。这是响应已认证 Capability
+ * Query 的唯一生产者视图，不暴露 Peer 缓存或 Owner 可变状态。 */
+ucn_v6_result_t ucn_v6_capability_copy_local(
+    const ucn_v6_capability_owner_t *owner,
+    ucn_v6_capability_record_t *record,
+    uint8_t digest[UCN_V6_CAPABILITY_DIGEST_BYTES]);
 
 /* EN: Handles authenticated Peer HELLO/ADVERTISE without granting authority.
  * 中文：处理已认证 Peer HELLO/ADVERTISE，但不授予任何 Authority。 */

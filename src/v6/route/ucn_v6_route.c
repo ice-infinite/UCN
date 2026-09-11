@@ -87,6 +87,48 @@ static bool domain_equal(const ucn_v6_route_domain_t *left,
                right->destination_session_generation;
 }
 
+/* EN: Identity that is actually visible to a relay on Wire.  Endpoint
+ * Principals and the destination Session generation are intentionally absent
+ * from the v6 forwarding header, so Route Owner must use Route generation to
+ * make this reduced key unambiguous.
+ * 中文：中继在 Wire 上真实可见的身份。端点 Principal 与目标 Session 代际
+ * 有意不进入 v6 转发头，因此 Route Owner 必须结合 Route 代际保证这个缩减键
+ * 唯一。 */
+static bool wire_domain_equal(const ucn_v6_route_domain_t *left,
+                              const ucn_v6_route_domain_t *right)
+{
+    return left != NULL && right != NULL &&
+           ucn_v6_binding_key_equal(&left->origin_binding,
+                                    &right->origin_binding) &&
+           left->origin_session_generation ==
+               right->origin_session_generation &&
+           ucn_v6_binding_key_equal(&left->destination_binding,
+                                    &right->destination_binding);
+}
+
+static bool proposal_conflicts_with_live_wire_key(
+    const ucn_v6_route_owner_t *owner,
+    const ucn_v6_route_proposal_t *proposal,
+    uint64_t now_us)
+{
+    size_t index;
+    for (index = 0U; index < UCN_V6_CONFIG_ROUTE_SETS; ++index) {
+        const ucn_v6_route_set_slot_t *slot = &owner->sets[index];
+        if (!slot->occupied ||
+            domain_equal(&slot->current.domain, &proposal->domain)) {
+            continue;
+        }
+        if ((slot->current.route_generation == proposal->route_generation &&
+             wire_domain_equal(&slot->current.domain, &proposal->domain)) ||
+            (slot->previous_valid && now_us < slot->previous_deadline_us &&
+             slot->previous.route_generation == proposal->route_generation &&
+             wire_domain_equal(&slot->previous.domain, &proposal->domain))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool path_capability_equal(const ucn_v6_path_capability_t *left,
                                   const ucn_v6_path_capability_t *right)
 {
@@ -905,6 +947,11 @@ ucn_v6_result_t ucn_v6_route_candidate_commit_ack(
         !proposal_is_valid(&candidate->proposal)) {
         return UCN_V6_ERR_TIMEOUT;
     }
+    if (proposal_conflicts_with_live_wire_key(
+            owner, &candidate->proposal, now_us)) {
+        saturating_increment(&owner->stats.rejected_stale);
+        return UCN_V6_ERR_REPLAY;
+    }
     set = find_set(owner, &candidate->proposal.domain);
     if (set != NULL) {
         if (ucn_v6_serial_checked_next(set->current.route_generation,
@@ -1225,6 +1272,99 @@ ucn_v6_result_t ucn_v6_route_select(
         return UCN_V6_ERR_STATE;
     }
     *selection = next;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_route_select_forward(
+    ucn_v6_route_owner_t *owner,
+    uint64_t now_us,
+    const ucn_v6_frame_t *authenticated_frame,
+    uint64_t flow_id,
+    uint64_t packet_sequence,
+    ucn_v6_route_policy_t policy,
+    ucn_v6_route_domain_t *resolved_domain,
+    ucn_v6_route_selection_t *selection)
+{
+    const ucn_v6_route_domain_t *matched = NULL;
+    ucn_v6_route_select_request_t request;
+    ucn_v6_route_selection_t selected;
+    ucn_v6_route_domain_t domain;
+    size_t index;
+    ucn_v6_result_t result;
+
+    if (!owner_is_valid(owner) || authenticated_frame == NULL ||
+        resolved_domain == NULL || selection == NULL || flow_id == 0U ||
+        (authenticated_frame->flags & UCN_V6_FLAG_ROUTE_CONTEXT) == 0U ||
+        authenticated_frame->route_generation == 0U ||
+        authenticated_frame->route_generation >
+            UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        authenticated_frame->session_generation == 0U ||
+        authenticated_frame->session_generation >
+            UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        policy < UCN_V6_ROUTE_POLICY_PINNED ||
+        policy > UCN_V6_ROUTE_POLICY_WEIGHTED_MULTIPATH ||
+        ucn_v6_memory_ranges_overlap(
+            authenticated_frame, sizeof(*authenticated_frame),
+            resolved_domain, sizeof(*resolved_domain)) ||
+        ucn_v6_memory_ranges_overlap(
+            authenticated_frame, sizeof(*authenticated_frame),
+            selection, sizeof(*selection)) ||
+        ucn_v6_memory_ranges_overlap(
+            resolved_domain, sizeof(*resolved_domain),
+            selection, sizeof(*selection))) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_ROUTE_SETS; ++index) {
+        const ucn_v6_route_domain_t *candidate;
+        if (!owner->sets[index].occupied) continue;
+        candidate = &owner->sets[index].current.domain;
+        if (owner->sets[index].current.route_generation !=
+                authenticated_frame->route_generation ||
+            candidate->origin_binding.realm_id != authenticated_frame->realm_id ||
+            candidate->origin_binding.node_address !=
+                authenticated_frame->source_address ||
+            candidate->origin_binding.binding_generation !=
+                authenticated_frame->source_binding_generation ||
+            candidate->destination_binding.realm_id !=
+                authenticated_frame->realm_id ||
+            candidate->destination_binding.node_address !=
+                authenticated_frame->destination_address ||
+            candidate->destination_binding.binding_generation !=
+                authenticated_frame->destination_binding_generation ||
+            candidate->origin_session_generation !=
+                authenticated_frame->session_generation) {
+            continue;
+        }
+        if (matched != NULL) {
+            owner->faulted = true;
+            owner->stats.faulted = true;
+            return UCN_V6_ERR_STATE;
+        }
+        matched = candidate;
+    }
+    if (matched == NULL) return UCN_V6_ERR_NOT_FOUND;
+    domain = *matched;
+    result = ucn_v6_route_accept_generation(
+        owner, now_us, &domain, authenticated_frame->route_generation);
+    if (result != UCN_V6_OK) return result;
+    memset(&request, 0, sizeof(request));
+    request.domain = domain;
+    request.flow_id = flow_id;
+    request.packet_sequence = packet_sequence;
+    request.policy = policy;
+    if (policy == UCN_V6_ROUTE_POLICY_PINNED) {
+        if ((authenticated_frame->flags & UCN_V6_FLAG_PATH_CONTEXT) == 0U) {
+            return UCN_V6_ERR_ARGUMENT;
+        }
+        request.pinned_path_id = authenticated_frame->path.path_id;
+        request.pinned_path_generation =
+            authenticated_frame->path.path_generation;
+    }
+    memset(&selected, 0, sizeof(selected));
+    result = ucn_v6_route_select(owner, now_us, &request, &selected);
+    if (result != UCN_V6_OK) return result;
+    *resolved_domain = domain;
+    *selection = selected;
     return UCN_V6_OK;
 }
 
@@ -1581,5 +1721,404 @@ ucn_v6_result_t ucn_v6_route_copy_view(
     next = owner->stats;
     next.faulted = owner->faulted;
     *view = next;
+    return UCN_V6_OK;
+}
+
+static void protocol_write_u16(uint8_t *output, uint16_t value)
+{
+    output[0] = (uint8_t)(value >> 8U);
+    output[1] = (uint8_t)value;
+}
+
+static void protocol_write_u32(uint8_t *output, uint32_t value)
+{
+    output[0] = (uint8_t)(value >> 24U);
+    output[1] = (uint8_t)(value >> 16U);
+    output[2] = (uint8_t)(value >> 8U);
+    output[3] = (uint8_t)value;
+}
+
+static void protocol_write_u64(uint8_t *output, uint64_t value)
+{
+    protocol_write_u32(output, (uint32_t)(value >> 32U));
+    protocol_write_u32(output + 4U, (uint32_t)value);
+}
+
+static uint16_t protocol_read_u16(const uint8_t *input)
+{
+    return (uint16_t)(((uint16_t)input[0] << 8U) | input[1]);
+}
+
+static uint32_t protocol_read_u32(const uint8_t *input)
+{
+    return ((uint32_t)input[0] << 24U) |
+           ((uint32_t)input[1] << 16U) |
+           ((uint32_t)input[2] << 8U) | input[3];
+}
+
+static uint64_t protocol_read_u64(const uint8_t *input)
+{
+    return ((uint64_t)protocol_read_u32(input) << 32U) |
+           protocol_read_u32(input + 4U);
+}
+
+static void protocol_write_binding(uint8_t *output,
+                                   const ucn_v6_binding_key_t *binding)
+{
+    protocol_write_u32(output, binding->realm_id);
+    protocol_write_u32(output + 4U, binding->node_address);
+    protocol_write_u32(output + 8U, binding->binding_generation);
+}
+
+static void protocol_read_binding(const uint8_t *input,
+                                  ucn_v6_binding_key_t *binding)
+{
+    binding->realm_id = protocol_read_u32(input);
+    binding->node_address = protocol_read_u32(input + 4U);
+    binding->binding_generation = protocol_read_u32(input + 8U);
+}
+
+static void protocol_write_domain(uint8_t *output,
+                                  const ucn_v6_route_domain_t *domain)
+{
+    memcpy(output, domain->origin_principal.bytes, 16U);
+    protocol_write_binding(output + 16U, &domain->origin_binding);
+    protocol_write_u32(output + 28U, domain->origin_session_generation);
+    memcpy(output + 32U, domain->destination_principal.bytes, 16U);
+    protocol_write_binding(output + 48U, &domain->destination_binding);
+    protocol_write_u32(output + 60U,
+                       domain->destination_session_generation);
+}
+
+static void protocol_read_domain(const uint8_t *input,
+                                 ucn_v6_route_domain_t *domain)
+{
+    memcpy(domain->origin_principal.bytes, input, 16U);
+    protocol_read_binding(input + 16U, &domain->origin_binding);
+    domain->origin_session_generation = protocol_read_u32(input + 28U);
+    memcpy(domain->destination_principal.bytes, input + 32U, 16U);
+    protocol_read_binding(input + 48U, &domain->destination_binding);
+    domain->destination_session_generation = protocol_read_u32(input + 60U);
+}
+
+static size_t protocol_message_bytes(ucn_v6_route_protocol_kind_t kind)
+{
+    switch (kind) {
+    case UCN_V6_ROUTE_DISCOVER_REQUEST:
+        return 86U;
+    case UCN_V6_ROUTE_DISCOVER_RESPONSE:
+        return UCN_V6_ROUTE_PROTOCOL_MAX_BYTES;
+    case UCN_V6_ROUTE_PATH_PROBE:
+    case UCN_V6_ROUTE_PATH_PROBE_ACK:
+        return 102U;
+    case UCN_V6_ROUTE_PATH_ACTIVATE:
+    case UCN_V6_ROUTE_PATH_ACTIVATE_ACK:
+        return 96U;
+    case UCN_V6_ROUTE_ERROR:
+        return 88U;
+    default:
+        return 0U;
+    }
+}
+
+static bool protocol_message_is_valid(
+    const ucn_v6_route_protocol_message_t *message)
+{
+    const ucn_v6_route_protocol_kind_t kind =
+        message == NULL ? (ucn_v6_route_protocol_kind_t)0 : message->kind;
+    if (message == NULL || protocol_message_bytes(kind) == 0U ||
+        message->candidate_transaction_id == 0U ||
+        message->candidate_transaction_id >
+            UCN_V6_SERIAL64_ROTATION_THRESHOLD ||
+        !domain_is_valid(&message->domain) ||
+        message->route_generation == 0U ||
+        message->route_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD) {
+        return false;
+    }
+    if (kind == UCN_V6_ROUTE_DISCOVER_REQUEST) {
+        return message->body.discover_request.maximum_hops != 0U &&
+               message->body.discover_request.maximum_hops <=
+                   UCN_V6_HOP_COUNT_MAX &&
+               (message->body.discover_request.required_feature_bits &
+                ~UCN_V6_CAPABILITY_KNOWN_FEATURES) == 0U;
+    }
+    if (kind == UCN_V6_ROUTE_DISCOVER_RESPONSE) {
+        const ucn_v6_route_discover_response_body_t *response =
+            &message->body.discover_response;
+        return response->path_id != 0U && response->path_id != UINT16_MAX &&
+               response->path_generation != 0U &&
+               response->path_generation <=
+                   UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+               response->hop_count != 0U &&
+               response->hop_count <= UCN_V6_HOP_COUNT_MAX &&
+               response->weight != 0U &&
+               response->destination_capability_generation != 0U &&
+               response->destination_capability_generation <=
+                   UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+               bytes_nonzero(response->destination_capability_digest,
+                             UCN_V6_CAPABILITY_DIGEST_BYTES) &&
+               (response->destination_realtime_mode_bits &
+                (uint16_t)~(UCN_V6_REALTIME_MODE_LOCAL |
+                            UCN_V6_REALTIME_MODE_SYNCED |
+                            UCN_V6_REALTIME_MODE_DEADLINE)) == 0U &&
+               (((response->destination_realtime_mode_bits &
+                  (UCN_V6_REALTIME_MODE_SYNCED |
+                   UCN_V6_REALTIME_MODE_DEADLINE)) != 0U) ==
+                (response->destination_clock_domain_id != 0U &&
+                 response->destination_clock_domain_generation != 0U &&
+                 response->destination_clock_domain_generation <=
+                     UCN_V6_SERIAL_ROTATION_THRESHOLD)) &&
+               response->path_frame_mtu != 0U &&
+               response->path_frame_mtu <= UCN_V6_WIRE_MAX_FRAME_BYTES &&
+               response->payload_budget != 0U &&
+               response->payload_budget < response->path_frame_mtu &&
+               response->fragment_data_budget != 0U &&
+               response->fragment_data_budget <= response->payload_budget &&
+               response->feature_bits != 0U &&
+               (response->feature_bits &
+                ~UCN_V6_CAPABILITY_KNOWN_FEATURES) == 0U &&
+               response->hop_suite_bits != 0U &&
+               (response->hop_suite_bits &
+                ~UCN_V6_CAPABILITY_HOP_SUITE_BITS) == 0U &&
+               response->e2e_suite_bits != 0U &&
+               (response->e2e_suite_bits &
+                ~UCN_V6_CAPABILITY_E2E_SUITE_BITS) == 0U &&
+               (uint32_t)response->max_message_class <=
+                   (uint32_t)UCN_V6_MESSAGE_T8K &&
+               response->max_window != 0U &&
+               response->max_concurrency != 0U &&
+               (response->timestamp_capability_bits &
+                (uint16_t)~(UCN_V6_TIMESTAMP_RX_SOFTWARE |
+                            UCN_V6_TIMESTAMP_TX_SOFTWARE |
+                            UCN_V6_TIMESTAMP_RX_HARDWARE |
+                            UCN_V6_TIMESTAMP_TX_HARDWARE)) == 0U &&
+               ((response->timestamp_capability_bits == 0U) ==
+                (response->timestamp_uncertainty_us == 0U));
+    }
+    if (kind == UCN_V6_ROUTE_PATH_PROBE ||
+        kind == UCN_V6_ROUTE_PATH_PROBE_ACK) {
+        return message->body.probe.path_id != 0U &&
+               message->body.probe.path_id != UINT16_MAX &&
+               message->body.probe.path_generation != 0U &&
+               message->body.probe.path_generation <=
+                   UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+               bytes_nonzero(message->body.probe.proposal_digest,
+                             UCN_V6_ROUTE_PROPOSAL_DIGEST_BYTES);
+    }
+    if (kind == UCN_V6_ROUTE_PATH_ACTIVATE ||
+        kind == UCN_V6_ROUTE_PATH_ACTIVATE_ACK) {
+        return bytes_nonzero(message->body.activation.proposal_digest,
+                             UCN_V6_ROUTE_PROPOSAL_DIGEST_BYTES);
+    }
+    return message->body.error.path_id != 0U &&
+           message->body.error.path_id != UINT16_MAX &&
+           message->body.error.path_generation != 0U &&
+           message->body.error.path_generation <=
+               UCN_V6_SERIAL_ROTATION_THRESHOLD &&
+           message->body.error.reason != 0U;
+}
+
+uint16_t ucn_v6_route_protocol_opcode(ucn_v6_route_protocol_kind_t kind)
+{
+    switch (kind) {
+    case UCN_V6_ROUTE_DISCOVER_REQUEST:
+        return UCN_V6_PROTOCOL_OPCODE_ROUTE_DISCOVER_REQUEST;
+    case UCN_V6_ROUTE_DISCOVER_RESPONSE:
+        return UCN_V6_PROTOCOL_OPCODE_ROUTE_DISCOVER_RESPONSE;
+    case UCN_V6_ROUTE_PATH_PROBE:
+        return UCN_V6_PROTOCOL_OPCODE_ROUTE_PATH_PROBE;
+    case UCN_V6_ROUTE_PATH_PROBE_ACK:
+        return UCN_V6_PROTOCOL_OPCODE_ROUTE_PATH_PROBE_ACK;
+    case UCN_V6_ROUTE_PATH_ACTIVATE:
+        return UCN_V6_PROTOCOL_OPCODE_ROUTE_PATH_ACTIVATE;
+    case UCN_V6_ROUTE_PATH_ACTIVATE_ACK:
+        return UCN_V6_PROTOCOL_OPCODE_ROUTE_PATH_ACTIVATE_ACK;
+    case UCN_V6_ROUTE_ERROR:
+        return UCN_V6_PROTOCOL_OPCODE_ROUTE_ERROR;
+    default:
+        return 0U;
+    }
+}
+
+static ucn_v6_route_protocol_kind_t protocol_kind_from_opcode(
+    uint16_t opcode)
+{
+    switch (opcode) {
+    case UCN_V6_PROTOCOL_OPCODE_ROUTE_DISCOVER_REQUEST:
+        return UCN_V6_ROUTE_DISCOVER_REQUEST;
+    case UCN_V6_PROTOCOL_OPCODE_ROUTE_DISCOVER_RESPONSE:
+        return UCN_V6_ROUTE_DISCOVER_RESPONSE;
+    case UCN_V6_PROTOCOL_OPCODE_ROUTE_PATH_PROBE:
+        return UCN_V6_ROUTE_PATH_PROBE;
+    case UCN_V6_PROTOCOL_OPCODE_ROUTE_PATH_PROBE_ACK:
+        return UCN_V6_ROUTE_PATH_PROBE_ACK;
+    case UCN_V6_PROTOCOL_OPCODE_ROUTE_PATH_ACTIVATE:
+        return UCN_V6_ROUTE_PATH_ACTIVATE;
+    case UCN_V6_PROTOCOL_OPCODE_ROUTE_PATH_ACTIVATE_ACK:
+        return UCN_V6_ROUTE_PATH_ACTIVATE_ACK;
+    case UCN_V6_PROTOCOL_OPCODE_ROUTE_ERROR:
+        return UCN_V6_ROUTE_ERROR;
+    default:
+        return (ucn_v6_route_protocol_kind_t)0;
+    }
+}
+
+ucn_v6_result_t ucn_v6_route_protocol_encode(
+    const ucn_v6_route_protocol_message_t *message,
+    uint8_t *output, size_t output_capacity, size_t *output_length)
+{
+    uint8_t encoded[UCN_V6_ROUTE_PROTOCOL_MAX_BYTES];
+    size_t required;
+    if (!protocol_message_is_valid(message) || output == NULL ||
+        output_length == NULL) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    required = protocol_message_bytes(message->kind);
+    if (output_capacity < required) return UCN_V6_ERR_NO_SPACE;
+    if (ucn_v6_memory_ranges_overlap(message, sizeof(*message), output,
+                                     required) ||
+        ucn_v6_memory_ranges_overlap(message, sizeof(*message), output_length,
+                                     sizeof(*output_length)) ||
+        ucn_v6_memory_ranges_overlap(output, required, output_length,
+                                     sizeof(*output_length))) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(encoded, 0, sizeof(encoded));
+    encoded[0] = UCN_V6_ROUTE_PROTOCOL_SCHEMA;
+    encoded[1] = (uint8_t)message->kind;
+    protocol_write_u64(&encoded[4], message->candidate_transaction_id);
+    protocol_write_domain(&encoded[12], &message->domain);
+    protocol_write_u32(&encoded[76], message->route_generation);
+    if (message->kind == UCN_V6_ROUTE_DISCOVER_REQUEST) {
+        protocol_write_u16(&encoded[80],
+                           message->body.discover_request.maximum_hops);
+        protocol_write_u32(&encoded[82],
+                           message->body.discover_request.required_feature_bits);
+    } else if (message->kind == UCN_V6_ROUTE_DISCOVER_RESPONSE) {
+        const ucn_v6_route_discover_response_body_t *response =
+            &message->body.discover_response;
+        protocol_write_u16(&encoded[80], response->path_id);
+        protocol_write_u32(&encoded[82], response->path_generation);
+        protocol_write_u16(&encoded[86], response->hop_count);
+        protocol_write_u16(&encoded[88], response->priority);
+        protocol_write_u16(&encoded[90], response->weight);
+        protocol_write_u32(&encoded[92],
+                           response->destination_capability_generation);
+        memcpy(&encoded[96], response->destination_capability_digest, 16U);
+        protocol_write_u16(&encoded[112],
+                           response->destination_realtime_mode_bits);
+        protocol_write_u16(&encoded[114],
+                           response->destination_clock_domain_id);
+        protocol_write_u32(&encoded[116],
+                           response->destination_clock_domain_generation);
+        protocol_write_u32(&encoded[120], response->path_frame_mtu);
+        protocol_write_u32(&encoded[124], response->payload_budget);
+        protocol_write_u32(&encoded[128], response->fragment_data_budget);
+        protocol_write_u32(&encoded[132], response->feature_bits);
+        protocol_write_u32(&encoded[136], response->hop_suite_bits);
+        protocol_write_u32(&encoded[140], response->e2e_suite_bits);
+        encoded[144] = (uint8_t)response->max_message_class;
+        protocol_write_u16(&encoded[145], response->max_window);
+        protocol_write_u16(&encoded[147], response->max_concurrency);
+        protocol_write_u16(&encoded[149],
+                           response->timestamp_capability_bits);
+        protocol_write_u32(&encoded[151],
+                           response->timestamp_uncertainty_us);
+    } else if (message->kind == UCN_V6_ROUTE_PATH_PROBE ||
+               message->kind == UCN_V6_ROUTE_PATH_PROBE_ACK) {
+        protocol_write_u16(&encoded[80], message->body.probe.path_id);
+        protocol_write_u32(&encoded[82],
+                           message->body.probe.path_generation);
+        memcpy(&encoded[86], message->body.probe.proposal_digest, 16U);
+    } else if (message->kind == UCN_V6_ROUTE_PATH_ACTIVATE ||
+               message->kind == UCN_V6_ROUTE_PATH_ACTIVATE_ACK) {
+        memcpy(&encoded[80], message->body.activation.proposal_digest, 16U);
+    } else {
+        protocol_write_u16(&encoded[80], message->body.error.path_id);
+        protocol_write_u32(&encoded[82],
+                           message->body.error.path_generation);
+        encoded[86] = message->body.error.reason;
+    }
+    memcpy(output, encoded, required);
+    *output_length = required;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_route_protocol_decode(
+    uint16_t protocol_opcode,
+    const uint8_t *input, size_t input_length,
+    ucn_v6_route_protocol_message_t *message)
+{
+    ucn_v6_route_protocol_message_t decoded;
+    ucn_v6_route_protocol_kind_t kind =
+        protocol_kind_from_opcode(protocol_opcode);
+    size_t required = protocol_message_bytes(kind);
+    if (input == NULL || message == NULL || required == 0U ||
+        input_length != required ||
+        ucn_v6_memory_ranges_overlap(input, input_length, message,
+                                     sizeof(*message))) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    if (input[0] != UCN_V6_ROUTE_PROTOCOL_SCHEMA ||
+        input[1] != (uint8_t)kind || input[2] != 0U || input[3] != 0U ||
+        (kind == UCN_V6_ROUTE_ERROR && input[87] != 0U)) {
+        return UCN_V6_ERR_MALFORMED;
+    }
+    memset(&decoded, 0, sizeof(decoded));
+    decoded.kind = kind;
+    decoded.candidate_transaction_id = protocol_read_u64(&input[4]);
+    protocol_read_domain(&input[12], &decoded.domain);
+    decoded.route_generation = protocol_read_u32(&input[76]);
+    if (kind == UCN_V6_ROUTE_DISCOVER_REQUEST) {
+        decoded.body.discover_request.maximum_hops =
+            protocol_read_u16(&input[80]);
+        decoded.body.discover_request.required_feature_bits =
+            protocol_read_u32(&input[82]);
+    } else if (kind == UCN_V6_ROUTE_DISCOVER_RESPONSE) {
+        ucn_v6_route_discover_response_body_t *response =
+            &decoded.body.discover_response;
+        response->path_id = protocol_read_u16(&input[80]);
+        response->path_generation = protocol_read_u32(&input[82]);
+        response->hop_count = protocol_read_u16(&input[86]);
+        response->priority = protocol_read_u16(&input[88]);
+        response->weight = protocol_read_u16(&input[90]);
+        response->destination_capability_generation =
+            protocol_read_u32(&input[92]);
+        memcpy(response->destination_capability_digest, &input[96], 16U);
+        response->destination_realtime_mode_bits =
+            protocol_read_u16(&input[112]);
+        response->destination_clock_domain_id =
+            protocol_read_u16(&input[114]);
+        response->destination_clock_domain_generation =
+            protocol_read_u32(&input[116]);
+        response->path_frame_mtu = protocol_read_u32(&input[120]);
+        response->payload_budget = protocol_read_u32(&input[124]);
+        response->fragment_data_budget = protocol_read_u32(&input[128]);
+        response->feature_bits = protocol_read_u32(&input[132]);
+        response->hop_suite_bits = protocol_read_u32(&input[136]);
+        response->e2e_suite_bits = protocol_read_u32(&input[140]);
+        response->max_message_class =
+            (ucn_v6_message_class_t)input[144];
+        response->max_window = protocol_read_u16(&input[145]);
+        response->max_concurrency = protocol_read_u16(&input[147]);
+        response->timestamp_capability_bits =
+            protocol_read_u16(&input[149]);
+        response->timestamp_uncertainty_us =
+            protocol_read_u32(&input[151]);
+    } else if (kind == UCN_V6_ROUTE_PATH_PROBE ||
+               kind == UCN_V6_ROUTE_PATH_PROBE_ACK) {
+        decoded.body.probe.path_id = protocol_read_u16(&input[80]);
+        decoded.body.probe.path_generation = protocol_read_u32(&input[82]);
+        memcpy(decoded.body.probe.proposal_digest, &input[86], 16U);
+    } else if (kind == UCN_V6_ROUTE_PATH_ACTIVATE ||
+               kind == UCN_V6_ROUTE_PATH_ACTIVATE_ACK) {
+        memcpy(decoded.body.activation.proposal_digest, &input[80], 16U);
+    } else {
+        decoded.body.error.path_id = protocol_read_u16(&input[80]);
+        decoded.body.error.path_generation = protocol_read_u32(&input[82]);
+        decoded.body.error.reason = input[86];
+    }
+    if (!protocol_message_is_valid(&decoded)) return UCN_V6_ERR_MALFORMED;
+    *message = decoded;
     return UCN_V6_OK;
 }

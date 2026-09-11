@@ -1,10 +1,10 @@
 # UCN v6 最终协议架构与破坏性重构 RFC
 
-> 文档级别：`PROPOSED / PRE-IMPLEMENTATION RFC`
+> 文档级别：`SELF-REVIEWED / PRE-IMPLEMENTATION RFC / EXTERNAL REVIEW REQUIRED`
 > 目标版本：`UCN v6 Draft`，稳定后作为 `UCN 1.0` 的候选基础
 > 兼容策略：**不兼容现有 v4/v5 测试固件、Core Wire、Cluster Wire、公共对象 ABI 或持久化记录**
-> 当前状态：V6A-01～V6A-25 对应整改均已外审通过；`V6-00 = DONE / EXTERNAL FINAL REVIEW GO`（仅最终架构 RFC/纯文档范围）。这不表示 v6 代码、Wire、安全、实机或掉电能力已经实现；`V6-01` 仍阻塞于 V5-64 A06 可追溯独立外审和用户对提交、v5 快照/Tag及 v6 基线的明确授权
-> 日期：2026-09-04
+> 当前状态：V6A-01～V6A-25 所在历史基线的顶层架构不变量曾获 `V6-00 = EXTERNAL FINAL REVIEW GO`；本文件在 2026-09-07～08 为低开销 Wire、模块化、用户意图和简化逻辑作了后续修订并完成内部交叉自审，**当前修订版处于 `SELF-REVIEWED / EXTERNAL REVIEW REQUIRED`，不得沿用旧哈希的外审签字**。V6-01～V6-15 的既有软件实现和自审也不等于这些新合同已经实现。本文原第 6 章逐字节候选已失效；当前线上字段唯一候选权威改为[低开销统一 Wire 详细设计](UCN_v6_低开销统一Wire各Contract字段与运行机制详细设计.md)，其语义已自审但 Registry/Golden 仍未外审冻结，在此之前不得替换当前生产 Codec/RX/TX。真实 Flash/掉电、生产密码 Provider、实机资源与长稳仍为发布阻断
+> 日期：2026-09-07
 
 ## 1. 决策摘要
 
@@ -17,8 +17,8 @@ Storage Layout 或旧固件互通承诺。因此 v6 的首要目标不是兼容�
 1. v4/v5 通过 Git 分支、Tag 和测试报告保存，不进入 v6 运行时代码；
 2. Core、Transfer、Realtime 和 Cluster 使用同一个协议主版本和安全身份模型；
 3. W0～W3 改称 **Wire Address Class**，只表达线上地址宽度，不表达节点能力或权限；
-4. Nano/Lite/Full 是编译期资源和功能 Profile，所有 Profile 都必须解析全部 Wire
-   Address Class；
+4. Nano/Lite/Full 只表示编译期固定容量和预算；功能集合由 Composition 决定。所有实现
+   使用同一个 v6 Wire 版本，并对未编译能力对应的 Contract 做严格、无副作用拒绝；
 5. 只有地址和长度类字段允许随 Wire Class 缩短，Address Binding Generation、Session、
    Sequence、Route/Path Generation 等安全或所有权字段不得随地址宽度缩短；
 6. 稳定 Device Identity、网络 Node Address、Address Binding Generation、Session
@@ -29,8 +29,7 @@ Storage Layout 或旧固件互通承诺。因此 v6 的首要目标不是兼容�
    普通 HELLO。HELLO 保持小型，完整能力通过带 Generation/Digest 的认证记录交换；
 9. Link、Peer、Path 三层能力分别建模，Path Frame MTU、Payload/Fragment Budget 和功能
    能力必须由全路径瓶颈与精确 Frame Contract 计算；
-10. 动态 Route、固定 Path、多 Bearer、手动指定和自动负载均衡统一为有界
-    `RouteSet`，但每个 Flow 默认固定一条 Route，避免逐包乱序；
+10. 基础 RREQ/RREP 只建立可过期、非 Authority 的 `SoftRoute`；固定 Path、多 Bearer、手动 Pinned 和自动负载均衡统一为有界 `FlowPath/RouteSet`，通过逐跳 Stage/Commit 激活，每个 Flow 默认固定一条路径以避免逐包乱序；
 11. 生产安全是 v6 的组成部分，不再把真实 JOIN、逐跳控制认证、E2E AEAD、Replay、
     ACL 和 Key Rotation 留成发布后的可选补丁；
 12. Transfer 采用固定内存的流水发送、选择确认和逐跳流控，避免 Stop-and-Wait 或
@@ -38,7 +37,9 @@ Storage Layout 或旧固件互通承诺。因此 v6 的首要目标不是兼容�
 13. Realtime 和 Cluster 保持可选模块；普通业务不承担时间字段，Core 不依赖 Cluster；
 14. 内部状态改为不可由调用者直接改写的私有对象，同时继续由调用者提供静态内存；
 15. v6 只有一个配置事实源和一个发布事实源，不再长期保留头文件局部默认、兼容别名、
-    双 Wire 与双状态机。
+    双 Wire 与双状态机；
+16. 低开销 Common Header 不携带 Hop Profile 自声明位。H0/H1/H2/H3 必须由当前本地
+    Ingress/Egress Link 与精确 Context 唯一导出；禁止按长度、Tag、试 Key 或认证失败降级猜测。
 
 ## 2. 为什么需要破坏性收敛
 
@@ -132,13 +133,14 @@ Endpoint 不增加时间字节。
 | 对象 | 建议宽度 | 生命周期 | 是否逐帧携带 | 用途 |
 | --- | ---: | --- | --- | --- |
 | Device Identity | 128 bit 或公钥指纹 | 出厂至撤销 | 否 | 认证、ACL、设备替换和审计 |
-| Network Realm ID | 32 bit | 网络创建至重建 | 是 | 隔离不同 UCN 网络 |
-| Node Address | 8/16/24/32 bit | 入网租约 | 是 | 日常路由和转发 |
-| Address Binding Generation | 固定 32 bit | 单次 Realm/Address 绑定 | 是 | 防止地址复用 ABA，绑定 Source/Destination |
+| Network Realm ID | 32 bit | 网络创建至重建 | C0 显式；C1～C5 由 Link/Context 证明 | 隔离不同 UCN 网络 |
+| Node Address | 8/16/24/32 bit | 入网租约 | C0/C1 显式；C2～C5 由 Context 短引用 | 日常路由和转发 |
+| Address Binding Generation | 固定 32 bit | 单次 Realm/Address 绑定 | C0 显式；其他 Contract 由当前认证/Flow/Group Context 证明 | 防止地址复用 ABA，绑定 Source/Destination |
 | Node Alias | 产品定义 | 可修改 | 否 | 人员管理和诊断显示 |
-| Session Generation | 固定 32 bit | 启动/轮换 | 是 | Replay、Nonce 与权限代际 |
-| Origin Sequence | 固定 32 bit | 单 E2E/Group 重放域 | 是 | 跨中继保持不变，绑定端到端或 Group 消息身份 |
-| Hop Sequence | 固定 32 bit | 单下一跳 Peer Session | 是 | 每跳重新分配，用于 Hop Replay 和重签 |
+| Session Generation | 固定 32 bit | 启动/轮换 | 由 Security/Peer Context 证明，不作为普通帧公共字段 | Replay、Nonce 与权限代际 |
+| C1 Transport Parent Generation | 固定 32 bit | 一次 C1 Transfer 父域 | 仅 Transfer Setup、C1 Fragment/SACK | Security OFF 时仍提供 Transfer anti-ABA |
+| Origin Sequence | 固定 32 bit | 单 E2E/Group 重放域 | C1/C2/C4/C5 等适用数据 Contract | 跨中继保持不变，绑定端到端或 Group 消息身份 |
+| Hop Sequence | 固定 32 bit | 单下一跳 Peer Session | 仅 H1/H3 Trailer | 每跳重新分配，用于 Hop Replay 和重签 |
 | Bootstrap Transaction ID | 固定 64 bit | 单次一跳入网事务 | Bootstrap only | 区分未分配地址的并发设备 |
 
 Device Identity 不允许直接拿 MAC、串口号或 CAN ID 代替。MAC 可以参与出厂导入或
@@ -439,7 +441,8 @@ Authority Lease Sequence 内，后续 proof 的 `max_remaining_lease_us` 不得�
 | Hop Sequence | Peer Session Sender | `{next-hop principal,next-hop session_generation,hop selector}` | 发送区间预留，高水位不得回退 | 仅新下一跳 Session Generation |
 | Link Instance Generation | Link Owner | `{local boot incarnation,link slot,peer binding}` | 若父 boot incarnation 持久化，可随新父域重置 | reopen 必须先推进父域或本代际 |
 | Capability Generation | Capability Owner | `{principal,session_generation}` | 已发布值不得在同 Session 回退 | 仅新 Session 或 checked-next |
-| Group Policy Generation（线上 `group_generation`） | Realm Manifest 选定的唯一 Group Policy Owner：签名静态配置或当前逻辑 Realm Address Authority/quorum，二者不可同时写 | `{realm,group_id}`；动态 `group_id` 只能等于 Realm 分配高水位的 checked-next，禁止稀疏指定/回收；静态 `group_id` 只能来自固定 Manifest 槽 | 动态模式持久化单个 `group_id_allocation_high_water`；静态模式持久化固定槽的 `NEVER_ACTIVATED/ACTIVE/RETIRED` 状态；Policy 摘要、Owner/Fence 与 Generation high-water 均 persist-before-publish | 仅新 Realm 或从未分配/激活的 Group ID 建立新父域；删除不降低分配高水位、不把静态槽恢复为未使用；Generation 到阈值时退休该 Group 并分配新 ID，容量/ID 耗尽则 Fault |
+| C1 Transport Parent Generation | C1 Transport Parent Owner | `{realm,source principal/binding,destination principal/binding,transport policy}`，独立于 Security Session | Generation 与 Transfer-ID high-water persist-before-use；无 Persistence/等价 monotonic witness 时能力关闭 | 双方经 C0 三阶段提交 checked-next；同一父域不因重启、安全关闭或单个 Transfer 退休而重置 |
+| Group Policy Generation（线上 `group_generation`） | Realm Manifest 选定的唯一 Group Policy Owner：签名只读静态配置或当前逻辑 Realm Address Authority/quorum，二者不可同时写；Cluster 不得被委派为另一 Owner | `{realm,group_id}`；动态 `group_id` 只能等于 Realm 分配高水位的 checked-next，禁止稀疏指定/回收；静态 `group_id` 只能来自固定 Manifest 槽 | 动态模式持久化 `group_id_allocation_high_water`、Policy、Owner/Fence 与 Generation high-water；静态模式只读取受平台 Manifest anti-rollback 保护的固定 `NEVER_ACTIVATED/ACTIVE/RETIRED` 槽，不创建 UCN runtime Persistence 状态 | 动态模式仅新 Realm 或从未分配的 checked-next Group ID 建立新父域，删除不降低高水位；静态状态只能随新的已验证 Realm Manifest/平台代际变化，不能运行期修改；Generation/容量/ID 耗尽则 Fault |
 | Group Key Generation（线上 `group_key_generation`） | 当前 Group Policy 明确授权的 Group Key Rotation Owner | `{realm,group_id,group_generation,group_key_id}`；`group_key_id` 是签名 Group Policy Manifest 中固定 Key 槽的不可变 ID，不允许运行时稀疏分配；同一父域内跨 Key Owner/Address Authority 换主连续 | 每 Group 的固定 Key 槽保存 `NEVER_ACTIVATED/ACTIVE/PREVIOUS/RETIRED`、current/previous Generation high-water、撤销和激活状态，persist-before-use；摘要只校验完整性，不作为“是否用过”的成员判定 | 日常轮换保持 Key ID 不变并 checked-next Key Generation；仅新 `group_generation` 或从未激活的固定 Key 槽可从 1 开始；槽/Generation 耗尽时推进 Policy Generation 或 Fault，禁止驱逐、复用或回绕 |
 | Route Generation | Traffic Origin | `{origin binding,origin session,destination binding}` | 已激活/已发布值按策略持久化或由新 Session 隔离 | 仅父 Binding/Session 改变或 checked-next |
 | Path Generation | Path Installer | `{origin binding,session,path_id}` | 已安装值不得回退 | 仅新父域、Path ID 或 checked-next |
@@ -450,9 +453,12 @@ Authority Lease Sequence 内，后续 proof 的 `max_remaining_lease_us` 不得�
 回绕到 1。仅用于统计的计数器可以饱和；参与所有权、Replay、地址绑定或 Authority 的
 计数器不能饱和后继续运行。
 
-Group 的 Owner 模式由签名 Realm Manifest 固定。静态模式只能加载 Trust Anchor 签名、
-代际不低于本地 high-water 的 Group Policy，不允许运行时自增或降级为动态自签；动态模式
-只能由持有当前 Address Authority Lease/Fence 和所需 quorum 的逻辑 Authority 推进。
+Group 的 Owner 模式由签名 Realm Manifest 固定。静态模式只能加载 Trust Anchor 签名、由平台
+Manifest Generation/secure-boot anti-rollback 验证的只读 Group Policy；它不创建 UCN runtime
+Persistence 状态，也不允许运行时自增、退休或降级为动态自签。需要运行期更新/退休的 Group
+必须选择动态模式。动态模式只能由持有当前 Address Authority Lease/Fence 和所需 quorum 的
+唯一逻辑 Realm Address Authority 推进；Cluster Head 可以向它提出请求，但不得通过“委派”
+变成第二个 Group Policy Owner。
 Authority 换主、设备重启、配置恢复或分区合并都不是重置条件。无法证明 high-water 连续时，
 必须停止发布/接受新 Group Policy 和 Group Key；已有 Key 是否继续使用只按其已持久化租约、
 撤销和本地安全策略判断，不能通过回退 Generation 延寿。
@@ -496,11 +502,20 @@ Policy/Key/HELLO。删除动态 Group 可以释放一个 `active_groups[]` 运�
 无界 Key 历史也不会复活旧 selector。任何摘要只用于校验固定记录完整性，不能代替高水位或
 槽状态做“是否曾使用”的成员查询。
 
-## 6. Core Wire v6 候选合同
+## 6. Core Wire v6 历史候选合同（已被低开销 Wire 提案取代）
 
-本节冻结逻辑字段和安全边界。精确 Golden Byte Offset 由 `V6-03` 形成最终 Wire RFC；
-该任务只能实现隔离、默认关闭的 Codec、Golden 和负向测试。生产 RX/TX/Encoder 必须等待
-`V6-07` Security 与唯一 JOIN FSM 获得外部复审 GO，不能以 V6-03 完成为理由提前放行。
+> **非规范性历史记录：**本章第 6.1～6.8 节保留 V6-00 终审时的 9 B 前缀、
+> A0～A3 逐帧地址和 41/43/45/47 B 基础头方案，只用于解释架构演进，不能再作为
+> Codec、Golden Bytes、路由模型或测试的实现依据。当前唯一线上字段候选是
+> [UCN v6 低开销统一 Wire](UCN_v6_低开销统一Wire各Contract字段与运行机制详细设计.md)：
+> 3 B Common Header、C0～C5、Realm 固定地址宽度和 6-bit Hop Limit。若两文档的字段、
+> 位宽、开销或事务键冲突，以低开销 Wire 的当前候选为准；其语义与逻辑模型已经完成
+> 内部交叉自审，但仍须完成独立外审、精确 Registry 和 Golden/Negative Bytes 后才能标记
+> `FROZEN FOR IMPLEMENTATION`。
+
+以下段落是 V6-00 当时用于冻结逻辑字段和安全边界的历史输入，随后曾由 V6-03 实现，
+但已不再是下一轮低开销重构的字段合同。后续实现只能引用本章开头指向的低开销 Wire，
+不能从以下历史 Offset、Flags、Tag 或长度中挑选字段混入 C0～C5。
 
 ### 6.1 Wire Address Class
 
@@ -800,6 +815,8 @@ EMPTY
   → COMMITTED_RESULT         // result/failure durable and replayable
   → TOMBSTONED               // result retention/ack policy satisfied
 
+PREPARED -- durable proof executor never observed request --> ABORTED_NO_EFFECT
+EXECUTING -- same-boot pre-handoff proof executor never observed request --> ABORTED_NO_EFFECT
 EXECUTING -- reboot/unknown external outcome --> IN_DOUBT
 IN_DOUBT -- authenticated reconciliation ----> COMMITTED_RESULT or TOMBSTONED
 ```
@@ -812,8 +829,21 @@ IN_DOUBT -- authenticated reconciliation ----> COMMITTED_RESULT or TOMBSTONED
 其他执行器在 `EXECUTING` 后发生掉电时必须恢复为 `IN_DOUBT`：不得自动再次执行，也不得
 伪造成功/失败结果；对端获得明确的 `IN_DOUBT`，由 Endpoint 产品策略执行人工或设备级
 对账。这样的 Endpoint 只能承诺“最多一次尝试”，不能承诺副作用必然发生或结果必然可重放。
-`PREPARED` 尚未交给执行器时可以安全继续或 Abort；`COMMITTED_RESULT` 的精确重复只能重放
-相同 durable result。
+`PREPARED` 尚未交给执行器时可以安全继续或 Abort。`EXECUTING → ABORTED_NO_EFFECT` 只允许
+同一次启动中，Owner 仍持有不可伪造的 pre-handoff latch，并能证明执行器从未观察请求；一旦
+发生重启、callback outcome 不明或 handoff 可能发生，就只能按 `IN_DOUBT`/对账路径处理。
+`COMMITTED_RESULT` 的精确重复只能重放相同 durable result。
+
+Journal 槽、持久化 continuation、Operation reply receipt、回调/查询义务和 Endpoint 声明上限
+内的固定 inline result buffer，必须全部在提交 PREPARED 和调用执行器之前原子预留。执行器可能
+观察请求后禁止再分配终态资源。超出预留结果上限且副作用可能已发生时进入合同 Fault 和
+`IN_DOUBT`，不得重试执行器或将其冒充普通队列满。
+
+执行器返回结果不等于结果已经 durable。Runtime 必须进入固定
+`RESULT_PERSIST_PENDING` continuation，等待 Provider submit/poll 完成，reload 并逐字段匹配
+exact Journal 后，才可发送/返回 `COMMITTED_RESULT`。`ABORTED_NO_EFFECT`、`IN_DOUBT` 等会
+改变对端后续行为的终态同样必须先完成持久化回读证明；Provider 返回 `PENDING` 时不得提前
+回复。
 
 Journal 表满必须在发送 ACK、进入 `EXECUTING` 或触发任何副作用之前返回 `NO_SPACE`。
 `PREPARED`、`EXECUTING` 和 `IN_DOUBT` 不允许按时间自动 GC。`COMMITTED_RESULT` 只有在结果
@@ -834,6 +864,37 @@ API 和统计必须区分：
 5. `APPLICATION_RESULT`：远端任务执行并返回结果。
 
 任何 `UCN_OK` 都必须能说明它属于哪一级，不能把本机入队写成远端执行成功。
+
+这里的 `LOCAL_ACCEPTED` 有两个明确、互斥的本地实现层级。满足以下全部条件的普通发布可以走
+**未跟踪最小路径**：`PUBLISH + ONE_WAY + operation_id=0 + BEST_EFFORT + COPY + 单帧 + LOCAL_ACCEPTED`，未配置
+Completion callback，调用者传入 `out_handle == NULL`，且不要求 Group、Latest、Reliable、
+Transfer、任何 Operation/dedup、Zero-copy、Durable Operation 或远端结果。该路径只预留一个持有 Copy Frame、Deadline、
+Route 等待状态和 Driver completion latch 的 TX Slot；它不创建 Anchor、Receipt、Request execution
+或 Attempt。后续失败只进入有界诊断，调用者也不能查询或取消这个已经选择为未跟踪的发布。
+
+若任一条件不满足，或 Resolver 需要 Security/Flow/Transfer/Persistence 等独立 Setup 生命周期，
+Runtime 必须在接受前原子升级为**受跟踪 Request 路径**；不能先按未跟踪路径返回成功，再事后补建
+Handle。调用者提供非空 `out_handle` 本身就是要求受跟踪路径，容量不足时返回 `NO_SPACE`，不得
+静默忽略 Handle。两条路径共用同一 Public Intent API、Wire Codec、Forward Table、Adapter token
+和安全门禁，只是本地生命周期对象数量不同。
+
+受跟踪 Request 创建时必须同时预留稳定 Request Anchor 和固定 Completion Receipt。公共 Handle
+解析 Anchor；Anchor 分别保存 exact live-request 与 exact receipt 的 slot/generation 引用，
+不能用一个裸槽号同时冒充两个对象。用户 Completion 一经发布不可改变，后台最终 Outcome
+另存诊断视图；`LOCAL_ACCEPTED` 后的 Link 失败不能发布第二个相反 Completion。只有后台
+Request/Attempt 全部退休且应用已 ACK/consume（或非 durable 查询窗口届满）后，Receipt 与
+Anchor 才能释放。Receipt 表满必须在 Sequence、Buffer 或任何线上副作用之前拒绝。
+受跟踪路径的唯一 Request Finalizer 必须同时处理三种首次终态：终态证明已达到用户要求里程碑时发布一次
+SUCCESS；证明已不可能达到时发布一次 FAILURE；无法证明远端结果时发布一次 UNKNOWN。不能
+假设成功一定先经过异步 completion handler；同步、本地或恢复/对账得到的成功若首次进入
+Finalizer，也必须在退休 execution 前把不可变 Completion 写入已预留 Receipt。
+
+每个可提交 Driver TX token 必须内嵌预留 exact completion latch；ISR/Driver 原子锁存结果，
+外层 Driver-completion wakeup queue 只作可丢失的唤醒，因此队列满不能丢掉 token latch 中的退休证明。submit 返回与早到
+event 在同一 gate 合并：一致终态只消费一次，冲突且无法证明是否提交时进入 `IN_DOUBT`。
+`IN_DOUBT` 的逻辑结果保持 unknown，但 Owner 仍执行有界 query/cancel，必要时 Fence 并
+close/reopen Adapter 取得旧 DMA quiescence 后退休物理 obligation；若永远无法证明 quiescent，
+该 Adapter Instance 和相关资源永久隔离，不能静默复用。
 
 ### 7.4 Traffic Class
 
@@ -970,11 +1031,18 @@ max_payload(path, frame_contract, hop_suite, e2e_suite, address_class)
   - crc_bytes
 ```
 
-Transfer 的 `fragment_data_budget` 还必须继续减去 Message ID、Fragment Index/Count、
-SACK/Credit 所需的实际 Fragment Header；Realtime Frame 则减去 Time/Scheduling 扩展。
+Transfer 的 `fragment_data_budget` 还必须继续减去 Transfer ID、Fragment Index/Count、
+C1 专有 Parent Generation，以及 SACK/Credit 所需的实际 Fragment Header；C2/C4 的不可变
+Flow Context 已证明 Parent Generation，不逐片重复。Realtime Frame 则减去 Time/Scheduling 扩展。
 任一步下溢、Unknown 或结果为 0 都必须在占用 TX/RX/重组槽前拒绝。Path Contract 应缓存
 `path_frame_mtu` 和按允许 Contract 计算的 Payload Budget，而不是把单一 `path_mtu` 同时
 解释为 Carrier、Frame 和业务 Payload。
+
+Transfer Setup 的 43/52/54 B 只是逻辑 UCN Frame 长度，不保证一次物理 Carrier 可容纳。
+Classic CAN、窄串流等小 MTU Bearer 必须使用独立、固定容量、已认证的 Carrier 分段层先承载
+Setup；该层不能借用尚未建立的 Transfer Fragment/Window 自举，也不能把 Carrier 分片当作
+业务 Fragment。Carrier 能力未启用或槽位不足时，Setup 在任何 Transfer/远端重组状态发布前
+失败关闭。
 
 能力未知、过期、Digest 不一致、Bearer/Route/Path/Session Generation 改变时必须在发送
 前失败关闭。不得先分配 8 KiB 重组资源，传到中间节点后才发现 MTU 或能力不支持。
@@ -1042,8 +1110,10 @@ HELLO。普通 HELLO、Group HELLO 和 `PEER_REAUTH_*` 三者不得共享 Replay
 - **E2E AEAD**：同时需要端到端保密、完整性和原始 Principal 的业务。
 
 Peer Hop/Group/E2E Suite、Key ID 与 Key Generation 必须来自 6.6 的显式 selector。接收者不得用当前
-默认 Key、隐式 Realm 配置或试遍候选 Key 来解释 Frame。Control/Transfer Opcode 位于
-Protocol Context；Peer Hop/Group Tag 覆盖其线上编码，凡会改变端到端权限/Authority 的 Opcode 还必须
+默认 Key、隐式 Realm 配置或试遍候选 Key 来解释 Frame。当前低开销 Wire 将 C0 Opcode 固定在
+C0 Header，将 C1/C2/C4/C5 的 Control/Diagnostic code 固定在 Payload offset 0，并用 Transfer
+的固定 Kind word 表达 Fragment/SACK；不得沿用本 RFC 历史第 6 章的可选 Protocol Context。
+Peer Hop/Group Tag 覆盖实际线上编码，凡会改变端到端权限/Authority 的 Opcode 还必须
 进入 E2E AAD。Bootstrap 在 Session 前只使用冻结的 bootstrap suite/transcript proof，不与
 普通 Frame 的 selector 混用。
 
@@ -1074,6 +1144,31 @@ Security 解封后交给 Capability、Route、QoS、Transfer、Realtime 与 Clus
 - 持久化失败时不得发送可能复用 Nonce 的受保护帧；
 - Rotation 必须 persist-before-use。
 
+Replay bitmap 只能把已见 Sequence 标成 replay candidate，不能独立证明收到的是精确重复。
+Security 验证成功后返回 canonical AAD/Payload digest；Reliable/Transfer receipt Owner 再按
+完整事务键和 digest 判定 exact duplicate 或 conflict。O0 Reliable 没有密码学 replay 证明，
+只能在 Endpoint 为 `PUBLIC_UNAUTHENTICATED`、没有权限副作用，且当前 Planner/Route Owner
+持有由产品 Threat Policy 批准、绑定精确 Link/Path Generation 的 `TRUSTED_LINK_ALLOWED`
+证明时，使用 Transport 的固定去重 receipt；任一条件缺失都在 Attempt/receipt/ACK 前拒绝，
+且不得产生 `AUTHENTICATED_*` 结论。
+
+Security Replay 变更采用固定容量的 `RESERVED → CONSUMED/ABORTED` handle。只有
+`FRESH_AUTHENTICATED` 才取得 exclusive mutation reservation 和 Payload view；
+`AUTHENTICATED_REPLAY_CANDIDATE` 只能取得事务键、AAD fingerprint 与 Payload digest 的只读
+evidence，不得访问 Payload、消费 Replay 或进入业务首次交付。Group/Transport 先预留全部业务、
+fanout、receipt 和队列资源，再进入仍可失败的 `PRECOMMIT`，按当前可信时间复验 Session/Key/
+Policy/ACL/Lease/Fence 后消费 reservation；失败时释放全部未发布资源。只有消费成功后才能进入
+不含外部回调和可失败操作的 `NOFAIL_PUBLISH`。并发同 Sequence 只能消费一次。Digest
+算法、domain separation、长度前缀和截断方式以低开销 Wire 2.6 的
+`UCN_V6_DIGEST_SUITE_1` 为唯一候选，O0 digest 不是认证证明。
+
+首次 E2E protect 后，Attempt 必须固定持有有界 `ORIGIN_SEALED` artifact（不可变 E2E Header、
+Payload、Origin Tag、digest 和父代际）。同一 Reliable 事务重传只重发这些 sealed bytes，
+不能重新分配 Origin Sequence/Nonce 或再次保护；中继仅为下一跳重新生成 Hop Sequence/Tag。
+sealed artifact 数量、holder、**字节池/每 Contract bucket**、重试窗口和 terminal receipt 均须
+有编译期容量；基础 C1 Reliable 拥有不可被 Transfer/Bulk 借尽的保留。必须在 Origin
+Sequence/Nonce/protect 前预留精确字节，容量不足时零 crypto、零序号消耗。
+
 ### 9.4 Endpoint ACL
 
 ACL Key 至少包含：
@@ -1084,7 +1179,7 @@ Source/Destination Address Binding Generation
 Session Generation
 Source/Destination Endpoint
 Frame Type
-Protocol Opcode（非 DATA 必须精确匹配；DATA 固定为 0）
+Protocol Operation Code（Control/Diagnostic 为精确 u16；Transfer 为规范 subtype；DATA 固定为 0）
 Traffic Class
 Delivery Guarantee
 Interaction Role
@@ -1092,11 +1187,12 @@ Operation ID（适用时）
 Direction
 ```
 
-ACL 查找使用完整 canonical tuple；`Frame Type` 不是其下全部操作的通配授权。CONTROL、
-TRANSFER、DIAGNOSTIC 和 BOOTSTRAP 必须在解析并认证固定 Protocol Context 后，以精确
-`protocol_opcode` 再查 ACL/控制策略，未知 Opcode 在状态分派前拒绝。特权操作不得仅凭
+ACL 查找使用完整 canonical tuple；`Frame Type` 不是其下全部操作的通配授权。CONTROL/
+BOOTSTRAP 使用当前低开销 Wire 的固定 2 B Opcode 位置，DIAGNOSTIC 使用固定 2 B code，
+TRANSFER 使用 C0 Setup Opcode 或固定 Fragment/SACK subtype；它们规范化为精确
+`protocol_operation_code` 后再查 ACL/控制策略，未知值在状态分派前拒绝。特权操作不得仅凭
 `Frame Type=CONTROL`、Endpoint 通配或同 Traffic Class 获权；若产品要授权一组 Opcode，
-必须在签名产品配置中显式枚举，而不是用隐式 wildcard。DATA 不携带 Protocol Context，
+必须在签名产品配置中显式枚举，而不是用隐式 wildcard。DATA 不携带 operation code，
 进入 ACL key 时使用唯一 canonical 值 0，避免“字段缺失”和“任意 Opcode”混淆。
 
 未建立 Session 的 Bootstrap 使用 5.3 的 Realm Trust/commissioning policy 和 transcript
@@ -1112,7 +1208,16 @@ Q0、Timed Command、Cluster Authority 和配置写入必须使用比普通 Tele
 
 ### 10.1 统一对象
 
-每个 `(traffic_origin,destination)` 对应一个固定容量 RouteSet：
+基础可达性与可供高级能力消费的路径证明是两个不同对象：
+
+```text
+SoftRoute
+  - destination / next hop / link generation
+  - local entry generation / cost / hop / expiry
+  - 仅供 C1，易失、非 Authority、不发布全路径 Generation
+```
+
+需要稳定路径证明时，每个 `(traffic_origin,destination)` 对应一个固定容量 RouteSet：
 
 ```text
 RouteSet
@@ -1124,23 +1229,31 @@ RouteSet
   - previous generation + bounded grace
 ```
 
-动态 Route 的主键是：
+`Route Domain` 的唯一 canonical tuple 是：
 
 ```text
 {realm,
  origin_address, origin_binding_generation, origin_session_generation,
- destination_address, destination_binding_generation,
- route_generation}
+ destination_address, destination_binding_generation}
 ```
+
+具体已安装 Route 的主键为 `{Route Domain, route_generation}`。全文统一使用
+`route_generation`；`route_epoch` 不再作为第二个同义字段。
 
 Candidate 的唯一主键是 `{完整 Route Domain, Candidate Transaction ID}`，事务高水位也
 由同一 Route Domain 持有；不同业务 Origin/Route Domain 可合法复用相同数值的 Transaction
-ID，不得互相拒绝或命中。Activate/ACK 必须继续绑定该完整主键、Route Generation 与冻结
-Proposal Digest。Candidate 一旦开始 Probe、分配 Generation 或发送 Activate，其 Path
-Snapshot 永久冻结；任何路径变化必须新建事务。
+ID，不得互相拒绝或命中。Route 激活采用
+`PATH_ACTIVATE_STAGE/PATH_STAGE_ACK/PATH_ACTIVATE_COMMIT/PATH_COMMIT_ACK/PATH_ACTIVATE_ABORT`
+五个独立语义，全部绑定完整主键、Route Generation 与冻结 Proposal Digest。Relay 只有收到
+下游精确 Stage ACK 后才能向上游 Stage ACK；只有收到下游精确 Commit ACK 后才能发布本地
+Active 并向上游 Commit ACK。Candidate 一旦开始 Probe、分配 Generation 或发送 Stage，其
+Path Snapshot 永久冻结；任何路径变化必须新建事务。Commit 已可能在远端生效但终态 ACK
+未知时进入 `IN_DOUBT`，不能通过恢复本地 snapshot 声称远端已回滚。
 同一地址被另一 Device 重新获得后，即使它碰巧使用相同 Session Generation，也不能命中
 旧 RouteSet、Replay、Capability、ACL 或 Path；Address Binding Generation 是地址租约
 所有权的一部分，而不是诊断字段。
+
+上述五个激活语义仅用于 Advanced FlowPath。基础 SoftRoute 的流程是 `RREQ → RREP → SOFT_ACTIVE`，不分配 Route Generation、Label 或 Proposal Digest，不得被 Pinned Path、Realtime Network Sync 或 Cluster Authority 消费。完整分界见[Capability 与 Contract Resolver 简化设计](UCN_v6_逻辑模型与伪代码/23-Capability与Contract-Resolver简化设计.md)与[Advanced Route 与 Flow 简化设计](UCN_v6_逻辑模型与伪代码/24-Advanced-Route与Flow简化设计.md)。
 
 ### 10.2 手动指定与自动负载均衡
 
@@ -1190,13 +1303,11 @@ Deadline 或执行副作用前，必须由 Route Owner 重新解析当前或仍�
 并同时重验即时下一跳 Capability 与目标 Path Capability。调用方不得直接构造完整
 `RoutePath` 作为授权输入。
 
-Capability、Route 与 QoS 的累计跳数统一使用 16-bit 无符号语义，合法范围为
-`1..65534`；`0` 表示无有效路径，`65535` 保留为无效/耗尽哨兵。Route Proposal Digest 必须
-编码完整 16-bit 跳数，不能截断成 8-bit，也不能让 256 跳以上的合法 Path 在模块边界别名。
-Wire Hop Limit 使用同一 16-bit 合法域，因此任何能被 Route Owner 安装的路径都有
-唯一、可表达的逐帧转发范围；不允许再存在“路径模型合法，但帧因 8-bit TTL 无法到达”
-的第二套跳数上限。产品仍应在 Manifest/Policy 中把实际可用上限收窄到已验证的
-实时范围，而不是默认使用 65534 跳。
+Capability、Route、QoS 与 Wire Hop Limit 使用同一个 6-bit 跳数语义，合法范围为
+`1..63`；`0` 表示无有效路径并在接收侧拒绝。Route Owner 不得安装超过 63 跳的 Path，
+Route Proposal Digest 必须编码完整 6-bit 值并拒绝高位非零。需要跨越更多物理节点时，
+应通过 Realm/Gateway 分层或未来独立审核的新 Contract 完成，不能让本地模型接受线上
+无法表达的路径，也不能在中继处静默截断 Hop Limit。
 
 ## 11. Transfer、流水和拥塞控制
 
@@ -1211,17 +1322,48 @@ T32 / T64 / T128 / T256 / T512 / T1K / T2K / T4K / T8K
 等级表示最大承诺，不要求消息必须恰好等于桶大小。Endpoint 可接受任意不超过其等级、
 Path 的实际 Payload/Fragment Budget 和当前资源合同的长度。
 
-### 11.2 选择确认
+### 11.2 Transfer Setup 与选择确认
+
+首个 Fragment 之前必须通过唯一 C0 Transport-Control Contract 完成有界
+`TRANSFER_SETUP/TRANSFER_SETUP_ACK`；同一命名空间还包含 `TRANSFER_ABORT` 和
+`TRANSFER_TERMINAL_RECEIPT`，C1/C2/C4 不得各自定义另一套 Setup 控制帧。接收端一次性验证并
+预留 Service、总长度、完整消息摘要、Delivery/Interaction、Fragment Count/Data Budget、绝对截止期、重组
+bitmap、Credit/SACK 和 terminal receipt。非 One-way Transfer 绑定非零 Operation ID；
+One-way 没有 conditional Operation correlation，线上不包含 Operation ID，也不得用零值假装
+存在；但完整 Transfer 身份仍包含 Source/Destination Binding、安全域、Service、父
+C1 Transport/Flow Context Generation、Transfer ID 与 Setup digest。重复完全相同 Setup 幂等，
+冲突 Setup 拒绝；精确 Abort
+只能清理尚未产生交付副作用的状态。
+
+Transfer ID 由 C1 Transport Parent Owner 或 C2/C4 Flow Transport Owner 在各自父代际内
+单调分配，不回绕，不复用仍位于 Setup、receipt、reassembly 或 replay 窗口内的值。C1
+Transport Parent 独立于 Security Session，绑定双方当前 Principal/Binding，并使用 durable
+checked-next Generation；没有 Persistence/等价 monotonic witness 时不得启用 C1 Transfer。C1 Service
+必须等于目标 Service，C2/C4 Service 必须等于父 Flow 绑定 Service；耗尽时
+必须轮换父代际或 Fault。单次 Transfer 的总长度、摘要、Operation 和重组进度不得写回长期
+Flow Context。
 
 v6 建议以固定窗口 Selective Repeat 取代默认 Go-Back-N：
 
-- Fragment Sequence 和 Message ID 固定宽度；
-- ACK 带 cumulative base + received bitmap；
+- Fragment Index/Count 和 Transfer ID 固定宽度；C1 Fragment 另携带 4 B Parent Generation，
+  C2/C4 由不可变 Flow Context 证明父代际；
+- Fragment 的 `Index/Kind` word 在 Fragment 时 bit15 固定为 0；反向 SACK/Credit 在同一位置
+  使用固定 `0x8000`，不能靠 Payload 长度/方向猜测；
+- C1 SACK 使用保留 Transport Feedback Service，并携带 Original Service 与 Parent Generation；
+  C2/C4 SACK 使用 Flow 建立时原子创建、绑定正向 canonical Flow Fingerprint 的成对反向反馈
+  Flow；缺少反馈 Flow 时不得 ACK C2/C4 Transfer Setup；
+- ACK/SACK 带 cumulative base + received bitmap；
 - 只重传缺失 Fragment；
 - Window 上限编译期固定；
 - RX 缺槽在首片前明确拒绝；
 - Recent Completion 防止最后 ACK 丢失导致重复执行；
 - Result 与 Reassembly ACK 分离。
+
+Request/Result/Error Transfer Setup 必须复用普通 Operation Envelope 的 Operation Flags，
+Result/Error 还必须携带同一 Result Code；不能因分片而丢失 durable-at-most-once/final 语义。
+每个已提交 Fragment 的 `{Origin Sequence,AAD fingerprint,Payload digest,outcome}` 必须在固定
+evidence 容量中保留，直到 Security replay-candidate 与 Transport terminal-receipt 两个合法窗口
+都结束；否则无法区分 exact duplicate 与同 Sequence 冲突帧。
 
 发送中的 Transfer 只冻结 Route Owner 给出的一个规范依赖链
 `{本机出口 Link, next-hop Session, next-hop Capability, Route, Path}`，以及稳定的
@@ -1246,7 +1388,7 @@ caller-owned Buffer Token。尤其在 `A→B→C` 中，A-B 出口断开必须�
 
 接收端重组超时只回收尚未完成的消息。完整消息一旦进入 `COMPLETE`，其 Payload 与重放
 身份归应用消费生命周期所有；只有应用显式复制/领取并退休后才可释放。应用迟滞必须形成
-可见背压，不能靠普通重组定时器静默丢弃完整消息或重新开放同一 Message ID 的执行窗口。
+可见背压，不能靠普通重组定时器静默丢弃完整消息或重新开放同一 Transfer ID 的执行窗口。
 
 ### 11.4 多跳流水
 
@@ -1407,11 +1549,14 @@ ucn_product_config.h
 - 运行期配置管理 Node Address、Link 实例、密钥 Provider、策略和 Endpoint；
 - 非法容量在编译期失败，而不是缩窄到 `uint8_t` 后运行时回绕。
 
-### 14.3 Profile
+### 14.3 Profile 与 Composition
 
-- Nano：静态直连/静态 Route/基础安全/四级解码；
-- Lite：增加 Neighbor、HELLO/JOIN、Heartbeat、AODV-Lite；
-- Full：增加 Candidate、RouteSet、Pinned Path、Policy/Balance 和诊断；
+- Nano/Lite/Full 只定义容量、扫描预算、栈和静态 Storage 上界，不授予功能；
+- Composition 独立决定 Static Route、Discovery、Security、Reliable、Flow、Transfer、
+  Realtime、Group、Cluster 等模块是否编译；
+- `Nano + Security`、`Full + Static Direct` 等组合都是合法目标，前提是容量满足所选模块的
+  最低合同；不足时必须在构建或初始化阶段拒绝，不能静默裁剪；
+- 项目可以提供推荐 Composition 模板，但模板不是 Profile 的协议语义；
 - Transfer、Realtime、Cluster、Service Directory 为正交 Feature，不隐式等于 Full；
 - 未编译 Feature 的 API 可以不导出，Feature Manifest 负责集成期检查，不再依赖大量
   “链接存在但返回 CONFIG”的兼容 Stub。
@@ -1602,10 +1747,12 @@ V6-03 只生成隔离、default-OFF 的 Decoder/Encoder、Golden 和 Negative ta
 期间维护纯模型测试，但生产接线必须等待统一 Identity、Security、Capability、Transfer
 和 Persistence 合同。
 
-V6-11 Realtime 与 V6-12 Cluster 只共享 V6-03/05/06/07 形成的 Wire、Owner、Security、
-Capability、Generation 和 Persistence 基座。两个 Feature 的库、对象、配置和链接依赖
-必须保持独立；启用 Cluster 不得隐式启用 Realtime，反之亦然。二者可以并行开发和外审，
-V6-12 不依赖 V6-11 完成。
+V6-11 的 **UCN Network Time Sync/线上同步 Realtime** 与 V6-12 Cluster 可复用
+V6-03/05/06/07 形成的 Wire、Owner、Security、Capability 和 Generation 基座；其中需要保存
+同步代际、Authority 或掉电承诺的分支才消费 Persistence。`LOCAL_STAMP` 和产品提供的外部
+Time Provider 不因此依赖 Flow、Network Time Sync、Cluster 或 Persistence。Realtime 与
+Cluster 两个 Feature 的库、对象、配置和链接依赖必须保持独立；启用 Cluster 不得隐式启用
+Realtime，反之亦然。二者可以并行开发和外审，V6-12 不依赖 V6-11 完成。
 
 ## 21. 每阶段统一验收
 
@@ -1649,7 +1796,8 @@ Key 槽退休后永久占位；普通换钥保持 Key ID 并只推进 Key Genera
 只有同时满足以下条件，才可以将 v6 改称 UCN 1.0 RC：
 
 - 单一 Core Wire 和单一 Cluster Target Wire；
-- 所有 Profile 能解析 A0～A3；
+- Nano/Lite/Full 共享同一个 v6 版本和 C0～C5 严格分派；Composition 未启用的能力必须
+  在首次状态写入前明确拒绝，不能回退成另一个 Contract；
 - Identity、Bootstrap、Address Binding、Session、Route/Path 与 Group Policy/Key Generation
   无歧义且无回绕 ABA；
 - 唯一 JOIN FSM、认证前 Cookie/固定资源、挑战相对 Lease Freshness、Peer Hop/Group/E2E
@@ -1671,15 +1819,13 @@ Key 槽退休后永久占位；普通换钥保持 Key ID 并只推进 Key Genera
 
 ## 23. 当前边界
 
-本文只是最终架构和破坏性重构基线。它没有：
+本文最初是 V6-00 的纯文档架构基线；“尚未建立 v6 分支、尚未修改 Codec”的描述只属于
+该历史阶段。当前项目状态应以[任务表](../../00-项目管理/00-任务表.md)和 V6-15 最新整改/
+自审报告为准：V6-01～V6-15 已形成 v6-only 软件实现，但统一外部复审和硬件发布门禁仍未
+完成，因此不能称为 UCN 1.0 RC。
 
-- 修改 `UCN_PROTOCOL_VERSION`；
-- 修改任何 Encoder/Decoder、Frame、Node、Transfer、Realtime 或 Cluster 源码；
-- 建立 v6 Git 分支或 Tag；
-- 擦除任何开发板 Flash；
-- 宣称新 Wire、安全、吞吐、实机或掉电能力已实现。
-
-V6-00 已在最终架构 RFC/纯文档范围完成外部终审。后续必须先满足 V6-01 的 V5-64 A06
-可追溯独立外审与用户明确授权，再建立 v5 快照/Tag 和 v6 基线；不得绕过 V6-01 直接开始
-V6-03。V6-03 完成也只表示隔离 Codec 可测试；生产 Encoder/Decoder 与 Node/Adapter
-接线必须等待 V6-07 Security/JOIN 外部复审 GO。
+低开销 Wire、用户 Intent、模块边界和本逻辑文档集属于 V6-15 之后的新一轮破坏性设计。
+它们尚未修改当前 Encoder/Decoder、Frame、Runtime、Transfer、Realtime 或 Cluster 源码，
+也没有证明新的 Wire、安全、吞吐、实机或掉电能力。只有低开销 Wire 与全部逻辑文档达到
+`FROZEN FOR IMPLEMENTATION`，并建立单独实施任务和基线后，才能开始替换当前 v6 Wire；
+不能把“设计文档已经写完”解释成当前固件已经采用 C0～C5。

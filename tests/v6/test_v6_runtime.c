@@ -21,6 +21,8 @@ typedef struct fake_lock {
 typedef struct fake_driver {
     ucn_v6_adapter_owner_t *adapter;
     ucn_v6_driver_event_key_t submitted_key;
+    uint8_t submitted_frame[UCN_V6_CONFIG_ADAPTER_FRAME_BYTES];
+    size_t submitted_length;
     unsigned submits;
     unsigned quiesces;
 } fake_driver_t;
@@ -84,10 +86,14 @@ static ucn_v6_result_t submit_frame(
 {
     fake_driver_t *driver = (fake_driver_t *)context;
     ucn_v6_driver_timestamp_t timestamp;
-    (void)frame;
-    (void)frame_length;
     (void)hardware_priority;
-    if (!request_timestamp) return UCN_V6_ERR_STATE;
+    (void)request_timestamp;
+    if (frame == NULL || frame_length == 0U ||
+        frame_length > sizeof(driver->submitted_frame)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memcpy(driver->submitted_frame, frame, frame_length);
+    driver->submitted_length = frame_length;
     ++driver->submits;
     driver->submitted_key = *key;
     memset(&timestamp, 0, sizeof(timestamp));
@@ -115,18 +121,17 @@ static ucn_v6_result_t quiesce(void *context)
 
 static ucn_v6_result_t handle_ingress(
     void *context, ucn_v6_runtime_owner_t *runtime, uint64_t now_us,
-    const uint8_t *encoded_frame, size_t encoded_length,
+    const ucn_v6_security_open_result_t *opened,
     const ucn_v6_driver_rx_view_t *rx,
     ucn_v6_runtime_ingress_disposition_t *disposition)
 {
     fake_app_t *app = (fake_app_t *)context;
-    (void)encoded_frame;
+    (void)opened;
 #if !UCN_V6_FEATURE_REALTIME_ENABLED
     (void)runtime;
     (void)now_us;
     (void)rx;
 #endif
-    if (encoded_length != 3U) return UCN_V6_ERR_STATE;
     ++app->ingress_calls;
     if (app->try_reopen_during_ingress) {
         app->reopen_during_ingress_generation = UINT32_C(0xA5A5A5A5);
@@ -170,6 +175,32 @@ static ucn_v6_result_t release_buffer(
     app->released_token = token;
     app->released_result = result;
     return UCN_V6_OK;
+}
+
+static ucn_v6_result_t reject_bootstrap_ingress(
+    void *context, uint64_t now_us,
+    const ucn_v6_runtime_bootstrap_ingress_t *ingress,
+    ucn_v6_runtime_bootstrap_action_t *action)
+{
+    (void)context;
+    (void)now_us;
+    (void)ingress;
+    (void)action;
+    return UCN_V6_ERR_ACCESS;
+}
+
+static ucn_v6_result_t reject_bootstrap_commit(
+    void *context, uint64_t now_us,
+    const ucn_v6_bootstrap_key_t *key,
+    const ucn_v6_bootstrap_transcript_t *transcript,
+    ucn_v6_join_commit_t *commit)
+{
+    (void)context;
+    (void)now_us;
+    (void)key;
+    (void)transcript;
+    (void)commit;
+    return UCN_V6_ERR_ACCESS;
 }
 
 static void configure_opened_sync(fake_app_t *app, uint8_t payload[12])
@@ -217,6 +248,9 @@ static int test_standard_runtime_rx_tx_and_timestamp_binding(void)
     ucn_v6_driver_event_key_t rx_key;
     ucn_v6_driver_event_key_t tx_key;
     ucn_v6_runtime_view_t view;
+    ucn_v6_bootstrap_hello_t bootstrap_hello;
+    ucn_v6_bootstrap_hello_t decoded_hello;
+    ucn_v6_frame_t bootstrap_frame;
     uint8_t announce_payload[12];
     uint8_t rx_frame[3] = {1U, 2U, 3U};
     uint8_t tx_frame[3] = {4U, 5U, 6U};
@@ -260,6 +294,10 @@ static int test_standard_runtime_rx_tx_and_timestamp_binding(void)
     app.try_reopen_during_ingress = true;
     memset(&config, 0, sizeof(config));
     config.runtime_instance_generation = 1U;
+    config.relay_route_policy = UCN_V6_ROUTE_POLICY_ACTIVE_STANDBY;
+    config.relay_residence_bound_us = 1U;
+    config.relay_transmit_bound_us = 1U;
+    config.transfer_maximum_credit = 32U;
     config.adapter = adapter;
     config.bootstrap = (ucn_v6_bootstrap_owner_t *)&dummy;
     config.security = (ucn_v6_security_manager_t *)&dummy;
@@ -275,8 +313,10 @@ static int test_standard_runtime_rx_tx_and_timestamp_binding(void)
     config.cluster = (ucn_v6_cluster_owner_t *)&dummy;
 #endif
     config.app.context = &app;
-    config.app.handle_ingress = handle_ingress;
+    config.app.handle_authenticated_ingress = handle_ingress;
     config.app.release_buffer = release_buffer;
+    config.bootstrap_ops.process_ingress = reject_bootstrap_ingress;
+    config.bootstrap_ops.build_join_commit = reject_bootstrap_commit;
     CHECK(ucn_v6_runtime_init_in_place(
               runtime_storage.bytes, sizeof(runtime_storage),
               ucn_v6_compiled_manifest(), &config, &runtime) == UCN_V6_OK);
@@ -300,24 +340,52 @@ static int test_standard_runtime_rx_tx_and_timestamp_binding(void)
     }
 #endif
 
-    memset(&rx_timestamp, 0, sizeof(rx_timestamp));
-    rx_timestamp.timestamp_us = 100U;
-    rx_timestamp.uncertainty_us = 2U;
-    rx_timestamp.valid = true;
-    rx_timestamp.hardware = true;
-    CHECK(ucn_v6_adapter_publish_rx(adapter, 1U, 1U, rx_frame,
-              sizeof(rx_frame), &rx_timestamp, false, &rx_key) == UCN_V6_OK);
-    CHECK(hooks.rx_ingress(hooks.context, 110U, 1U, &phase) == UCN_V6_OK);
-    CHECK(app.ingress_calls == 1U && phase.work_done == 1U);
-    CHECK(app.reopen_during_ingress_result == UCN_V6_ERR_STATE);
-    CHECK(app.reopen_during_ingress_generation == UINT32_C(0xA5A5A5A5));
-    CHECK(driver.quiesces == 0U);
+    memset(&bootstrap_hello, 0, sizeof(bootstrap_hello));
+    bootstrap_hello.flow = UCN_V6_BOOTSTRAP_FLOW_JOIN;
+    memset(bootstrap_hello.identity_digest.bytes, 0x3AU,
+           sizeof(bootstrap_hello.identity_digest.bytes));
+    bootstrap_hello.device_nonce = UINT64_C(41);
+    bootstrap_hello.transaction_id = UINT64_C(42);
+    CHECK(ucn_v6_runtime_bootstrap_start(
+              runtime, 100U, 1U, 1U, 1U,
+              UCN_V6_ADDRESS_CLASS_A1, 7U, &bootstrap_hello) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_runtime_bootstrap_start(
+              runtime, 101U, 1U, 1U, 1U,
+              UCN_V6_ADDRESS_CLASS_A1, 7U, &bootstrap_hello) ==
+          UCN_V6_ERR_REPLAY);
+    CHECK(hooks.qos_tx(hooks.context, 102U, 1U, &phase) == UCN_V6_OK);
+    CHECK(driver.submits == 0U && phase.work_done == 1U);
+    CHECK(hooks.qos_tx(hooks.context, 103U, 1U, &phase) == UCN_V6_OK);
+    CHECK(driver.submits == 1U &&
+          driver.submitted_length > UCN_V6_BOOTSTRAP_HELLO_BYTES);
+    memset(&bootstrap_frame, 0, sizeof(bootstrap_frame));
+    CHECK(ucn_v6_wire_decode(driver.submitted_frame,
+                             driver.submitted_length,
+                             &bootstrap_frame) == UCN_V6_OK);
+    CHECK(bootstrap_frame.frame_type == UCN_V6_FRAME_BOOTSTRAP &&
+          bootstrap_frame.protocol_opcode ==
+              UCN_V6_PROTOCOL_OPCODE_BOOTSTRAP_HELLO &&
+          bootstrap_frame.source_address == 0U &&
+          bootstrap_frame.source_binding_generation == 0U &&
+          bootstrap_frame.hop_limit == 1U &&
+          bootstrap_frame.payload_length ==
+              UCN_V6_BOOTSTRAP_HELLO_BYTES);
+    memset(&decoded_hello, 0, sizeof(decoded_hello));
+    CHECK(ucn_v6_bootstrap_hello_decode(
+              bootstrap_frame.payload, bootstrap_frame.payload_length,
+              &decoded_hello) == UCN_V6_OK);
+    CHECK(memcmp(&decoded_hello, &bootstrap_hello,
+                 sizeof(decoded_hello)) == 0);
+    CHECK(hooks.tx_completion(hooks.context, 104U, 1U, &phase) ==
+          UCN_V6_OK);
+    CHECK(app.release_calls == 0U);
 
-    CHECK(ucn_v6_adapter_enqueue_tx(adapter, 1U, UINT64_C(77), tx_frame,
+    CHECK(ucn_v6_adapter_enqueue_tx(adapter, 1U, 1U, UINT64_C(77), tx_frame,
               sizeof(tx_frame), UCN_V6_TRAFFIC_Q1, true, &tx_key) ==
           UCN_V6_OK);
     CHECK(hooks.qos_tx(hooks.context, 120U, 1U, &phase) == UCN_V6_OK);
-    CHECK(driver.submits == 1U);
+    CHECK(driver.submits == 2U);
     CHECK(hooks.tx_completion(hooks.context, 150U, 1U, &phase) ==
           UCN_V6_OK);
     CHECK(app.release_calls == 0U);
@@ -334,13 +402,14 @@ static int test_standard_runtime_rx_tx_and_timestamp_binding(void)
     CHECK(driver.quiesces == 0U);
     app.try_reopen_during_release = false;
     CHECK(ucn_v6_runtime_copy_view(runtime, &view) == UCN_V6_OK);
-    CHECK(view.rx_consumed == 1U && view.tx_completions == 1U &&
+    CHECK(view.rx_consumed == 0U && view.tx_completions == 2U &&
           view.released_buffers == 1U);
+    CHECK(view.bootstrap_frames_sent == 1U);
 #if UCN_V6_FEATURE_REALTIME_ENABLED
     CHECK(view.realtime_exchanges_started == 0U);
     CHECK(view.realtime_tx_timestamps_captured == 0U);
 #endif
-    CHECK(ucn_v6_adapter_enqueue_tx(adapter, 1U, UINT64_C(88), tx_frame,
+    CHECK(ucn_v6_adapter_enqueue_tx(adapter, 1U, 1U, UINT64_C(88), tx_frame,
               sizeof(tx_frame), UCN_V6_TRAFFIC_Q2, false, &tx_key) ==
           UCN_V6_OK);
     CHECK(ucn_v6_runtime_reopen_link(runtime, 1U, &new_link_generation) ==
@@ -359,9 +428,29 @@ static int test_standard_runtime_rx_tx_and_timestamp_binding(void)
           UCN_V6_OK);
     CHECK(hooks.hop_security(hooks.context, 162U, 1U, &phase) == UCN_V6_OK);
     CHECK(!phase.has_invalidation);
+    CHECK(ucn_v6_adapter_set_link_readiness(
+              adapter, 1U, 2U, UCN_V6_LINK_READY) == UCN_V6_OK);
     CHECK(ucn_v6_runtime_copy_view(runtime, &view) == UCN_V6_OK);
     CHECK(view.link_reopens == 1U && view.invalidations == 1U &&
           view.released_buffers == 2U);
+
+    /* Raw Adapter bytes can only become a pending Runtime transaction. They
+     * are never delivered to the application before Security opens them. */
+    memset(&rx_timestamp, 0, sizeof(rx_timestamp));
+    rx_timestamp.timestamp_us = 200U;
+    rx_timestamp.uncertainty_us = 2U;
+    rx_timestamp.valid = true;
+    rx_timestamp.hardware = true;
+    CHECK(ucn_v6_adapter_publish_rx(adapter, 1U, 2U, 1U, rx_frame,
+              sizeof(rx_frame), &rx_timestamp, false, &rx_key) == UCN_V6_OK);
+    CHECK(hooks.rx_ingress(hooks.context, 210U, 1U, &phase) == UCN_V6_OK);
+    CHECK(app.ingress_calls == 0U && phase.work_done == 1U);
+    app.reopen_during_ingress_generation = UINT32_C(0xA5A5A5A5);
+    app.reopen_during_ingress_result = ucn_v6_runtime_reopen_link(
+        runtime, rx_key.link_id, &app.reopen_during_ingress_generation);
+    CHECK(app.reopen_during_ingress_result == UCN_V6_ERR_STATE);
+    CHECK(app.reopen_during_ingress_generation == UINT32_C(0xA5A5A5A5));
+    CHECK(driver.quiesces == 1U);
     return 0;
 }
 
@@ -377,6 +466,10 @@ static int test_init_rejects_overlapping_config_without_writing(void)
     memset(&storage, 0xA5, sizeof(storage));
     memset(&valid, 0, sizeof(valid));
     valid.runtime_instance_generation = 1U;
+    valid.relay_route_policy = UCN_V6_ROUTE_POLICY_ACTIVE_STANDBY;
+    valid.relay_residence_bound_us = 1U;
+    valid.relay_transmit_bound_us = 1U;
+    valid.transfer_maximum_credit = 32U;
     memset(&app, 0, sizeof(app));
     valid.adapter = (ucn_v6_adapter_owner_t *)&dummy;
     valid.bootstrap = (ucn_v6_bootstrap_owner_t *)&dummy;
@@ -393,8 +486,10 @@ static int test_init_rejects_overlapping_config_without_writing(void)
     valid.cluster = (ucn_v6_cluster_owner_t *)&dummy;
 #endif
     valid.app.context = &app;
-    valid.app.handle_ingress = handle_ingress;
+    valid.app.handle_authenticated_ingress = handle_ingress;
     valid.app.release_buffer = release_buffer;
+    valid.bootstrap_ops.process_ingress = reject_bootstrap_ingress;
+    valid.bootstrap_ops.build_join_commit = reject_bootstrap_commit;
     inside = (ucn_v6_runtime_config_t *)(void *)storage.bytes;
     memcpy(inside, &valid, sizeof(valid));
     before = storage;

@@ -611,9 +611,15 @@ static ucn_v6_result_t test_retire_realtime_session(
         capability->session_generation;
     result = ucn_v6_capability_apply_invalidation(
         store->capability_owner, &invalidation);
-    if (result != UCN_V6_OK || realtime == NULL) {
+    if (result != UCN_V6_OK) {
         return result;
     }
+    if (store->route_owner != NULL) {
+        result = ucn_v6_route_apply_invalidation(
+            store->route_owner, &invalidation);
+        if (result != UCN_V6_OK) return result;
+    }
+    if (realtime == NULL) return UCN_V6_OK;
     return ucn_v6_realtime_apply_invalidation(realtime, &invalidation);
 }
 

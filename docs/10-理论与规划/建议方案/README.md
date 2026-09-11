@@ -6,8 +6,14 @@
 
 ## 当前建议
 
-- [UCN v6 最终协议架构与破坏性重构 RFC](UCN_v6_最终协议架构与破坏性重构_RFC.md)：在协议尚未正式发布、无需兼容 v4/v5 测试固件的前提下，重新冻结 Identity/双向认证 Bootstrap/Address Authority 与 Binding、Core Wire/AAD/Peer-Group-E2E Key Selector、交付与交互、生产安全、Capability/Path Payload Budget、RouteSet、Transfer、QoS、C99 Storage、Realtime、Cluster 和发布门禁；V6A-01～V6A-25 全部外审通过，`V6-00 = DONE / EXTERNAL FINAL REVIEW GO`（仅架构 RFC/纯文档范围）。当前 V6-01～13 软件实现已完成，V6-14/15 完成可执行软件范围并等待统一外审；TSan、目标硬件、Flash 掉电、性能长稳和生产密码 Provider 仍为发布阻断项。
-- [UCN v6 V6-00 最终架构 RFC 自审报告](UCN_v6_V6-00_最终架构RFC自审报告.md)：逐项复核当前 v5 事实、v6 顶层决策、Wire 候选长度、安全边界、跨模块依赖、Compatibility Removal Manifest 和 V6-00～V6-15 实施顺序，并记录 V6A-01～25 五轮整改与最终外部签字；结论为 V6-00 纯文档范围终审 GO。
+- [UCN v6 低开销统一 Wire：各 Contract 字段与运行机制详细设计](UCN_v6_低开销统一Wire各Contract字段与运行机制详细设计.md)：当前唯一的下一轮线上字段候选权威，定义 3 B Common Header、C0～C5、O0～O2、H0～H3、Realm 固定地址宽度、6-bit Hop Limit、Context 和实际开销。语义与逻辑交叉已内部自审，精确 Registry/Golden 仍需外审冻结；在此之前不得替换当前 Codec。
+- [UCN v6 面向用户意图的自动传输策略与配置接口详细设计](UCN_v6_面向用户意图的自动传输策略与配置接口详细设计.md)：唯一负责用户 Intent、Policy 合并、自动选型、显式收紧覆盖、Request/Attempt/Buffer 和 Completion 用户语义；普通用户无需选择 C/H/O 组合。
+- [UCN v6 逻辑模型、伪代码与状态图](UCN_v6_逻辑模型与伪代码/README.md)：包含 00～14 完整合同/对抗附录与 15～26 简化实现主线；后者补齐了基础通信、SoftRoute、Security、Reliable/Transfer、Service/QoS、Realtime、Group、Cluster、Persistence、Capability Resolver、Advanced Flow、统一 Public API/Internal SPI，以及全局不变量/模块对接登记表。当前为 `SELF-REVIEWED / EXTERNAL REVIEW REQUIRED`，不表示源码已按此实现。
+- [UCN v6 简化文档收口与全体自审报告](../../09-审计与整改/UCN_V6_简化文档收口与全体自审报告_2026-09-08.md)：记录 34 份简化体系文档与 1 份当前 Core Wire 事实边界的逐篇结论、跨文档冲突、整改结果和机械门禁；它是内部自审证据，不替代独立外审。
+- [UCN v6 可裁剪模块边界、依赖、资源与静态装配详细设计](UCN_v6_可裁剪模块边界依赖资源与静态装配详细设计.md)：定义最小通信内核、Composition/Profile/Policy/Intent 四维配置、Identity/Security/Network/Flow/Transport/Service/Operation/QoS/Realtime/Group/Cluster 等模块边界、唯一状态所有权、依赖与失效传播、独立 Storage、静态装配、用户 Intent 自动解析、标准产品组合、分阶段重构和 Flash/RAM/Stack/CPU/Wire 五本验收账。已完成与简化主线的内部自审，仍需外部复审，不表示现有源码已完成全部裁剪。
+- [UCN v6 最终协议架构与破坏性重构 RFC](UCN_v6_最终协议架构与破坏性重构_RFC.md)：拥有 MCU-first、身份、Owner、安全、持久化和发布门禁等顶层不变量。其原第 6 章的 9 B 前缀候选已明确降为历史记录，不能再与低开销 C0～C5 混合作为字段来源。V6A-01～V6A-25 的外审签字只属于当时的历史哈希；2026-09-08 的低开销 Wire、模块化、用户 Intent 和逻辑模型修订已完成内部交叉自审，当前为 `SELF-REVIEWED / EXTERNAL REVIEW REQUIRED`。低开销精确 Registry/Golden、统一 API ABI 和整套文档外审冻结前，不授权替换生产 Codec 或宣称源码已完成该架构。
+- [UCN v6 Core Wire 精确格式 RFC](UCN_v6_Core_Wire_精确格式_RFC.md)：精确描述当前 V6-03/V6-15 已实现的 Contract 1 和现有回归，作为迁移前代码事实保留；它已被标记为下一轮低开销重构的被替代方案，不是 C0～C5 的目标字段来源。
+- [UCN v6 V6-00 最终架构 RFC 自审报告](UCN_v6_V6-00_最终架构RFC自审报告.md)：记录 V6A-01～25 历史基线的五轮整改与外部签字。它是可追溯证据，不是 2026-09-07 后当前修订版的外审结论。
 - [UCN FPGA 硬件转发节点实施方案](UCN_FPGA硬件转发节点实施方案.md)：规定未来使用 FPGA 作为可选高速转发、汇聚或骨干节点时的软硬件边界、数据流水线、控制接口、Route/Path 表、QoS、安全、故障回退、实施阶段与验证门禁。当前仅为设计建议，尚无 RTL 和实机结论。
 - [UCN 可选实时元数据与分布式时间同步详细设计方案](UCN_可选实时元数据与分布式时间同步详细设计方案.md)：按 Endpoint/业务流定义 `NONE/LOCAL_STAMP/SYNCED_STAMP/DEADLINE`，以普通消息零额外时间 Wire 字节、Timed 消息候选 16 B 端到端 Envelope 起步，再分阶段建设 Time Domain、硬件时间戳、同步服务和可选 Hop-aware Deadline。RT-A01～A11 已完成整改、第四轮全体自审与受限软件范围外部复审；生产接线和实机继续 HOLD。
 - [UCN Realtime Metadata v1 编解码 RFC](UCN_Realtime_Metadata_v1_RFC.md)：冻结供默认不链接的 RT-01 实验 Codec 使用的 16 B 布局、合法组合、uncertainty 算法、无写回错误语义和三条 Golden Vector；不授权生产 RX/TX、Domain FSM 或四报文同步。

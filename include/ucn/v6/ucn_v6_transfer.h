@@ -123,6 +123,16 @@ typedef struct ucn_v6_transfer_completed {
     uint32_t message_crc32c;
 } ucn_v6_transfer_completed_t;
 
+/* EN: Callback-scoped immutable view of one reassembled message. The payload
+ * remains owned by Transfer and is valid only until the message is retired,
+ * expired or invalidated. Callers must not retain or modify the pointer.
+ * 中文：重组消息的回调期只读视图。Payload 始终由 Transfer 持有，仅在消息
+ * 被退休、过期或失效前有效；调用方不得保存或改写该指针。 */
+typedef struct ucn_v6_transfer_completed_view {
+    ucn_v6_transfer_completed_t completed;
+    const uint8_t *payload;
+} ucn_v6_transfer_completed_view_t;
+
 typedef struct ucn_v6_transfer_credit_reservation {
     uint64_t reservation_id;
     ucn_v6_session_key_t peer;
@@ -247,6 +257,16 @@ ucn_v6_result_t ucn_v6_transfer_retire_tx(
     ucn_v6_transfer_owner_t *owner,
     uint64_t message_id,
     uint64_t *buffer_token);
+/* EN: Runtime-only terminal fence for a selected or queued fragment that can
+ * no longer be submitted (expired Hop budget, revoked security or local
+ * encoding failure). It never returns the caller buffer; retire_tx remains
+ * the single release boundary.
+ * 中文：Runtime 在已选/已排队分片无法再提交时使用的终态 Fence（Hop Budget
+ * 到期、安全撤销或本地编码失败）。本函数不返还调用方 Buffer；retire_tx
+ * 仍是唯一资源返还边界。 */
+ucn_v6_result_t ucn_v6_transfer_fail_tx(
+    ucn_v6_transfer_owner_t *owner,
+    uint64_t message_id);
 ucn_v6_result_t ucn_v6_transfer_rebind_path(
     ucn_v6_transfer_owner_t *owner,
     uint64_t now_us,
@@ -266,6 +286,12 @@ ucn_v6_result_t ucn_v6_transfer_copy_completed(
     uint8_t *output,
     size_t output_capacity,
     ucn_v6_transfer_completed_t *completed);
+ucn_v6_result_t ucn_v6_transfer_borrow_completed(
+    const ucn_v6_transfer_owner_t *owner,
+    const ucn_v6_session_key_t *origin,
+    uint64_t operation_id,
+    uint64_t message_id,
+    ucn_v6_transfer_completed_view_t *view);
 ucn_v6_result_t ucn_v6_transfer_retire_completed(
     ucn_v6_transfer_owner_t *owner,
     uint64_t now_us,

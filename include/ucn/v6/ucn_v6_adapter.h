@@ -102,6 +102,14 @@ typedef struct ucn_v6_driver_rx_view {
     ucn_v6_driver_event_key_t key;
     ucn_v6_driver_timestamp_t timestamp;
     ucn_v6_bearer_kind_t bearer;
+    /* EN: Link-local physical sender identity supplied by the Driver. It is
+     * never a network Principal. Point-to-point links use the fixed value 1;
+     * shared bearers derive a stable nonzero value from their carrier source
+     * (for example CAN source ID or authenticated radio peer handle).
+     * 中文：由 Driver 提供的链路本地物理发送者标识，绝不是网络 Principal。
+     * 点对点链路固定使用 1；共享 Bearer 必须由 Carrier 来源（如 CAN Source
+     * ID 或无线 Peer Handle）派生稳定非零值。 */
+    uint32_t local_peer_discriminator;
     uint16_t frame_length;
 } ucn_v6_driver_rx_view_t;
 
@@ -175,6 +183,7 @@ ucn_v6_result_t ucn_v6_adapter_publish_rx(
     ucn_v6_adapter_owner_t *owner,
     uint16_t link_id,
     uint32_t link_generation,
+    uint32_t local_peer_discriminator,
     const uint8_t *frame,
     size_t frame_length,
     const ucn_v6_driver_timestamp_t *timestamp,
@@ -199,6 +208,7 @@ ucn_v6_result_t ucn_v6_adapter_retire_rx(
 ucn_v6_result_t ucn_v6_adapter_enqueue_tx(
     ucn_v6_adapter_owner_t *owner,
     uint16_t link_id,
+    uint32_t link_generation,
     uint64_t buffer_token,
     const uint8_t *frame,
     size_t frame_length,

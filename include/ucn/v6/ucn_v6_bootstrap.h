@@ -138,6 +138,32 @@ typedef enum ucn_v6_bootstrap_event {
 } ucn_v6_bootstrap_event_t;
 
 #define UCN_V6_BOOTSTRAP_EVIDENCE_MAX_BYTES ((size_t)128U)
+#define UCN_V6_BOOTSTRAP_TRANSCRIPT_CANONICAL_BYTES ((size_t)379U)
+#define UCN_V6_BOOTSTRAP_LOGICAL_MAX_BYTES                           \
+    (UCN_V6_BOOTSTRAP_TRANSCRIPT_CANONICAL_BYTES + (size_t)1U +     \
+     UCN_V6_BOOTSTRAP_EVIDENCE_MAX_BYTES)
+#define UCN_V6_BOOTSTRAP_FRAGMENT_HEADER_BYTES ((size_t)36U)
+#define UCN_V6_BOOTSTRAP_FRAGMENT_DATA_BYTES ((size_t)128U)
+#define UCN_V6_BOOTSTRAP_MAX_FRAGMENTS ((uint8_t)4U)
+#define UCN_V6_BOOTSTRAP_HELLO_BYTES ((size_t)40U)
+#define UCN_V6_BOOTSTRAP_COOKIE_CHALLENGE_BYTES ((size_t)40U)
+#define UCN_V6_BOOTSTRAP_COOKIE_MAX_BYTES ((uint8_t)16U)
+#define UCN_V6_BOOTSTRAP_HELLO_COOKIE_FIXED_BYTES ((size_t)82U)
+
+typedef struct ucn_v6_bootstrap_hello {
+    ucn_v6_bootstrap_flow_t flow;
+    ucn_v6_principal_t identity_digest;
+    uint64_t device_nonce;
+    uint64_t transaction_id;
+} ucn_v6_bootstrap_hello_t;
+
+typedef struct ucn_v6_bootstrap_cookie_challenge {
+    ucn_v6_bootstrap_flow_t flow;
+    uint64_t transaction_id;
+    uint32_t cookie_time_bucket;
+    uint8_t cookie_length;
+    uint8_t cookie[UCN_V6_BOOTSTRAP_COOKIE_MAX_BYTES];
+} ucn_v6_bootstrap_cookie_challenge_t;
 
 /* EN: Canonical, bounded proof bytes for exactly one Bootstrap event.  The
  * trusted verifier interprets them in the supplied event/transcript domain.
@@ -147,6 +173,151 @@ typedef struct ucn_v6_bootstrap_evidence {
     uint16_t length;
     uint8_t bytes[UCN_V6_BOOTSTRAP_EVIDENCE_MAX_BYTES];
 } ucn_v6_bootstrap_evidence_t;
+
+typedef struct ucn_v6_bootstrap_hello_cookie {
+    ucn_v6_bootstrap_flow_t flow;
+    ucn_v6_principal_t identity_digest;
+    uint64_t device_nonce;
+    uint64_t transaction_id;
+    uint64_t lease_freshness_challenge_nonce;
+    uint16_t selected_link_instance_id;
+    uint32_t selected_link_instance_generation;
+    uint8_t prior_messages_hash[32];
+    ucn_v6_bootstrap_evidence_t cookie_evidence;
+} ucn_v6_bootstrap_hello_cookie_t;
+
+/* EN: One strict post-Cookie Bootstrap fragment.  The outer Opcode selects
+ * the event; this header repeats the immutable transaction key so fragment
+ * zero can be admitted only against an already-open Bootstrap pending slot.
+ * Fragments are canonical, contiguous and fixed at 128 bytes except the last.
+ * 中文：Cookie 之后的严格 Bootstrap 分片。外层 Opcode 选择事件；本头重复
+ * 不可变事务键，使第 0 片只能匹配已打开的 Bootstrap pending 后才被接纳。
+ * 分片必须规范、连续，除最后一片外固定承载 128 字节。 */
+typedef struct ucn_v6_bootstrap_fragment {
+    ucn_v6_bootstrap_flow_t flow;
+    ucn_v6_bootstrap_phase_t phase;
+    uint8_t fragment_index;
+    uint8_t fragment_count;
+    uint16_t total_length;
+    uint16_t fragment_offset;
+    uint16_t fragment_length;
+    uint64_t transaction_id;
+    ucn_v6_principal_t identity_digest;
+    uint8_t data[UCN_V6_BOOTSTRAP_FRAGMENT_DATA_BYTES];
+} ucn_v6_bootstrap_fragment_t;
+
+typedef struct ucn_v6_bootstrap_reassembly {
+    bool occupied;
+    uint16_t protocol_opcode;
+    ucn_v6_bootstrap_phase_t phase;
+    ucn_v6_bootstrap_key_t key;
+    uint16_t total_length;
+    uint8_t fragment_count;
+    uint8_t received_mask;
+    uint64_t deadline_us;
+    uint8_t logical[UCN_V6_BOOTSTRAP_LOGICAL_MAX_BYTES];
+} ucn_v6_bootstrap_reassembly_t;
+
+/* EN: Exact pre-state Bootstrap payloads. HELLO and COOKIE_CHALLENGE are
+ * fixed 40-byte records, so the stateless response never amplifies the
+ * request. HELLO_COOKIE is a single bounded record; its Cookie is verified
+ * before any fragment-reassembly or Bootstrap pending state is allocated.
+ * 中文：精确的认证前 Bootstrap Payload。HELLO 与 COOKIE_CHALLENGE 固定为
+ * 40 字节，确保无状态响应不放大请求。HELLO_COOKIE 是单个有界记录；其
+ * Cookie 必须在分片重组或 Bootstrap pending 分配前完成验证。 */
+ucn_v6_result_t ucn_v6_bootstrap_hello_encode(
+    const ucn_v6_bootstrap_hello_t *hello,
+    uint8_t output[UCN_V6_BOOTSTRAP_HELLO_BYTES]);
+ucn_v6_result_t ucn_v6_bootstrap_hello_decode(
+    const uint8_t *input, size_t input_length,
+    ucn_v6_bootstrap_hello_t *hello);
+ucn_v6_result_t ucn_v6_bootstrap_cookie_challenge_encode(
+    const ucn_v6_bootstrap_cookie_challenge_t *challenge,
+    uint8_t output[UCN_V6_BOOTSTRAP_COOKIE_CHALLENGE_BYTES]);
+ucn_v6_result_t ucn_v6_bootstrap_cookie_challenge_decode(
+    const uint8_t *input, size_t input_length,
+    ucn_v6_bootstrap_cookie_challenge_t *challenge);
+ucn_v6_result_t ucn_v6_bootstrap_hello_cookie_encode(
+    const ucn_v6_bootstrap_hello_cookie_t *hello_cookie,
+    uint8_t *output, size_t output_capacity, size_t *output_length);
+ucn_v6_result_t ucn_v6_bootstrap_hello_cookie_decode(
+    const uint8_t *input, size_t input_length,
+    ucn_v6_bootstrap_hello_cookie_t *hello_cookie);
+
+/* EN: Canonical ordered Bootstrap transcript codec. The expected phase is
+ * external state owned by the bounded FSM; it selects which later field
+ * groups must already be present. Earlier messages encode future fields as
+ * canonical zero. Decode/encode rejection never writes the output object.
+ * 中文：Bootstrap 有序 Transcript 的唯一规范 Codec。Expected phase 属于
+ * 有界 FSM 的外部状态，用来决定哪些后续字段组必须已存在；早期消息把未来
+ * 字段规范编码为零。编解码拒绝时绝不写回输出对象。 */
+ucn_v6_result_t ucn_v6_bootstrap_transcript_encode(
+    const ucn_v6_bootstrap_transcript_t *transcript,
+    ucn_v6_bootstrap_phase_t expected_phase,
+    uint8_t output[UCN_V6_BOOTSTRAP_TRANSCRIPT_CANONICAL_BYTES]);
+ucn_v6_result_t ucn_v6_bootstrap_transcript_decode(
+    const uint8_t *input, size_t input_length,
+    ucn_v6_bootstrap_phase_t expected_phase,
+    ucn_v6_bootstrap_transcript_t *transcript);
+
+/* EN: Maps exactly one post-Cookie event to its frozen Bootstrap Opcode.
+ * Zero means the event is not a Wire message.
+ * 中文：把一个 Cookie 后事件映射到冻结的 Bootstrap Opcode；0 表示该事件
+ * 不是线上消息。 */
+uint16_t ucn_v6_bootstrap_event_opcode(ucn_v6_bootstrap_event_t event);
+
+/* EN: Builds/parses the canonical logical event body:
+ * transcript[379] + evidence_length:u8 + evidence.  The expected phase is
+ * explicit so an earlier-stage transcript cannot be interpreted as a later
+ * proof. Rejection never writes output.
+ * 中文：构建/解析规范逻辑事件体：379 字节 transcript + 1 字节证明长度 +
+ * proof。显式 expected phase 防止早期 transcript 被解释成后期证明；拒绝
+ * 时不写回输出。 */
+ucn_v6_result_t ucn_v6_bootstrap_logical_encode(
+    ucn_v6_bootstrap_event_t event,
+    ucn_v6_bootstrap_phase_t expected_phase,
+    const ucn_v6_bootstrap_transcript_t *transcript,
+    const ucn_v6_bootstrap_evidence_t *evidence,
+    uint8_t *output, size_t output_capacity, size_t *output_length);
+ucn_v6_result_t ucn_v6_bootstrap_logical_decode(
+    uint16_t protocol_opcode,
+    ucn_v6_bootstrap_phase_t expected_phase,
+    const uint8_t *input, size_t input_length,
+    ucn_v6_bootstrap_transcript_t *transcript,
+    ucn_v6_bootstrap_evidence_t *evidence);
+
+/* EN: Encodes/decodes one exact fragment payload.  The encoded header is
+ * always 36 bytes; total length and offsets must describe the unique
+ * contiguous partition of the logical body.
+ * 中文：编解码一个精确分片 Payload。编码头固定 36 字节；总长与偏移必须
+ * 描述逻辑消息唯一的连续分区。 */
+ucn_v6_result_t ucn_v6_bootstrap_fragment_encode(
+    const ucn_v6_bootstrap_fragment_t *fragment,
+    uint8_t *output, size_t output_capacity, size_t *output_length);
+ucn_v6_result_t ucn_v6_bootstrap_fragment_decode(
+    const uint8_t *input, size_t input_length,
+    ucn_v6_bootstrap_fragment_t *fragment);
+
+/* EN: Accepts one decoded fragment only after the caller has resolved the
+ * exact Bootstrap pending key and immutable pending deadline. A different
+ * key never evicts or expires the occupied object; expiry/reset is explicit.
+ * Duplicate fragments are accepted only when byte-identical.
+ * 中文：调用方解析到精确 Bootstrap pending key 与不可变截止期后，才接纳
+ * 一个已解码分片。不同 key 绝不能驱逐或借机过期现有对象；过期/复位必须
+ * 显式执行。重复分片仅在字节完全相同时幂等接受。 */
+ucn_v6_result_t ucn_v6_bootstrap_reassembly_accept(
+    ucn_v6_bootstrap_reassembly_t *reassembly,
+    uint16_t protocol_opcode,
+    const ucn_v6_bootstrap_key_t *key,
+    uint64_t pending_deadline_us,
+    uint64_t now_us,
+    const ucn_v6_bootstrap_fragment_t *fragment,
+    bool *complete);
+ucn_v6_result_t ucn_v6_bootstrap_reassembly_borrow(
+    const ucn_v6_bootstrap_reassembly_t *reassembly,
+    const uint8_t **logical, size_t *logical_length);
+ucn_v6_result_t ucn_v6_bootstrap_reassembly_reset(
+    ucn_v6_bootstrap_reassembly_t *reassembly);
 
 typedef struct ucn_v6_bootstrap_verifier_ops {
     void *context;
@@ -230,6 +401,16 @@ ucn_v6_result_t ucn_v6_bootstrap_validate_final(
 size_t ucn_v6_bootstrap_expire(
     ucn_v6_bootstrap_owner_t *owner,
     uint64_t now_us);
+
+/* EN: Atomically removes every half-open JOIN/REAUTH transaction bound to
+ * one exact retired Link instance.  A Link ID without its generation is not
+ * sufficient to invalidate Bootstrap state.
+ * 中文：原子清除绑定到一个精确已退休 Link 实例的全部半开 JOIN/REAUTH
+ * 事务；只有 Link ID 而没有代际不足以失效 Bootstrap 状态。 */
+size_t ucn_v6_bootstrap_invalidate_link(
+    ucn_v6_bootstrap_owner_t *owner,
+    uint16_t link_id,
+    uint32_t link_generation);
 
 #ifdef __cplusplus
 }

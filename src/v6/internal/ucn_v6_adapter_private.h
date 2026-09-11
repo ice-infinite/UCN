@@ -22,6 +22,7 @@ typedef struct ucn_v6_adapter_rx_slot {
     ucn_v6_driver_event_key_t key;
     ucn_v6_driver_timestamp_t timestamp;
     ucn_v6_bearer_kind_t bearer;
+    uint32_t local_peer_discriminator;
     uint16_t frame_length;
     uint8_t frame[UCN_V6_CONFIG_ADAPTER_FRAME_BYTES];
 } ucn_v6_adapter_rx_slot_t;

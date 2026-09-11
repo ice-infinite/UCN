@@ -278,15 +278,19 @@ static bool frame_contract_is_valid(const ucn_v6_frame_t *frame)
         return false;
     }
     if (frame->frame_type == UCN_V6_FRAME_BOOTSTRAP) {
-        return !peer && !group &&
+        bool unbound_join = frame->source_address == 0U &&
+                            frame->source_binding_generation == 0U;
+        bool bound_reauth = frame->source_address != 0U &&
+                            frame->source_address <= ordinary_max &&
+                            serial_is_valid(
+                                frame->source_binding_generation);
+        return !peer && !group && (unbound_join || bound_reauth) &&
                (frame->flags & (UCN_V6_FLAG_E2E_CONTEXT |
                                 UCN_V6_FLAG_MESSAGE_CONTEXT |
                                 UCN_V6_FLAG_ROUTE_CONTEXT |
                                 UCN_V6_FLAG_PATH_CONTEXT |
                                 UCN_V6_FLAG_HOP_BUDGET_CONTEXT)) == 0U &&
-               frame->source_address == 0U &&
                frame->destination_address == wire_max &&
-               frame->source_binding_generation == 0U &&
                frame->destination_binding_generation == 0U &&
                frame->session_generation == 0U &&
                 frame->origin_sequence == 0U && frame->hop_sequence == 0U &&

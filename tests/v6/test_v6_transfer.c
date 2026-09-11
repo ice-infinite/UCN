@@ -126,6 +126,10 @@ static ucn_v6_security_open_result_t capability_open(
         fixture->domain.destination_binding.node_address;
     opened.frame.source_binding_generation =
         fixture->domain.destination_binding.binding_generation;
+    opened.frame.destination_address =
+        fixture->domain.origin_binding.node_address;
+    opened.frame.destination_binding_generation =
+        fixture->domain.origin_binding.binding_generation;
     opened.frame.session_generation = 7U;
     opened.frame.protocol_opcode =
         UCN_V6_PROTOCOL_OPCODE_CAPABILITY_ADVERTISE;
@@ -398,9 +402,12 @@ static ucn_v6_security_open_result_t opened_fragment(
     opened.frame.message.destination_endpoint = 20U;
     opened.frame.message.interaction_role = UCN_V6_INTERACTION_REQUEST;
     opened.frame.message.operation_id = operation_id;
-    opened.frame.route_generation = fixture->path.route_generation;
-    opened.frame.path.path_id = fixture->path.path_id;
-    opened.frame.path.path_generation = fixture->path.path_generation;
+    /* Reverse traffic owns an independent Route/Path generation.  SACK
+     * authentication binds endpoint identity and operation, never the
+     * forward path number. */
+    opened.frame.route_generation = fixture->path.route_generation + 10U;
+    opened.frame.path.path_id = fixture->path.path_id + 1U;
+    opened.frame.path.path_generation = fixture->path.path_generation + 10U;
     opened.frame.payload = encoded;
     opened.frame.payload_length = (uint16_t)encoded_length;
     return opened;
@@ -429,9 +436,16 @@ static ucn_v6_security_open_result_t opened_sack(
         fixture->domain.destination_binding.node_address;
     opened.frame.source_binding_generation =
         fixture->domain.destination_binding.binding_generation;
+    opened.frame.destination_address =
+        fixture->domain.origin_binding.node_address;
+    opened.frame.destination_binding_generation =
+        fixture->domain.origin_binding.binding_generation;
     opened.frame.session_generation =
         fixture->path.destination_session_generation;
     opened.frame.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_TRANSFER_SACK;
+    opened.frame.message.source_endpoint = 20U;
+    opened.frame.message.destination_endpoint = 10U;
+    opened.frame.message.interaction_role = UCN_V6_INTERACTION_REQUEST;
     opened.frame.message.operation_id = operation_id;
     opened.frame.route_generation = fixture->path.route_generation;
     opened.frame.path.path_id = fixture->path.path_id;
@@ -1230,6 +1244,36 @@ static int test_multihop_egress_parent_fences_transfer(void)
     return 0;
 }
 
+static int test_explicit_terminal_fail_fence(void)
+{
+    transfer_fixture_t fixture;
+    ucn_v6_transfer_send_request_t request;
+    ucn_v6_transfer_fragment_t fragment;
+    ucn_v6_transfer_tx_view_t view;
+    uint64_t token = 0U;
+
+    CHECK(fixture_init(&fixture) == 0);
+    request = request_for(&fixture, 61U, 64U, 32U, 2U);
+    CHECK(ucn_v6_transfer_send_begin(fixture.tx, 1U, &request) == UCN_V6_OK);
+    memset(&fragment, 0, sizeof(fragment));
+    CHECK(ucn_v6_transfer_next_fragment(
+              fixture.tx, 1U, request.message_id, &fragment) == UCN_V6_OK);
+    CHECK(ucn_v6_transfer_fail_tx(fixture.tx, request.message_id) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_transfer_copy_tx(
+              fixture.tx, request.message_id, &view) == UCN_V6_OK &&
+          view.phase == UCN_V6_TRANSFER_TX_FAILED);
+    CHECK(ucn_v6_transfer_record_fragment_submit(
+              fixture.tx, 1U, request.message_id, fragment.fragment_index,
+              false) == UCN_V6_ERR_ARGUMENT);
+    CHECK(ucn_v6_transfer_retire_tx(
+              fixture.tx, request.message_id, &token) == UCN_V6_OK &&
+          token == request.buffer_token);
+    CHECK(ucn_v6_transfer_fail_tx(fixture.tx, request.message_id) ==
+          UCN_V6_ERR_NOT_FOUND);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_codec_and_message_classes() == 0);
@@ -1240,6 +1284,7 @@ int main(void)
     CHECK(test_operation_id_gaps_and_restart_independence() == 0);
     CHECK(test_capability_bound_path_lifecycle() == 0);
     CHECK(test_multihop_egress_parent_fences_transfer() == 0);
+    CHECK(test_explicit_terminal_fail_fence() == 0);
     puts("v6 transfer tests passed");
     return 0;
 }

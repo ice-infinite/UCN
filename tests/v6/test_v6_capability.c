@@ -154,6 +154,26 @@ static int test_codec_and_authenticated_cache(void)
     CHECK(ucn_v6_capability_owner_init_in_place(
               storage.bytes, sizeof(storage), ucn_v6_compiled_manifest(),
               &local, 1000U, 300U, &owner) == UCN_V6_OK);
+    {
+        ucn_v6_capability_record_t local_copy;
+        uint8_t local_digest[UCN_V6_CAPABILITY_DIGEST_BYTES];
+        uint8_t expected_digest[UCN_V6_CAPABILITY_DIGEST_BYTES];
+        memset(&local_copy, 0, sizeof(local_copy));
+        memset(local_digest, 0, sizeof(local_digest));
+        CHECK(ucn_v6_capability_digest(&local, expected_digest) ==
+              UCN_V6_OK);
+        CHECK(ucn_v6_capability_copy_local(
+                  owner, &local_copy, local_digest) == UCN_V6_OK);
+        CHECK(memcmp(&local_copy, &local, sizeof(local)) == 0);
+        CHECK(memcmp(local_digest, expected_digest,
+                     sizeof(local_digest)) == 0);
+        CHECK(ucn_v6_capability_copy_local(
+                  owner, &local_copy,
+                  (uint8_t *)&local_copy) == UCN_V6_ERR_ARGUMENT);
+        CHECK(ucn_v6_capability_copy_local(
+                  owner, (ucn_v6_capability_record_t *)owner,
+                  local_digest) == UCN_V6_ERR_ARGUMENT);
+    }
     opened = peer_open(&remote_principal, 7U, 3U, 5U, 2U, 19U,
                        UCN_V6_PROTOCOL_OPCODE_CAPABILITY_ADVERTISE,
                        payload, sizeof(payload));

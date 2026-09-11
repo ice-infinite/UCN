@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 #define UCN_V6_API_VERSION UINT16_C(1)
-#define UCN_V6_STORAGE_LAYOUT UINT16_C(9)
+#define UCN_V6_STORAGE_LAYOUT UINT16_C(11)
 #define UCN_V6_STORAGE_ALIGNMENT ((size_t)8U)
 
 #define UCN_V6_PROFILE_NANO 1U
@@ -208,9 +208,15 @@ extern "C" {
 #ifndef UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGE_TIMEOUT_US
 #define UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGE_TIMEOUT_US UINT64_C(1000000)
 #endif
+#ifndef UCN_V6_CONFIG_RUNTIME_BOOTSTRAP_TX_TIMEOUT_US
+#define UCN_V6_CONFIG_RUNTIME_BOOTSTRAP_TX_TIMEOUT_US UINT64_C(3000000)
+#endif
 
 #if UCN_V6_CONFIG_MAX_BINDINGS < 1U || UCN_V6_CONFIG_MAX_BINDINGS > 255U
 #error "UCN_V6_CONFIG_MAX_BINDINGS must be 1..255"
+#endif
+#if UCN_V6_CONFIG_RUNTIME_BOOTSTRAP_TX_TIMEOUT_US == 0U
+#error "UCN_V6_CONFIG_RUNTIME_BOOTSTRAP_TX_TIMEOUT_US must be nonzero"
 #endif
 #if UCN_V6_CONFIG_MAX_ACTIVE_GROUPS < 1U || \
     UCN_V6_CONFIG_MAX_ACTIVE_GROUPS > 255U
@@ -434,7 +440,7 @@ enum {
      UCN_V6_ADAPTER_FEATURE_BIT)
 
 #define UCN_V6_COMPILED_LAYOUT_HASH                                        \
-    (UINT64_C(0xD65A000900000000) ^                                       \
+    (UINT64_C(0xD65A000B00000000) ^                                       \
      ((uint64_t)UCN_V6_PROFILE * UINT64_C(0x9E3779B97F4A7C15)) ^           \
      ((uint64_t)UCN_V6_COMPILED_FEATURE_BITS *                            \
       UINT64_C(0xD6E8FEB86659FD93)) ^                                     \
@@ -534,7 +540,9 @@ enum {
      ((uint64_t)UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGES *                      \
       UINT64_C(0xD1342543DE82EF95)) ^                                      \
      ((uint64_t)UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGE_TIMEOUT_US *            \
-      UINT64_C(0xA3B195354A39B70D)))
+      UINT64_C(0xA3B195354A39B70D)) ^                                      \
+     ((uint64_t)UCN_V6_CONFIG_RUNTIME_BOOTSTRAP_TX_TIMEOUT_US *             \
+      UINT64_C(0xB4B82E39A1C7D6F5)))
 
 #if UCN_V6_CONFIG_TRANSFER_MAX_CLASS == 0U
 #define UCN_V6_TRANSFER_MAX_MESSAGE_BYTES 32U
@@ -613,8 +621,18 @@ enum {
                UCN_V6_CONFIG_ADAPTER_TX_SLOTS) *                         \
                   (UCN_V6_CONFIG_ADAPTER_FRAME_BYTES + 128U)))
 #define UCN_V6_RUNTIME_OWNER_STORAGE_BYTES                                \
-    ((size_t)(2304U + UCN_V6_CONFIG_ADAPTER_FRAME_BYTES * 3U +            \
+    ((size_t)(8192U + UCN_V6_CONFIG_ADAPTER_FRAME_BYTES * 5U +            \
                UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGES * 512U +               \
+              UCN_V6_CONFIG_BOOTSTRAP_PENDING * 2U *                       \
+                  (UCN_V6_CONFIG_ADAPTER_FRAME_BYTES + 768U) +             \
+              UCN_V6_CONFIG_BOOTSTRAP_PENDING * 2U * 96U +                 \
+              (UCN_V6_CONFIG_BOOTSTRAP_PENDING * 2U + 1U) *                \
+                  (UCN_V6_CONFIG_ADAPTER_FRAME_BYTES + 64U) +              \
+              (UCN_V6_CONFIG_QOS_Q0_DEPTH +                               \
+               UCN_V6_CONFIG_QOS_Q1_DEPTH +                               \
+               UCN_V6_CONFIG_QOS_Q2_DEPTH +                               \
+               UCN_V6_CONFIG_QOS_Q3_DEPTH) *                              \
+                  (UCN_V6_CONFIG_ADAPTER_FRAME_BYTES + 512U) +            \
               (UCN_V6_CONFIG_ADAPTER_TX_SLOTS +                           \
                UCN_V6_CONFIG_TRANSFER_TX_SLOTS +                          \
                UCN_V6_CONFIG_QOS_Q0_DEPTH + UCN_V6_CONFIG_QOS_Q1_DEPTH + \

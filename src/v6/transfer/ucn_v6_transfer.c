@@ -598,10 +598,10 @@ static bool sack_context_matches(const ucn_v6_transfer_tx_slot_t *tx,
            frame->session_generation ==
                tx->request.route_ref.domain.destination_session_generation &&
            frame->message.operation_id == tx->request.message.operation_id &&
-           frame->route_generation == tx->request.route_ref.route_generation &&
-           frame->path.path_id == tx->request.route_ref.path_id &&
-           frame->path.path_generation ==
-               tx->request.route_ref.path_generation;
+           frame->destination_address ==
+               tx->request.route_ref.domain.origin_binding.node_address &&
+           frame->destination_binding_generation ==
+               tx->request.route_ref.domain.origin_binding.binding_generation;
 }
 
 static bool tx_fragment_was_sent(const ucn_v6_transfer_tx_slot_t *tx,
@@ -766,6 +766,30 @@ ucn_v6_result_t ucn_v6_transfer_retire_tx(
         --owner->stats.tx_active;
     }
     *buffer_token = token;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_transfer_fail_tx(
+    ucn_v6_transfer_owner_t *owner,
+    uint64_t message_id)
+{
+    ucn_v6_transfer_tx_slot_t *tx;
+    if (!owner_is_valid(owner) || message_id == 0U ||
+        (tx = find_tx(owner, message_id)) == NULL) {
+        return UCN_V6_ERR_NOT_FOUND;
+    }
+    if (tx->phase != UCN_V6_TRANSFER_TX_SENDING) {
+        return tx->phase == UCN_V6_TRANSFER_TX_FAILED ?
+                   UCN_V6_OK : UCN_V6_ERR_STATE;
+    }
+    if (owner->selected &&
+        owner->selected_tx_index == (uint16_t)(tx - owner->tx)) {
+        owner->selected = false;
+        owner->selected_tx_index = 0U;
+        owner->selected_fragment_index = 0U;
+        owner->stats.selection_pending = false;
+    }
+    tx->phase = UCN_V6_TRANSFER_TX_FAILED;
     return UCN_V6_OK;
 }
 
@@ -1162,6 +1186,34 @@ ucn_v6_result_t ucn_v6_transfer_copy_completed(
     completed.message_crc32c = rx->message_crc32c;
     memcpy(output, rx->data, rx->total_length);
     *completed_out = completed;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_transfer_borrow_completed(
+    const ucn_v6_transfer_owner_t *owner,
+    const ucn_v6_session_key_t *origin,
+    uint64_t operation_id,
+    uint64_t message_id,
+    ucn_v6_transfer_completed_view_t *view_out)
+{
+    const ucn_v6_transfer_rx_slot_t *rx;
+    ucn_v6_transfer_completed_view_t view;
+    if (!owner_is_valid(owner) || !session_is_valid(origin) ||
+        view_out == NULL ||
+        (rx = find_rx_const(owner, origin, operation_id, message_id)) == NULL ||
+        !rx->complete) {
+        return UCN_V6_ERR_NOT_FOUND;
+    }
+    memset(&view, 0, sizeof(view));
+    view.completed.origin = rx->origin;
+    view.completed.message = rx->message;
+    view.completed.operation_id = rx->operation_id;
+    view.completed.message_id = rx->message_id;
+    view.completed.message_class = rx->message_class;
+    view.completed.payload_length = rx->total_length;
+    view.completed.message_crc32c = rx->message_crc32c;
+    view.payload = rx->data;
+    *view_out = view;
     return UCN_V6_OK;
 }
 

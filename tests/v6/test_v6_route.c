@@ -413,6 +413,11 @@ static int test_selection_rerr_and_generation_grace(void)
     ucn_v6_route_select_request_t request;
     ucn_v6_route_selection_t first;
     ucn_v6_route_selection_t second;
+    ucn_v6_route_selection_t forwarded;
+    ucn_v6_route_selection_t forwarded_before;
+    ucn_v6_route_domain_t resolved_domain;
+    ucn_v6_route_domain_t resolved_before;
+    ucn_v6_frame_t forwarded_frame;
     ucn_v6_route_path_ref_t reference;
     ucn_v6_route_resolution_t resolved;
     ucn_v6_route_resolution_t sentinel;
@@ -436,6 +441,40 @@ static int test_selection_rerr_and_generation_grace(void)
     CHECK(ucn_v6_route_select(fixture.route_owner, 21U, &request,
                               &second) == UCN_V6_OK);
     CHECK(second.path.path_id == 2U);
+    memset(&forwarded_frame, 0, sizeof(forwarded_frame));
+    forwarded_frame.flags = UCN_V6_FLAG_ROUTE_CONTEXT;
+    forwarded_frame.realm_id = fixture.route_domain.origin_binding.realm_id;
+    forwarded_frame.source_address =
+        fixture.route_domain.origin_binding.node_address;
+    forwarded_frame.source_binding_generation =
+        fixture.route_domain.origin_binding.binding_generation;
+    forwarded_frame.destination_address =
+        fixture.route_domain.destination_binding.node_address;
+    forwarded_frame.destination_binding_generation =
+        fixture.route_domain.destination_binding.binding_generation;
+    forwarded_frame.session_generation =
+        fixture.route_domain.origin_session_generation;
+    forwarded_frame.route_generation = 1U;
+    CHECK(ucn_v6_route_select_forward(
+              fixture.route_owner, 21U, &forwarded_frame, 91U, 1U,
+              UCN_V6_ROUTE_POLICY_ACTIVE_STANDBY, &resolved_domain,
+              &forwarded) == UCN_V6_OK);
+    CHECK(memcmp(&resolved_domain, &fixture.route_domain,
+                 sizeof(resolved_domain)) == 0 &&
+          forwarded.route_generation == 1U);
+    memset(&resolved_domain, 0xA5, sizeof(resolved_domain));
+    memset(&forwarded, 0x5A, sizeof(forwarded));
+    resolved_before = resolved_domain;
+    forwarded_before = forwarded;
+    ++forwarded_frame.destination_binding_generation;
+    CHECK(ucn_v6_route_select_forward(
+              fixture.route_owner, 21U, &forwarded_frame, 91U, 1U,
+              UCN_V6_ROUTE_POLICY_ACTIVE_STANDBY, &resolved_domain,
+              &forwarded) == UCN_V6_ERR_NOT_FOUND);
+    CHECK(memcmp(&resolved_domain, &resolved_before,
+                 sizeof(resolved_domain)) == 0 &&
+          memcmp(&forwarded, &forwarded_before, sizeof(forwarded)) == 0);
+    --forwarded_frame.destination_binding_generation;
     request.policy = UCN_V6_ROUTE_POLICY_WEIGHTED_MULTIPATH;
     request.allow_reordering = false;
     CHECK(ucn_v6_route_select(fixture.route_owner, 21U, &request,
@@ -817,8 +856,210 @@ static int test_route_hop_count_matches_capability_width(void)
     return 0;
 }
 
+static int test_relay_wire_key_is_unambiguous(void)
+{
+    fixture_t fixture;
+    ucn_v6_route_domain_t alias_domain;
+    ucn_v6_route_path_t alias_path;
+    ucn_v6_route_activation_t activation;
+    ucn_v6_route_candidate_view_t before;
+    ucn_v6_route_candidate_view_t after;
+    CHECK(fixture_init(&fixture) == 0);
+    CHECK(activate_candidate(&fixture, 101U, 1U, false, &activation) == 0);
+    CHECK(ucn_v6_route_candidate_commit_ack(
+              fixture.route_owner, 18U, &activation) == UCN_V6_OK);
+
+    /* Principals are not carried in the forwarding header.  A second full
+     * domain that aliases the same Wire binding/session/generation tuple
+     * therefore cannot publish the same Route generation. */
+    alias_domain = fixture.route_domain;
+    alias_domain.origin_principal = principal(0x91U);
+    alias_path = route_path(&fixture, 11U, 1U, 1U, 0U, 1U, 1U);
+    CHECK(ucn_v6_route_candidate_begin(
+              fixture.route_owner, 20U, 201U, &alias_domain, 1U) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_add_path(
+              fixture.route_owner, 21U, 201U, &alias_domain,
+              &alias_path) == UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_record_probe(
+              fixture.route_owner, 22U, 201U, &alias_domain,
+              alias_path.path_id, alias_path.path_generation) == UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_prepare_activation(
+              fixture.route_owner, 23U, 201U, &alias_domain,
+              &activation) == UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_record_activation_send(
+              fixture.route_owner, 23U, 201U, &alias_domain, true) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_route_copy_candidate(
+              fixture.route_owner, 201U, &alias_domain, &before) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_commit_ack(
+              fixture.route_owner, 24U, &activation) == UCN_V6_ERR_REPLAY);
+    CHECK(ucn_v6_route_copy_candidate(
+              fixture.route_owner, 201U, &alias_domain, &after) ==
+          UCN_V6_OK);
+    CHECK(memcmp(&before, &after, sizeof(before)) == 0);
+    return 0;
+}
+
+static ucn_v6_route_protocol_message_t route_protocol_message(
+    ucn_v6_route_protocol_kind_t kind)
+{
+    ucn_v6_route_protocol_message_t message;
+    size_t index;
+    memset(&message, 0, sizeof(message));
+    message.kind = kind;
+    message.candidate_transaction_id = UINT64_C(0x0102030405060708);
+    message.domain = domain(2U, 7U, UINT32_C(0x11121314),
+                            UINT32_C(0x21222324));
+    message.domain.origin_session_generation = UINT32_C(0x31323334);
+    message.domain.destination_session_generation = UINT32_C(0x41424344);
+    message.route_generation = UINT32_C(0x51525354);
+    if (kind == UCN_V6_ROUTE_DISCOVER_REQUEST) {
+        message.body.discover_request.maximum_hops = UINT16_C(0x1234);
+        message.body.discover_request.required_feature_bits =
+            UCN_V6_FEATURE_ROUTE | UCN_V6_FEATURE_TRANSFER;
+    } else if (kind == UCN_V6_ROUTE_DISCOVER_RESPONSE) {
+        ucn_v6_route_discover_response_body_t *body =
+            &message.body.discover_response;
+        body->path_id = UINT16_C(0x1234);
+        body->path_generation = UINT32_C(0x61626364);
+        body->hop_count = UINT16_C(0x2345);
+        body->priority = UINT16_C(0x3456);
+        body->weight = UINT16_C(0x4567);
+        body->destination_capability_generation = UINT32_C(0x71727374);
+        for (index = 0U; index < UCN_V6_CAPABILITY_DIGEST_BYTES; ++index) {
+            body->destination_capability_digest[index] =
+                (uint8_t)(0x80U + index);
+        }
+        body->path_frame_mtu = 240U;
+        body->payload_budget = 160U;
+        body->fragment_data_budget = 128U;
+        body->feature_bits = UCN_V6_FEATURE_ROUTE |
+                             UCN_V6_FEATURE_TRANSFER;
+        body->hop_suite_bits = UCN_V6_CAPABILITY_HOP_SUITE_BITS;
+        body->e2e_suite_bits = UCN_V6_CAPABILITY_E2E_SUITE_BITS;
+        body->max_message_class = UCN_V6_MESSAGE_T512;
+        body->max_window = 4U;
+        body->max_concurrency = 2U;
+    } else if (kind == UCN_V6_ROUTE_PATH_PROBE ||
+               kind == UCN_V6_ROUTE_PATH_PROBE_ACK) {
+        message.body.probe.path_id = UINT16_C(0x1234);
+        message.body.probe.path_generation = UINT32_C(0x61626364);
+        for (index = 0U; index < UCN_V6_ROUTE_PROPOSAL_DIGEST_BYTES;
+             ++index) {
+            message.body.probe.proposal_digest[index] =
+                (uint8_t)(0x90U + index);
+        }
+    } else if (kind == UCN_V6_ROUTE_PATH_ACTIVATE ||
+               kind == UCN_V6_ROUTE_PATH_ACTIVATE_ACK) {
+        for (index = 0U; index < UCN_V6_ROUTE_PROPOSAL_DIGEST_BYTES;
+             ++index) {
+            message.body.activation.proposal_digest[index] =
+                (uint8_t)(0xA0U + index);
+        }
+    } else {
+        message.body.error.path_id = UINT16_C(0x1234);
+        message.body.error.path_generation = UINT32_C(0x61626364);
+        message.body.error.reason = 7U;
+    }
+    return message;
+}
+
+static int test_route_protocol_codec_registry(void)
+{
+    static const size_t lengths[] = {0U, 86U, 155U, 102U, 102U,
+                                     96U, 96U, 88U};
+    uint8_t encoded[UCN_V6_ROUTE_PROTOCOL_MAX_BYTES];
+    uint8_t reencoded[UCN_V6_ROUTE_PROTOCOL_MAX_BYTES];
+    uint8_t sentinel[UCN_V6_ROUTE_PROTOCOL_MAX_BYTES];
+    ucn_v6_route_protocol_message_t message;
+    ucn_v6_route_protocol_message_t decoded;
+    ucn_v6_route_protocol_message_t before;
+    size_t encoded_length;
+    size_t reencoded_length;
+    uint32_t kind;
+    memset(sentinel, 0xCC, sizeof(sentinel));
+    for (kind = UCN_V6_ROUTE_DISCOVER_REQUEST;
+         kind <= UCN_V6_ROUTE_ERROR; ++kind) {
+        message = route_protocol_message((ucn_v6_route_protocol_kind_t)kind);
+        memset(encoded, 0xCC, sizeof(encoded));
+        encoded_length = SIZE_MAX;
+        CHECK(ucn_v6_route_protocol_encode(
+                  &message, encoded, sizeof(encoded), &encoded_length) ==
+              UCN_V6_OK);
+        CHECK(encoded_length == lengths[kind]);
+        CHECK(encoded[0] == UCN_V6_ROUTE_PROTOCOL_SCHEMA);
+        CHECK(encoded[1] == kind && encoded[2] == 0U && encoded[3] == 0U);
+        CHECK(encoded[4] == 0x01U && encoded[11] == 0x08U);
+        CHECK(memcmp(&encoded[12], message.domain.origin_principal.bytes,
+                     16U) == 0);
+        CHECK(encoded[31] == 0x01U && encoded[35] == 0x02U &&
+              encoded[39] == 0x14U);
+        CHECK(encoded[75] == 0x44U && encoded[79] == 0x54U);
+        memset(&decoded, 0xA5, sizeof(decoded));
+        CHECK(ucn_v6_route_protocol_decode(
+                  ucn_v6_route_protocol_opcode(message.kind), encoded,
+                  encoded_length, &decoded) == UCN_V6_OK);
+        memset(reencoded, 0xDD, sizeof(reencoded));
+        reencoded_length = SIZE_MAX;
+        CHECK(ucn_v6_route_protocol_encode(
+                  &decoded, reencoded, sizeof(reencoded),
+                  &reencoded_length) == UCN_V6_OK);
+        CHECK(reencoded_length == encoded_length);
+        CHECK(memcmp(encoded, reencoded, encoded_length) == 0);
+    }
+
+    message = route_protocol_message(UCN_V6_ROUTE_DISCOVER_RESPONSE);
+    CHECK(ucn_v6_route_protocol_encode(
+              &message, encoded, sizeof(encoded), &encoded_length) ==
+          UCN_V6_OK);
+    CHECK(encoded[80] == 0x12U && encoded[81] == 0x34U);
+    CHECK(encoded[85] == 0x64U && encoded[87] == 0x45U);
+    CHECK(encoded[95] == 0x74U && encoded[96] == 0x80U &&
+          encoded[111] == 0x8FU);
+    CHECK(encoded[123] == 240U && encoded[127] == 160U &&
+          encoded[131] == 128U);
+    CHECK(encoded[144] == UCN_V6_MESSAGE_T512 &&
+          encoded[146] == 4U && encoded[148] == 2U);
+
+    before = decoded;
+    encoded[3] = 1U;
+    CHECK(ucn_v6_route_protocol_decode(
+              UCN_V6_PROTOCOL_OPCODE_ROUTE_DISCOVER_RESPONSE, encoded,
+              encoded_length, &decoded) == UCN_V6_ERR_MALFORMED);
+    CHECK(memcmp(&decoded, &before, sizeof(decoded)) == 0);
+    encoded[3] = 0U;
+    CHECK(ucn_v6_route_protocol_decode(
+              UCN_V6_PROTOCOL_OPCODE_ROUTE_PATH_ACTIVATE, encoded,
+              encoded_length, &decoded) == UCN_V6_ERR_ARGUMENT);
+    CHECK(memcmp(&decoded, &before, sizeof(decoded)) == 0);
+
+    message = route_protocol_message(UCN_V6_ROUTE_PATH_ACTIVATE);
+    memset(message.body.activation.proposal_digest, 0,
+           sizeof(message.body.activation.proposal_digest));
+    memcpy(encoded, sentinel, sizeof(encoded));
+    encoded_length = UINT32_C(0x12345678);
+    CHECK(ucn_v6_route_protocol_encode(
+              &message, encoded, sizeof(encoded), &encoded_length) ==
+          UCN_V6_ERR_ARGUMENT);
+    CHECK(memcmp(encoded, sentinel, sizeof(encoded)) == 0);
+    CHECK(encoded_length == UINT32_C(0x12345678));
+
+    message = route_protocol_message(UCN_V6_ROUTE_DISCOVER_REQUEST);
+    message.body.discover_request.required_feature_bits =
+        UINT32_C(0x80000000);
+    memcpy(encoded, sentinel, sizeof(encoded));
+    CHECK(ucn_v6_route_protocol_encode(
+              &message, encoded, sizeof(encoded), &encoded_length) ==
+          UCN_V6_ERR_ARGUMENT);
+    CHECK(memcmp(encoded, sentinel, sizeof(encoded)) == 0);
+    return 0;
+}
+
 int main(void)
 {
+    CHECK(test_route_protocol_codec_registry() == 0);
     CHECK(test_atomic_activation_and_frozen_candidate() == 0);
     CHECK(test_selection_rerr_and_generation_grace() == 0);
     CHECK(test_cross_origin_retry_and_identity_aba() == 0);
@@ -826,6 +1067,7 @@ int main(void)
     CHECK(test_capability_change_and_session_invalidation() == 0);
     CHECK(test_path_lease_refresh_and_delayed_old_event() == 0);
     CHECK(test_route_hop_count_matches_capability_width() == 0);
+    CHECK(test_relay_wire_key_is_unambiguous() == 0);
     puts("ucn v6 route tests passed");
     return 0;
 }

@@ -2,7 +2,8 @@
 
 #include <string.h>
 
-#define UCN_V6_BOOTSTRAP_CANONICAL_BYTES ((size_t)379U)
+#define UCN_V6_BOOTSTRAP_CANONICAL_BYTES \
+    UCN_V6_BOOTSTRAP_TRANSCRIPT_CANONICAL_BYTES
 #define UCN_V6_JOIN_RECEIPT_CANONICAL_BYTES \
     UCN_V6_SECURITY_JOIN_RECEIPT_BYTES
 #define UCN_V6_ACL_CANONICAL_BYTES ((size_t)92U)
@@ -492,6 +493,27 @@ static bool selector_equal(
     return left->suite_id == right->suite_id &&
            left->key_id == right->key_id &&
            left->key_generation == right->key_generation;
+}
+
+static bool live_session_hop_selectors_overlap(
+    const ucn_v6_security_session_record_t *left,
+    const ucn_v6_security_session_record_t *right)
+{
+    if (left == NULL || right == NULL || !left->occupied || !left->admitted ||
+        left->revoked || left->requires_reauth || !right->occupied ||
+        !right->admitted || right->revoked || right->requires_reauth ||
+        left->link_instance_id != right->link_instance_id ||
+        left->link_instance_generation != right->link_instance_generation) {
+        return false;
+    }
+    return selector_equal(&left->hop_current, &right->hop_current) ||
+           (!selector_is_zero(&left->hop_previous) &&
+            selector_equal(&left->hop_previous, &right->hop_current)) ||
+           (!selector_is_zero(&right->hop_previous) &&
+            selector_equal(&left->hop_current, &right->hop_previous)) ||
+           (!selector_is_zero(&left->hop_previous) &&
+            !selector_is_zero(&right->hop_previous) &&
+            selector_equal(&left->hop_previous, &right->hop_previous));
 }
 
 static bool manager_storage_is_valid(
@@ -1131,6 +1153,16 @@ static bool snapshot_is_valid(
                                   &snapshot->sessions[right].peer_binding) &&
                     snapshot->sessions[index].session_generation ==
                         snapshot->sessions[right].session_generation) {
+                    return false;
+                }
+                /* A raw Adapter record identifies its immediate Peer by the
+                 * exact Link generation and Hop selector. Two live Sessions
+                 * may therefore never share any current/previous selector in
+                 * that physical domain; otherwise canonical Runtime RX could
+                 * not choose the authentication key without caller input. */
+                if (live_session_hop_selectors_overlap(
+                        &snapshot->sessions[index],
+                        &snapshot->sessions[right])) {
                     return false;
                 }
             }
@@ -1821,98 +1853,20 @@ ucn_v6_result_t ucn_v6_security_write_bootstrap_transcript(
     size_t *output_length)
 {
     uint8_t encoded[UCN_V6_BOOTSTRAP_CANONICAL_BYTES];
-    size_t offset = 0U;
-
+    ucn_v6_result_t result;
     if (transcript == NULL || output == NULL || output_length == NULL ||
         output_capacity < sizeof(encoded) ||
-        !bootstrap_transcript_is_valid(transcript)) {
+        ucn_v6_memory_ranges_overlap(output, sizeof(encoded),
+                                     output_length,
+                                     sizeof(*output_length)) ||
+        ucn_v6_memory_ranges_overlap(transcript, sizeof(*transcript),
+                                     output_length,
+                                     sizeof(*output_length))) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    encoded[offset++] = transcript->protocol_version;
-    put_u16(&encoded[offset], transcript->bootstrap_header_contract);
-    offset += 2U;
-    encoded[offset++] = 1U; /* Frozen ordered-role contract v1. */
-    encoded[offset++] = (uint8_t)transcript->flow;
-    memcpy(&encoded[offset], transcript->joining_device_principal.bytes, 16U);
-    offset += 16U;
-    memcpy(&encoded[offset],
-           transcript->joining_device_identity_digest.bytes, 16U);
-    offset += 16U;
-    memcpy(&encoded[offset], transcript->authority_principal.bytes, 16U);
-    offset += 16U;
-    put_u32(&encoded[offset], transcript->authority_generation);
-    offset += 4U;
-    put_u64(&encoded[offset], transcript->device_nonce);
-    offset += 8U;
-    put_u64(&encoded[offset], transcript->authority_nonce);
-    offset += 8U;
-    put_u64(&encoded[offset], transcript->transaction_id);
-    offset += 8U;
-    put_u64(&encoded[offset], transcript->lease_freshness_challenge_nonce);
-    offset += 8U;
-    put_u32(&encoded[offset], transcript->realm_id);
-    offset += 4U;
-    put_u32(&encoded[offset], transcript->proposed_address);
-    offset += 4U;
-    put_u32(&encoded[offset], transcript->address_binding_generation);
-    offset += 4U;
-    put_u32(&encoded[offset], transcript->authority_address);
-    offset += 4U;
-    put_u32(&encoded[offset], transcript->authority_binding_generation);
-    offset += 4U;
-    put_u16(&encoded[offset], transcript->selected_link_instance_id);
-    offset += 2U;
-    memcpy(&encoded[offset], transcript->binding_lease_id, 16U);
-    offset += 16U;
-    put_u64(&encoded[offset], transcript->binding_lease_duration_us);
-    offset += 8U;
-    put_u64(&encoded[offset], transcript->authority_lease_sequence);
-    offset += 8U;
-    put_u64(&encoded[offset], transcript->authority_lease_duration_us);
-    offset += 8U;
-    put_u64(&encoded[offset], transcript->freshness_max_remaining_lease_us);
-    offset += 8U;
-    memcpy(&encoded[offset], transcript->durable_fence_token, 16U);
-    offset += 16U;
-    memcpy(&encoded[offset], transcript->allocation_high_water_digest, 16U);
-    offset += 16U;
-    memcpy(&encoded[offset], transcript->quorum_config_digest,
-           UCN_V6_AUTHORITY_DIGEST_BYTES);
-    offset += UCN_V6_AUTHORITY_DIGEST_BYTES;
-    memcpy(&encoded[offset], transcript->signer_set_digest,
-           UCN_V6_AUTHORITY_DIGEST_BYTES);
-    offset += UCN_V6_AUTHORITY_DIGEST_BYTES;
-    memcpy(&encoded[offset], transcript->threshold_proof_digest,
-           UCN_V6_AUTHORITY_DIGEST_BYTES);
-    offset += UCN_V6_AUTHORITY_DIGEST_BYTES;
-    memcpy(&encoded[offset], transcript->freshness_proof_transcript_hash,
-           UCN_V6_AUTHORITY_DIGEST_BYTES);
-    offset += UCN_V6_AUTHORITY_DIGEST_BYTES;
-    put_u16(&encoded[offset], transcript->authority_signer_count);
-    offset += 2U;
-    put_u16(&encoded[offset], transcript->authority_quorum_threshold);
-    offset += 2U;
-    encoded[offset++] = transcript->binding_mode;
-    encoded[offset++] = transcript->selected_hop_suite;
-    put_u16(&encoded[offset], transcript->selected_hop_key_id);
-    offset += 2U;
-    put_u32(&encoded[offset], transcript->selected_hop_key_generation);
-    offset += 4U;
-    encoded[offset++] = transcript->selected_e2e_mode;
-    encoded[offset++] = transcript->selected_e2e_suite;
-    put_u16(&encoded[offset], transcript->selected_e2e_key_id);
-    offset += 2U;
-    put_u32(&encoded[offset], transcript->selected_e2e_key_generation);
-    offset += 4U;
-    put_u32(&encoded[offset], transcript->selected_session_generation);
-    offset += 4U;
-    put_u32(&encoded[offset], transcript->selected_link_instance_generation);
-    offset += 4U;
-    memcpy(&encoded[offset], transcript->prior_messages_hash, 32U);
-    offset += 32U;
-    if (offset != sizeof(encoded)) {
-        return UCN_V6_ERR_STATE;
-    }
+    result = ucn_v6_bootstrap_transcript_encode(
+        transcript, UCN_V6_BOOTSTRAP_FINAL_DURABLE, encoded);
+    if (result != UCN_V6_OK) return result;
     memcpy(output, encoded, sizeof(encoded));
     *output_length = sizeof(encoded);
     return UCN_V6_OK;
@@ -3852,6 +3806,298 @@ ucn_v6_result_t ucn_v6_security_open_frame(
     return UCN_V6_OK;
 }
 
+ucn_v6_result_t ucn_v6_security_open_ingress_frame(
+    ucn_v6_security_manager_t *manager,
+    uint64_t now_us,
+    uint16_t ingress_link_instance_id,
+    uint32_t ingress_link_instance_generation,
+    const uint8_t *encoded_frame,
+    size_t encoded_length,
+    uint8_t *plaintext_storage,
+    size_t plaintext_capacity,
+    ucn_v6_security_open_result_t *result_out)
+{
+    ucn_v6_frame_t preview;
+    ucn_v6_principal_t authenticated_peer;
+    const ucn_v6_principal_t *peer_argument = NULL;
+    ucn_v6_result_t rc;
+
+    if (!manager_storage_is_valid(manager) || manager->faulted ||
+        ingress_link_instance_id == 0U ||
+        ingress_link_instance_id == UINT16_MAX ||
+        ingress_link_instance_generation == 0U ||
+        ingress_link_instance_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        encoded_frame == NULL || result_out == NULL) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(&preview, 0, sizeof(preview));
+    rc = ucn_v6_wire_decode(encoded_frame, encoded_length, &preview);
+    if (rc != UCN_V6_OK || preview.frame_type == UCN_V6_FRAME_BOOTSTRAP) {
+        return UCN_V6_ERR_MALFORMED;
+    }
+    if ((preview.flags & UCN_V6_FLAG_GROUP_CONTEXT) == 0U) {
+        rc = ucn_v6_security_resolve_ingress_peer(
+            manager, now_us, ingress_link_instance_id,
+            ingress_link_instance_generation, &preview,
+            &authenticated_peer);
+        if (rc != UCN_V6_OK) return rc;
+        peer_argument = &authenticated_peer;
+    }
+    return ucn_v6_security_open_frame(
+        manager, now_us, ingress_link_instance_id,
+        ingress_link_instance_generation, peer_argument, encoded_frame,
+        encoded_length, plaintext_storage, plaintext_capacity, result_out);
+}
+
+ucn_v6_result_t ucn_v6_security_open_relay_ingress(
+    ucn_v6_security_manager_t *manager,
+    uint64_t now_us,
+    uint16_t ingress_link_instance_id,
+    uint32_t ingress_link_instance_generation,
+    const ucn_v6_principal_t *authenticated_peer_principal,
+    const uint8_t *encoded_frame,
+    size_t encoded_length,
+    ucn_v6_security_open_result_t *verified_ingress)
+{
+    ucn_v6_security_open_result_t opened;
+    ucn_v6_result_t rc;
+    if (verified_ingress == NULL ||
+        buffer_ranges_overlap(encoded_frame, encoded_length,
+                              verified_ingress, sizeof(*verified_ingress))) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(&opened, 0, sizeof(opened));
+    rc = ucn_v6_security_open_frame(
+        manager, now_us, ingress_link_instance_id,
+        ingress_link_instance_generation, authenticated_peer_principal,
+        encoded_frame, encoded_length, NULL, 0U, &opened);
+    if (rc != UCN_V6_OK) return rc;
+    if (!opened.hop_authenticated || opened.endpoint_authorized ||
+        opened.group_discovery_only ||
+        opened.frame.frame_type == UCN_V6_FRAME_BOOTSTRAP ||
+        opened.frame.hop_limit <= 1U ||
+        (opened.frame.flags & UCN_V6_FLAG_PEER_HOP_CONTEXT) == 0U ||
+        (opened.frame.flags & UCN_V6_FLAG_GROUP_CONTEXT) != 0U ||
+        (opened.frame.flags & UCN_V6_FLAG_E2E_CONTEXT) == 0U ||
+        opened.frame.origin_sequence == 0U ||
+        (opened.frame.payload_length != 0U &&
+         opened.frame.payload == NULL)) {
+        return UCN_V6_ERR_SECURITY;
+    }
+    *verified_ingress = opened;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_security_forward_opened(
+    ucn_v6_security_manager_t *manager,
+    uint64_t now_us,
+    const ucn_v6_principal_t *next_hop_principal,
+    uint64_t hop_budget_debit_us,
+    const ucn_v6_security_open_result_t *verified_ingress,
+    uint8_t *frame_work,
+    size_t frame_work_capacity,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_length,
+    ucn_v6_frame_t *relayed_frame)
+{
+    ucn_v6_frame_t relay;
+    ucn_v6_security_session_record_t *hop_session;
+    size_t relay_length = 0U;
+    size_t link_tag_offset;
+    uint32_t hop_sequence;
+    ucn_v6_result_t rc;
+    size_t borrowed_payload_length;
+
+    borrowed_payload_length = verified_ingress == NULL ? 0U :
+                                  verified_ingress->frame.payload_length;
+    if (!manager_storage_is_valid(manager) || manager->faulted ||
+        !ucn_v6_principal_is_valid(next_hop_principal) ||
+        verified_ingress == NULL || frame_work == NULL || output == NULL ||
+        output_length == NULL || relayed_frame == NULL ||
+        !verified_ingress->hop_authenticated ||
+        verified_ingress->endpoint_authorized ||
+        verified_ingress->group_discovery_only ||
+        verified_ingress->frame.frame_type == UCN_V6_FRAME_BOOTSTRAP ||
+        verified_ingress->frame.hop_limit <= 1U ||
+        (verified_ingress->frame.flags & UCN_V6_FLAG_PEER_HOP_CONTEXT) == 0U ||
+        (verified_ingress->frame.flags & UCN_V6_FLAG_GROUP_CONTEXT) != 0U ||
+        (verified_ingress->frame.flags & UCN_V6_FLAG_E2E_CONTEXT) == 0U ||
+        verified_ingress->frame.origin_sequence == 0U ||
+        (borrowed_payload_length != 0U &&
+         verified_ingress->frame.payload == NULL) ||
+        buffer_ranges_overlap(verified_ingress, sizeof(*verified_ingress),
+                              frame_work, frame_work_capacity) ||
+        buffer_ranges_overlap(verified_ingress, sizeof(*verified_ingress),
+                              output, output_capacity) ||
+        buffer_ranges_overlap(verified_ingress, sizeof(*verified_ingress),
+                              output_length, sizeof(*output_length)) ||
+        buffer_ranges_overlap(verified_ingress, sizeof(*verified_ingress),
+                              relayed_frame, sizeof(*relayed_frame)) ||
+        buffer_ranges_overlap(frame_work, frame_work_capacity,
+                              output, output_capacity) ||
+        buffer_ranges_overlap(frame_work, frame_work_capacity,
+                              output_length, sizeof(*output_length)) ||
+        buffer_ranges_overlap(frame_work, frame_work_capacity,
+                              relayed_frame, sizeof(*relayed_frame)) ||
+        buffer_ranges_overlap(output, output_capacity,
+                              output_length, sizeof(*output_length)) ||
+        buffer_ranges_overlap(output, output_capacity,
+                              relayed_frame, sizeof(*relayed_frame)) ||
+        buffer_ranges_overlap(output_length, sizeof(*output_length),
+                              relayed_frame, sizeof(*relayed_frame)) ||
+        (borrowed_payload_length != 0U &&
+         (buffer_ranges_overlap(verified_ingress->frame.payload,
+                                borrowed_payload_length, frame_work,
+                                frame_work_capacity) ||
+          buffer_ranges_overlap(verified_ingress->frame.payload,
+                                borrowed_payload_length, output,
+                                output_capacity) ||
+          buffer_ranges_overlap(verified_ingress->frame.payload,
+                                borrowed_payload_length, output_length,
+                                sizeof(*output_length)) ||
+          buffer_ranges_overlap(verified_ingress->frame.payload,
+                                borrowed_payload_length, relayed_frame,
+                                sizeof(*relayed_frame))))) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+
+    relay = verified_ingress->frame;
+    if ((relay.flags & UCN_V6_FLAG_HOP_BUDGET_CONTEXT) != 0U) {
+        if (hop_budget_debit_us == 0U ||
+            hop_budget_debit_us >= relay.hop_budget.remaining_budget_us) {
+            return UCN_V6_ERR_EXHAUSTED;
+        }
+        relay.hop_budget.remaining_budget_us -= hop_budget_debit_us;
+    } else if (hop_budget_debit_us != 0U) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    hop_session = find_session_by_principal(&manager->committed,
+                                             next_hop_principal);
+    if (hop_session == NULL || !hop_session->admitted || hop_session->revoked ||
+        hop_session->requires_reauth ||
+        now_us >= hop_session->local_lease_deadline_us) {
+        return UCN_V6_ERR_SECURITY;
+    }
+    --relay.hop_limit;
+    relay.peer_hop.suite_id = hop_session->hop_current.suite_id;
+    relay.peer_hop.key_id = hop_session->hop_current.key_id;
+    relay.peer_hop.key_generation = hop_session->hop_current.key_generation;
+    relay.hop_sequence = 1U;
+    memset(relay.link_tag, 0, sizeof(relay.link_tag));
+    rc = ucn_v6_wire_encoded_size(&relay, &relay_length);
+    if (rc != UCN_V6_OK) return rc;
+    if (frame_work_capacity < relay_length || output_capacity < relay_length) {
+        return UCN_V6_ERR_NO_SPACE;
+    }
+    rc = reserve_session_tx_sequence(manager, next_hop_principal, true,
+                                     &hop_sequence);
+    if (rc != UCN_V6_OK) return rc;
+    hop_session = find_session_by_principal(&manager->committed,
+                                             next_hop_principal);
+    if (hop_session == NULL) return UCN_V6_ERR_STATE;
+    relay.hop_sequence = hop_sequence;
+    rc = ucn_v6_wire_encode(&relay, frame_work, frame_work_capacity,
+                            &relay_length);
+    if (rc != UCN_V6_OK || relay_length < 20U) {
+        return rc != UCN_V6_OK ? rc : UCN_V6_ERR_STATE;
+    }
+    link_tag_offset = relay_length - UCN_V6_SECURITY_TAG_BYTES - 4U;
+    rc = crypto_compute_tag(manager, &hop_session->hop_current, frame_work,
+                            link_tag_offset, NULL, 0U, relay.link_tag);
+    if (rc != UCN_V6_OK) return rc;
+    rc = ucn_v6_wire_encode(&relay, frame_work, frame_work_capacity,
+                            &relay_length);
+    if (rc != UCN_V6_OK) return rc;
+    memcpy(output, frame_work, relay_length);
+    *relayed_frame = relay;
+    *output_length = relay_length;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_security_frame_targets_local(
+    const ucn_v6_security_manager_t *manager,
+    const ucn_v6_frame_t *frame,
+    bool *targets_local)
+{
+    bool local;
+    if (!manager_storage_is_valid(manager) || manager->faulted ||
+        frame == NULL || targets_local == NULL ||
+        frame->frame_type == UCN_V6_FRAME_BOOTSTRAP ||
+        ucn_v6_memory_ranges_overlap(frame, sizeof(*frame),
+                                     targets_local, sizeof(*targets_local))) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    local = (frame->flags & UCN_V6_FLAG_GROUP_CONTEXT) != 0U ||
+            (manager->committed.local_binding_valid &&
+             manager->committed.local_binding.realm_id == frame->realm_id &&
+             manager->committed.local_binding.node_address ==
+                 frame->destination_address &&
+             manager->committed.local_binding.binding_generation ==
+                 frame->destination_binding_generation);
+    *targets_local = local;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_security_resolve_ingress_peer(
+    ucn_v6_security_manager_t *manager,
+    uint64_t now_us,
+    uint16_t ingress_link_instance_id,
+    uint32_t ingress_link_instance_generation,
+    const ucn_v6_frame_t *frame,
+    ucn_v6_principal_t *peer_principal)
+{
+    ucn_v6_principal_t resolved;
+    size_t index;
+    bool matched = false;
+    if (!manager_storage_is_valid(manager) || manager->faulted ||
+        ingress_link_instance_id == 0U ||
+        ingress_link_instance_id == UINT16_MAX ||
+        ingress_link_instance_generation == 0U ||
+        ingress_link_instance_generation > UCN_V6_SERIAL_ROTATION_THRESHOLD ||
+        frame == NULL || peer_principal == NULL ||
+        frame->frame_type == UCN_V6_FRAME_BOOTSTRAP ||
+        (frame->flags & UCN_V6_FLAG_PEER_HOP_CONTEXT) == 0U ||
+        ucn_v6_memory_ranges_overlap(frame, sizeof(*frame),
+                                     peer_principal,
+                                     sizeof(*peer_principal))) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    for (index = 0U; index < UCN_V6_CONFIG_SECURITY_SESSIONS; ++index) {
+        const ucn_v6_security_session_record_t *session =
+            &manager->committed.sessions[index];
+        bool selector_current;
+        bool selector_previous;
+        if (!session->occupied || !session->admitted || session->revoked ||
+            session->requires_reauth || now_us >= session->local_lease_deadline_us ||
+            session->link_instance_id != ingress_link_instance_id ||
+            session->link_instance_generation !=
+                ingress_link_instance_generation) {
+            continue;
+        }
+        selector_current =
+            frame->peer_hop.suite_id == session->hop_current.suite_id &&
+            frame->peer_hop.key_id == session->hop_current.key_id &&
+            frame->peer_hop.key_generation ==
+                session->hop_current.key_generation;
+        selector_previous = now_us < session->hop_previous_deadline_us &&
+            frame->peer_hop.suite_id == session->hop_previous.suite_id &&
+            frame->peer_hop.key_id == session->hop_previous.key_id &&
+            frame->peer_hop.key_generation ==
+                session->hop_previous.key_generation;
+        if (!selector_current && !selector_previous) continue;
+        if (matched) {
+            manager->faulted = true;
+            return UCN_V6_ERR_STATE;
+        }
+        resolved = session->peer_principal;
+        matched = true;
+    }
+    if (!matched) return UCN_V6_ERR_SECURITY;
+    *peer_principal = resolved;
+    return UCN_V6_OK;
+}
+
 ucn_v6_result_t ucn_v6_security_protect_peer_discovery(
     ucn_v6_security_manager_t *manager,
     uint64_t now_us,
@@ -4201,134 +4447,57 @@ ucn_v6_result_t ucn_v6_security_relay_frame(
     ucn_v6_frame_t *relayed_frame)
 {
     ucn_v6_security_open_result_t opened;
-    ucn_v6_frame_t relay;
-    ucn_v6_security_session_record_t *hop_session;
-    size_t relay_length = 0U;
-    size_t link_tag_offset;
-    uint32_t hop_sequence;
     ucn_v6_result_t rc;
 
-    if (!manager_storage_is_valid(manager) || manager->faulted ||
-        !ucn_v6_principal_is_valid(authenticated_peer_principal) ||
-        !ucn_v6_principal_is_valid(next_hop_principal) ||
-        encoded_frame == NULL || encoded_length == 0U ||
+    if (encoded_frame == NULL || encoded_length == 0U ||
         frame_work == NULL || output == NULL || output_length == NULL ||
         verified_ingress == NULL || relayed_frame == NULL ||
-        buffer_ranges_overlap(encoded_frame, encoded_length,
-                              frame_work, encoded_length) ||
-        buffer_ranges_overlap(encoded_frame, encoded_length,
-                              output, encoded_length) ||
-        buffer_ranges_overlap(frame_work, encoded_length,
-                              output, encoded_length) ||
-        buffer_ranges_overlap(encoded_frame, encoded_length,
-                              verified_ingress, sizeof(*verified_ingress)) ||
-        buffer_ranges_overlap(encoded_frame, encoded_length,
-                              relayed_frame, sizeof(*relayed_frame)) ||
-        buffer_ranges_overlap(frame_work, encoded_length,
-                              verified_ingress, sizeof(*verified_ingress)) ||
-        buffer_ranges_overlap(frame_work, encoded_length,
-                              relayed_frame, sizeof(*relayed_frame)) ||
-        buffer_ranges_overlap(output, encoded_length,
-                              verified_ingress, sizeof(*verified_ingress)) ||
-        buffer_ranges_overlap(output, encoded_length,
-                              relayed_frame, sizeof(*relayed_frame)) ||
-        buffer_ranges_overlap(verified_ingress, sizeof(*verified_ingress),
-                              relayed_frame, sizeof(*relayed_frame)) ||
-        buffer_ranges_overlap(encoded_frame, encoded_length,
-                              output_length, sizeof(*output_length)) ||
-        buffer_ranges_overlap(verified_ingress, sizeof(*verified_ingress),
-                              output_length, sizeof(*output_length)) ||
-        buffer_ranges_overlap(relayed_frame, sizeof(*relayed_frame),
-                              output_length, sizeof(*output_length)) ||
-        buffer_ranges_overlap(output_length, sizeof(*output_length),
-                              frame_work, encoded_length) ||
-        buffer_ranges_overlap(output_length, sizeof(*output_length),
-                              output, encoded_length) ||
         frame_work_capacity < encoded_length ||
-        output_capacity < encoded_length) {
+        output_capacity < encoded_length ||
+        buffer_ranges_overlap(encoded_frame, encoded_length, frame_work,
+                              frame_work_capacity) ||
+        buffer_ranges_overlap(encoded_frame, encoded_length, output,
+                              output_capacity) ||
+        buffer_ranges_overlap(encoded_frame, encoded_length,
+                              verified_ingress, sizeof(*verified_ingress)) ||
+        buffer_ranges_overlap(encoded_frame, encoded_length,
+                              relayed_frame, sizeof(*relayed_frame))) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    rc = ucn_v6_security_open_frame(
+    if (buffer_ranges_overlap(frame_work, frame_work_capacity, output,
+                              output_capacity) ||
+        buffer_ranges_overlap(frame_work, frame_work_capacity, output_length,
+                              sizeof(*output_length)) ||
+        buffer_ranges_overlap(frame_work, frame_work_capacity,
+                              verified_ingress, sizeof(*verified_ingress)) ||
+        buffer_ranges_overlap(frame_work, frame_work_capacity,
+                              relayed_frame, sizeof(*relayed_frame)) ||
+        buffer_ranges_overlap(output, output_capacity, output_length,
+                              sizeof(*output_length)) ||
+        buffer_ranges_overlap(output, output_capacity, verified_ingress,
+                              sizeof(*verified_ingress)) ||
+        buffer_ranges_overlap(output, output_capacity, relayed_frame,
+                              sizeof(*relayed_frame)) ||
+        buffer_ranges_overlap(output_length, sizeof(*output_length),
+                              verified_ingress, sizeof(*verified_ingress)) ||
+        buffer_ranges_overlap(output_length, sizeof(*output_length),
+                              relayed_frame, sizeof(*relayed_frame)) ||
+        buffer_ranges_overlap(verified_ingress, sizeof(*verified_ingress),
+                              relayed_frame, sizeof(*relayed_frame))) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    memset(&opened, 0, sizeof(opened));
+    rc = ucn_v6_security_open_relay_ingress(
         manager, now_us, ingress_link_instance_id,
-        ingress_link_instance_generation,
-        authenticated_peer_principal, encoded_frame, encoded_length,
-        NULL, 0U, &opened);
-    if (rc != UCN_V6_OK) {
-        return rc;
-    }
-    if (!opened.hop_authenticated || opened.endpoint_authorized ||
-        opened.group_discovery_only) {
-        return UCN_V6_ERR_SECURITY;
-    }
-    relay = opened.frame;
-    if (relay.frame_type == UCN_V6_FRAME_BOOTSTRAP || relay.hop_limit <= 1U ||
-        (relay.flags & UCN_V6_FLAG_PEER_HOP_CONTEXT) == 0U ||
-        (relay.flags & UCN_V6_FLAG_GROUP_CONTEXT) != 0U ||
-        (relay.flags & UCN_V6_FLAG_E2E_CONTEXT) == 0U ||
-        relay.origin_sequence == 0U ||
-        (relay.payload_length != 0U && relay.payload == NULL)) {
-        return UCN_V6_ERR_STATE;
-    }
-    if ((relay.flags & UCN_V6_FLAG_HOP_BUDGET_CONTEXT) != 0U) {
-        if (hop_budget_debit_us == 0U ||
-            hop_budget_debit_us >= relay.hop_budget.remaining_budget_us) {
-            return UCN_V6_ERR_EXHAUSTED;
-        }
-        relay.hop_budget.remaining_budget_us -= hop_budget_debit_us;
-    } else if (hop_budget_debit_us != 0U) {
-        return UCN_V6_ERR_ARGUMENT;
-    }
-    hop_session = find_session_by_principal(&manager->committed,
-                                             next_hop_principal);
-    if (hop_session == NULL || !hop_session->admitted || hop_session->revoked ||
-        hop_session->requires_reauth ||
-        now_us >= hop_session->local_lease_deadline_us) {
-        return UCN_V6_ERR_SECURITY;
-    }
-    --relay.hop_limit;
-    relay.peer_hop.suite_id = hop_session->hop_current.suite_id;
-    relay.peer_hop.key_id = hop_session->hop_current.key_id;
-    relay.peer_hop.key_generation = hop_session->hop_current.key_generation;
-    relay.hop_sequence = 1U;
-    memset(relay.link_tag, 0, sizeof(relay.link_tag));
-    rc = ucn_v6_wire_encoded_size(&relay, &relay_length);
-    if (rc != UCN_V6_OK) {
-        return rc;
-    }
-    if (frame_work_capacity < relay_length || output_capacity < relay_length) {
-        return UCN_V6_ERR_NO_SPACE;
-    }
-    rc = reserve_session_tx_sequence(manager, next_hop_principal, true,
-                                     &hop_sequence);
-    if (rc != UCN_V6_OK) {
-        return rc;
-    }
-    hop_session = find_session_by_principal(&manager->committed,
-                                             next_hop_principal);
-    if (hop_session == NULL) {
-        return UCN_V6_ERR_STATE;
-    }
-    relay.hop_sequence = hop_sequence;
-    rc = ucn_v6_wire_encode(&relay, frame_work, frame_work_capacity,
-                            &relay_length);
-    if (rc != UCN_V6_OK || relay_length < 20U) {
-        return rc != UCN_V6_OK ? rc : UCN_V6_ERR_STATE;
-    }
-    link_tag_offset = relay_length - UCN_V6_SECURITY_TAG_BYTES - 4U;
-    rc = crypto_compute_tag(manager, &hop_session->hop_current, frame_work,
-                            link_tag_offset, NULL, 0U, relay.link_tag);
-    if (rc != UCN_V6_OK) {
-        return rc;
-    }
-    rc = ucn_v6_wire_encode(&relay, frame_work, frame_work_capacity,
-                            &relay_length);
-    if (rc != UCN_V6_OK) {
-        return rc;
-    }
-    memcpy(output, frame_work, relay_length);
+        ingress_link_instance_generation, authenticated_peer_principal,
+        encoded_frame, encoded_length, &opened);
+    if (rc != UCN_V6_OK) return rc;
+    rc = ucn_v6_security_forward_opened(
+        manager, now_us, next_hop_principal, hop_budget_debit_us, &opened,
+        frame_work, frame_work_capacity, output, output_capacity,
+        output_length, relayed_frame);
+    if (rc != UCN_V6_OK) return rc;
     *verified_ingress = opened;
-    *relayed_frame = relay;
-    *output_length = relay_length;
     return UCN_V6_OK;
 }
 
@@ -4527,5 +4696,32 @@ ucn_v6_result_t ucn_v6_security_copy_view(
         }
     }
     *view = next;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_security_copy_local_identity(
+    const ucn_v6_security_manager_t *manager,
+    ucn_v6_principal_t *principal,
+    ucn_v6_binding_key_t *binding)
+{
+    ucn_v6_principal_t next_principal;
+    ucn_v6_binding_key_t next_binding;
+    if (!manager_storage_is_valid(manager) || manager->faulted ||
+        principal == NULL || binding == NULL ||
+        !manager->committed.local_binding_valid ||
+        !ucn_v6_principal_is_valid(&manager->committed.local_principal) ||
+        !ucn_v6_binding_key_is_valid(&manager->committed.local_binding) ||
+        ucn_v6_memory_ranges_overlap(manager, sizeof(*manager), principal,
+                                     sizeof(*principal)) ||
+        ucn_v6_memory_ranges_overlap(manager, sizeof(*manager), binding,
+                                     sizeof(*binding)) ||
+        ucn_v6_memory_ranges_overlap(principal, sizeof(*principal), binding,
+                                     sizeof(*binding))) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    next_principal = manager->committed.local_principal;
+    next_binding = manager->committed.local_binding;
+    *principal = next_principal;
+    *binding = next_binding;
     return UCN_V6_OK;
 }

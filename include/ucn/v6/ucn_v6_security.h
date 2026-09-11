@@ -481,6 +481,85 @@ ucn_v6_result_t ucn_v6_security_open_frame(
     size_t plaintext_capacity,
     ucn_v6_security_open_result_t *result);
 
+/* EN: Opens an ingress frame without accepting a caller-asserted Peer
+ * identity. Security first decodes only enough immutable Wire identity to
+ * locate the unique admitted Session bound to the exact physical Link
+ * generation, then authenticates through ucn_v6_security_open_frame(). Group
+ * frames use their authenticated Group selector and do not require a Peer
+ * Session. This is the canonical Runtime RX entry.
+ * 中文：在不接受调用方声称的 Peer 身份前提下打开入站帧。Security 先只解码
+ * 定位所需的不可变 Wire 身份，从精确物理 Link 代际中找到唯一已准入 Session，
+ * 再通过 ucn_v6_security_open_frame() 完成认证；Group 帧使用自身认证的 Group
+ * selector，不要求 Peer Session。本函数是 Runtime 的唯一规范 RX 入口。 */
+ucn_v6_result_t ucn_v6_security_open_ingress_frame(
+    ucn_v6_security_manager_t *manager,
+    uint64_t now_us,
+    uint16_t ingress_link_instance_id,
+    uint32_t ingress_link_instance_generation,
+    const uint8_t *encoded_frame,
+    size_t encoded_length,
+    uint8_t *plaintext_storage,
+    size_t plaintext_capacity,
+    ucn_v6_security_open_result_t *result);
+
+/* EN: Classifies an already decoded non-Bootstrap destination against the
+ * Security manager's durable local Binding. Group discovery is local by
+ * definition. Rejected calls do not write the result.
+ * 中文：依据 Security Manager 的持久本地 Binding 判定已解码非 Bootstrap
+ * 帧是否以本站为目标；Group discovery 按定义属于本地处理。拒绝不写回。 */
+ucn_v6_result_t ucn_v6_security_frame_targets_local(
+    const ucn_v6_security_manager_t *manager,
+    const ucn_v6_frame_t *frame,
+    bool *targets_local);
+
+/* EN: Resolves the exact live last-Hop Peer from authenticated Wire selector
+ * and ingress Link generation before a relay operation. Source Address is not
+ * used because it remains the immutable end-to-end origin across relays.
+ * 中文：在中继前，依据入站 Link 代际与 Wire Hop selector 解析唯一活跃的
+ * 上一跳 Peer；Source Address 跨中继保持端到端源身份，不能用于上一跳定位。 */
+ucn_v6_result_t ucn_v6_security_resolve_ingress_peer(
+    ucn_v6_security_manager_t *manager,
+    uint64_t now_us,
+    uint16_t ingress_link_instance_id,
+    uint32_t ingress_link_instance_generation,
+    const ucn_v6_frame_t *frame,
+    ucn_v6_principal_t *peer_principal);
+
+/* EN: Authenticates one relay ingress exactly once and consumes only the
+ * verified previous-Hop replay state.  It does not select or seal the next
+ * Hop.  The returned DTO is the sole input accepted by
+ * ucn_v6_security_forward_opened().
+ * 中文：对一条中继入站帧只认证一次，并仅提交已验证上一跳的 Replay 状态；
+ * 本函数不选择也不封装下一跳。返回 DTO 是
+ * ucn_v6_security_forward_opened() 唯一接受的输入。 */
+ucn_v6_result_t ucn_v6_security_open_relay_ingress(
+    ucn_v6_security_manager_t *manager,
+    uint64_t now_us,
+    uint16_t ingress_link_instance_id,
+    uint32_t ingress_link_instance_generation,
+    const ucn_v6_principal_t *authenticated_peer_principal,
+    const uint8_t *encoded_frame,
+    size_t encoded_length,
+    ucn_v6_security_open_result_t *verified_ingress);
+
+/* EN: Re-seals an already authenticated relay DTO for one exact next-Hop
+ * session.  This function never re-opens ingress and therefore cannot consume
+ * the previous-Hop replay window twice when Route/QoS work is separated.
+ * 中文：把已认证中继 DTO 按一个精确下一跳 Session 重新封装。本函数绝不再次
+ * 打开入站帧，因此 Route/QoS 分阶段执行时不会重复消费上一跳 Replay 窗口。 */
+ucn_v6_result_t ucn_v6_security_forward_opened(
+    ucn_v6_security_manager_t *manager,
+    uint64_t now_us,
+    const ucn_v6_principal_t *next_hop_principal,
+    uint64_t hop_budget_debit_us,
+    const ucn_v6_security_open_result_t *verified_ingress,
+    uint8_t *frame_work,
+    size_t frame_work_capacity,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_length,
+    ucn_v6_frame_t *relayed_frame);
+
 /* EN: Reserves a persistent sequence, seals E2E, then applies the next-hop
  * tag. Frame, input payload, every work/output buffer, and output-length
  * object must be pairwise disjoint. Work storage may change on failure;
@@ -573,6 +652,16 @@ ucn_v6_result_t ucn_v6_security_protect_group_hello(
 ucn_v6_result_t ucn_v6_security_copy_view(
     const ucn_v6_security_manager_t *manager,
     ucn_v6_security_view_t *view);
+
+/* EN: Copies the committed local endpoint identity used by Runtime when it
+ * derives reverse protocol routes. It never exposes keys or mutable Session
+ * state, and fails until a binding is durable.
+ * 中文：复制 Runtime 派生协议反向 Route 所需的已提交本机端点身份；不暴露
+ * 密钥或可变 Session 状态，并在 Binding 尚未持久化前失败。 */
+ucn_v6_result_t ucn_v6_security_copy_local_identity(
+    const ucn_v6_security_manager_t *manager,
+    ucn_v6_principal_t *principal,
+    ucn_v6_binding_key_t *binding);
 
 #ifdef __cplusplus
 }

@@ -36,6 +36,7 @@ typedef struct ucn_v6_qos_queue_item {
     uint64_t buffer_token;
     uint64_t flow_id;
     ucn_v6_session_key_t source;
+    bool parent_link_bound;
     uint16_t ingress_link_id;
     uint32_t ingress_link_generation;
     ucn_v6_traffic_class_t traffic_class;
@@ -52,6 +53,7 @@ typedef struct ucn_v6_qos_queue_item {
 typedef struct ucn_v6_qos_flow_state {
     bool occupied;
     ucn_v6_session_key_t source;
+    bool parent_link_bound;
     uint16_t ingress_link_id;
     uint32_t ingress_link_generation;
     uint64_t flow_id;
@@ -65,6 +67,7 @@ typedef struct ucn_v6_qos_inflight {
     uint64_t buffer_token;
     uint64_t flow_id;
     ucn_v6_session_key_t source;
+    bool parent_link_bound;
     uint16_t ingress_link_id;
     uint32_t ingress_link_generation;
     ucn_v6_traffic_class_t traffic_class;

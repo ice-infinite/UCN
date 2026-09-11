@@ -81,7 +81,7 @@ UCN 不应继续用一个发布结论同时覆盖 v5 实验、v6 Core 和 Cluste
 | 发布线 | 内容 | 当前状态 | 放行方式 |
 | --- | --- | --- | --- |
 | v5 Experimental | 当前 Frame、Node、Mesh、Route、Path、QoS、Transfer 和实验组件 | 软件证据丰富但不发布 | 只形成不可变历史快照 |
-| v6 / UCN 1.0 | 单一 Identity、Wire、Security、Message、Capability、RouteSet、Transfer 与参考平台 | V6-00 已终审 GO；V6-01～13 软件实现完成，V6-14/15 软件范围完成并等待统一外审 | 继续完成 TSan、目标硬件、Flash 掉电、性能长稳、生产密码 Provider 与最终外审；通过前不创建 1.0 RC |
+| v6 / UCN 1.0 | 单一 Identity、Wire、Security、Message、Capability、RouteSet、Transfer 与参考平台 | 历史 V6-00 哈希曾终审 GO；V6-01～13 软件实现完成，V6-14/15 软件范围完成。当前低开销 Wire、模块化、用户 Intent 和逻辑模型 00～26 已完成 V6S-A01～A14 与残留 R15～R27 内部整改；R15/R21、R16～R20 与 R22 文档语义已获外部 GO，R23/R24～R27 已完成规范 Owner ID、有向登记表逐边核对和基础设施调用 allowlist 整改，等待外部复审。状态为 `SELF-REVIEWED / EXTERNAL RE-REVIEW REQUIRED / AUDIT HOLD`；当前源码的物理解耦仍是后续 MOD 任务 | 先外审冻结当前文档、精确 Registry/Golden 和 API ABI，再按 MOD 顺序映射/替换实现；随后完成 TSan、目标硬件、Flash 掉电、性能长稳、生产密码 Provider 与最终外审；通过前不创建 1.0 RC |
 | Cluster Target | 复用 v6 的 Joint Config、Authority、Backup、Takeover、Handover、Recovery、Rekey | 模型较完整，统一接线待 v6 基座 | 作为可选模块随 1.0 支持矩阵签字 |
 
 这样可以先保存 v5 试验成果，再构建一个没有兼容债务的 MCU 自组网 Core；Cluster
@@ -221,10 +221,13 @@ ESP-NOW、多 Bearer 或生产完成。
 设计目标。当前已有静态 Peer Class、窗口能力、Binding 最大消息等级、E2E 策略和多种
 MTU 软件测试，但以下内容还没有形成最终协议闭环：
 
-当前 V6A-01～V6A-25 对应整改已全部获得外部 GO；V6A-24/V6A-25 合并冻结了 Group
-Generation 所有权、防 ABA 与固定容量表示。`V6-00` 已在最终架构 RFC/纯文档范围完成
-外部终审。该签字不代表 v6 代码、Wire、安全、实机或掉电能力已经完成；`V6-01` 仍等待
-V5-64 A06 的可追溯独立外审记录和用户对提交、v5 快照/Tag及 v6 基线的明确授权。
+V6A-01～V6A-25 所在**历史哈希**的整改曾全部获得外部 GO；V6A-24/V6A-25 合并冻结了
+Group Generation 所有权、防 ABA 与固定容量表示。2026-09-08 对最终架构 RFC 进行低开销
+Wire、模块化、用户 Intent 和逻辑模型 00～26 收口后，当前修订已完成 V6S-A01～A14
+内部整改与交叉自审，状态为 `SELF-REVIEWED / EXTERNAL RE-REVIEW REQUIRED / AUDIT HOLD`；
+历史签字只作证据，不能授权当前修订进入生产 Codec/RX/TX。第 26 篇只登记全局不变量与
+模块对接，A10/A11 所述 CMake/Runtime/Store 物理解耦仍须按 MOD-02～04 实施，V6-01～15
+的既有执行记录也不证明当前新合同已经实现。
 
 - 未绑定地址节点的一跳双向认证 Bootstrap、已绑定节点新 Link 重认证、单一逻辑 Address
   Authority 的 Lease/Fence/Quorum 与地址 Binding Generation；
@@ -722,19 +725,15 @@ E7  UCN 1.0 RC 与支持矩阵
 
 当前最合理的连续动作是：
 
-1. 对 V5-64 A06 形成独立、可追溯的外审结论，并据此关闭或继续整改台账；
-2. V6-00 最终架构 RFC 已完成外部终审，不再作为 V6-01 阻塞项；
-3. V5-64 A06 获得可追溯独立 GO 且用户明确授权后执行 V6-01：保存当前 v5 实验 Tag/分支、建立 Compatibility Removal Manifest 和
-   v6 干净基线；
-4. 按 V6-02～V6-05 实现身份/Bootstrap/Binding、Core Wire、Message 和 C99 Opaque
-   Storage 基座；
-5. 先实现 V6-07 唯一 JOIN/Security，再实现 V6-06 认证 Capability/Path Budget 和后续
-   RouteSet/Transfer；
-6. 同时确定第一个参考产品的 MCU、RTOS 和 Bearer 组合。
+1. 对低开销 Wire、模块边界、用户 Intent、逻辑模型 00～25 和统一 API/SPI 做当前哈希的独立外审；
+2. 关闭外审问题后，冻结基础 C0/C1、RREQ/RREP/RERR/SoftRoute 和 Advanced Flow 五个 Opcode 的精确 Registry、bit/byte offset、Golden 与 Negative Matrix；
+3. 冻结第 25 篇公共 C API 的结构大小、对齐、错误码、Feature OFF 头文件面和 Full/Lite/Nano 固定容量默认值；
+4. 建立“当前已实现 Contract 1 → 目标低开销 C0～C5”的逐模块替换清单，禁止两种 Wire 在同一产品 Runtime 中混合；
+5. 按 `Core/Runtime → Resolver → Basic C1/SoftRoute → Security/Delivery → Advanced Flow → Optional Features` 顺序实现并逐阶段重跑软件门禁；
+6. 完成生产密码 Provider、Flash/掉电、TSan、目标 MCU/Bearer、性能/功耗和长稳后，再创建 1.0 RC。
 
-如果当前只选择一个新任务，应选择 **完成 V5-64 A06 的可追溯独立外审**。它与用户对
-提交、v5 快照/Tag及 v6 基线的明确授权共同构成 V6-01 的剩余前置；在此之前不直接扩
-HELLO 或修改 Frame。完整任务见[总任务表](00-任务表.md)。
+如果当前只选择一个新任务，应选择 **对当前低开销/模块化/逻辑模型修订做独立外审**。
+外审冻结前不替换生产 Codec/RX/TX；历史 v5/v6 实验提交和旧 V6-00 签字只作追溯证据。
 
 ## 16. 最终完成定义
 

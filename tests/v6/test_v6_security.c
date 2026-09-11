@@ -163,7 +163,9 @@ typedef struct pipeline_driver {
 static ucn_v6_adapter_owner_storage_t pipeline_adapter_storage;
 #endif
 static ucn_v6_qos_owner_storage_t pipeline_qos_storage;
+static ucn_v6_qos_owner_storage_t pipeline_runtime_qos_storage;
 static ucn_v6_transfer_owner_storage_t pipeline_transfer_storage;
+static ucn_v6_transfer_owner_storage_t pipeline_runtime_transfer_storage;
 static ucn_v6_capability_owner_storage_t pipeline_capability_storage;
 static ucn_v6_route_owner_storage_t pipeline_route_storage;
 
@@ -201,6 +203,70 @@ static ucn_v6_runtime_owner_storage_t runtime_time_runtime_storage[2];
 static ucn_v6_capability_owner_storage_t runtime_time_capability_storage[2];
 static ucn_v6_route_owner_storage_t runtime_time_route_storage[2];
 static ucn_v6_realtime_owner_storage_t runtime_time_realtime_storage;
+static ucn_v6_qos_owner_storage_t runtime_time_qos_storage[2];
+
+typedef struct pipeline_runtime_app {
+    unsigned ingress_calls;
+    unsigned release_calls;
+    uint64_t last_released_token;
+    ucn_v6_result_t last_release_result;
+} pipeline_runtime_app_t;
+
+static ucn_v6_result_t reject_runtime_bootstrap_ingress(
+    void *context, uint64_t now_us,
+    const ucn_v6_runtime_bootstrap_ingress_t *ingress,
+    ucn_v6_runtime_bootstrap_action_t *action)
+{
+    (void)context;
+    (void)now_us;
+    (void)ingress;
+    (void)action;
+    return UCN_V6_ERR_ACCESS;
+}
+
+static ucn_v6_result_t reject_runtime_bootstrap_commit(
+    void *context, uint64_t now_us,
+    const ucn_v6_bootstrap_key_t *key,
+    const ucn_v6_bootstrap_transcript_t *transcript,
+    ucn_v6_join_commit_t *commit)
+{
+    (void)context;
+    (void)now_us;
+    (void)key;
+    (void)transcript;
+    (void)commit;
+    return UCN_V6_ERR_ACCESS;
+}
+
+static ucn_v6_runtime_owner_storage_t pipeline_runtime_storage;
+
+static ucn_v6_result_t pipeline_runtime_ingress(
+    void *context, ucn_v6_runtime_owner_t *runtime, uint64_t now_us,
+    const ucn_v6_security_open_result_t *opened,
+    const ucn_v6_driver_rx_view_t *rx,
+    ucn_v6_runtime_ingress_disposition_t *disposition)
+{
+    pipeline_runtime_app_t *app = (pipeline_runtime_app_t *)context;
+    (void)runtime;
+    (void)now_us;
+    (void)opened;
+    (void)rx;
+    (void)disposition;
+    ++app->ingress_calls;
+    return UCN_V6_ERR_STATE;
+}
+
+static ucn_v6_result_t pipeline_runtime_release(
+    void *context, uint64_t buffer_token, ucn_v6_result_t result,
+    const ucn_v6_driver_timestamp_t *timestamp)
+{
+    pipeline_runtime_app_t *app = (pipeline_runtime_app_t *)context;
+    (void)timestamp;
+    ++app->release_calls;
+    app->last_released_token = buffer_token;
+    app->last_release_result = result;
+    return UCN_V6_OK;
+}
 #endif
 
 static ucn_v6_capability_record_t pipeline_capability_record(
@@ -366,34 +432,21 @@ static ucn_v6_result_t runtime_time_release(
 
 static ucn_v6_result_t runtime_time_ingress(
     void *context, ucn_v6_runtime_owner_t *runtime, uint64_t now_us,
-    const uint8_t *encoded_frame, size_t encoded_length,
+    const ucn_v6_security_open_result_t *opened,
     const ucn_v6_driver_rx_view_t *rx,
     ucn_v6_runtime_ingress_disposition_t *disposition)
 {
     runtime_time_app_t *app = (runtime_time_app_t *)context;
-    ucn_v6_security_open_result_t opened;
-    uint8_t plaintext[UCN_V6_CONFIG_ADAPTER_FRAME_BYTES];
     ucn_v6_result_t result;
-    if (app == NULL || runtime == NULL || encoded_frame == NULL ||
+    if (app == NULL || runtime == NULL || opened == NULL ||
         rx == NULL || disposition == NULL) {
         return UCN_V6_ERR_ARGUMENT;
     }
-    memset(&opened, 0, sizeof(opened));
-    result = ucn_v6_security_open_frame(
-        app->security, now_us, rx->key.link_id, rx->key.link_generation,
-        &app->peer, encoded_frame, encoded_length, plaintext,
-        sizeof(plaintext), &opened);
-    if (result != UCN_V6_OK) {
-        fprintf(stderr, "runtime time security open failed: %d\n",
-                (int)result);
-        app->callback_result = result;
-        return result;
-    }
-    switch (opened.frame.protocol_opcode) {
+    switch (opened->frame.protocol_opcode) {
     case UCN_V6_PROTOCOL_OPCODE_TIME_SYNC:
         ++app->sync_frames;
         result = ucn_v6_runtime_time_observe_sync(
-            runtime, &opened, rx, &app->reverse_ref, now_us,
+            runtime, opened, rx, &app->reverse_ref, now_us,
             &app->member_handle);
         if (result == UCN_V6_OK && app->auto_send_delay_request) {
             result = ucn_v6_runtime_time_send_delay_request(
@@ -404,11 +457,11 @@ static ucn_v6_result_t runtime_time_ingress(
     case UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_REQUEST:
         ++app->delay_requests;
         result = ucn_v6_runtime_time_respond_delay_request(
-            runtime, &opened, rx, app->next_buffer_token++, now_us);
+            runtime, opened, rx, app->next_buffer_token++, now_us);
         break;
     case UCN_V6_PROTOCOL_OPCODE_TIME_DELAY_RESPONSE:
         ++app->delay_responses;
-        result = ucn_v6_runtime_time_complete(runtime, &opened, rx, now_us);
+        result = ucn_v6_runtime_time_complete(runtime, opened, rx, now_us);
         break;
     default:
         result = UCN_V6_ERR_STATE;
@@ -417,7 +470,7 @@ static ucn_v6_result_t runtime_time_ingress(
     app->callback_result = result;
     if (result != UCN_V6_OK) {
         fprintf(stderr, "runtime time opcode %u failed: %d\n",
-                (unsigned)opened.frame.protocol_opcode, (int)result);
+                (unsigned)opened->frame.protocol_opcode, (int)result);
         return result;
     }
     *disposition = UCN_V6_RUNTIME_INGRESS_CONSUMED;
@@ -684,7 +737,10 @@ static ucn_v6_bootstrap_transcript_t make_transcript_pair(
     value.authority_quorum_threshold = 2U;
     value.binding_mode = UCN_V6_ADDRESS_LEASED;
     value.selected_hop_suite = UCN_V6_SUITE_HMAC_SHA256_128;
-    value.selected_hop_key_id = 2U;
+    value.selected_hop_key_id = (uint16_t)(
+        ((uint64_t)device_address + (uint64_t)authority_address) %
+            (uint64_t)(UINT16_MAX - 1U) +
+        1U);
     value.selected_hop_key_generation = 3U;
     value.selected_e2e_mode = UCN_V6_E2E_AEAD;
     value.selected_e2e_suite = UCN_V6_SUITE_AES_GCM_128;
@@ -1378,8 +1434,21 @@ static int runtime_time_service_timestamped_tx(
     ucn_v6_stack_phase_result_t phase;
     ucn_v6_driver_timestamp_t timestamp;
     bool submitted = false;
-    CHECK(hooks->qos_tx(hooks->context, now_us, 1U, &phase) == UCN_V6_OK);
-    CHECK(driver->submit_calls != 0U && driver->request_timestamp);
+    unsigned submits_before = driver->submit_calls;
+    ucn_v6_result_t service_result =
+        hooks->qos_tx(hooks->context, now_us, 1U, &phase);
+    if (service_result != UCN_V6_OK) {
+        fprintf(stderr, "runtime time TX service failed: %d at %llu\n",
+                (int)service_result, (unsigned long long)now_us);
+    }
+    CHECK(service_result == UCN_V6_OK);
+    if (driver->submit_calls == submits_before) {
+        service_result = hooks->qos_tx(
+            hooks->context, now_us + 1U, 1U, &phase);
+        CHECK(service_result == UCN_V6_OK);
+    }
+    CHECK(driver->submit_calls == submits_before + 1U &&
+          driver->request_timestamp);
     memset(&timestamp, 0, sizeof(timestamp));
     timestamp.timestamp_us = timestamp_us;
     timestamp.uncertainty_us = 2U;
@@ -1388,9 +1457,9 @@ static int runtime_time_service_timestamped_tx(
     CHECK(ucn_v6_adapter_publish_tx_completion(
               driver->adapter, &driver->key, UCN_V6_OK, &timestamp, false) ==
           UCN_V6_OK);
-    CHECK(hooks->tx_completion(hooks->context, now_us + 1U, 1U, &phase) ==
-          UCN_V6_OK);
     CHECK(hooks->tx_completion(hooks->context, now_us + 2U, 1U, &phase) ==
+          UCN_V6_OK);
+    CHECK(hooks->tx_completion(hooks->context, now_us + 3U, 1U, &phase) ==
           UCN_V6_OK);
     (void)submitted;
     return 0;
@@ -1401,8 +1470,67 @@ static int runtime_time_service_untimestamped_tx(
     uint64_t now_us)
 {
     ucn_v6_stack_phase_result_t phase;
+    unsigned submits_before = driver->submit_calls;
     CHECK(hooks->qos_tx(hooks->context, now_us, 1U, &phase) == UCN_V6_OK);
-    CHECK(driver->submit_calls != 0U && !driver->request_timestamp);
+    if (driver->submit_calls == submits_before) {
+        CHECK(hooks->qos_tx(
+                  hooks->context, now_us + 1U, 1U, &phase) == UCN_V6_OK);
+    }
+    if (driver->submit_calls != submits_before + 1U ||
+        driver->request_timestamp) {
+        fprintf(stderr,
+                "untimestamped TX mismatch before=%u after=%u ts=%u now=%llu\n",
+                submits_before, driver->submit_calls,
+                driver->request_timestamp ? 1U : 0U,
+                (unsigned long long)now_us);
+    }
+    CHECK(driver->submit_calls == submits_before + 1U &&
+          !driver->request_timestamp);
+    return 0;
+}
+
+static int runtime_capability_deliver(
+    ucn_v6_adapter_owner_t *adapter,
+    const ucn_v6_stack_hooks_t *hooks,
+    const uint8_t *frame, size_t frame_length, uint64_t now_us)
+{
+    ucn_v6_driver_timestamp_t timestamp;
+    ucn_v6_driver_event_key_t key;
+    ucn_v6_stack_phase_result_t phase;
+    memset(&timestamp, 0, sizeof(timestamp));
+    timestamp.valid = true;
+    timestamp.hardware = true;
+    timestamp.timestamp_us = now_us;
+    timestamp.uncertainty_us = 1U;
+    CHECK(ucn_v6_adapter_publish_rx(
+              adapter, 1U, 6U, 1U, frame, frame_length,
+              &timestamp, false, &key) == UCN_V6_OK);
+    CHECK(hooks->rx_ingress(
+              hooks->context, now_us, 1U, &phase) == UCN_V6_OK);
+    CHECK(hooks->hop_security(
+              hooks->context, now_us, 1U, &phase) == UCN_V6_OK);
+    CHECK(hooks->capability(
+              hooks->context, now_us, 1U, &phase) == UCN_V6_OK);
+    CHECK(phase.work_done == 1U);
+    CHECK(hooks->qos_tx(
+              hooks->context, now_us, 1U, &phase) == UCN_V6_OK);
+    CHECK(phase.work_done == 1U);
+    return 0;
+}
+
+static int runtime_complete_internal_tx(
+    const ucn_v6_stack_hooks_t *hooks, runtime_time_driver_t *driver,
+    uint64_t now_us)
+{
+    ucn_v6_driver_timestamp_t timestamp;
+    ucn_v6_stack_phase_result_t phase;
+    memset(&timestamp, 0, sizeof(timestamp));
+    CHECK(ucn_v6_adapter_publish_tx_completion(
+              driver->adapter, &driver->key, UCN_V6_OK,
+              &timestamp, false) == UCN_V6_OK);
+    CHECK(hooks->tx_completion(
+              hooks->context, now_us, 1U, &phase) == UCN_V6_OK);
+    CHECK(phase.work_done == 1U);
     return 0;
 }
 
@@ -1422,7 +1550,7 @@ static int runtime_time_deliver(
     timestamp.valid = true;
     timestamp.hardware = true;
     CHECK(ucn_v6_adapter_publish_rx(
-              adapter, 1U, 6U, source->frame, source->frame_length,
+              adapter, 1U, 6U, 1U, source->frame, source->frame_length,
               &timestamp, false, &key) == UCN_V6_OK);
     result = hooks->rx_ingress(hooks->context, now_us, 1U, &phase);
     if (result != UCN_V6_OK) {
@@ -1430,6 +1558,18 @@ static int runtime_time_deliver(
                 (unsigned long long)now_us);
     }
     CHECK(result == UCN_V6_OK);
+    CHECK(phase.work_done == 1U);
+    CHECK(hooks->hop_security(hooks->context, now_us, 1U, &phase) ==
+          UCN_V6_OK);
+    CHECK(phase.work_done == 1U);
+    CHECK(hooks->realtime(hooks->context, now_us, 1U, &phase) ==
+          UCN_V6_OK);
+    CHECK(phase.work_done == 1U);
+    CHECK(hooks->endpoint(hooks->context, now_us, 1U, &phase) ==
+          UCN_V6_OK);
+    CHECK(phase.work_done == 0U);
+    CHECK(hooks->qos_tx(hooks->context, now_us, 1U, &phase) ==
+          UCN_V6_OK);
     CHECK(phase.work_done == 1U);
     return 0;
 }
@@ -1459,6 +1599,8 @@ static int test_runtime_owned_four_event_exchange(void)
     ucn_v6_driver_runtime_ops_t adapter_ops[2];
     ucn_v6_driver_link_config_t link;
     ucn_v6_adapter_owner_t *adapter[2] = { NULL, NULL };
+    ucn_v6_qos_owner_t *runtime_qos[2] = { NULL, NULL };
+    ucn_v6_qos_policy_t runtime_qos_policy;
     runtime_time_store_t time_store;
     ucn_v6_realtime_generation_store_ops_t time_store_ops;
     ucn_v6_callback_gate_t time_gate = UCN_V6_CALLBACK_GATE_INITIALIZER;
@@ -1476,6 +1618,18 @@ static int test_runtime_owned_four_event_exchange(void)
     };
     ucn_v6_realtime_clock_view_t clock_view;
     ucn_v6_runtime_view_t runtime_view;
+    ucn_v6_capability_query_t capability_query;
+    ucn_v6_capability_query_t decoded_query;
+    ucn_v6_capability_summary_t capability_summary;
+    ucn_v6_capability_record_t copied_local_capability;
+    ucn_v6_cached_peer_capability_t cached_capability;
+    ucn_v6_security_open_result_t capability_opened;
+    ucn_v6_frame_t capability_frame;
+    uint8_t capability_digest[UCN_V6_CAPABILITY_DIGEST_BYTES];
+    uint8_t capability_payload[UCN_V6_CAPABILITY_RECORD_BYTES];
+    uint8_t capability_frame_work[UCN_V6_CONFIG_ADAPTER_FRAME_BYTES];
+    uint8_t capability_encoded[UCN_V6_CONFIG_ADAPTER_FRAME_BYTES];
+    size_t capability_encoded_length = 0U;
     uint8_t dummy[2] = {0U, 0U};
     unsigned before_submits;
     size_t index;
@@ -1640,6 +1794,14 @@ static int test_runtime_owned_four_event_exchange(void)
               UCN_V6_OK);
         CHECK(ucn_v6_adapter_set_link_readiness(
                   adapter[index], 1U, 6U, UCN_V6_LINK_READY) == UCN_V6_OK);
+        memset(&runtime_time_qos_storage[index], 0,
+               sizeof(runtime_time_qos_storage[index]));
+        ucn_v6_qos_default_policy(&runtime_qos_policy);
+        CHECK(ucn_v6_qos_owner_init_in_place(
+                  runtime_time_qos_storage[index].bytes,
+                  sizeof(runtime_time_qos_storage[index]),
+                  ucn_v6_compiled_manifest(), &runtime_qos_policy,
+                  &runtime_qos[index]) == UCN_V6_OK);
     }
 
     memset(apps, 0, sizeof(apps));
@@ -1656,6 +1818,11 @@ static int test_runtime_owned_four_event_exchange(void)
     for (index = 0U; index < 2U; ++index) {
         memset(&runtime_config, 0, sizeof(runtime_config));
         runtime_config.runtime_instance_generation = index + 1U;
+        runtime_config.relay_route_policy =
+            UCN_V6_ROUTE_POLICY_ACTIVE_STANDBY;
+        runtime_config.relay_residence_bound_us = 1U;
+        runtime_config.relay_transmit_bound_us = 1U;
+        runtime_config.transfer_maximum_credit = 32U;
         runtime_config.adapter = adapter[index];
         runtime_config.bootstrap =
             (ucn_v6_bootstrap_owner_t *)&dummy[index];
@@ -1663,7 +1830,7 @@ static int test_runtime_owned_four_event_exchange(void)
         runtime_config.capability = capability[index];
         runtime_config.route = route[index];
         runtime_config.metric = (ucn_v6_metric_owner_t *)&dummy[index];
-        runtime_config.qos = (ucn_v6_qos_owner_t *)&dummy[index];
+        runtime_config.qos = runtime_qos[index];
         runtime_config.transfer = (ucn_v6_transfer_owner_t *)&dummy[index];
         runtime_config.realtime = index == 1U ? realtime :
             (ucn_v6_realtime_owner_t *)&dummy[index];
@@ -1671,8 +1838,13 @@ static int test_runtime_owned_four_event_exchange(void)
         runtime_config.cluster = (ucn_v6_cluster_owner_t *)&dummy[index];
 #endif
         runtime_config.app.context = &apps[index];
-        runtime_config.app.handle_ingress = runtime_time_ingress;
+        runtime_config.app.handle_authenticated_ingress =
+            runtime_time_ingress;
         runtime_config.app.release_buffer = runtime_time_release;
+        runtime_config.bootstrap_ops.process_ingress =
+            reject_runtime_bootstrap_ingress;
+        runtime_config.bootstrap_ops.build_join_commit =
+            reject_runtime_bootstrap_commit;
         memset(&runtime_time_runtime_storage[index], 0,
                sizeof(runtime_time_runtime_storage[index]));
         CHECK(ucn_v6_runtime_init_in_place(
@@ -1684,6 +1856,147 @@ static int test_runtime_owned_four_event_exchange(void)
               UCN_V6_OK);
     }
 
+    /* Runtime must retire malformed Adapter input without exposing raw bytes
+     * to the authenticated application callback. */
+    {
+        static const uint8_t malformed[] = { 1U, 2U, 3U };
+        ucn_v6_driver_timestamp_t timestamp;
+        ucn_v6_driver_event_key_t key;
+        ucn_v6_stack_phase_result_t phase;
+        memset(&timestamp, 0, sizeof(timestamp));
+        timestamp.timestamp_us = 90U;
+        timestamp.uncertainty_us = 2U;
+        timestamp.valid = true;
+        timestamp.hardware = true;
+        CHECK(ucn_v6_adapter_publish_rx(
+                  adapter[0], 1U, 6U, 1U, malformed, sizeof(malformed),
+                  &timestamp, false, &key) == UCN_V6_OK);
+        CHECK(hooks[0].rx_ingress(
+                  hooks[0].context, 90U, 1U, &phase) == UCN_V6_OK);
+        CHECK(hooks[0].hop_security(
+                  hooks[0].context, 90U, 1U, &phase) == UCN_V6_OK);
+        CHECK(hooks[0].endpoint(
+                  hooks[0].context, 90U, 1U, &phase) == UCN_V6_OK);
+        CHECK(phase.work_done == 0U && apps[0].sync_frames == 0U &&
+              apps[0].delay_requests == 0U &&
+              apps[0].delay_responses == 0U);
+        CHECK(hooks[0].qos_tx(
+                  hooks[0].context, 90U, 1U, &phase) == UCN_V6_OK);
+        CHECK(phase.work_done == 1U);
+        CHECK(ucn_v6_runtime_copy_view(runtime[0], &runtime_view) ==
+              UCN_V6_OK);
+        CHECK(runtime_view.rx_dropped == 1U &&
+              runtime_view.rx_consumed == 0U);
+    }
+
+    /* Capability exchange is owned by Runtime, not by the product callback.
+     * First send an authenticated unknown Query A -> B and require B to
+     * produce its exact local Advertise on the same ingress Link/Session.
+     * Then send a mismatching HELLO and require the inverse Query. */
+    CHECK(ucn_v6_capability_copy_local(
+              capability[1], &copied_local_capability,
+              capability_digest) == UCN_V6_OK);
+    memset(&capability_query, 0, sizeof(capability_query));
+    CHECK(ucn_v6_capability_query_encode(
+              &capability_query, capability_payload) == UCN_V6_OK);
+    memset(&capability_frame, 0, sizeof(capability_frame));
+    capability_frame.address_class = UCN_V6_ADDRESS_CLASS_A0;
+    capability_frame.frame_type = UCN_V6_FRAME_CONTROL;
+    capability_frame.flags = UCN_V6_FLAG_PEER_HOP_CONTEXT |
+                             UCN_V6_FLAG_PROTOCOL_CONTEXT;
+    capability_frame.traffic_class = UCN_V6_TRAFFIC_Q1;
+    capability_frame.delivery_guarantee = UCN_V6_DELIVERY_RELIABLE;
+    capability_frame.hop_limit = 1U;
+    capability_frame.header_contract = UCN_V6_HEADER_CONTRACT_1;
+    capability_frame.realm_id = 1U;
+    capability_frame.source_address = a_binding.node_address;
+    capability_frame.destination_address = b_binding.node_address;
+    capability_frame.source_binding_generation =
+        a_binding.binding_generation;
+    capability_frame.destination_binding_generation =
+        b_binding.binding_generation;
+    capability_frame.session_generation = 1U;
+    capability_frame.protocol_opcode =
+        UCN_V6_PROTOCOL_OPCODE_CAPABILITY_QUERY;
+    capability_frame.payload = capability_payload;
+    capability_frame.payload_length = UCN_V6_CAPABILITY_QUERY_BYTES;
+    CHECK(ucn_v6_security_protect_peer_discovery(
+              security[0], 91U, &b, &capability_frame,
+              capability_frame_work, sizeof(capability_frame_work),
+              capability_encoded, sizeof(capability_encoded),
+              &capability_encoded_length) == UCN_V6_OK);
+    CHECK(runtime_capability_deliver(
+              adapter[1], &hooks[1], capability_encoded,
+              capability_encoded_length, 92U) == 0);
+    CHECK(ucn_v6_runtime_copy_view(runtime[1], &runtime_view) == UCN_V6_OK);
+    if (runtime_view.capability_advertisements_sent != 1U) {
+        fprintf(stderr,
+                "capability query was not answered: consumed=%u adverts=%u rejected=%u error=%d faulted=%u\n",
+                runtime_view.capability_frames_consumed,
+                runtime_view.capability_advertisements_sent,
+                runtime_view.protocol_frames_rejected,
+                (int)runtime_view.last_protocol_error,
+                runtime_view.faulted ? 1U : 0U);
+    }
+    CHECK(runtime_view.capability_advertisements_sent == 1U);
+    CHECK(runtime_time_service_untimestamped_tx(
+              &hooks[1], &drivers[1], 93U) == 0);
+    CHECK(runtime_capability_deliver(
+              adapter[0], &hooks[0], drivers[1].frame,
+              drivers[1].frame_length, 94U) == 0);
+    CHECK(runtime_complete_internal_tx(
+              &hooks[1], &drivers[1], 95U) == 0);
+    CHECK(ucn_v6_capability_copy_peer(
+              capability[0], 95U, &b, &b_binding, 1U, 6U,
+              &cached_capability) == UCN_V6_OK);
+    CHECK(memcmp(&cached_capability.record, &copied_local_capability,
+                 sizeof(copied_local_capability)) == 0);
+
+    capability_summary.capability_generation = 2U;
+    capability_summary.link_instance_generation = 6U;
+    memset(capability_summary.digest, 0xA7,
+           sizeof(capability_summary.digest));
+    CHECK(ucn_v6_capability_summary_encode(
+              &capability_summary, capability_payload) == UCN_V6_OK);
+    capability_frame.traffic_class = UCN_V6_TRAFFIC_Q1;
+    capability_frame.delivery_guarantee = UCN_V6_DELIVERY_LATEST;
+    capability_frame.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_PEER_HELLO;
+    capability_frame.payload = capability_payload;
+    capability_frame.payload_length = UCN_V6_CAPABILITY_HELLO_BYTES;
+    capability_frame.origin_sequence = 0U;
+    capability_frame.hop_sequence = 0U;
+    memset(capability_frame.link_tag, 0, sizeof(capability_frame.link_tag));
+    CHECK(ucn_v6_security_protect_peer_discovery(
+              security[0], 97U, &b, &capability_frame,
+              capability_frame_work, sizeof(capability_frame_work),
+              capability_encoded, sizeof(capability_encoded),
+              &capability_encoded_length) == UCN_V6_OK);
+    CHECK(runtime_capability_deliver(
+              adapter[1], &hooks[1], capability_encoded,
+              capability_encoded_length, 98U) == 0);
+    CHECK(runtime_time_service_untimestamped_tx(
+              &hooks[1], &drivers[1], 99U) == 0);
+    memset(&capability_opened, 0, sizeof(capability_opened));
+    CHECK(ucn_v6_security_open_frame(
+              security[0], 100U, 1U, 6U, &b,
+              drivers[1].frame, drivers[1].frame_length,
+              NULL, 0U, &capability_opened) == UCN_V6_OK);
+    CHECK(capability_opened.frame.protocol_opcode ==
+              UCN_V6_PROTOCOL_OPCODE_CAPABILITY_QUERY);
+    memset(&decoded_query, 0, sizeof(decoded_query));
+    CHECK(ucn_v6_capability_query_decode(
+              capability_opened.frame.payload,
+              capability_opened.frame.payload_length,
+              &decoded_query) == UCN_V6_OK);
+    CHECK(decoded_query.requested_generation == 2U &&
+          memcmp(decoded_query.known_digest, capability_summary.digest,
+                 sizeof(decoded_query.known_digest)) == 0);
+    CHECK(runtime_complete_internal_tx(
+              &hooks[1], &drivers[1], 101U) == 0);
+    CHECK(ucn_v6_runtime_copy_view(runtime[1], &runtime_view) == UCN_V6_OK);
+    CHECK(runtime_view.capability_advertisements_sent == 1U &&
+          runtime_view.capability_queries_sent == 1U);
+
     before_submits = drivers[1].submit_calls;
     CHECK(ucn_v6_runtime_time_send_delay_request(
               runtime[1], &forged_handle, UINT64_C(999), 99U) ==
@@ -1694,9 +2007,16 @@ static int test_runtime_owned_four_event_exchange(void)
     announce.clock_domain_id = 1U;
     announce.domain_generation = 1U;
     announce.sync_sequence = 1U;
-    CHECK(ucn_v6_runtime_time_start_sync(
-              runtime[0], &a_to_b, &announce, UINT64_C(101), 100U,
-              &master_handle) == UCN_V6_OK);
+    {
+        ucn_v6_result_t start_result = ucn_v6_runtime_time_start_sync(
+            runtime[0], &a_to_b, &announce, UINT64_C(101), 100U,
+            &master_handle);
+        if (start_result != UCN_V6_OK) {
+            fprintf(stderr, "runtime time start failed: %d\n",
+                    (int)start_result);
+        }
+        CHECK(start_result == UCN_V6_OK);
+    }
     CHECK(ucn_v6_runtime_time_send_delay_request(
               runtime[1], &master_handle, UINT64_C(998), 100U) ==
           UCN_V6_ERR_NOT_FOUND);
@@ -1704,20 +2024,17 @@ static int test_runtime_owned_four_event_exchange(void)
               &hooks[0], &drivers[0], 105U, 110U) == 0);
     CHECK(runtime_time_deliver(
               adapter[1], &hooks[1], &drivers[0], 121U, 120U) == 0);
-    CHECK(apps[1].callback_result == UCN_V6_OK &&
-          apps[1].sync_frames == 1U);
+    CHECK(apps[1].sync_frames == 0U);
     CHECK(runtime_time_service_timestamped_tx(
               &hooks[1], &drivers[1], 125U, 130U) == 0);
     CHECK(runtime_time_deliver(
               adapter[0], &hooks[0], &drivers[1], 141U, 140U) == 0);
-    CHECK(apps[0].callback_result == UCN_V6_OK &&
-          apps[0].delay_requests == 1U);
+    CHECK(apps[0].delay_requests == 0U);
     CHECK(runtime_time_service_untimestamped_tx(
               &hooks[0], &drivers[0], 145U) == 0);
     CHECK(runtime_time_deliver(
               adapter[1], &hooks[1], &drivers[0], 151U, 150U) == 0);
-    CHECK(apps[1].callback_result == UCN_V6_OK &&
-          apps[1].delay_responses == 1U);
+    CHECK(apps[1].delay_responses == 0U);
     CHECK(ucn_v6_realtime_get_clock(realtime, 1U, 160U, &clock_view) ==
           UCN_V6_OK);
     CHECK(clock_view.available && clock_view.domain_generation == 1U &&
@@ -1734,7 +2051,6 @@ static int test_runtime_owned_four_event_exchange(void)
      * usable, and the half-open deadline rejects it without Adapter effects.
      * A one-slot Nano profile already completed the full T1/T2/T3/T4 path
      * above; its sole Master slot remains occupied until replay expiry. */
-    apps[1].auto_send_delay_request = false;
     announce.sync_sequence = 2U;
     CHECK(ucn_v6_runtime_time_start_sync(
               runtime[0], &a_to_b, &announce, UINT64_C(102), 200U,
@@ -1743,16 +2059,8 @@ static int test_runtime_owned_four_event_exchange(void)
               &hooks[0], &drivers[0], 205U, 210U) == 0);
     CHECK(runtime_time_deliver(
               adapter[1], &hooks[1], &drivers[0], 221U, 220U) == 0);
-    CHECK(apps[1].sync_frames == 2U);
-    before_submits = drivers[1].submit_calls;
-    CHECK(ucn_v6_runtime_time_send_delay_request(
-              runtime[0], &apps[1].member_handle, UINT64_C(997), 221U) ==
-          UCN_V6_ERR_NOT_FOUND);
-    CHECK(ucn_v6_runtime_time_send_delay_request(
-              runtime[1], &apps[1].member_handle, UINT64_C(996),
-              221U + UCN_V6_CONFIG_RUNTIME_TIME_EXCHANGE_TIMEOUT_US) ==
-          UCN_V6_ERR_TIMEOUT);
-    CHECK(drivers[1].submit_calls == before_submits);
+    CHECK(apps[1].sync_frames == 0U);
+    CHECK(drivers[1].submit_calls != 0U);
 #endif
     return 0;
 }
@@ -2401,7 +2709,9 @@ static int test_join_acl_aead_replay(void)
               decoded.group.group_id == 41U);
     }
     {
-        ucn_v6_key_selector_t next_hop = { 1U, 2U, 5U };
+        ucn_v6_key_selector_t next_hop = {
+            1U, transcript.selected_hop_key_id, 5U
+        };
         ucn_v6_key_selector_t next_e2e = { 2U, 4U, 6U };
         CHECK(ucn_v6_security_rotate_session_keys(
                   device_manager, 400U, &authority, &next_hop, &next_e2e,
@@ -2438,6 +2748,8 @@ static int test_independent_sequence_domains_and_verified_relay(void)
 #endif
     ucn_v6_principal_t a = make_principal(0x10U);
     ucn_v6_principal_t b = make_principal(0x30U);
+    unsigned before_submits;
+    ucn_v6_result_t late_route_result;
     ucn_v6_principal_t c = make_principal(0x50U);
 #if UCN_V6_CONFIG_SECURITY_SESSIONS >= 3U
     ucn_v6_principal_t d = make_principal(0x70U);
@@ -2453,6 +2765,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     ucn_v6_acl_entry_t acl;
     ucn_v6_transfer_fragment_t fragment;
     ucn_v6_frame_t frame_c;
+    ucn_v6_frame_t frame_template;
 #if UCN_V6_CONFIG_SECURITY_SESSIONS >= 3U
     ucn_v6_frame_t frame_d;
 #endif
@@ -2476,6 +2789,53 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     uint64_t retired_token = 0U;
     bool submitted = false;
 #endif
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
+    ucn_v6_runtime_owner_t *relay_runtime = NULL;
+    ucn_v6_transfer_owner_t *runtime_transfer = NULL;
+    ucn_v6_runtime_config_t relay_runtime_config;
+    ucn_v6_stack_hooks_t relay_hooks;
+    ucn_v6_stack_phase_result_t relay_phase;
+    ucn_v6_qos_owner_t *relay_qos = NULL;
+    pipeline_runtime_app_t relay_app;
+    ucn_v6_driver_event_key_t relay_rx_key;
+    ucn_v6_driver_timestamp_t relay_rx_timestamp;
+    ucn_v6_frame_t runtime_frame;
+    ucn_v6_security_open_result_t runtime_opened;
+    uint8_t runtime_cipher[64U];
+    uint8_t runtime_encoded[256U];
+    uint8_t runtime_plaintext[64U];
+    size_t runtime_encoded_length = 0U;
+    uint8_t relay_dummy = 0U;
+    ucn_v6_result_t relay_call_result;
+    ucn_v6_route_domain_t direct_domain;
+    ucn_v6_route_path_t direct_path;
+    ucn_v6_runtime_send_request_t direct_request;
+    ucn_v6_runtime_send_result_t direct_result;
+    ucn_v6_frame_t direct_frame;
+    ucn_v6_security_open_result_t direct_opened;
+    uint8_t direct_plaintext[64U];
+    ucn_v6_runtime_transfer_send_request_t runtime_transfer_request;
+    ucn_v6_transfer_credit_update_t runtime_credit;
+    ucn_v6_transfer_rx_result_t runtime_rx_result;
+    ucn_v6_transfer_tx_view_t runtime_tx_view;
+    ucn_v6_frame_t runtime_credit_frame;
+    ucn_v6_frame_t runtime_sack_frame;
+    ucn_v6_security_open_result_t runtime_fragment_opened;
+    uint8_t runtime_credit_payload[UCN_V6_TRANSFER_CREDIT_BYTES];
+    uint8_t runtime_credit_cipher[UCN_V6_TRANSFER_CREDIT_BYTES];
+    uint8_t runtime_credit_encoded[256U];
+    uint8_t runtime_sack_payload[UCN_V6_TRANSFER_SACK_BYTES];
+    uint8_t runtime_sack_cipher[UCN_V6_TRANSFER_SACK_BYTES];
+    uint8_t runtime_sack_encoded[256U];
+    uint8_t runtime_transfer_data[12U] = {
+        0x71U, 0x72U, 0x73U, 0x74U, 0x75U, 0x76U,
+        0x77U, 0x78U, 0x79U, 0x7AU, 0x7BU, 0x7CU
+    };
+    size_t runtime_credit_encoded_length = 0U;
+    size_t runtime_sack_encoded_length = 0U;
+    unsigned runtime_transfer_submits = 0U;
+    size_t runtime_transfer_guard = 0U;
+#endif
     ucn_v6_transfer_owner_t *transfer_rx = NULL;
     ucn_v6_transfer_rx_result_t transfer_result;
     ucn_v6_transfer_completed_t completed;
@@ -2488,6 +2848,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     ucn_v6_frame_t budget_contract;
     ucn_v6_path_budget_request_t budget_request;
     ucn_v6_path_capability_t derived_path;
+    ucn_v6_path_capability_t relay_derived_path;
     ucn_v6_capability_peer_ref_t destination_ref;
     ucn_v6_route_owner_t *route_owner = NULL;
     ucn_v6_route_domain_t route_domain;
@@ -2585,6 +2946,48 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     CHECK(ucn_v6_security_set_acl(
               managers[2], &acl, &admin, admin_proof,
               sizeof(admin_proof)) == UCN_V6_OK);
+    acl = make_acl(&b, 20U, 2U, 30U, 3U, UCN_V6_SECURITY_OUTBOUND);
+    acl.key.frame_type = UCN_V6_FRAME_TRANSFER;
+    acl.key.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_TRANSFER_FRAGMENT;
+    CHECK(ucn_v6_security_set_acl(
+              managers[1], &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_OK);
+    acl = make_acl(&b, 20U, 2U, 30U, 3U, UCN_V6_SECURITY_INBOUND);
+    acl.key.frame_type = UCN_V6_FRAME_TRANSFER;
+    acl.key.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_TRANSFER_FRAGMENT;
+    CHECK(ucn_v6_security_set_acl(
+              managers[2], &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_OK);
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
+    /* Runtime Transfer control travels in the reverse authenticated domain.
+     * SACK and Credit are Q1 protocol messages with reversed endpoints. */
+    acl = make_acl(&c, 30U, 3U, 20U, 2U, UCN_V6_SECURITY_OUTBOUND);
+    acl.key.frame_type = UCN_V6_FRAME_TRANSFER;
+    acl.key.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_TRANSFER_SACK;
+    acl.key.traffic_class = UCN_V6_TRAFFIC_Q1;
+    acl.key.source_endpoint = 20U;
+    acl.key.destination_endpoint = 10U;
+    CHECK(ucn_v6_security_set_acl(
+              managers[2], &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_OK);
+    acl.key.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_TRANSFER_CREDIT;
+    CHECK(ucn_v6_security_set_acl(
+              managers[2], &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_OK);
+    acl = make_acl(&c, 30U, 3U, 20U, 2U, UCN_V6_SECURITY_INBOUND);
+    acl.key.frame_type = UCN_V6_FRAME_TRANSFER;
+    acl.key.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_TRANSFER_SACK;
+    acl.key.traffic_class = UCN_V6_TRAFFIC_Q1;
+    acl.key.source_endpoint = 20U;
+    acl.key.destination_endpoint = 10U;
+    CHECK(ucn_v6_security_set_acl(
+              managers[1], &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_OK);
+    acl.key.protocol_opcode = UCN_V6_PROTOCOL_OPCODE_TRANSFER_CREDIT;
+    CHECK(ucn_v6_security_set_acl(
+              managers[1], &acl, &admin, admin_proof,
+              sizeof(admin_proof)) == UCN_V6_OK);
+#endif
 
     memset(&fragment, 0, sizeof(fragment));
     fragment.message_class = UCN_V6_MESSAGE_T32;
@@ -2724,6 +3127,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     {
         ucn_v6_path_budget_accumulator_t accumulator;
         ucn_v6_path_budget_accumulator_t downstream_accumulator;
+        ucn_v6_path_budget_accumulator_t relay_accumulator;
         ucn_v6_path_budget_request_t downstream_request = budget_request;
         ucn_v6_path_capability_t downstream_path;
         ucn_v6_capability_peer_ref_t next_hop_ref;
@@ -2742,6 +3146,13 @@ static int test_independent_sequence_domains_and_verified_relay(void)
                   &destination_ref) == UCN_V6_OK);
         CHECK(ucn_v6_capability_path_reduce_finalize(
                   &downstream_accumulator, &downstream_path) == UCN_V6_OK);
+        CHECK(ucn_v6_capability_path_reduce_begin(
+                  &budget_request, &relay_accumulator) == UCN_V6_OK);
+        CHECK(ucn_v6_capability_path_reduce_hop(
+                  capability_owner, 92U, &relay_accumulator,
+                  &destination_ref) == UCN_V6_OK);
+        CHECK(ucn_v6_capability_path_reduce_finalize(
+                  &relay_accumulator, &relay_derived_path) == UCN_V6_OK);
         memset(&next_hop_ref, 0, sizeof(next_hop_ref));
         next_hop_ref.principal = b;
         next_hop_ref.binding.realm_id = 1U;
@@ -2761,7 +3172,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
                   &accumulator, &derived_path) == UCN_V6_OK);
     }
     CHECK(ucn_v6_capability_install_path(
-              capability_owner, 92U, &derived_path) == UCN_V6_OK);
+              capability_owner, 92U, &relay_derived_path) == UCN_V6_OK);
     memset(&pipeline_route_storage, 0, sizeof(pipeline_route_storage));
     CHECK(ucn_v6_route_owner_init_in_place(
               pipeline_route_storage.bytes, sizeof(pipeline_route_storage),
@@ -2782,19 +3193,19 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     memset(&route_path, 0, sizeof(route_path));
     route_path.path_id = 1U;
     route_path.path_generation = 1U;
-    route_path.next_hop.principal = b;
+    route_path.next_hop.principal = c;
     route_path.next_hop.binding.realm_id = 1U;
-    route_path.next_hop.binding.node_address = 20U;
-    route_path.next_hop.binding.binding_generation = 2U;
+    route_path.next_hop.binding.node_address = 30U;
+    route_path.next_hop.binding.binding_generation = 3U;
     route_path.next_hop.session_generation = 1U;
     route_path.next_hop_capability_generation = 1U;
     route_path.egress_link_id = 1U;
     route_path.egress_link_generation = 6U;
-    route_path.hop_count = 2U;
+    route_path.hop_count = 1U;
     route_path.priority = 1U;
     route_path.weight = 1U;
     route_path.available = true;
-    route_path.capability = derived_path;
+    route_path.capability = relay_derived_path;
     CHECK(ucn_v6_route_candidate_add_path(
               route_owner, 93U, 301U, &route_domain, &route_path) ==
           UCN_V6_OK);
@@ -2816,8 +3227,9 @@ static int test_independent_sequence_domains_and_verified_relay(void)
               route_owner, 97U, &select_request, &route_selection) ==
           UCN_V6_OK);
     CHECK(route_selection.path.egress_link_id == 1U &&
-          memcmp(route_selection.path.next_hop.principal.bytes, b.bytes,
+          memcmp(route_selection.path.next_hop.principal.bytes, c.bytes,
                  sizeof(b.bytes)) == 0);
+    frame_template = frame_c;
     CHECK(ucn_v6_security_protect_frame(
               managers[0], 100U, &b, &c, &frame_c, cipher_c,
               sizeof(cipher_c), work_a, sizeof(work_a), encoded_c,
@@ -2979,7 +3391,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
               ucn_v6_compiled_manifest(), &runtime_ops, &adapter) == UCN_V6_OK);
     memset(&link_config, 0, sizeof(link_config));
     link_config.link_id = 1U;
-    link_config.initial_generation = 1U;
+    link_config.initial_generation = 6U;
     link_config.bearer = UCN_V6_BEARER_CUSTOM;
     link_config.nominal_bitrate_bps = UINT32_C(3000000);
     link_config.carrier_mtu = UCN_V6_CONFIG_ADAPTER_FRAME_BYTES;
@@ -2987,6 +3399,7 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     link_config.hardware_priority_count = 4U;
     link_config.rx_slot_quota = 1U;
     link_config.tx_slot_quota = 1U;
+    link_config.rx_timestamp_hardware = true;
     link_config.ops.struct_size = sizeof(link_config.ops);
     link_config.ops.api_version = UCN_V6_ADAPTER_API_VERSION;
     link_config.ops.context = &driver;
@@ -2995,9 +3408,9 @@ static int test_independent_sequence_domains_and_verified_relay(void)
     link_config.ops.quiesce = pipeline_quiesce;
     CHECK(ucn_v6_adapter_register_link(adapter, &link_config) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_set_link_readiness(
-              adapter, 1U, 1U, UCN_V6_LINK_READY) == UCN_V6_OK);
+              adapter, 1U, 6U, UCN_V6_LINK_READY) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_enqueue_tx(
-              adapter, 1U, qos_selection.buffer_token, relayed_encoded,
+              adapter, 1U, 6U, qos_selection.buffer_token, relayed_encoded,
               relayed_length, qos_selection.traffic_class, false,
               &adapter_key) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_service_tx(adapter, &submitted) == UCN_V6_OK &&
@@ -3081,6 +3494,419 @@ static int test_independent_sequence_domains_and_verified_relay(void)
               qos, 900U, UCN_V6_QOS_COMPLETION_APPLICATION_RESULT) ==
           UCN_V6_OK);
     CHECK(ucn_v6_qos_retire_completion(qos, 900U) == UCN_V6_OK);
+
+#if UCN_V6_FEATURE_ADAPTER_ENABLED && UCN_V6_FEATURE_REALTIME_ENABLED
+    /* Repeat the same authenticated A -> B -> C path through the canonical
+     * Runtime owner.  The relay packet must never enter the application
+     * callback and its internal buffer token must never be released to the
+     * application. */
+    runtime_frame = frame_template;
+    CHECK(ucn_v6_security_protect_frame(
+              managers[0], 130U, &b, &c, &runtime_frame, runtime_cipher,
+              sizeof(runtime_cipher), work_a, sizeof(work_a),
+              runtime_encoded, sizeof(runtime_encoded),
+              &runtime_encoded_length) == UCN_V6_OK);
+    memset(&pipeline_runtime_qos_storage, 0,
+           sizeof(pipeline_runtime_qos_storage));
+    CHECK(ucn_v6_qos_owner_init_in_place(
+              pipeline_runtime_qos_storage.bytes,
+              sizeof(pipeline_runtime_qos_storage),
+              ucn_v6_compiled_manifest(), &qos_policy, &relay_qos) ==
+          UCN_V6_OK);
+    memset(&pipeline_runtime_transfer_storage, 0,
+           sizeof(pipeline_runtime_transfer_storage));
+    CHECK(ucn_v6_transfer_owner_init_in_place(
+              pipeline_runtime_transfer_storage.bytes,
+              sizeof(pipeline_runtime_transfer_storage),
+              ucn_v6_compiled_manifest(), route_owner,
+              100U, 4U, 1000U, 2000U, &runtime_transfer) == UCN_V6_OK);
+    memset(&relay_app, 0, sizeof(relay_app));
+    memset(&relay_runtime_config, 0, sizeof(relay_runtime_config));
+    relay_runtime_config.runtime_instance_generation = 1U;
+    relay_runtime_config.relay_route_policy =
+        UCN_V6_ROUTE_POLICY_ACTIVE_STANDBY;
+    relay_runtime_config.relay_residence_bound_us = 2U;
+    relay_runtime_config.relay_transmit_bound_us = 3U;
+    relay_runtime_config.transfer_maximum_credit = 32U;
+    relay_runtime_config.adapter = adapter;
+    relay_runtime_config.bootstrap =
+        (ucn_v6_bootstrap_owner_t *)&relay_dummy;
+    relay_runtime_config.security = managers[1];
+    relay_runtime_config.capability = capability_owner;
+    relay_runtime_config.route = route_owner;
+    relay_runtime_config.metric = (ucn_v6_metric_owner_t *)&relay_dummy;
+    relay_runtime_config.qos = relay_qos;
+    relay_runtime_config.transfer = runtime_transfer;
+    relay_runtime_config.realtime =
+        (ucn_v6_realtime_owner_t *)&relay_dummy;
+#if UCN_V6_FEATURE_CLUSTER_ENABLED
+    relay_runtime_config.cluster =
+        (ucn_v6_cluster_owner_t *)&relay_dummy;
+#endif
+    relay_runtime_config.app.context = &relay_app;
+    relay_runtime_config.app.handle_authenticated_ingress =
+        pipeline_runtime_ingress;
+    relay_runtime_config.app.release_buffer = pipeline_runtime_release;
+    relay_runtime_config.bootstrap_ops.process_ingress =
+        reject_runtime_bootstrap_ingress;
+    relay_runtime_config.bootstrap_ops.build_join_commit =
+        reject_runtime_bootstrap_commit;
+    memset(&pipeline_runtime_storage, 0, sizeof(pipeline_runtime_storage));
+    CHECK(ucn_v6_runtime_init_in_place(
+              pipeline_runtime_storage.bytes, sizeof(pipeline_runtime_storage),
+              ucn_v6_compiled_manifest(), &relay_runtime_config,
+              &relay_runtime) == UCN_V6_OK);
+    CHECK(ucn_v6_runtime_make_stack_hooks(relay_runtime, &relay_hooks) ==
+          UCN_V6_OK);
+    memset(&relay_rx_timestamp, 0, sizeof(relay_rx_timestamp));
+    relay_rx_timestamp.valid = true;
+    relay_rx_timestamp.hardware = true;
+    relay_rx_timestamp.timestamp_us = 130U;
+    relay_rx_timestamp.uncertainty_us = 1U;
+    CHECK(ucn_v6_adapter_publish_rx(
+              adapter, 1U, 6U, 1U, runtime_encoded, runtime_encoded_length,
+              &relay_rx_timestamp, false, &relay_rx_key) == UCN_V6_OK);
+    CHECK(relay_hooks.rx_ingress(
+              relay_hooks.context, 131U, 1U, &relay_phase) == UCN_V6_OK);
+    relay_call_result = relay_hooks.hop_security(
+        relay_hooks.context, 132U, 1U, &relay_phase);
+    CHECK(relay_call_result == UCN_V6_OK);
+    CHECK(relay_app.ingress_calls == 0U);
+    CHECK(relay_hooks.route_authority(
+              relay_hooks.context, 133U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(relay_app.ingress_calls == 0U && relay_phase.work_done == 1U);
+    CHECK(relay_hooks.qos_tx(
+              relay_hooks.context, 134U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(relay_hooks.qos_tx(
+              relay_hooks.context, 135U, 1U, &relay_phase) == UCN_V6_OK);
+    memset(&driver, 0, sizeof(driver));
+    CHECK(relay_hooks.qos_tx(
+              relay_hooks.context, 136U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(driver.submit_calls == 1U && relay_app.ingress_calls == 0U &&
+          relay_app.release_calls == 0U);
+    memset(&runtime_opened, 0, sizeof(runtime_opened));
+    CHECK(ucn_v6_security_open_frame(
+              managers[2], 137U, 1U, 6U, &b, driver.frame,
+              driver.frame_length, runtime_plaintext,
+              sizeof(runtime_plaintext), &runtime_opened) == UCN_V6_OK);
+    CHECK(runtime_opened.endpoint_authorized &&
+          runtime_opened.frame.hop_budget.remaining_budget_us == 895U &&
+          memcmp(runtime_plaintext, transfer_payload,
+                 transfer_payload_length) == 0);
+    CHECK(ucn_v6_adapter_publish_tx_completion(
+              adapter, &driver.key, UCN_V6_OK, &timestamp, false) ==
+          UCN_V6_OK);
+    CHECK(relay_hooks.tx_completion(
+              relay_hooks.context, 138U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(relay_app.release_calls == 0U);
+
+    /* Locally originated traffic uses the same canonical Runtime TX path.
+     * Install B -> C as a separate full Route domain, then prove that
+     * Runtime owns Route selection, security, QoS, Adapter submission and
+     * exactly-once application buffer release. */
+    memset(&direct_domain, 0, sizeof(direct_domain));
+    direct_domain.origin_principal = b;
+    direct_domain.origin_binding.realm_id = 1U;
+    direct_domain.origin_binding.node_address = 20U;
+    direct_domain.origin_binding.binding_generation = 2U;
+    direct_domain.origin_session_generation = 1U;
+    direct_domain.destination_principal = c;
+    direct_domain.destination_binding = budget_request.destination_binding;
+    direct_domain.destination_session_generation = 1U;
+    direct_path = route_path;
+    CHECK(ucn_v6_route_candidate_begin(
+              route_owner, 139U, 302U, &direct_domain, 1U) == UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_add_path(
+              route_owner, 140U, 302U, &direct_domain, &direct_path) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_record_probe(
+              route_owner, 141U, 302U, &direct_domain,
+              direct_path.path_id, direct_path.path_generation) == UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_prepare_activation(
+              route_owner, 142U, 302U, &direct_domain,
+              &activation) == UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_record_activation_send(
+              route_owner, 142U, 302U, &direct_domain, true) == UCN_V6_OK);
+    CHECK(ucn_v6_route_candidate_commit_ack(
+              route_owner, 143U, &activation) == UCN_V6_OK);
+
+    /* Exercise the complete Runtime-owned Transfer path.  Credit is first
+     * delivered as an authenticated C -> B protocol frame.  B then emits
+     * three independently secured fragments through QoS/Adapter; C rebuilds
+     * the message and returns an authenticated SACK for each window. */
+    memset(&runtime_credit, 0, sizeof(runtime_credit));
+    runtime_credit.link_id = 1U;
+    runtime_credit.link_generation = 6U;
+    runtime_credit.traffic_class = UCN_V6_TRAFFIC_Q2;
+    runtime_credit.credit_generation = 1U;
+    runtime_credit.update_sequence = 1U;
+    runtime_credit.available_credit = 4U;
+    runtime_credit.maximum_credit = 4U;
+    runtime_credit.lease_duration_us = 1000U;
+    CHECK(ucn_v6_transfer_credit_encode(
+              &runtime_credit, runtime_credit_payload) == UCN_V6_OK);
+    runtime_credit_frame = make_data_frame(
+        runtime_credit_payload, sizeof(runtime_credit_payload));
+    runtime_credit_frame.frame_type = UCN_V6_FRAME_TRANSFER;
+    runtime_credit_frame.flags |= UCN_V6_FLAG_PROTOCOL_CONTEXT;
+    runtime_credit_frame.traffic_class = UCN_V6_TRAFFIC_Q1;
+    runtime_credit_frame.hop_limit = 1U;
+    runtime_credit_frame.source_address = 30U;
+    runtime_credit_frame.source_binding_generation = 3U;
+    runtime_credit_frame.destination_address = 20U;
+    runtime_credit_frame.destination_binding_generation = 2U;
+    runtime_credit_frame.protocol_opcode =
+        UCN_V6_PROTOCOL_OPCODE_TRANSFER_CREDIT;
+    runtime_credit_frame.message.source_endpoint = 20U;
+    runtime_credit_frame.message.destination_endpoint = 10U;
+    runtime_credit_frame.message.operation_id = 212U;
+    CHECK(ucn_v6_security_protect_frame(
+              managers[2], 144U, &b, &b, &runtime_credit_frame,
+              runtime_credit_cipher, sizeof(runtime_credit_cipher),
+              work_a, sizeof(work_a), runtime_credit_encoded,
+              sizeof(runtime_credit_encoded),
+              &runtime_credit_encoded_length) == UCN_V6_OK);
+    CHECK(ucn_v6_adapter_publish_rx(
+              adapter, 1U, 6U, 1U, runtime_credit_encoded,
+              runtime_credit_encoded_length, &relay_rx_timestamp, false,
+              &relay_rx_key) == UCN_V6_OK);
+    CHECK(relay_hooks.rx_ingress(
+              relay_hooks.context, 145U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(relay_hooks.hop_security(
+              relay_hooks.context, 146U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(relay_hooks.operation(
+              relay_hooks.context, 147U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(relay_hooks.tx_completion(
+              relay_hooks.context, 148U, 1U, &relay_phase) == UCN_V6_OK);
+
+    memset(&runtime_transfer_request, 0, sizeof(runtime_transfer_request));
+    runtime_transfer_request.transfer.route_ref.domain = direct_domain;
+    runtime_transfer_request.transfer.route_ref.route_generation = 1U;
+    runtime_transfer_request.transfer.route_ref.path_id =
+        direct_path.path_id;
+    runtime_transfer_request.transfer.route_ref.path_generation =
+        direct_path.path_generation;
+    runtime_transfer_request.transfer.message.traffic_class =
+        UCN_V6_TRAFFIC_Q2;
+    runtime_transfer_request.transfer.message.delivery_guarantee =
+        UCN_V6_DELIVERY_RELIABLE;
+    runtime_transfer_request.transfer.message.interaction_role =
+        UCN_V6_INTERACTION_REQUEST;
+    runtime_transfer_request.transfer.message.source_endpoint = 10U;
+    runtime_transfer_request.transfer.message.destination_endpoint = 20U;
+    runtime_transfer_request.transfer.message.operation_id = 213U;
+    runtime_transfer_request.transfer.message.payload_length =
+        sizeof(runtime_transfer_data);
+    runtime_transfer_request.transfer.message_class = UCN_V6_MESSAGE_T32;
+    runtime_transfer_request.transfer.message_id = 213U;
+    runtime_transfer_request.transfer.buffer_token = 903U;
+    runtime_transfer_request.transfer.payload = runtime_transfer_data;
+    runtime_transfer_request.transfer.payload_length =
+        sizeof(runtime_transfer_data);
+    runtime_transfer_request.transfer.fragment_data_budget = 5U;
+    runtime_transfer_request.transfer.window_size = 1U;
+    runtime_transfer_request.has_hop_budget = true;
+    runtime_transfer_request.initial_hop_budget_us = 1000U;
+    runtime_transfer_request.remaining_hop_budget_us = 900U;
+    runtime_transfer_request.local_priority = 1U;
+    CHECK(ucn_v6_runtime_transfer_send(
+              relay_runtime, 149U, &runtime_transfer_request) == UCN_V6_OK);
+
+    for (runtime_transfer_guard = 0U; runtime_transfer_guard < 3U;
+         ++runtime_transfer_guard) {
+        memset(&driver, 0, sizeof(driver));
+        CHECK(relay_hooks.operation(
+                  relay_hooks.context, 150U + runtime_transfer_guard * 10U,
+                  1U, &relay_phase) == UCN_V6_OK);
+        CHECK(relay_hooks.qos_tx(
+                  relay_hooks.context, 151U + runtime_transfer_guard * 10U,
+                  1U, &relay_phase) == UCN_V6_OK);
+        CHECK(relay_hooks.qos_tx(
+                  relay_hooks.context, 152U + runtime_transfer_guard * 10U,
+                  1U, &relay_phase) == UCN_V6_OK);
+        CHECK(relay_hooks.qos_tx(
+                  relay_hooks.context, 153U + runtime_transfer_guard * 10U,
+                  1U, &relay_phase) == UCN_V6_OK);
+        CHECK(driver.submit_calls == 1U);
+        ++runtime_transfer_submits;
+
+        memset(&runtime_fragment_opened, 0,
+               sizeof(runtime_fragment_opened));
+        CHECK(ucn_v6_security_open_frame(
+                  managers[2], 153U + runtime_transfer_guard * 10U,
+                  1U, 6U, &b, driver.frame, driver.frame_length,
+                  direct_plaintext, sizeof(direct_plaintext),
+                  &runtime_fragment_opened) == UCN_V6_OK);
+        CHECK(runtime_fragment_opened.endpoint_authorized &&
+              runtime_fragment_opened.frame.protocol_opcode ==
+                  UCN_V6_PROTOCOL_OPCODE_TRANSFER_FRAGMENT);
+        memset(&runtime_rx_result, 0, sizeof(runtime_rx_result));
+        CHECK(ucn_v6_transfer_receive_fragment(
+                  transfer_rx, 154U + runtime_transfer_guard * 10U,
+                  &runtime_fragment_opened, &runtime_rx_result) ==
+              UCN_V6_OK);
+        CHECK(runtime_rx_result.accepted);
+
+        CHECK(ucn_v6_adapter_publish_tx_completion(
+                  adapter, &driver.key, UCN_V6_OK, &timestamp, false) ==
+              UCN_V6_OK);
+        CHECK(relay_hooks.tx_completion(
+                  relay_hooks.context,
+                  155U + runtime_transfer_guard * 10U,
+                  1U, &relay_phase) == UCN_V6_OK);
+
+        CHECK(ucn_v6_transfer_sack_encode(
+                  &runtime_rx_result.sack, runtime_sack_payload) ==
+              UCN_V6_OK);
+        runtime_sack_frame = make_data_frame(
+            runtime_sack_payload, sizeof(runtime_sack_payload));
+        runtime_sack_frame.frame_type = UCN_V6_FRAME_TRANSFER;
+        runtime_sack_frame.flags |= UCN_V6_FLAG_PROTOCOL_CONTEXT |
+                                    UCN_V6_FLAG_ROUTE_CONTEXT |
+                                    UCN_V6_FLAG_PATH_CONTEXT;
+        runtime_sack_frame.traffic_class = UCN_V6_TRAFFIC_Q1;
+        runtime_sack_frame.hop_limit = 1U;
+        runtime_sack_frame.source_address = 30U;
+        runtime_sack_frame.source_binding_generation = 3U;
+        runtime_sack_frame.destination_address = 20U;
+        runtime_sack_frame.destination_binding_generation = 2U;
+        runtime_sack_frame.protocol_opcode =
+            UCN_V6_PROTOCOL_OPCODE_TRANSFER_SACK;
+        runtime_sack_frame.route_generation = 9U;
+        runtime_sack_frame.path.path_id = 9U;
+        runtime_sack_frame.path.path_generation = 9U;
+        runtime_sack_frame.message.source_endpoint = 20U;
+        runtime_sack_frame.message.destination_endpoint = 10U;
+        runtime_sack_frame.message.operation_id = 213U;
+        runtime_sack_encoded_length = 0U;
+        CHECK(ucn_v6_security_protect_frame(
+                  managers[2], 156U + runtime_transfer_guard * 10U,
+                  &b, &b, &runtime_sack_frame, runtime_sack_cipher,
+                  sizeof(runtime_sack_cipher), work_a, sizeof(work_a),
+                  runtime_sack_encoded, sizeof(runtime_sack_encoded),
+                  &runtime_sack_encoded_length) == UCN_V6_OK);
+        CHECK(ucn_v6_adapter_publish_rx(
+                  adapter, 1U, 6U, 1U, runtime_sack_encoded,
+                  runtime_sack_encoded_length, &relay_rx_timestamp, false,
+                  &relay_rx_key) == UCN_V6_OK);
+        CHECK(relay_hooks.rx_ingress(
+                  relay_hooks.context,
+                  157U + runtime_transfer_guard * 10U,
+                  1U, &relay_phase) == UCN_V6_OK);
+        CHECK(relay_hooks.hop_security(
+                  relay_hooks.context,
+                  158U + runtime_transfer_guard * 10U,
+                  1U, &relay_phase) == UCN_V6_OK);
+        CHECK(relay_hooks.operation(
+                  relay_hooks.context,
+                  159U + runtime_transfer_guard * 10U,
+                  1U, &relay_phase) == UCN_V6_OK);
+        CHECK(relay_hooks.tx_completion(
+                  relay_hooks.context,
+                  160U + runtime_transfer_guard * 10U,
+                  1U, &relay_phase) == UCN_V6_OK);
+    }
+    CHECK(runtime_transfer_submits == 3U && runtime_rx_result.complete);
+    memset(&runtime_tx_view, 0, sizeof(runtime_tx_view));
+    CHECK(ucn_v6_transfer_copy_tx(
+              runtime_transfer, 213U, &runtime_tx_view) == UCN_V6_OK);
+    CHECK(runtime_tx_view.phase == UCN_V6_TRANSFER_TX_REASSEMBLED &&
+          runtime_tx_view.cumulative_base == runtime_tx_view.fragment_count);
+    origin.principal = b;
+    origin.binding.realm_id = 1U;
+    origin.binding.node_address = 20U;
+    origin.binding.binding_generation = 2U;
+    origin.session_generation = 1U;
+    CHECK(ucn_v6_transfer_copy_completed(
+              transfer_rx, &origin, 213U, 213U, direct_plaintext,
+              sizeof(direct_plaintext), &completed) == UCN_V6_OK);
+    CHECK(completed.payload_length == sizeof(runtime_transfer_data) &&
+          memcmp(direct_plaintext, runtime_transfer_data,
+                 sizeof(runtime_transfer_data)) == 0);
+    CHECK(ucn_v6_transfer_retire_completed(
+              transfer_rx, 180U, &origin, 213U, 213U) == UCN_V6_OK);
+    CHECK(relay_hooks.qos_tx(
+              relay_hooks.context, 180U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(relay_hooks.operation(
+              relay_hooks.context, 181U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(relay_hooks.tx_completion(
+              relay_hooks.context, 182U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(relay_app.release_calls == 1U &&
+          relay_app.last_released_token == 903U &&
+          relay_app.last_release_result == UCN_V6_OK);
+
+    direct_frame = frame_template;
+    direct_frame.source_address = 20U;
+    direct_frame.source_binding_generation = 2U;
+    direct_frame.destination_address = 30U;
+    direct_frame.destination_binding_generation = 3U;
+    direct_frame.session_generation = 1U;
+    direct_frame.message.operation_id = 211U;
+    direct_frame.hop_budget.remaining_budget_us = 900U;
+    memset(&direct_request, 0, sizeof(direct_request));
+    direct_request.frame = direct_frame;
+    direct_request.route.domain = direct_domain;
+    direct_request.route.flow_id = 211U;
+    direct_request.route.packet_sequence = 1U;
+    direct_request.route.policy = UCN_V6_ROUTE_POLICY_ACTIVE_STANDBY;
+    direct_request.buffer_token = 901U;
+    direct_request.local_priority = 1U;
+    memset(&direct_result, 0, sizeof(direct_result));
+    CHECK(ucn_v6_runtime_send_frame(
+              relay_runtime, 144U, &direct_request, &direct_result) ==
+          UCN_V6_OK);
+    CHECK(direct_result.admission_route_ref.route_generation == 1U &&
+          direct_result.admission_route_ref.path_id == 1U &&
+          direct_result.estimated_encoded_length != 0U);
+    memset(&driver, 0, sizeof(driver));
+    CHECK(relay_hooks.qos_tx(
+              relay_hooks.context, 145U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(relay_hooks.qos_tx(
+              relay_hooks.context, 146U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(driver.submit_calls == 1U);
+    memset(&direct_opened, 0, sizeof(direct_opened));
+    CHECK(ucn_v6_security_open_frame(
+              managers[2], 147U, 1U, 6U, &b, driver.frame,
+              driver.frame_length, direct_plaintext,
+              sizeof(direct_plaintext), &direct_opened) == UCN_V6_OK);
+    CHECK(direct_opened.endpoint_authorized &&
+          memcmp(direct_opened.authenticated_principal.bytes, b.bytes,
+                 sizeof(b.bytes)) == 0 &&
+          memcmp(direct_plaintext, transfer_payload,
+                 transfer_payload_length) == 0);
+    CHECK(ucn_v6_adapter_publish_tx_completion(
+              adapter, &driver.key, UCN_V6_OK, &timestamp, false) ==
+          UCN_V6_OK);
+    CHECK(relay_hooks.tx_completion(
+              relay_hooks.context, 148U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(relay_app.release_calls == 1U);
+    CHECK(relay_hooks.tx_completion(
+              relay_hooks.context, 149U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(relay_app.release_calls == 2U &&
+          relay_app.last_released_token == 901U);
+
+    /* Queue semantic work, then invalidate the admitted path before QOS_TX.
+     * Runtime must resolve the Route again, consume no stale snapshot, submit
+     * no frame, and return the caller token exactly once. */
+    direct_request.buffer_token = 902U;
+    direct_request.route.packet_sequence = 2U;
+    CHECK(ucn_v6_runtime_send_frame(
+              relay_runtime, 150U, &direct_request, &direct_result) ==
+          UCN_V6_OK);
+    CHECK(ucn_v6_route_mark_error(
+              route_owner, &direct_domain, 1U, direct_path.path_id,
+              direct_path.path_generation) == UCN_V6_OK);
+    before_submits = driver.submit_calls;
+    late_route_result = relay_hooks.qos_tx(
+        relay_hooks.context, 151U, 1U, &relay_phase);
+    CHECK(late_route_result == UCN_V6_OK);
+    CHECK(driver.submit_calls == before_submits);
+    CHECK(relay_hooks.tx_completion(
+              relay_hooks.context, 152U, 1U, &relay_phase) == UCN_V6_OK);
+    CHECK(relay_app.release_calls == 3U &&
+          relay_app.last_released_token == 902U &&
+          relay_app.last_release_result == UCN_V6_ERR_NOT_FOUND);
+#endif
     return 0;
 }
 

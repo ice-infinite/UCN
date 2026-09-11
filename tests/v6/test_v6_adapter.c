@@ -296,7 +296,11 @@ static int test_reference_profiles_and_rx(void)
     timestamp.valid = true;
     timestamp.hardware = true;
     CHECK(ucn_v6_adapter_publish_rx(
-              adapter, 1U, 1U, frame, sizeof(frame), &timestamp,
+              adapter, 1U, 1U, 0U, frame, sizeof(frame), &timestamp,
+              true, &key) == UCN_V6_ERR_ARGUMENT);
+    CHECK(ucn_v6_adapter_publish_rx(
+              adapter, 1U, 1U, UINT32_C(0xCAFE), frame, sizeof(frame),
+              &timestamp,
               true, &key) == UCN_V6_OK);
     CHECK(environment.isr_notifications == 1U);
     memset(output, 0, sizeof(output));
@@ -304,6 +308,7 @@ static int test_reference_profiles_and_rx(void)
               adapter, output, sizeof(output), &view) == UCN_V6_OK);
     CHECK(memcmp(frame, output, sizeof(frame)) == 0);
     CHECK(key_equal(&key, &view.key));
+    CHECK(view.local_peer_discriminator == UINT32_C(0xCAFE));
     CHECK(view.timestamp.timestamp_us == 700U && view.timestamp.hardware);
     memset(&before_view, 0xA5, sizeof(before_view));
     view = before_view;
@@ -314,7 +319,7 @@ static int test_reference_profiles_and_rx(void)
     CHECK(ucn_v6_adapter_retire_rx(adapter, &key) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_retire_rx(adapter, &key) == UCN_V6_ERR_NOT_FOUND);
     CHECK(ucn_v6_adapter_publish_rx(
-              adapter, 1U, 2U, frame, sizeof(frame), NULL,
+              adapter, 1U, 2U, 1U, frame, sizeof(frame), NULL,
               false, &key) == UCN_V6_ERR_REPLAY);
     return 0;
 }
@@ -406,8 +411,14 @@ static int test_tx_lifecycle_and_reopen(void)
     CHECK(ucn_v6_adapter_set_link_readiness(
               adapter, 9U, 3U, UCN_V6_LINK_READY) == UCN_V6_OK);
 
+    memset(&key1, 0xA5, sizeof(key1));
     CHECK(ucn_v6_adapter_enqueue_tx(
-              adapter, 9U, 101U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q0,
+              adapter, 9U, 2U, 101U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q0,
+              true, &key1) == UCN_V6_ERR_STATE);
+    CHECK(key1.link_id == UINT16_C(0xA5A5) &&
+          key1.link_generation == UINT32_C(0xA5A5A5A5));
+    CHECK(ucn_v6_adapter_enqueue_tx(
+              adapter, 9U, 3U, 101U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q0,
               true, &key1) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_service_tx(adapter, &submitted) == UCN_V6_OK);
     CHECK(submitted && driver.submit_calls == 1U && driver.last_priority == 3U);
@@ -432,7 +443,7 @@ static int test_tx_lifecycle_and_reopen(void)
 
     driver.submit_result = UCN_V6_ERR_NO_SPACE;
     CHECK(ucn_v6_adapter_enqueue_tx(
-              adapter, 9U, 102U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q3,
+              adapter, 9U, 3U, 102U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q3,
               false, &key2) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_service_tx(adapter, &submitted) ==
           UCN_V6_ERR_NO_SPACE);
@@ -448,7 +459,7 @@ static int test_tx_lifecycle_and_reopen(void)
 
     driver.complete_synchronously = false;
     CHECK(ucn_v6_adapter_enqueue_tx(
-              adapter, 9U, 103U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q2,
+              adapter, 9U, 3U, 103U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q2,
               false, &key3) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_service_tx(adapter, &submitted) == UCN_V6_OK &&
           submitted);
@@ -458,7 +469,7 @@ static int test_tx_lifecycle_and_reopen(void)
     CHECK(ucn_v6_adapter_peek_tx_completion(adapter, &completion) == UCN_V6_OK);
     CHECK(completion.result == UCN_V6_ERR_CANCELLED);
     CHECK(ucn_v6_adapter_enqueue_tx(
-              adapter, 9U, 104U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q1,
+              adapter, 9U, 3U, 104U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q1,
               false, &key4) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_cancel_tx(adapter, &key4) == UCN_V6_OK);
     CHECK(driver.cancel_calls == 1U);
@@ -480,12 +491,12 @@ static int test_tx_lifecycle_and_reopen(void)
     CHECK(ucn_v6_adapter_publish_tx_completion(
               adapter, &key3, UCN_V6_OK, NULL, true) == UCN_V6_ERR_REPLAY);
     CHECK(ucn_v6_adapter_publish_rx(
-              adapter, 9U, 4U, frame, sizeof(frame), NULL,
+              adapter, 9U, 4U, 1U, frame, sizeof(frame), NULL,
               true, &key4) == UCN_V6_ERR_STATE);
     CHECK(ucn_v6_adapter_set_link_readiness(
               adapter, 9U, 4U, UCN_V6_LINK_READY) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_publish_rx(
-              adapter, 9U, 4U, frame, sizeof(frame), NULL,
+              adapter, 9U, 4U, 1U, frame, sizeof(frame), NULL,
               true, &key4) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_retire_rx(adapter, &key4) == UCN_V6_OK);
     return 0;
@@ -533,10 +544,10 @@ static int test_offline_link_does_not_block_ready_link(void)
               adapter, 31U, 1U, UCN_V6_LINK_READY) == UCN_V6_OK);
 
     CHECK(ucn_v6_adapter_enqueue_tx(
-              adapter, 30U, 301U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q1,
+              adapter, 30U, 1U, 301U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q1,
               false, &offline_key) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_enqueue_tx(
-              adapter, 31U, 302U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q1,
+              adapter, 31U, 1U, 302U, frame, sizeof(frame), UCN_V6_TRAFFIC_Q1,
               false, &ready_key) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_set_link_readiness(
               adapter, 30U, 1U, UCN_V6_LINK_OFFLINE) == UCN_V6_OK);
@@ -800,7 +811,7 @@ static int test_freertos_notification_owner(void)
     CHECK(ucn_v6_adapter_set_link_readiness(
               adapter, 4U, 1U, UCN_V6_LINK_READY) == UCN_V6_OK);
     CHECK(ucn_v6_adapter_publish_rx(
-              adapter, 4U, 1U, frame, sizeof(frame), NULL,
+              adapter, 4U, 1U, 1U, frame, sizeof(frame), NULL,
               true, &key) == UCN_V6_OK);
     CHECK(environment.isr_notifications == 1U);
     CHECK(ucn_v6_freertos_port_run(port, &run_result) == UCN_V6_OK);

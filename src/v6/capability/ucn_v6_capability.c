@@ -4,17 +4,8 @@
 #include <string.h>
 
 #define UCN_V6_CAPABILITY_SCHEMA UINT16_C(1)
-#define UCN_V6_CAPABILITY_KNOWN_FEATURES                                 \
-    ((uint32_t)(UCN_V6_FEATURE_IDENTITY | UCN_V6_FEATURE_WIRE |         \
-                UCN_V6_FEATURE_MESSAGE | UCN_V6_FEATURE_SECURITY |      \
-                UCN_V6_FEATURE_ROUTE | UCN_V6_FEATURE_TRANSFER |        \
-                UCN_V6_FEATURE_REALTIME | UCN_V6_FEATURE_CLUSTER |      \
-                UCN_V6_FEATURE_CAPABILITY | UCN_V6_FEATURE_ADAPTER |    \
-                UCN_V6_FEATURE_QOS))
 #define UCN_V6_CAPABILITY_KNOWN_LINK_FLAGS UINT16_C(0x001F)
 #define UCN_V6_CAPABILITY_KNOWN_TIMESTAMP_BITS UINT16_C(0x000F)
-#define UCN_V6_CAPABILITY_HOP_SUITE_BITS UINT32_C(0x00000002)
-#define UCN_V6_CAPABILITY_E2E_SUITE_BITS UINT32_C(0x0000000E)
 #define UCN_V6_CAPABILITY_REALTIME_MODE_BITS UINT16_C(0x0007)
 
 typedef char ucn_v6_capability_owner_storage_must_fit[
@@ -669,6 +660,27 @@ ucn_v6_result_t ucn_v6_capability_owner_init_in_place(
     owner->initialized = true;
     owner->canary = UCN_V6_CAPABILITY_OWNER_CANARY;
     *owner_out = owner;
+    return UCN_V6_OK;
+}
+
+ucn_v6_result_t ucn_v6_capability_copy_local(
+    const ucn_v6_capability_owner_t *owner,
+    ucn_v6_capability_record_t *record,
+    uint8_t digest[UCN_V6_CAPABILITY_DIGEST_BYTES])
+{
+    if (!owner_is_valid(owner) || owner->faulted || record == NULL ||
+        digest == NULL ||
+        ucn_v6_memory_ranges_overlap(owner, sizeof(*owner),
+                                     record, sizeof(*record)) ||
+        ucn_v6_memory_ranges_overlap(
+            owner, sizeof(*owner), digest,
+            UCN_V6_CAPABILITY_DIGEST_BYTES) ||
+        ucn_v6_memory_ranges_overlap(record, sizeof(*record), digest,
+                                     UCN_V6_CAPABILITY_DIGEST_BYTES)) {
+        return UCN_V6_ERR_ARGUMENT;
+    }
+    *record = owner->local_record;
+    memcpy(digest, owner->local_digest, UCN_V6_CAPABILITY_DIGEST_BYTES);
     return UCN_V6_OK;
 }
 

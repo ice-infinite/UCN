@@ -103,6 +103,27 @@ typedef struct ucn_v6_qos_enqueue_result {
     uint64_t flow_id;
 } ucn_v6_qos_enqueue_result_t;
 
+/* Canonical scheduling input after Security/Runtime admission. Relay work
+ * keeps its exact ingress Link/Session parent so invalidation can retire it;
+ * locally originated work has parent_link_bound=false and is re-resolved
+ * against live Route/Security state only when selected for transmission.
+ * Security/Runtime 准入后的规范调度输入。中继工作保留精确入站
+ * Link/Session 父依赖以便失效回收；本机工作令 parent_link_bound=false，
+ * 仅在真正获选发送时重新解析当前 Route/Security。 */
+typedef struct ucn_v6_qos_admission {
+    ucn_v6_session_key_t quota_identity;
+    bool parent_link_bound;
+    uint16_t parent_link_id;
+    uint32_t parent_link_generation;
+    uint64_t flow_id;
+    ucn_v6_traffic_class_t traffic_class;
+    ucn_v6_delivery_guarantee_t delivery_guarantee;
+    bool has_hop_budget;
+    uint64_t initial_budget_us;
+    uint64_t remaining_budget_us;
+    bool authenticated;
+} ucn_v6_qos_admission_t;
+
 typedef enum ucn_v6_qos_selection_action {
     UCN_V6_QOS_ACTION_SEND = 1,
     UCN_V6_QOS_ACTION_DROP_EXPIRED = 2
@@ -212,6 +233,16 @@ ucn_v6_result_t ucn_v6_qos_owner_init_in_place(
 ucn_v6_result_t ucn_v6_qos_flow_id(
     const ucn_v6_security_open_result_t *opened,
     uint64_t *flow_id);
+/* EN: Enqueues one explicit, already-authorized scheduling DTO.
+ * 中文：排入一个显式且已经授权的调度 DTO。 */
+ucn_v6_result_t ucn_v6_qos_enqueue_admitted(
+    ucn_v6_qos_owner_t *owner,
+    uint64_t now_us,
+    const ucn_v6_qos_admission_t *admission,
+    uint64_t buffer_token,
+    uint16_t payload_bytes,
+    uint8_t local_priority,
+    ucn_v6_qos_enqueue_result_t *result);
 /* EN: Enqueues a caller-owned buffer token after fixed quota admission.
  * 中文：通过固定配额准入后排入调用方持有的 Buffer Token。 */
 ucn_v6_result_t ucn_v6_qos_enqueue(
@@ -239,6 +270,11 @@ ucn_v6_result_t ucn_v6_qos_record_completion(
 ucn_v6_result_t ucn_v6_qos_retire_completion(
     ucn_v6_qos_owner_t *owner,
     uint64_t buffer_token);
+/* EN: Atomically removes one queued (not selected/inflight) token.
+ * 中文：原子移除一个仍在排队、尚未选择/提交的 Token。 */
+ucn_v6_result_t ucn_v6_qos_cancel_queued(
+    ucn_v6_qos_owner_t *owner,
+    uint64_t buffer_token);
 /* EN: Reclaims only idle flows whose token buckets have naturally refilled to
  * their configured burst.  Reopening such a slot cannot reset admission
  * credit; active, selected, queued, inflight, or partially refilled flows are
@@ -261,14 +297,17 @@ ucn_v6_result_t ucn_v6_qos_forward_budget(
 uint8_t ucn_v6_qos_hardware_priority(
     ucn_v6_traffic_class_t traffic_class,
     uint8_t hardware_priority_count);
-/* EN: Atomically retires queued/inflight work owned by one canonical Link or
- * Session invalidation.  Capability/Path invalidations are canonical no-ops:
+/* EN: Atomically retires queued work owned by one canonical Link or Session
+ * invalidation. Inflight work remains Adapter-owned until Runtime cancels and
+ * retires its exact physical completion. Capability/Path invalidations are
+ * canonical no-ops:
  * queued ingress work is re-routed at send time and is not owned by one
  * mutable route choice.  Every retired buffer token is returned to the
  * caller; insufficient output capacity causes zero writes.
- * 中文：按规范 Link 或 Session 失效事件原子回收排队/飞行中工作。Capability/
- * Path 事件是规范空操作：排队的入口工作会在发送时重新选路，并不归属于某个
- * 可变 Route 选择。全部被回收 Buffer Token 都返还调用方；输出容量不足零写入。 */
+ * 中文：按规范 Link 或 Session 失效事件原子回收排队工作。飞行中工作继续由
+ * Adapter 持有，直到 Runtime 取消并退休其精确物理完成。Capability/Path 事件
+ * 是规范空操作：排队工作会在发送时重新选路，并不归属于可变 Route 选择。
+ * 全部被回收 Buffer Token 都返还调用方；输出容量不足零写入。 */
 ucn_v6_result_t ucn_v6_qos_apply_invalidation(
     ucn_v6_qos_owner_t *owner,
     const ucn_v6_stack_invalidation_t *invalidation,
