@@ -56,6 +56,7 @@ def candidate_paths(root: Path) -> list[Path]:
         "src/persistence/*.c",
         "src/internal/*.h",
         "tests/simplified/**/*",
+        "rust/tests/conformance/*.h",
         "tools/v6/*.py",
         "tools/v6/*.cmake",
         "tools/v6/*.sh",

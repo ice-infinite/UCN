@@ -1,6 +1,6 @@
 # UCN v6 简化版 Rust 独立实现总体设计
 
-> 文档状态：`RUST-03 / DONE / SELF-REVIEW PASS`
+> 文档状态：`RUST-04 / DONE / SELF-REVIEW PASS`
 >
 > 对应分支：`v6-simplified-rust`
 >
@@ -355,3 +355,30 @@ RAM/栈/Flash 证明。
 RUST-03 只解除 RUST-04 的实施顺序阻塞。Persistence、Security、Admission、动态 Route、可靠
 Transfer、Realtime、Group、Cluster、ESP32-S3 与真实 Bearer 均未由本阶段实现或放行。详细证据见
 `docs/08-实现与验证/版本演进/UCN_V6S_RUST_03_最小静态通信实施及自审报告.md`。
+
+## 20. RUST-04 实施边界与结果
+
+RUST-04 新增独立 `ucn-persistence` crate，按同一冻结合同重新实现，而不是包装或链接 C archive：
+
+- Record 使用 96 B big-endian Envelope 与槽尾 16 B Commit Marker；正文 CRC32C、Header CRC32C、
+  BLAKE2s-128 Body Digest 和 Durable Manifest Digest 均由 Rust 安全代码独立计算；
+- `PersistenceOwner<DOMAINS, BODY, SLOT>` 的 Domain、双槽、写入/回读 scratch、恢复正文和请求全部是
+  const generic 固定数组，不分配堆内存；
+- 提交严格沿 `inactive write → readback → marker → witness → reload witness/slots → select → proof`
+  单向推进，业务状态只能消费 reload 后、精确绑定 Domain/Owner/Generation/Transaction 的 proof；
+- Provider 的同步完成与 `PENDING → poll` 共用一套 exact completion 校验，Token、Phase、Slot、完整
+  字节数和 Blob State 任一不一致均失败关闭；共享原子 Gate 阻断跨 Owner 回调重入并分配不回绕 Token；
+- 恢复只接受 Witness 精确代；补推进仅允许 Factory `0→1`，或同时保留相邻前驱/后继且 Transaction
+  严格递增的 `n→n+1`；坏 Marker、坏摘要、跳代、同代、缺前驱和 Transaction 相等/回退均 Fault；
+- required Domain 故障使 Owner Fault；optional Domain 独立 Fault 后，其他 required Domain 仍可恢复；
+  每个 Domain 同时至多一个请求，Handle/取消/退休和半开 Deadline 均受固定状态机约束。
+
+C/Rust 共享 Oracle 覆盖 BLAKE2s-128、Nano/Lite/Full Manifest Digest、Body Digest 及完整 115 B
+Record image。Host 故障注入覆盖六个 Provider 阶段的同步/异步完成、五类 completion 错配、读回破坏、
+torn Marker、Witness 补推进、每个提交掉电窗口、精确重放和多 Domain 隔离。当前 Host 类型尺寸为
+Nano 3,968 B、Lite 9,072 B、Full 25,424 B；这些是静态布局证据，不是目标 MCU 栈或 Flash 实测。
+
+RUST-04 只解除 RUST-05 的实施顺序阻塞。Host Fake Provider 不能证明真实 Flash 的 Marker 原子性、
+独立 Witness 物理隔离、掉电行为或磨损寿命；Security、Admission、动态 Route、可靠 Transfer、
+Realtime、Group、Cluster 与 ESP32-S3 仍未由 Rust 实现完成。详细证据见
+`docs/08-实现与验证/版本演进/UCN_V6S_RUST_04_Persistence_Foundation实施及自审报告.md`。

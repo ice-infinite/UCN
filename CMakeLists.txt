@@ -572,7 +572,8 @@ if(UCN_BUILD_TESTS)
         ucn_add_test(ucn_persistence_codec_tests
             tests/simplified/test_persistence_codec.c ucn_persistence)
         target_include_directories(ucn_persistence_codec_tests PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/rust/tests/conformance)
 
         add_executable(ucn_persistence_foundation_tests
             tests/simplified/test_persistence.c)

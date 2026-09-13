@@ -1,0 +1,15 @@
+[package]
+name = "ucn-persistence"
+description = "Fixed-capacity persistence foundation for UCN v6 simplified"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ucn-owner = { path = "../ucn-owner" }
+ucn-types = { path = "../ucn-types" }
+
+[lints]
+workspace = true

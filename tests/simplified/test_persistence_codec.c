@@ -1,4 +1,5 @@
 #include "internal/ucn_persistence.h"
+#include "v6s_persistence_v1.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,11 +42,9 @@ static void test_hash_and_crc_oracles(void)
 {
     ucn_i_persist_hash_workspace_t workspace;
     static const uint8_t expected_empty[16] = {
-        0x64, 0x55, 0x0d, 0x6f, 0xfe, 0x2c, 0x0a, 0x01,
-        0xa1, 0x4a, 0xba, 0x1e, 0xad, 0xe0, 0x20, 0x0c};
+        UCN_V6S_PERSIST_BLAKE2S128_EMPTY_BYTES};
     static const uint8_t expected_abc[16] = {
-        0xaa, 0x49, 0x38, 0x11, 0x9b, 0x1d, 0xc7, 0xb8,
-        0x7c, 0xba, 0xd0, 0xff, 0xd2, 0x00, 0xd0, 0xae};
+        UCN_V6S_PERSIST_BLAKE2S128_ABC_BYTES};
     static const uint8_t crc_input[] = "123456789";
     uint8_t digest[16];
 
@@ -64,22 +63,20 @@ static void test_manifest_and_record_golden(void)
     ucn_persistence_digest_workspace_t manifest_workspace;
 #if UCN_PROFILE == UCN_PROFILE_NANO
     static const uint8_t expected_manifest[16] = {
-        0xeb, 0xf7, 0x53, 0x4c, 0x0e, 0x86, 0x04, 0x6f,
-        0xaa, 0xb0, 0x69, 0x79, 0xf9, 0xad, 0x11, 0xf8};
+        UCN_V6S_PERSIST_MANIFEST_NANO_BYTES};
 #elif UCN_PROFILE == UCN_PROFILE_LITE
     static const uint8_t expected_manifest[16] = {
-        0x07, 0x44, 0x68, 0x3f, 0xef, 0x36, 0x09, 0xa9,
-        0x39, 0x6e, 0x25, 0x3b, 0x71, 0x65, 0x38, 0xcf};
+        UCN_V6S_PERSIST_MANIFEST_LITE_BYTES};
 #elif UCN_PROFILE == UCN_PROFILE_FULL
     static const uint8_t expected_manifest[16] = {
-        0x7b, 0x6f, 0x51, 0x15, 0xb8, 0x8f, 0x80, 0x8a,
-        0x1b, 0x81, 0x73, 0xd3, 0x2e, 0x71, 0xc8, 0x85};
+        UCN_V6S_PERSIST_MANIFEST_FULL_BYTES};
 #else
 #error "UCN_PROFILE must select one manifest Golden"
 #endif
     static const uint8_t expected_body_digest[16] = {
-        0xe4, 0x81, 0x6b, 0x54, 0xf0, 0x28, 0xeb, 0x51,
-        0x21, 0x25, 0x31, 0x14, 0xc1, 0x86, 0x12, 0xdc};
+        UCN_V6S_PERSIST_BODY_PRODUCT_CONFIG_GEN1_TX5_BYTES};
+    static const uint8_t expected_compact_slot[115] = {
+        UCN_V6S_PERSIST_RECORD_GEN1_TX5_SLOT115_BYTES};
     static const uint8_t body[] = {1U, 2U, 3U};
     ucn_persist_manifest_entry_t entry;
     ucn_persist_manifest_t manifest;
@@ -90,6 +87,9 @@ static void test_manifest_and_record_golden(void)
     uint8_t decoded_body[UCN_PERSIST_BODY_BYTES];
     uint8_t marker[UCN_PERSIST_COMMIT_MARKER_BYTES];
     uint8_t saved;
+    uint8_t compact_slot[sizeof(expected_compact_slot)];
+    uint8_t compact_manifest_digest[UCN_PERSIST_DIGEST_BYTES];
+    size_t index;
 
     memset(&entry, 0, sizeof(entry));
     entry.struct_size = sizeof(entry);
@@ -136,6 +136,19 @@ static void test_manifest_and_record_golden(void)
     CHECK(memcmp(&slot[72], expected_body_digest, 16U) == 0);
     CHECK(memcmp(&slot[96], body, sizeof(body)) == 0);
     CHECK(ucn_i_persist_marker_encode(1U, marker) == UCN_OK);
+
+    for (index = 0U; index < sizeof(compact_manifest_digest); ++index) {
+        compact_manifest_digest[index] = (uint8_t)index;
+    }
+    CHECK(ucn_i_persist_record_encode(
+              &meta, compact_manifest_digest, body, sizeof(body),
+              sizeof(compact_slot), 0xFFU, compact_slot, &workspace) ==
+          UCN_OK);
+    memcpy(&compact_slot[sizeof(compact_slot) - sizeof(marker)], marker,
+           sizeof(marker));
+    CHECK(memcmp(compact_slot, expected_compact_slot,
+                 sizeof(compact_slot)) == 0);
+
     memcpy(&slot[sizeof(slot) - sizeof(marker)], marker, sizeof(marker));
     memset(&decoded, 0xA5, sizeof(decoded));
     memset(decoded_body, 0xA5, sizeof(decoded_body));

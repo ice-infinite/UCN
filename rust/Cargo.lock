@@ -27,6 +27,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucn-persistence"
+version = "0.0.0"
+dependencies = [
+ "ucn-owner",
+ "ucn-types",
+]
+
+[[package]]
 name = "ucn-types"
 version = "0.0.0"
 
