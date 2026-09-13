@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/ucn-adapter",
+    "crates/ucn-owner",
     "crates/ucn-types",
     "crates/ucn-wire",
 ]

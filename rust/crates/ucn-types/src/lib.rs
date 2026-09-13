@@ -12,18 +12,73 @@ use core::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 pub const PROTOCOL_MAJOR: u8 = 6;
 
 /// Rust 实现内部使用的、不会泄漏到 Wire ABI 的错误分类。
+#[repr(i32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     /// 调用参数或强类型构造参数非法。
-    Argument,
-    /// 输入字节不符合冻结 Wire 合同。
-    Malformed,
-    /// 输入合法但当前实施阶段尚未提供该能力。
-    Unsupported,
+    Argument = -1,
+    /// 编译 Manifest、Profile 或产品配置不匹配。
+    Config = -2,
     /// 调用方提供的固定缓冲区不足。
-    NoSpace,
+    NoSpace = -3,
+    /// 输入字节不符合冻结 Wire 合同。
+    Malformed = -4,
+    /// 密码证明或认证状态不成立。
+    Security = -5,
+    /// Replay/Sequence 窗口拒绝该输入。
+    Replay = -6,
+    /// ACL 或 Authority 不允许该操作。
+    Access = -7,
+    /// 当前生命周期、Token 或 Owner 状态不允许该操作。
+    State = -8,
     /// 不回绕计数器已经到达合法终值。
-    Exhausted,
+    Exhausted = -9,
+    /// 精确 Handle、Token 或对象不存在。
+    NotFound = -10,
+    /// 半开 Deadline 已到期。
+    Timeout = -11,
+    /// 操作已被取消。
+    Cancelled = -12,
+    /// Policy 拒绝该请求。
+    Policy = -13,
+    /// 输入合法但当前实施阶段尚未提供该能力。
+    Unsupported = -14,
+    /// Driver/Provider 是否产生副作用无法证明。
+    InDoubt = -15,
+}
+
+impl Error {
+    /// 返回与 C99 公共结果码一致的固定 32-bit 值。
+    #[must_use]
+    pub const fn code(self) -> i32 {
+        self as i32
+    }
+
+    /// 从固定结果码恢复错误；0 是成功而不是 [`Error`]。
+    ///
+    /// # Errors
+    ///
+    /// 0 或未登记值返回 [`Error::Argument`]。
+    pub const fn from_code(code: i32) -> Result<Self> {
+        match code {
+            -1 => Ok(Self::Argument),
+            -2 => Ok(Self::Config),
+            -3 => Ok(Self::NoSpace),
+            -4 => Ok(Self::Malformed),
+            -5 => Ok(Self::Security),
+            -6 => Ok(Self::Replay),
+            -7 => Ok(Self::Access),
+            -8 => Ok(Self::State),
+            -9 => Ok(Self::Exhausted),
+            -10 => Ok(Self::NotFound),
+            -11 => Ok(Self::Timeout),
+            -12 => Ok(Self::Cancelled),
+            -13 => Ok(Self::Policy),
+            -14 => Ok(Self::Unsupported),
+            -15 => Ok(Self::InDoubt),
+            _ => Err(Self::Argument),
+        }
+    }
 }
 
 /// UCN 结果别名。

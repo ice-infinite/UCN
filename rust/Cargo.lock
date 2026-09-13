@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "ucn-adapter"
+version = "0.0.0"
+dependencies = [
+ "ucn-types",
+]
+
+[[package]]
+name = "ucn-owner"
+version = "0.0.0"
+dependencies = [
+ "ucn-types",
+]
+
+[[package]]
 name = "ucn-types"
 version = "0.0.0"
 

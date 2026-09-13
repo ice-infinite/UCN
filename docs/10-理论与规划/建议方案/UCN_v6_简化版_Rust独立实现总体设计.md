@@ -297,3 +297,27 @@ Oracle 逐字段重建。RUST-01 自审报告记录于
 `docs/08-实现与验证/版本演进/UCN_V6S_RUST_01_基础类型Registry与C0C1_Wire实施及自审报告.md`。
 
 RUST-01 完成不表示安全、Adapter、Runtime 或实机已经完成，只解除 RUST-02 的顺序阻塞。
+
+## 18. RUST-02 实施边界与结果
+
+RUST-02 已实现 `ucn-owner` 与 `ucn-adapter` 两个独立 `no_std` crate，但尚未建立 Runtime、
+Endpoint 或业务发送 API：
+
+- Owner 状态只能经 `&mut self` 修改；任务/ISR 只能向 caller-owned 原子 Mailbox 或受限 Event
+  Ingress 发布事实；
+- Callback Gate 使用精确 Owner/Operation/Generation/Kind Claim 和不可回绕 Lease，拒绝递归、错门、
+  旧 Lease 及并发第二进入者；
+- Coordinator 只路由 typed Requirement/Event，保留完整 canonical requirement；摘要不得代替精确相等；
+- Adapter TX Token 精确绑定 Adapter、Slot、Token Generation、Link Slot、Link Handle Generation
+  和 Link Instance Generation；
+- Driver 只实现最小 `TxDriver` SPI，并只能持有 `AdapterEventIngress`；它无法取得
+  `&mut AdapterOwner`，因此同步 completion 可以到达但不能递归控制 Owner；
+- RX Frame 与 Link/时间戳事实由同一固定槽拥有并一起 claim/retire，不依赖两个 Ring 的顺序配对；
+- `NOT_SUBMITTED` 保留同一 Attempt/Token 供上层有界重试；`UNKNOWN` 或矛盾事实进入
+  `IN_DOUBT` 并围栏旧 Link；Link 实例重开后未知旧事务可安全退休，迟到精确证明仍可收敛；
+- 所有容量由 const generic 在编译期确定，达到上限不驱逐，代际终值不回绕。
+
+RUST-02 的详细代码—测试—边界映射见
+`docs/08-实现与验证/版本演进/UCN_V6S_RUST_02_Owner_Coordinator与AdapterToken实施及自审报告.md`。
+本阶段完成只解除 RUST-03 的顺序阻塞；没有证明最小静态通信、真实 Driver/ISR 时序、目标 MCU
+资源或生产可用性。

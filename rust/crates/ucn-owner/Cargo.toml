@@ -1,0 +1,14 @@
+[package]
+name = "ucn-owner"
+description = "Single-writer owner, callback gate and typed coordinator foundations for UCN v6 simplified"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ucn-types = { path = "../ucn-types" }
+
+[lints]
+workspace = true
