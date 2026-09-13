@@ -719,7 +719,9 @@ def active_documents(root: Path) -> list[Path]:
         "06-V6简化版分支基线与实施入口.md",
     ):
         docs.append(management / name)
-    docs.extend(sorted((root / "docs" / "08-实现与验证" / "版本演进").glob("UCN_V6_*.md")))
+    version_docs = root / "docs" / "08-实现与验证" / "版本演进"
+    docs.extend(sorted(version_docs.glob("UCN_V6_*.md")))
+    docs.extend(sorted(version_docs.glob("UCN_V6S_*.md")))
     proposal = root / "docs" / "10-理论与规划" / "建议方案"
     docs.extend(proposal / name for name in PROPOSAL_NAMES)
     docs.extend(sorted((proposal / "UCN_v6_逻辑模型与伪代码").glob("*.md")))
@@ -848,6 +850,9 @@ def validate_simplified_contract(root: Path, errors: list[str]) -> None:
         "ucn_publish(",
         "ucn_request(",
         "ucn_send_query(",
+        "ucn_callback_get_stats(",
+        "ucn_callback_send_query(",
+        "ucn_callback_link_get(",
         "ucn_driver_rx_publish(",
         "module_ensure(",
         "owner_instance",

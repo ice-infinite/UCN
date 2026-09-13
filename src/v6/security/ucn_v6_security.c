@@ -1879,7 +1879,7 @@ static ucn_v6_result_t write_join_durable_receipt_canonical(
     size_t output_capacity,
     size_t *output_length)
 {
-    uint8_t canonical[UCN_V6_BOOTSTRAP_CANONICAL_BYTES];
+    uint8_t canonical[UCN_V6_BOOTSTRAP_CANONICAL_BYTES] = {0U};
     size_t canonical_length = 0U;
     ucn_v6_result_t result;
 

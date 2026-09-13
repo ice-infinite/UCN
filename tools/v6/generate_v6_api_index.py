@@ -10,7 +10,7 @@ from pathlib import Path
 
 DECL = re.compile(
     r"(?m)^(?:const\s+)?[A-Za-z_][A-Za-z0-9_\s\*]*\b"
-    r"(ucn_v6_[A-Za-z0-9_]+)\s*\((.*?)\)\s*;",
+    r"(ucn_[A-Za-z0-9_]+)\s*\((.*?)\)\s*;",
     re.DOTALL,
 )
 
@@ -27,11 +27,14 @@ def main() -> int:
     args = parser.parse_args()
     root = Path(args.root).resolve()
     output = Path(args.output).resolve()
-    headers = sorted((root / "include" / "ucn" / "v6").rglob("*.h"))
+    public_root = root / "include" / "ucn"
+    headers = sorted(public_root.glob("*.h"))
+    headers.extend(sorted((public_root / "v6").rglob("*.h")))
     lines = [
         "# 公共函数签名索引",
         "",
-        "> 由 `tools/v6/generate_v6_api_index.py` 从当前公共头机械生成；不要手工编辑。",
+        "> 由 `tools/v6/generate_v6_api_index.py` 从当前简化版顶层公共头和仍保留的",
+        "> `include/ucn/v6/**` 迁移输入机械生成；不要手工编辑。",
         "",
         "每一项保留完整参数声明，用于快速定位调用入口。语义和前置条件仍以对应头文件注释",
         "与官方模块文档为准。",

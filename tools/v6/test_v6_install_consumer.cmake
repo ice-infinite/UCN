@@ -22,6 +22,33 @@ if(NOT install_result EQUAL 0)
     message(FATAL_ERROR "UCN v6 install step failed: ${install_result}")
 endif()
 
+if(NOT EXISTS "${install_dir}/include/ucn/ucn_types.h")
+    message(FATAL_ERROR "final public ucn_types.h was not installed")
+endif()
+if(EXISTS "${install_dir}/include/ucn/internal" OR
+   EXISTS "${install_dir}/include/ucn/ucn_owner.h" OR
+   EXISTS "${install_dir}/include/ucn/ucn_coordinator.h")
+    message(FATAL_ERROR "simplified internal Owner/Coordinator SPI leaked into install")
+endif()
+
+file(GLOB_RECURSE installed_common_archives
+    "${install_dir}/*ucn_common*"
+    "${install_dir}/*ucn_coordinator*")
+if(installed_common_archives)
+    message(FATAL_ERROR
+        "simplified internal foundation archive leaked into install: ${installed_common_archives}")
+endif()
+
+file(GLOB_RECURSE installed_target_files
+    "${install_dir}/*UCNTargets*.cmake")
+foreach(target_file IN LISTS installed_target_files)
+    file(READ "${target_file}" target_text)
+    if(target_text MATCHES "ucn_common|ucn_coordinator|UCN::common")
+        message(FATAL_ERROR
+            "simplified internal target leaked into installed package: ${target_file}")
+    endif()
+endforeach()
+
 function(ucn_check_optional_header header_name expected)
     set(header_path "${install_dir}/include/ucn/v6/${header_name}")
     if(expected AND NOT EXISTS "${header_path}")

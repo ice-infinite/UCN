@@ -6,19 +6,40 @@ build_root="${1:-/tmp/ucn-v6-validation}"
 
 cmake -S "$repo_root" -B "$build_root/asan-ubsan" -G Ninja \
   -DUCN_BUILD_TESTS=ON -DUCN_PROFILE=FULL \
+  -DUCN_FEATURE_PERSISTENCE=ON \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
   -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 cmake --build "$build_root/asan-ubsan" -j4
 ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 \
-  ctest --test-dir "$build_root/asan-ubsan" -R '^(ucn_v6_|v6_)' \
+  ctest --test-dir "$build_root/asan-ubsan" \
+  -R '^(ucn_v6_|v6_|v6s_|ucn_common|ucn_owner_foundation|ucn_owner_concurrency|ucn_coordinator|ucn_core_concurrency|ucn_persistence)' \
+  -E '^(v6s_(common|kernel)_(stack_usage|call_stack)_gate|v6s_install_consumer_gate)$' \
   --output-on-failure
 
 cmake -S "$repo_root" -B "$build_root/analyzer" -G Ninja \
   -DUCN_BUILD_TESTS=ON -DUCN_PROFILE=FULL \
+  -DUCN_FEATURE_PERSISTENCE=ON \
   -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fanalyzer"
 cmake --build "$build_root/analyzer" -j4
-ctest --test-dir "$build_root/analyzer" -R '^(ucn_v6_|v6_)' \
+ctest --test-dir "$build_root/analyzer" \
+  -R '^(ucn_v6_|v6_|v6s_|ucn_common|ucn_owner_foundation|ucn_owner_concurrency|ucn_coordinator|ucn_core_concurrency|ucn_persistence)' \
+  -E '^(v6s_(common|kernel)_(stack_usage|call_stack)_gate|v6s_install_consumer_gate)$' \
+  --output-on-failure
+
+cmake -S "$repo_root" -B "$build_root/tsan" -G Ninja \
+  -DUCN_BUILD_TESTS=ON -DUCN_PROFILE=FULL \
+  -DUCN_FEATURE_PERSISTENCE=ON \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -fno-pie -g" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread -no-pie"
+cmake --build "$build_root/tsan" --target \
+  ucn_owner_concurrency_tests ucn_coordinator_concurrency_tests \
+  ucn_core_concurrency_tests ucn_core_concurrency_driver_gate_tests \
+  ucn_persistence_concurrency_tests -j4
+TSAN_OPTIONS=halt_on_error=1 \
+  setarch "$(uname -m)" -R ctest --test-dir "$build_root/tsan" \
+  -R '^(ucn_owner_concurrency|ucn_coordinator_concurrency|ucn_core_concurrency|ucn_persistence_concurrency)' \
   --output-on-failure
 
 echo "V6 sanitizer/analyzer matrix completed at $build_root"

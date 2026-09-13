@@ -84,6 +84,38 @@ def selftest_readme_gate() -> list[str]:
     return errors
 
 
+def validate_live_implementation_status(task: str) -> list[str]:
+    """Allow only forward progress after the immutable V6S-00 sign-off."""
+    errors: list[str] = []
+    match = re.search(r"^IMPL_00\s+=\s+(.+)$", task, re.M)
+    if match is None:
+        return ["task table: missing IMPL_00 implementation status"]
+    status = match.group(1).strip()
+    allowed = {
+        "AUTHORIZED / IN PROGRESS",
+        "DONE / SELF-REVIEW PASS",
+        "DONE / SELF-REVIEW PASS / EXTERNAL REVIEW DEFERRED",
+    }
+    if status not in allowed:
+        errors.append(f"task table: invalid IMPL_00 progress state {status!r}")
+    return errors
+
+
+def selftest_live_implementation_status() -> list[str]:
+    """Prove completed work does not invalidate the earlier contract sign-off."""
+    errors: list[str] = []
+    for status in (
+        "AUTHORIZED / IN PROGRESS",
+        "DONE / SELF-REVIEW PASS",
+        "DONE / SELF-REVIEW PASS / EXTERNAL REVIEW DEFERRED",
+    ):
+        if validate_live_implementation_status(f"IMPL_00 = {status}\n"):
+            errors.append(f"implementation status self-test rejected {status!r}")
+    if not validate_live_implementation_status("IMPL_00 = BLOCKED\n"):
+        errors.append("implementation status self-test accepted a rollback to BLOCKED")
+    return errors
+
+
 def parse_manifest(text: str) -> tuple[dict[str, tuple[str, int]], list[str]]:
     """Parse the generated candidate manifest without trusting its producer."""
     entries: dict[str, tuple[str, int]] = {}
@@ -298,8 +330,8 @@ def main() -> int:
             errors.append(f"task table: {task_id} is not self-reviewed DONE")
         elif index == 8 and "DONE / EXTERNAL REVIEW GO" not in lines[0]:
             errors.append(f"task table: {task_id} lacks external GO")
-    require(task, "IMPL_00                 = AUTHORIZED / IN PROGRESS",
-            "task table", errors)
+    errors.extend(validate_live_implementation_status(task))
+    errors.extend(selftest_live_implementation_status())
     require(task, "V6S_00_CONTRACT_FREEZE = DONE / EXTERNAL REVIEW GO",
             "task table", errors)
 

@@ -108,9 +108,16 @@ C99 文件作用域不能用运行时函数返回值声明数组，因此每个�
 UCN_DECLARE_STORAGE(app_ucn_storage);
 ```
 
-`UCN_DECLARE_STORAGE` 是唯一受支持的可移植声明形式。生成器必须为当前编译器提供满足对齐的
+`UCN_DECLARE_STORAGE` 是唯一受支持的可移植声明形式。配置头必须为当前编译器提供满足对齐的
 union/attribute/declspec 实现；不支持所需对齐的编译器在编译期失败。不得要求用户手写
 `uint8_t bytes[N]` 后猜测对齐。
+
+`UCN_COMPILED_MANIFEST_HASH` 禁止写成按 Profile 手工维护的三个常量。它必须由当前编译输入
+机械推导：以固定顺序把 `manifest magic/schema`、API Version、Storage Layout、Profile、
+简化 Feature mask、全部固定表容量、Adapter frame/slot、Q0～Q3、总 TX slot、Storage
+bytes/alignment、`CHAR_BIT`、指针宽度及关键公共 DTO `sizeof` 规范化为 `u32be`，再执行
+FNV-1a-64。字段顺序和字段数属于冻结合同；单字段单值变异必须改变结果。这里的 Hash 用于
+发现构建/头文件/容量/ABI 漂移，不是密码认证。
 
 运行时 `ucn_storage_required()` 只用于诊断和交叉核对，不能替代编译期常量。`ucn_init()` 在
 首次写 Storage 前按顺序验证：指针、容量、地址对齐、API Version、Storage Layout、完整
@@ -220,6 +227,26 @@ ucn_result_t ucn_plan_preview(const ucn_node_t *, const ucn_target_t *,
                               ucn_plan_view_t *);
 ```
 
+Endpoint callback 中的只读查询使用独立的 callback-scope API：
+
+```c
+ucn_result_t ucn_callback_link_get(const ucn_node_t *,
+                                   ucn_callback_scope_t,
+                                   uint16_t, ucn_link_handle_t *);
+ucn_result_t ucn_callback_send_query(const ucn_node_t *,
+                                     ucn_callback_scope_t,
+                                     ucn_send_handle_t, ucn_send_view_t *);
+ucn_result_t ucn_callback_get_stats(const ucn_node_t *,
+                                    ucn_callback_scope_t, ucn_stats_t *);
+```
+
+`ucn_callback_scope_t` 只由 Runtime 写入本次 `ucn_endpoint_message_t`，绑定 Runtime、Owner 和
+64-bit no-wrap nonce。它不是 Wire 身份或安全凭据；它只用于证明调用者显式持有本次 callback
+上下文。普通 `ucn_link_get/ucn_send_query/ucn_get_stats` 在 callback gate 活动期间一律返回
+`UCN_ERR_STATE`，不能因为另一个线程恰好与 callback 同时运行而借用快照。scope API 只读取
+callback 开始前冻结的 Link/Send/Stats；伪造、跨 Runtime、过期和 callback 返回后的 scope
+全部失败且输出不写回。
+
 Completion 必须分开表示 local admission、link submit、remote acceptance、application result、
 execution unknown、buffer release 与 receipt retirement。`cancel` 不证明远端没收到；物理提交
 不确定时结果只能是 `IN_DOUBT`。诊断 View 不是可执行 Authority。
@@ -244,7 +271,7 @@ Driver 不解码 Wire、不做 ACL、不建立 Session、不调 Endpoint。Port 
 | --- | --- | --- |
 | Driver callback | 专用 ISR-safe fact/latch | 生命周期、发送、重开 Adapter、Provider I/O |
 | Provider callback | 对当前 token 的同步 completion latch | init、再次 submit/poll/load、业务发送 |
-| Endpoint callback | 只读 View、显式延迟投递 API | stop/deinit/reopen、直接 Owner/SPI |
+| Endpoint callback | 携带精确 callback scope 的只读 View、显式延迟投递 API | 普通查询、stop/deinit/reopen、直接 Owner/SPI |
 | Owner step | 当前 Coordinator 路由的一个 work item | 第二 task/ISR 并发写同 Owner |
 
 共享 Gate 必须由调用方存储持有，并由目标平台提供 task/ISR/SMP 安全原子或临界区；普通静态指针

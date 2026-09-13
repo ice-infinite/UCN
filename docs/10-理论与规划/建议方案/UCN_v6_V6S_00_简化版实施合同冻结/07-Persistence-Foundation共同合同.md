@@ -157,6 +157,19 @@ journal 实现等价语义。Foundation 不猜 Flash page/program unit，也不�
 Marker 只发布已经完整写入并回读验证的 Record。相同 generation 的 exact marker 重放可幂等；
 不同 generation、不同 Slot 或冲突字节失败关闭。
 
+`load_slot()` 没有“逻辑空槽”旁路。Provider 必须始终返回固定长度的原始槽镜像并报告
+`BLOB_PRESENT`，Foundation 自己读取槽尾 marker：
+
+- marker 全为 Provider erased value：该槽未提交，正文即使完整、部分写入或随机残留也全部忽略；
+- marker 是完整且与 Record Generation 精确一致的 16 B 合法值：该槽已提交，再继续验证
+  Envelope、Digest、CRC 和 Body；
+- marker 既非全擦除也非完整合法值：视为 torn marker，当前 domain 失败关闭；
+- `BLOB_EMPTY` 仅允许 `load_witness()` 表示不存在 witness；`load_slot()` 返回它属于 Provider
+  合同错误并失败关闭。
+
+Provider 不能维护“这个槽是否提交”的易失 sidecar。进程重建或掉电重启后，返回值必须只由
+真实持久介质内容产生；Host Fake Provider 也必须遵守同一规则。
+
 ## 6. Anti-rollback Witness
 
 Witness 是 Provider 提供的 per-domain 单调对象：
@@ -178,9 +191,11 @@ witness 的产品不能承诺 anti-rollback；不得把“最新槽坏了就退�
 
 ## 7. Provider SPI
 
-Provider vtable 至少具有 exact `struct_size/api_version/context`。I/O token 是 Persistence Owner
-在进入 callback 前分配的非零 64-bit 单调值；Owner 的固定 continuation slot 保存完整绑定，
-Provider 不得生成、替换或解释 token。所有开始函数都接收同一个 input token：
+Provider vtable 至少具有 exact `struct_size/api_version/context`。I/O token 由同一 Provider
+回调域中所有 Owner 共享的 caller-owned gate 在进入 callback 前分配，是该回调域全局唯一、非零、
+64-bit 单调且不回绕的值；不能由各 Owner 独立分配，否则两个 Owner 共享 Provider 时会产生歧义。
+Owner 的固定 continuation slot 保存完整绑定，Provider 不得生成、替换或解释 token。所有开始函数
+都接收同一个 input token：
 
 ```text
 begin_load_slot(domain, slot, output_buffer, exact_bytes, io_token)
@@ -195,10 +210,16 @@ poll(io_token, expected_phase, output_completion)
 开始函数返回值只有 `COMPLETED/PENDING/FAILED`；全零或未知值非法。`COMPLETED` 的输出只能写入
 调用前预留的 latch，callback 返回后由 Owner 统一合并；`PENDING` 保留 exact continuation，后续
 只允许用相同 token 和 phase 调用 `poll`；`poll` 可以继续返回 `PENDING`，此时必须原样保留
-同一 continuation，不分配新 token、不重复发起底层 I/O；`FAILED` 退休 token 并按当前 phase
+同一 continuation，不分配新 token、不重复发起底层 I/O；新 I/O 分配到 `UINT64_MAX` 前必须
+失败关闭，不能回绕或复用旧 token；`FAILED` 退休 token 并按当前 phase
 回滚/Fault。没有实现 `poll` 的 Provider 若从任一 `begin_*` 返回 PENDING，则立即 Fault 当前
 domain。每个 I/O token 绑定
 `{runtime,owner,domain,request,slot,record_generation,phase}`，不可跨 phase 重用。
+
+Provider geometry 在 Owner Storage 首次写入和任何 Provider I/O 前完成验证。每个 Manifest
+`slot_capacity_bytes` 必须不超过 `maximum_slot_bytes`，并且分别是
+`minimum_write_alignment` 与 `minimum_erase_alignment` 的整数倍；两个最小对齐均必须非零。
+不满足时初始化原子拒绝，Owner Storage、输出指针和 Provider 调用计数保持不变。
 
 Provider callback 规则：
 
@@ -207,6 +228,17 @@ Provider callback 规则：
 3. callback 内递归 init/submit/poll/load、另一个 Provider I/O 或 Runtime 生命周期入口返回 STATE；
 4. 多 task/ISR/SMP 的 gate 必须使用平台原子/临界区，不得使用普通静态指针或 volatile；
 5. Provider 不解析业务 Body，也不直接通知业务 Owner。
+
+shared gate 维护有界 Owner 引用计数。每个成功初始化的 Persistence Owner 原子登记一次，并在
+成功反初始化时原子撤销一次；只要引用计数非零或 callback 活跃，gate deinit 必须零写拒绝。
+因此不能在旧 Owner 仍持有指针时销毁并原地重建 Gate，多个 Owner 的共同回调域不会被生命周期
+操作静默拆开。
+
+状态锁在 Provider callback 返回后必须重新取得，Owner 才能合并 completion。若平台锁在该点返回
+失败，调用栈不得继续读取、写入或解锁 Owner；shared gate 指针、Runtime/Owner identity、token 和
+phase 必须在释放状态锁前冻结，只允许使用这些冻结值经独立 gate 锁撤销本次 callback 占用，然后
+返回 `UCN_ERR_STATE`。Owner 保留 `IO_ACTIVE/call_active` 形成不可恢复的易失 Fence，后续
+请求全部失败关闭；上层只能按产品故障策略重启该 Runtime，不能把这次 I/O 猜成成功或未发生。
 
 ## 8. Persistence Request 与 Proof
 
@@ -224,6 +256,20 @@ volatile continuation handle
 
 Digest 只作槽查找预筛选；命中后必须精确比较整个有界 canonical request。相同 digest、不同
 request 是冲突，不能复用 pending。
+
+这里的“整个 request”只适用于同一易失 pending 的重复提交。重启后或 proof 退休后的同事务
+重放，只能根据 Record 自身判断下面的 durable identity：
+
+```text
+domain + schema/version + transaction id + operation kind
+record generation + exact canonical body/body fingerprint
+```
+
+`absolute_deadline`、`business transition proof/reference` 和 `volatile continuation` 不进入
+Record，也不得由 Foundation Proof 回显成“已持久化字段”。同一 durable identity 的重放只返回
+同一耐久事实；它携带的当前业务前置条件和 continuation 是新的易失关联，必须由 Coordinator 与
+业务 Owner 在本次调用中重新精确绑定、重新验证。相同 transaction ID 但 durable identity 中任一
+字段或 Body 不同，必须作为冲突拒绝。
 
 成功 reload 后 Foundation 生成只读 proof：
 
@@ -258,7 +304,7 @@ READY
 submit(request):
     validate owner/domain/gate/request/canonical body
     require expected fingerprint == current snapshot
-    call business pure transition validator
+    require Coordinator-bound nonzero business transition reference
     checked-next record generation and reserve inactive slot/staging
     publish exact WRITING continuation before Provider call
     write full Header+Body with uncommitted marker
@@ -266,9 +312,15 @@ submit(request):
     publish exact 16 B marker
     advance independent witness
     reload both slots and witness
-    select unique newest record and compare request exactly
+    select unique newest record and compare durable request identity exactly
     publish new domain snapshot and immutable proof
 ```
+
+业务 pure transition validator 由业务 Owner 在形成 immutable requirement 前执行，Coordinator
+把其 exact reference/digest 与本次 requirement 绑定；Persistence Foundation 不反向调用业务
+Owner，也不解释该 digest。Foundation 自己负责的 schema/domain/capacity/expected-state/duplicate
+检查仍必须全部发生在首次 Provider I/O 前。未来业务模块接线时，若业务验证结果不能被
+Coordinator 精确绑定，提交必须在进入 Persistence Owner 前失败关闭。
 
 所有配置、transition、capacity、expected-state 和 duplicate/conflict 校验在首次 Provider I/O 前
 完成。不允许在 durable Commit 后才检查 Backup ACK、quorum、Authority 或业务门禁。
@@ -279,15 +331,24 @@ submit(request):
 | --- | --- | --- |
 | 新 Record 未写完 | 旧 committed + 旧 witness | 忽略未提交槽 |
 | 新 Record 完整、marker 未提交 | 新槽 uncommitted | 忽略新槽，不发布 promise |
-| marker 已提交、witness 仍为旧值 | 唯一完整新代为 `witness+1` | 验证后补推进 witness，再 reload |
+| 首次 marker 已提交、witness 仍为 0 | 唯一完整新代为 generation 1 | provisioning witness 有效后允许补推进，再 reload |
+| 后续 marker 已提交、witness 仍为旧值 | 同时存在完整 `generation=witness` 前驱和 `generation=witness+1` 后继；Transaction ID 严格递增 | 验证完整历史后补推进 witness，再 reload |
+| witness 非零、只有 `witness+1` 后继而前驱缺失/损坏 | 无法证明 Transaction ID 相对前驱严格递增 | domain Fault；witness 保持不变，不发布正文或 Proof |
 | witness 已推进、最终 reload 未做 | 新 committed 与 witness 相等 | reload 精确成功后恢复新状态 |
 | witness 指向的最新槽损坏/缺失 | 旧槽低于 witness | domain Fault；禁止回退 |
 | 两槽同代但内容不同 | 冲突 | domain Fault |
+| 两槽同代且内容相同 | 不可能由正常双槽提交顺序产生 | domain Fault |
+| 相邻 generation 但 Transaction ID 相等或回退 | 事务历史不连续 | domain Fault |
 | generation 跳跃无 reservation proof | 无法证明连续 | domain Fault |
 | witness 损坏/回退/多个最大值 | 无法证明高水位 | domain Fault |
 
 掉电允许安全跳号，不允许 ABA。Factory Empty 只能由产品 provisioning marker/Provider 明确证明；
 不能把任意全 `0xFF`、CRC 错或旧版本 Record 当 factory empty。
+
+Witness 补推进不是“看到下一代有效 Record 就接受”。除 generation 0 到 1 的首次提交外，补推进
+必须同时读到同一 Domain、Schema 和 Durable Manifest 下的前驱与后继；两者 generation 精确
+相邻，且后继 Transaction ID 严格大于前驱。任一证明缺失、Transaction 相等/回退或字段错绑，
+必须在 Provider `ADVANCE_WITNESS` 前失败关闭。
 
 ## 11. 启动顺序
 

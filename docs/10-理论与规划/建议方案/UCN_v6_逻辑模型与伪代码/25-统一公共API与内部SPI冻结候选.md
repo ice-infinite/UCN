@@ -131,7 +131,7 @@ ucn_result_t ucn_static_route_remove(
     ucn_path_handle_t path);
 ```
 
-Endpoint callback 不能重入任何会改变 Runtime/Adapter/Provider 生命周期的公开入口。回调只能返回固定的 `ACCEPT/DROP`；需要异步持有 Payload 时，使用明确 Buffer Claim/Release API。
+Endpoint callback 不能重入任何会改变 Runtime/Adapter/Provider 生命周期的公开入口。回调只能返回固定的 `ACCEPT/DROP`；需要异步持有 Payload 时，使用明确 Buffer Claim/Release API。Runtime 在每次回调消息中签发短生命周期 `ucn_callback_scope_t`，只允许通过 `ucn_callback_*` 查询该次冻结快照。普通查询 API 不推断“当前全局 gate 是 step”来放行，因为那会让同时运行的其他线程错误借用 callback 权限。
 
 ## 5. 统一发送面
 
@@ -250,6 +250,32 @@ ucn_result_t ucn_get_path_view(
     ucn_path_handle_t path,
     ucn_path_view_t *out_view);
 ```
+
+回调动态范围的对应只读面必须显式携带 scope：
+
+```c
+ucn_result_t ucn_callback_get_stats(
+    const ucn_node_t *node,
+    ucn_callback_scope_t scope,
+    ucn_stats_t *out_stats);
+
+ucn_result_t ucn_callback_send_query(
+    const ucn_node_t *node,
+    ucn_callback_scope_t scope,
+    ucn_send_handle_t handle,
+    ucn_send_view_t *out_view);
+
+ucn_result_t ucn_callback_link_get(
+    const ucn_node_t *node,
+    ucn_callback_scope_t scope,
+    uint16_t link_index,
+    ucn_link_handle_t *out_link);
+```
+
+scope 精确绑定 Runtime/Owner/本次 callback nonce，只在回调开始到返回的半开生命周期内有效。
+普通线程没有 scope 时，即使 callback 正在另一个线程中执行，也不能调用普通查询绕开 gate；
+显式取得 scope 的协作线程只能读本次冻结快照，不能获得 Mutation 权限。scope 不是网络
+Authority，禁止上 Wire、持久化或在 callback 结束后复用。
 
 诊断 View 不是可执行 Authority。`plan_preview()` 不预留资源，不保证随后提交仍选相同 Plan。所有输出结构均有 `struct_size/api_version`，错误时完全不写回。
 
@@ -389,7 +415,7 @@ owner_step(node, now, budget):
 | --- | --- |
 | Driver callback | 仅对约定的 completion latch/ISR publish 函数 |
 | Provider callback | 不允许任何可发起新 Provider I/O 的 API |
-| Endpoint callback | 允许查询只读 View；发送如需支持必须进入独立有界延迟队列，不递归 Owner |
+| Endpoint callback | 只允许携带本次 callback scope 查询冻结 View；发送如需支持必须进入独立有界延迟队列，不递归 Owner |
 | Owner step | 不允许另一个 task/ISR 并发进入同 Owner 写路径 |
 
 共享 Gate 必须是调用方持有、任务/ISR/SMP 安全的原子或平台临界区，不得使用未同步的进程静态指针。

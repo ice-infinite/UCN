@@ -11,7 +11,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", required=True, type=Path)
     parser.add_argument("--limit-bytes", required=True, type=int)
+    parser.add_argument(
+        "--source-prefix",
+        action="append",
+        help="normalized source-path fragment whose records are in scope",
+    )
     args = parser.parse_args()
+    prefixes = [item.replace("\\", "/") for item in
+                (args.source_prefix or ["/src/v6/"])]
 
     records: list[tuple[int, str]] = []
     invalid: list[str] = []
@@ -21,7 +28,7 @@ def main() -> int:
             if len(fields) < 3:
                 continue
             location = fields[0].replace("\\", "/")
-            if "/src/v6/" not in location:
+            if not any(prefix in location for prefix in prefixes):
                 continue
             try:
                 stack_bytes = int(fields[1])
@@ -33,7 +40,10 @@ def main() -> int:
             records.append((stack_bytes, raw))
 
     if not records:
-        print("v6 stack gate: no production .su records found")
+        print(
+            "stack gate: no production .su records found for "
+            f"{prefixes}"
+        )
         return 2
     offenders = [item for item in records if item[0] > args.limit_bytes]
     if invalid or offenders:
@@ -44,7 +54,7 @@ def main() -> int:
         return 1
     maximum = max(records)
     print(
-        f"v6 stack gate: {len(records)} functions, "
+        f"stack gate: {len(records)} functions from {prefixes}, "
         f"max={maximum[0]} bytes, limit={args.limit_bytes} bytes"
     )
     print(maximum[1])

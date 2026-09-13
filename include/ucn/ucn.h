@@ -1,6 +1,12 @@
 #ifndef UCN_H
 #define UCN_H
 
+#include "ucn/ucn_types.h"
+#include "ucn/ucn_config.h"
+#include "ucn/ucn_driver.h"
+#include "ucn/ucn_product.h"
+#include "ucn/ucn_core.h"
+
 /*
  * UCN v6 public umbrella header.
  * UCN v3/v4/v5 APIs are intentionally absent from the v6 release surface.

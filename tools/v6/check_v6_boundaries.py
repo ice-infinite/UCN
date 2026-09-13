@@ -15,12 +15,17 @@ def main() -> int:
     root = args.root.resolve()
     errors: list[str] = []
     runtime_files = sorted((root / "src" / "v6").rglob("*.c"))
-    public_files = sorted((root / "include" / "ucn" / "v6").rglob("*.h"))
+    runtime_files.extend(sorted((root / "src" / "core").rglob("*.c")))
+    for directory in ("wire", "adapter", "runtime", "persistence"):
+        runtime_files.extend(sorted((root / "src" / directory).rglob("*.c")))
+    public_files = sorted((root / "include" / "ucn").rglob("*.h"))
     if not runtime_files or not public_files:
         errors.append("v6 source/header set is empty")
 
     heap_pattern = re.compile(r"\b(malloc|calloc|realloc|free|alloca)\s*\(")
-    old_include = re.compile(r"#\s*include\s*[<\"]ucn/(?!v6/)")
+    old_include = re.compile(
+        r"#\s*include\s*[<\"]ucn/(?!v6/|"
+        r"ucn_(?:simplified|types|config|driver|product|core|persistence)\.h[>\"])")
     for path in runtime_files + public_files:
         text = path.read_text(encoding="utf-8")
         relative = path.relative_to(root).as_posix()
@@ -62,7 +67,8 @@ def main() -> int:
 
     cmake = (root / "CMakeLists.txt").read_text(encoding="utf-8")
     required_targets = (
-        "ucn_v6_config", "ucn_v6_identity", "ucn_v6_wire",
+        "ucn_common", "ucn_coordinator", "ucn_wire", "ucn_adapter",
+        "ucn_kernel", "ucn_simplified", "ucn_persistence", "ucn_v6_config", "ucn_v6_identity", "ucn_v6_wire",
         "ucn_v6_message", "ucn_v6_owner", "ucn_v6_security",
         "ucn_v6_capability", "ucn_v6_route", "ucn_v6_qos",
         "ucn_v6_transfer", "ucn_v6_realtime", "ucn_v6_cluster",
@@ -86,15 +92,26 @@ def main() -> int:
             errors.append(f"legacy CMake option remains: {token}")
 
     legacy_paths: list[Path] = []
+    allowed_source_roots = (
+        root / "src" / "v6", root / "src" / "core",
+        root / "src" / "internal", root / "src" / "wire",
+        root / "src" / "adapter", root / "src" / "runtime",
+        root / "src" / "persistence",
+    )
     for path in (root / "src").rglob("*"):
-        if path.is_file() and (root / "src" / "v6") not in path.parents:
+        if path.is_file() and not any(base in path.parents for base in allowed_source_roots):
             legacy_paths.append(path)
     for path in (root / "include" / "ucn").rglob("*"):
-        if (path.is_file() and path.name != "ucn.h" and
+        if (path.is_file() and path.name not in (
+                "ucn.h", "ucn_simplified.h", "ucn_types.h",
+                "ucn_config.h", "ucn_driver.h",
+                "ucn_product.h", "ucn_core.h", "ucn_persistence.h") and
                 (root / "include" / "ucn" / "v6") not in path.parents):
             legacy_paths.append(path)
     for path in (root / "tests").rglob("*"):
-        if path.is_file() and (root / "tests" / "v6") not in path.parents:
+        if (path.is_file() and
+                (root / "tests" / "v6") not in path.parents and
+                (root / "tests" / "simplified") not in path.parents):
             legacy_paths.append(path)
     for path in (root / "tools").rglob("*"):
         if (path.is_file() and "__pycache__" not in path.parts and
@@ -106,7 +123,8 @@ def main() -> int:
     umbrella = (root / "include" / "ucn" / "ucn.h")
     if not umbrella.is_file():
         errors.append("v6 public umbrella header is missing")
-    elif re.search(r'#\s*include\s*[<\"]ucn/(?!v6/|ucn\.h)',
+    elif re.search(r'#\s*include\s*[<\"]ucn/(?!v6/|ucn\.h[>\"]|'
+                   r'ucn_(?:simplified|types|config|driver|product|core)\.h[>\"])',
                    umbrella.read_text(encoding="utf-8")):
         errors.append("public umbrella includes a legacy header")
 
