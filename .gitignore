@@ -6,6 +6,7 @@
 /.v6s-*/
 /构建中文路径*/
 /cmake-build-*/
+/**/target/
 /.h743cmp/
 CMakeCache.txt
 CMakeFiles/
