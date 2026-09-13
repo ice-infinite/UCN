@@ -179,12 +179,16 @@ pub struct DomainView {
     pub domain: DomainKey,
     /// 当前发布 Generation；Factory Empty 为 0。
     pub record_generation: u64,
+    /// 当前发布的 Foundation Transaction ID；Factory Empty 为 0。
+    pub foundation_transaction_id: u64,
     /// 当前正文长度。
     pub body_bytes: u32,
     /// Schema ID。
     pub schema_id: u16,
     /// Schema Version。
     pub schema_version: u16,
+    /// 当前发布记录的业务 Operation Kind；Factory Empty 为 0。
+    pub current_operation_kind: u16,
     /// 本次启动 Domain Generation。
     pub domain_generation: u16,
     /// 当前状态。
@@ -726,9 +730,11 @@ impl<'a, const DOMAINS: usize, const BODY: usize, const SLOT: usize>
         Ok(DomainView {
             domain: key,
             record_generation: domain.record_generation,
+            foundation_transaction_id: domain.transaction_id,
             body_bytes: domain.body_bytes,
             schema_id: domain.manifest.schema_id,
             schema_version: domain.manifest.schema_version,
+            current_operation_kind: domain.current_operation_kind,
             domain_generation: domain.domain_generation,
             state: domain.state,
             active_slot: domain.active_slot,

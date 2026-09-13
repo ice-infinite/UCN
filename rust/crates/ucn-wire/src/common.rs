@@ -25,7 +25,12 @@ pub struct CommonHeader {
 }
 
 impl CommonHeader {
-    pub(crate) fn decode(input: &[u8]) -> Result<Self> {
+    /// 从任意 Core Packet 前缀解析 Common Header；不会修改输入。
+    ///
+    /// # Errors
+    ///
+    /// 长度、协议版本或 Registry 值非法时返回 [`Error::Malformed`]。
+    pub fn decode(input: &[u8]) -> Result<Self> {
         if input.len() < COMMON_HEADER_BYTES {
             return Err(Error::Malformed);
         }
@@ -54,7 +59,8 @@ impl CommonHeader {
         })
     }
 
-    pub(crate) fn encode(self, output: &mut [u8]) {
+    /// 将已经验证的 Common Header 写入至少 3 B 的输出。
+    pub fn encode(self, output: &mut [u8]) {
         output[0] = (ucn_types::PROTOCOL_MAJOR << 4) | u8::from(self.contract);
         output[1] = (u8::from(self.traffic_class) << 6)
             | (u8::from(self.delivery) << 4)

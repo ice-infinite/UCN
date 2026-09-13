@@ -1,6 +1,6 @@
 # UCN v6 简化版 Rust 独立实现总体设计
 
-> 文档状态：`RUST-04 / DONE / SELF-REVIEW PASS`
+> 文档状态：`RUST-05 / DONE / SELF-REVIEW PASS`
 >
 > 对应分支：`v6-simplified-rust`
 >
@@ -382,3 +382,40 @@ RUST-04 只解除 RUST-05 的实施顺序阻塞。Host Fake Provider 不能证�
 独立 Witness 物理隔离、掉电行为或磨损寿命；Security、Admission、动态 Route、可靠 Transfer、
 Realtime、Group、Cluster 与 ESP32-S3 仍未由 Rust 实现完成。详细证据见
 `docs/08-实现与验证/版本演进/UCN_V6S_RUST_04_Persistence_Foundation实施及自审报告.md`。
+
+## 21. RUST-05 实施边界与结果
+
+RUST-05 新增独立 `ucn-security` crate，并保持 `no_std`、禁止 `unsafe`、固定容量和零第三方依赖：
+
+- `SecurityOwner<SESSIONS,REPLAY_SLOTS>` 唯一拥有 Peer Session、Key selector、密码 Replay
+  Window 与活动/围栏状态；其他模块只能持有不可构造的 `SessionHandle`；
+- 静态握手候选精确绑定双方 Principal/Binding、Link/Session/Policy/Key Generation、Suite、
+  Origin/Hop Context fingerprint、绝对到期时间与 transcript；密码 Provider 必须验证完整候选；
+- 新 Session 先生成 192 B canonical Record 和 typed Persistence requirement，只有精确绑定的
+  reload proof 才能将 `AWAITING_DURABILITY` 原子发布为 `ACTIVE`；高代 Session 发布时围栏旧代；
+- C0～C3 当前受保护路径实现 O1 HMAC-SHA-256-128、O2 AES-128-GCM/ChaCha20-Poly1305 Provider
+  边界、H1 HMAC-SHA-256-96 与 C2/H2 Combined Proof；所有 canonical AAD、Nonce、Tag 和长度均
+  对冻结 Wire Oracle；
+- C1 Origin Sequence、C0 Transaction ID 与 Hop Sequence 仍由各自唯一字段 Owner 提供；在密码
+  Provider 首次观察 Key/Nonce 前不可逆 burn，Provider 失败不复用；纯结构错误在 burn 前拒绝；
+- RX 先认证/解密，再执行精确 Principal、Binding、Context、Service、Opcode、方向 ACL，然后只
+  reserve Replay mutation；Coordinator 预留完业务资源后才 `commit`，失败则 `abort`；
+- exact duplicate 只返回 Session/Key/Context/AAD/Payload digest 证据，不再次暴露明文，也不由
+  Security 越权声称业务重复；遗失的 reservation 由持久游标和显式预算在半开 Deadline 清理；
+- H1 暂时关闭时，Record 仍保留 TX/RX Hop Key Generation 高水位；以后重新启用必须严格递增，
+  删除/降级 Profile 不能释放旧 Key ID/Generation 的防 ABA 约束。
+
+本阶段刻意不把 C4 当作普通 Peer Session：C4 Routed Origin 必须等 RUST-07 的 Flow Owner 提供
+独立 Origin 与逐跳 Context。H3 只在 Provider trait 保留密码原语，活动 Session 明确拒绝它，因为
+H3 唯一属于 RUST-09 的 C5 Group/Tree Security。`ucn-core` 的 O0/H0 静态路径也没有被暗中升级为
+安全 Runtime；后续 Runtime Coordinator 必须显式组合两个 Owner。
+
+验证包括 80 项 Rust Workspace Debug/Release/MSRV 测试、Clippy 和 rustdoc `-D warnings`、两个
+Cortex-M `no_std` target、10 条独立密码 Wire Oracle 与 C Full fresh 47/47。Host 固定对象尺寸为
+Nano 2,368 B、Lite 11,120 B、Full 32,176 B；256/512 B Payload workspace 分别为 984/1,752 B。
+这些数字不是 ESP32-S3 的 Flash、调用栈、任务栈或性能证明。
+
+RUST-05 只解除 RUST-06 的实施顺序阻塞。Dynamic Admission、Bootstrap/JOIN、Capability、生产
+密码库/安全元件、真实 Flash 防回退、随机数质量、侧信道、物理 Bearer 和 MCU 实测均未完成。
+详细证据见
+`docs/08-实现与验证/版本演进/UCN_V6S_RUST_05_Security_Session实施及自审报告.md`。

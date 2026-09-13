@@ -5,6 +5,7 @@ members = [
     "crates/ucn-core",
     "crates/ucn-owner",
     "crates/ucn-persistence",
+    "crates/ucn-security",
     "crates/ucn-types",
     "crates/ucn-wire",
 ]

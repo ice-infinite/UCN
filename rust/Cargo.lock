@@ -35,6 +35,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucn-security"
+version = "0.0.0"
+dependencies = [
+ "ucn-owner",
+ "ucn-persistence",
+ "ucn-types",
+ "ucn-wire",
+]
+
+[[package]]
 name = "ucn-types"
 version = "0.0.0"
 
