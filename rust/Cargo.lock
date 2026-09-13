@@ -10,6 +10,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucn-core"
+version = "0.0.0"
+dependencies = [
+ "ucn-adapter",
+ "ucn-owner",
+ "ucn-types",
+ "ucn-wire",
+]
+
+[[package]]
 name = "ucn-owner"
 version = "0.0.0"
 dependencies = [

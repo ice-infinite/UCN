@@ -1,0 +1,17 @@
+[package]
+name = "ucn-core"
+description = "Fixed-capacity endpoint, static path and single-frame runtime for UCN v6 simplified"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ucn-adapter = { path = "../ucn-adapter" }
+ucn-owner = { path = "../ucn-owner" }
+ucn-types = { path = "../ucn-types" }
+ucn-wire = { path = "../ucn-wire" }
+
+[lints]
+workspace = true

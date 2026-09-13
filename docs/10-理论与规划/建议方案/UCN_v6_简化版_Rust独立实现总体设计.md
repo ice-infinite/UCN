@@ -1,6 +1,6 @@
 # UCN v6 简化版 Rust 独立实现总体设计
 
-> 文档状态：`RUST-01 / DONE / SELF-REVIEW PASS`
+> 文档状态：`RUST-03 / DONE / SELF-REVIEW PASS`
 >
 > 对应分支：`v6-simplified-rust`
 >
@@ -321,3 +321,37 @@ RUST-02 的详细代码—测试—边界映射见
 `docs/08-实现与验证/版本演进/UCN_V6S_RUST_02_Owner_Coordinator与AdapterToken实施及自审报告.md`。
 本阶段完成只解除 RUST-03 的顺序阻塞；没有证明最小静态通信、真实 Driver/ISR 时序、目标 MCU
 资源或生产可用性。
+
+## 19. RUST-03 实施边界与结果
+
+RUST-03 新增独立 `ucn-core` crate，在 RUST-01 的 C1/O0/H0 Codec 和 RUST-02 的 Owner/Adapter
+基础上完成最小静态通信闭环：
+
+- `CoreNode` 只接受可信静态 O0 网络配置，启动前安装静态 Peer Binding、Endpoint 与单跳 Path；
+- `publish()` 在分配 Origin Sequence 前完成目标、Binding Generation、Path、队列、MTU 和 Deadline
+  预检，失败不消耗 Sequence、不驱逐队列项；
+- TX 使用四个固定分区和跨调用持久化的十二槽 `6:3:2:1` 调度表，同 Class 内按 Origin Sequence
+  选择最老请求；Adapter 暂时无槽时保留当前队列和调度位置；
+- `NOT_SUBMITTED` 重用精确 Adapter Token、Origin Sequence 和 Frame；`UNKNOWN/IN_DOUBT` 等无法证明
+  的 Driver 副作用使 Core 进入 Fault；
+- RX 原子 claim `{frame, link, timestamp, sender}`，严格解码并检查本机目标、静态 Source Binding、
+  Endpoint 和易失 64 位 Replay Window 后才进入受控回调；未知 Endpoint 不提前消耗 Replay；
+- stop 先通过 Adapter 的 RX publication 原子门关闭新输入，再以调用方预算取消/退休固定槽，最终到达
+  Quiescent；停止期间拒绝新业务，Quiescent 可显式重启；
+- Endpoint/Path Handle 绑定实例、槽位和不回绕 Generation，删除重建后旧 Handle 永久失效。
+
+本阶段分项自审主动关闭六个实现期问题：RX 停止门与 publication 分配必须共用原子临界区，且删除
+可绕过该证明的旧 RX setter；Adapter
+暂时满载不得消耗调度游标；一次 `step` 的最后清空检查不得突破预算；Callback Gate 已有 `u32`
+租约代际，不得再用 `u16` 回调次数让长运行节点在 65,535 次 RX 后错误耗尽；`publish()` 必须在
+分配 Sequence 前通过只读 Adapter 快照复核静态 Path 的 Link Generation 与当前 MTU。
+
+验证结果包括 Rust Host Debug/Release/MSRV 1.85 的 47 项测试、65,537 帧回调长运行与 12,000 次
+持续补队列公平压力、Clippy
+与 rustdoc `-D warnings`、两个 Cortex-M `no_std` target，以及 C Full fresh 47/47。Host 上
+`CoreNode` 固定对象尺寸为 Nano 5,976 B、Lite 16,920 B、Full 58,264 B；该数字不等于 MCU 的最终
+RAM/栈/Flash 证明。
+
+RUST-03 只解除 RUST-04 的实施顺序阻塞。Persistence、Security、Admission、动态 Route、可靠
+Transfer、Realtime、Group、Cluster、ESP32-S3 与真实 Bearer 均未由本阶段实现或放行。详细证据见
+`docs/08-实现与验证/版本演进/UCN_V6S_RUST_03_最小静态通信实施及自审报告.md`。

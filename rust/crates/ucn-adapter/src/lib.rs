@@ -34,6 +34,12 @@ pub struct LinkHandle {
 }
 
 impl LinkHandle {
+    /// 返回所属 Adapter 实例。
+    #[must_use]
+    pub const fn adapter_instance(self) -> u32 {
+        self.adapter_instance
+    }
+
     /// 返回 Link 槽位。
     #[must_use]
     pub const fn slot(self) -> u16 {
@@ -691,6 +697,12 @@ pub struct AdapterOwner<
 impl<'a, const LINKS: usize, const TX_SLOTS: usize, const RX_SLOTS: usize, const FRAME_BYTES: usize>
     AdapterOwner<'a, LINKS, TX_SLOTS, RX_SLOTS, FRAME_BYTES>
 {
+    /// 返回本 Owner 精确绑定的 Adapter 实例。
+    #[must_use]
+    pub const fn adapter_instance(&self) -> u32 {
+        self.adapter_instance
+    }
+
     /// 绑定一个调用方持有的 ingress；不会复制大帧存储。
     ///
     /// # Errors
@@ -768,9 +780,28 @@ impl<'a, const LINKS: usize, const TX_SLOTS: usize, const RX_SLOTS: usize, const
         })
     }
 
-    /// 控制是否接受新的 RX publication。
-    pub fn set_rx_enabled(&mut self, enabled: bool) {
+    /// 读取精确 Link Handle 当前的 Frame MTU。
+    ///
+    /// # Errors
+    ///
+    /// Handle 过期、槽位非法或 Link 已被围栏时返回错误。
+    pub fn link_mtu(&self, link: LinkHandle) -> Result<usize> {
+        self.validate_live_link(link)?;
+        Ok(self.links[usize::from(link.slot)].mtu)
+    }
+
+    /// 在与 RX publication 互斥的短临界区内切换 RX 接纳状态。
+    ///
+    /// 停止路径使用本入口可证明：成功返回后，没有更早观察到 `enabled=true` 的 publication
+    /// 仍处于写入中。并发 publication 已先取得门时，本调用立即返回而不等待。
+    ///
+    /// # Errors
+    ///
+    /// RX publication 正在分配槽位时返回 [`Error::State`]。
+    pub fn try_set_rx_enabled(&mut self, enabled: bool) -> Result<()> {
+        let _allocation = AtomicGuard::acquire(&self.ingress.rx_allocating)?;
         self.ingress.rx_enabled.store(enabled, Ordering::Release);
+        Ok(())
     }
 
     /// 预留一个精确 TX Token；只写一个空槽。
@@ -1321,7 +1352,9 @@ mod tests {
         assert_eq!(owner.tx_reserve(opened, 1), Err(Error::Exhausted));
         assert_eq!(owner.tx[0].state, TxState::Free);
 
-        owner.set_rx_enabled(true);
+        owner
+            .try_set_rx_enabled(true)
+            .expect("enable RX publication");
         ingress.rx[0].generation.store(u32::MAX, Ordering::Relaxed);
         ingress.rx[0].state.store(RX_FREE, Ordering::Relaxed);
         assert_eq!(

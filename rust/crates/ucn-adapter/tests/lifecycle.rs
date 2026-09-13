@@ -255,7 +255,9 @@ fn rx_frame_and_metadata_are_one_atomic_owned_item() {
         ingress.rx_publish(link, &[1, 2, 3], meta),
         Err(Error::State)
     );
-    owner.set_rx_enabled(true);
+    owner
+        .try_set_rx_enabled(true)
+        .expect("enable RX publication");
     let published = ingress.rx_publish(link, &[1, 2, 3], meta).expect("publish");
 
     let mut small = [0xEE; 2];
@@ -279,7 +281,9 @@ fn rx_capacity_and_stale_link_generation_fail_closed() {
     let ingress = Ingress::new(17).expect("ingress");
     let mut owner = AdapterOwner::new(17, &ingress).expect("owner");
     let link = owner.open_link(0, 2, 8).expect("link");
-    owner.set_rx_enabled(true);
+    owner
+        .try_set_rx_enabled(true)
+        .expect("enable RX publication");
     let meta = RxMeta {
         timestamp_us: 1,
         sender_discriminator: 2,
@@ -367,7 +371,9 @@ fn concurrent_rx_publishers_preserve_each_atomic_frame() {
     let ingress = Arc::new(ConcurrentIngress::new(20).expect("ingress"));
     let mut owner = AdapterOwner::new(20, ingress.as_ref()).expect("owner");
     let link = owner.open_link(0, 1, 8).expect("link");
-    owner.set_rx_enabled(true);
+    owner
+        .try_set_rx_enabled(true)
+        .expect("enable RX publication");
     let barrier = Arc::new(Barrier::new(5));
 
     thread::scope(|scope| {
