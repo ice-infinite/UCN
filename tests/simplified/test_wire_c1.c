@@ -1,5 +1,7 @@
 #include "internal/ucn_wire.h"
 
+#include "../../rust/tests/conformance/v6s_wire_core_v1.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -33,23 +35,13 @@ static int failures;
  * 中文：wire_a1 逐字节复制自 V6S-00-04 的权威 C1/A1 Golden；A0/A2/A3
  * 是独立补充 fixture。所有向量都禁止由当前实现反向生成，以免编解码双方同错。 */
 static const uint8_t payload_a0[] = {0xDEU, 0xADU};
-static const uint8_t wire_a0[] = {
-    0x61U, 0x80U, 0x05U, 0x01U, 0x02U, 0x12U, 0x34U,
-    0x11U, 0x22U, 0x33U, 0x44U, 0xDEU, 0xADU};
+static const uint8_t wire_a0[] = {UCN_V6S_WIRE_C1_A0_O0_H0_DATA_BYTES};
 static const uint8_t payload_a1[] = {0xDEU, 0xADU, 0xBEU, 0xEFU};
-static const uint8_t wire_a1[] = {
-    0x61U, 0x40U, 0x03U, 0x12U, 0x34U, 0x56U, 0x78U,
-    0x01U, 0x02U, 0x01U, 0x02U, 0x03U, 0x04U, 0xDEU, 0xADU,
-    0xBEU, 0xEFU};
+static const uint8_t wire_a1[] = {UCN_V6S_WIRE_C1_A1_O0_H0_DATA_BYTES};
 static const uint8_t payload_a2[] = {0x00U, 0xFFU};
-static const uint8_t wire_a2[] = {
-    0x61U, 0x40U, 0x01U, 0x01U, 0x02U, 0x03U, 0x0AU, 0x0BU, 0x0CU,
-    0x01U, 0x02U, 0xA1U, 0xB2U, 0xC3U, 0xD4U, 0x00U, 0xFFU};
+static const uint8_t wire_a2[] = {UCN_V6S_WIRE_C1_A2_O0_H0_DATA_BYTES};
 static const uint8_t payload_a3[] = {0x55U};
-static const uint8_t wire_a3[] = {
-    0x61U, 0x00U, 0x20U, 0x01U, 0x02U, 0x03U, 0x04U,
-    0xA1U, 0xA2U, 0xA3U, 0xA4U, 0xBEU, 0xEFU,
-    0x89U, 0xABU, 0xCDU, 0xEFU, 0x55U};
+static const uint8_t wire_a3[] = {UCN_V6S_WIRE_C1_A3_O0_H0_DATA_BYTES};
 
 static const golden_case_t golden[] = {
     {1U, 1U, 2U, 0x1234U, UINT32_C(0x11223344), UCN_TRAFFIC_Q2, 5U,
@@ -150,16 +142,16 @@ static void test_negative_decode(void)
     size_t index;
 
     memcpy(bad, wire_a0, sizeof(bad));
-    bad[0] = 0x51U;
+    bad[0] = UCN_V6S_NEG_BAD_VERSION_BYTE0;
     expect_decode_failure(bad, sizeof(bad), 1U, UCN_ERR_MALFORMED);
     memcpy(bad, wire_a0, sizeof(bad));
-    bad[0] = 0x66U;
+    bad[0] = UCN_V6S_NEG_RESERVED_CONTRACT_BYTE0;
     expect_decode_failure(bad, sizeof(bad), 1U, UCN_ERR_MALFORMED);
     memcpy(bad, wire_a0, sizeof(bad));
-    bad[0] = 0x62U;
+    bad[0] = UCN_V6S_NEG_OTHER_CONTRACT_BYTE0;
     expect_decode_failure(bad, sizeof(bad), 1U, UCN_ERR_UNSUPPORTED);
     memcpy(bad, wire_a0, sizeof(bad));
-    bad[1] |= 0x30U;
+    bad[1] |= UCN_V6S_NEG_RESERVED_DELIVERY_MASK;
     expect_decode_failure(bad, sizeof(bad), 1U, UCN_ERR_MALFORMED);
     memcpy(bad, wire_a0, sizeof(bad));
     bad[1] |= 0x10U;
@@ -171,13 +163,13 @@ static void test_negative_decode(void)
     bad[1] |= 0x01U;
     expect_decode_failure(bad, sizeof(bad), 1U, UCN_ERR_UNSUPPORTED);
     memcpy(bad, wire_a0, sizeof(bad));
-    bad[2] = 0xC5U;
+    bad[2] = UCN_V6S_NEG_RESERVED_ORIGIN_BYTE2;
     expect_decode_failure(bad, sizeof(bad), 1U, UCN_ERR_MALFORMED);
     memcpy(bad, wire_a0, sizeof(bad));
     bad[2] = 0x45U;
     expect_decode_failure(bad, sizeof(bad), 1U, UCN_ERR_UNSUPPORTED);
     memcpy(bad, wire_a0, sizeof(bad));
-    bad[2] = 0U;
+    bad[2] = UCN_V6S_NEG_ZERO_HOP_BYTE2;
     expect_decode_failure(bad, sizeof(bad), 1U, UCN_ERR_MALFORMED);
     memcpy(bad, wire_a0, sizeof(bad));
     bad[3] = 0U;

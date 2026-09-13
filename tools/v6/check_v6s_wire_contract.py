@@ -5,6 +5,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SHARED_FIXTURE = ROOT / "rust" / "tests" / "conformance" / "v6s_wire_core_v1.h"
 
 
 def common(contract: int, traffic: int, delivery: int,
@@ -362,6 +368,88 @@ def protected_vectors() -> dict[str, bytes]:
     }
 
 
+def shared_c_rust_vectors() -> dict[str, bytes]:
+    """Return the exact O0/H0 fixtures jointly consumed by C and Rust."""
+    return {
+        "UCN_V6S_WIRE_C0_A1_O0_H0_BOOTSTRAP_BYTES": raw_vectors()["C0_A1_O0_H0"],
+        "UCN_V6S_WIRE_C1_A0_O0_H0_DATA_BYTES": (
+            common(1, 2, 0, 0, 0, 0, 5) + be(1, 1) + be(2, 1) +
+            be(0x1234, 2) + be(0x11223344, 4) + bytes.fromhex("DEAD")
+        ),
+        "UCN_V6S_WIRE_C1_A1_O0_H0_DATA_BYTES": raw_vectors()["C1_A1_O0_H0"],
+        "UCN_V6S_WIRE_C1_A2_O0_H0_DATA_BYTES": (
+            common(1, 1, 0, 0, 0, 0, 1) + be(0x010203, 3) +
+            be(0x0A0B0C, 3) + be(0x0102, 2) + be(0xA1B2C3D4, 4) +
+            bytes.fromhex("00FF")
+        ),
+        "UCN_V6S_WIRE_C1_A3_O0_H0_DATA_BYTES": (
+            common(1, 0, 0, 0, 0, 0, 32) + be(0x01020304, 4) +
+            be(0xA1A2A3A4, 4) + be(0xBEEF, 2) + be(0x89ABCDEF, 4) +
+            bytes.fromhex("55")
+        ),
+    }
+
+
+def check_shared_c_rust_fixture() -> tuple[bool, str]:
+    """Verify fixture bytes and prove that both implementations consume it."""
+    text = SHARED_FIXTURE.read_text(encoding="utf-8")
+    expected = shared_c_rust_vectors()
+    for name, expected_bytes in expected.items():
+        match = re.search(
+            rf"#define\s+{re.escape(name)}(?P<body>.*?)(?=\n#define|\n#endif)",
+            text,
+            flags=re.DOTALL,
+        )
+        if match is None:
+            return False, f"missing shared fixture {name}"
+        actual = bytes(
+            int(value, 16)
+            for value in re.findall(r"0x([0-9A-Fa-f]{2})", match.group("body"))
+        )
+        if actual != expected_bytes:
+            return False, f"shared fixture mismatch {name}"
+        if not actual:
+            return False, f"empty shared fixture {name}"
+        mutated = bytes((actual[0] ^ 1,)) + actual[1:]
+        if mutated == expected_bytes:
+            return False, f"fixture mutation was not detected {name}"
+
+    c_test = (ROOT / "tests" / "simplified" / "test_wire_c1.c").read_text(
+        encoding="utf-8"
+    )
+    rust_test = (
+        ROOT / "rust" / "crates" / "ucn-wire" / "tests" / "conformance.rs"
+    ).read_text(encoding="utf-8")
+    if "../../rust/tests/conformance/v6s_wire_core_v1.h" not in c_test:
+        return False, "C conformance test does not include the shared fixture"
+    if "v6s_wire_core_v1.h" not in rust_test:
+        return False, "Rust conformance test does not include the shared fixture"
+    for name in expected:
+        if name.startswith("UCN_V6S_WIRE_C1_") and name not in c_test:
+            return False, f"C conformance test does not consume {name}"
+        if name not in rust_test:
+            return False, f"Rust conformance test does not consume {name}"
+
+    negative = {
+        "UCN_V6S_NEG_BAD_VERSION_BYTE0": 0x51,
+        "UCN_V6S_NEG_RESERVED_CONTRACT_BYTE0": 0x66,
+        "UCN_V6S_NEG_OTHER_CONTRACT_BYTE0": 0x62,
+        "UCN_V6S_NEG_RESERVED_DELIVERY_MASK": 0x30,
+        "UCN_V6S_NEG_RESERVED_ORIGIN_BYTE2": 0xC3,
+        "UCN_V6S_NEG_ZERO_HOP_BYTE2": 0x00,
+    }
+    for name, expected_value in negative.items():
+        match = re.search(rf"#define\s+{re.escape(name)}\s+0x([0-9A-Fa-f]{{2}})", text)
+        if match is None or int(match.group(1), 16) != expected_value:
+            return False, f"shared negative mismatch {name}"
+        if name not in c_test or name not in rust_test:
+            return False, f"C/Rust tests do not both consume {name}"
+    return True, (
+        f"shared_vectors={len(expected)} mutation={len(expected)}/{len(expected)} "
+        f"shared_negative={len(negative)}"
+    )
+
+
 def crypto_selftest() -> None:
     ciphertext, tag = aes128_gcm_encrypt(
         bytes(16), bytes(12), b"", bytes(16)
@@ -399,7 +487,13 @@ def main() -> int:
     if len(set(EXPECTED.values())) != len(EXPECTED):
         print("V6S_WIRE_ERROR duplicate golden bytes")
         return 1
-    print(f"V6S_WIRE_GOLDEN_OK vectors={len(EXPECTED)}")
+    shared_ok, shared_result = check_shared_c_rust_fixture()
+    if not shared_ok:
+        print(f"V6S_WIRE_ERROR {shared_result}")
+        return 1
+    print(
+        f"V6S_WIRE_GOLDEN_OK vectors={len(EXPECTED)} {shared_result}"
+    )
     return 0
 
 

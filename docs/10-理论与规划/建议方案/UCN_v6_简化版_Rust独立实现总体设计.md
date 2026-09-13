@@ -1,6 +1,6 @@
 # UCN v6 简化版 Rust 独立实现总体设计
 
-> 文档状态：`RUST-00 / DONE / SELF-REVIEW PASS`
+> 文档状态：`RUST-01 / DONE / SELF-REVIEW PASS`
 >
 > 对应分支：`v6-simplified-rust`
 >
@@ -278,3 +278,22 @@ cargo check --workspace --target thumbv7em-none-eabihf
 7. 当前没有宣称 ESP32-S3、实机、密码或掉电证明。
 
 满足上述条件只能放行 `RUST-01`，不能宣称 Rust 协议已经可用。
+
+## 17. RUST-01 实施边界与结果
+
+RUST-01 已将 V6S-00-02/03/04 的基础标量、Registry、C0 与 C1 Core Wire 映射为独立 Rust
+实现。为了保持 Security Owner 的唯一所有权，本阶段仅公开 `encode/decode_*_o0_h0`：
+
+- C0/C1 的 Common Header、地址宽度、big-endian offset 和基础长度已经实现；
+- C0 Bootstrap 与已绑定地址域分开校验；
+- C1 Data、Control、Diagnostic 和固定 Fragment/SACK subtype 已做 raw 结构校验；
+- O1/O2/H1 不接受调用方直接提供伪 Tag，而在 RUST-05 由唯一 Security Context 产生 sealed frame；
+- semantic policy 仍由后续 Operation、Transfer、Admission 和 Security Owner 完成，raw 合法不代表
+  业务可执行。
+
+共享 Oracle 位于 `rust/tests/conformance/v6s_wire_core_v1.h`。C1 的 C/Rust Codec 使用同一份 4 个
+地址宽度 Golden 与 6 个 Negative 常量；C0 使用冻结 A1 Bootstrap Golden，并由独立 Python Wire
+Oracle 逐字段重建。RUST-01 自审报告记录于
+`docs/08-实现与验证/版本演进/UCN_V6S_RUST_01_基础类型Registry与C0C1_Wire实施及自审报告.md`。
+
+RUST-01 完成不表示安全、Adapter、Runtime 或实机已经完成，只解除 RUST-02 的顺序阻塞。
