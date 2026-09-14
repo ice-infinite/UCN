@@ -347,6 +347,71 @@ pub struct SessionView {
     pub hop_profile: HopProfile,
 }
 
+/// Security Owner 签发的当前已认证 Peer 事实。
+///
+/// 字段私有，其他 crate 不能伪造；Capability Owner 只能通过只读访问器消费。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthenticatedPeerView {
+    runtime_instance: u32,
+    security_owner_instance: u32,
+    realm: RealmId,
+    peer: Binding,
+    session_generation: PeerSessionGeneration,
+    ingress_link_id: u16,
+    ingress_link_generation: LinkInstanceGeneration,
+    expires_at_us: u64,
+}
+
+impl AuthenticatedPeerView {
+    /// 返回签发该 View 的 Runtime 实例。
+    #[must_use]
+    pub const fn runtime_instance(self) -> u32 {
+        self.runtime_instance
+    }
+
+    /// 返回签发该 View 的 Security Owner 实例。
+    #[must_use]
+    pub const fn security_owner_instance(self) -> u32 {
+        self.security_owner_instance
+    }
+
+    /// 返回认证 Session 所属 Realm。
+    #[must_use]
+    pub const fn realm(self) -> RealmId {
+        self.realm
+    }
+
+    /// 返回已认证 Peer Binding。
+    #[must_use]
+    pub const fn peer(self) -> Binding {
+        self.peer
+    }
+
+    /// 返回 Peer Session Generation。
+    #[must_use]
+    pub const fn session_generation(self) -> PeerSessionGeneration {
+        self.session_generation
+    }
+
+    /// 返回当前入站 Link ID。
+    #[must_use]
+    pub const fn ingress_link_id(self) -> u16 {
+        self.ingress_link_id
+    }
+
+    /// 返回当前入站 Link Generation。
+    #[must_use]
+    pub const fn ingress_link_generation(self) -> LinkInstanceGeneration {
+        self.ingress_link_generation
+    }
+
+    /// 返回 Session 半开 Deadline。
+    #[must_use]
+    pub const fn expires_at_us(self) -> u64 {
+        self.expires_at_us
+    }
+}
+
 /// 一次有界 Replay reservation 维护的结果。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReplayMaintenance {
@@ -785,23 +850,23 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
             || facts.policy_generation != candidate.policy_generation
             || facts.now_us >= candidate.expires_at_us
             || facts.now_us >= requirement.base.absolute_deadline_us
-            || proof.runtime_instance != runtime
-            || proof.persistence_owner_instance != proof_owner
-            || proof.caller_owner_instance != persistence_owner
-            || proof.domain_generation != requirement.base.domain_generation
-            || proof.operation_kind != SESSION_OPERATION_KIND
-            || proof.domain != requirement.base.domain
-            || proof.record_generation
+            || proof.runtime_instance() != runtime
+            || proof.persistence_owner_instance() != proof_owner
+            || proof.caller_owner_instance() != persistence_owner
+            || proof.domain_generation() != requirement.base.domain_generation
+            || proof.operation_kind() != SESSION_OPERATION_KIND
+            || proof.domain() != requirement.base.domain
+            || proof.record_generation()
                 != requirement
                     .base
                     .expected_record_generation
                     .checked_add(1)
                     .ok_or(Error::Exhausted)?
-            || proof.foundation_transaction_id != requirement.base.next_transaction_id
-            || proof.witness_generation != proof.record_generation
-            || proof.body_bytes != SESSION_RECORD_BYTES_U32
-            || proof.body_digest != requirement.expected_published_digest
-            || proof.volatile_continuation != requirement.base.volatile_continuation
+            || proof.foundation_transaction_id() != requirement.base.next_transaction_id
+            || proof.witness_generation() != proof.record_generation()
+            || proof.body_bytes() != SESSION_RECORD_BYTES_U32
+            || proof.body_digest() != requirement.expected_published_digest
+            || proof.volatile_continuation() != requirement.base.volatile_continuation
         {
             return Err(Error::State);
         }
@@ -947,6 +1012,35 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
             expires_at_us: candidate.expires_at_us,
             origin_security: candidate.origin_level.wire(),
             hop_profile: candidate.hop_profile,
+        })
+    }
+
+    /// 生成 Capability Owner 可消费、其他 crate 无法伪造的认证 Peer view。
+    ///
+    /// # Errors
+    ///
+    /// Session、当前事实、Link ID 或 Deadline 不成立时返回错误。
+    pub fn authenticated_peer_view(
+        &self,
+        session: SessionHandle,
+        facts: CurrentFacts,
+        ingress_link_id: u16,
+    ) -> Result<AuthenticatedPeerView> {
+        if ingress_link_id == 0 || ingress_link_id == u16::MAX {
+            return Err(Error::Argument);
+        }
+        let slot = self.slot(session)?;
+        let candidate = slot.candidate.ok_or(Error::State)?;
+        validate_active_slot(slot, candidate, facts)?;
+        Ok(AuthenticatedPeerView {
+            runtime_instance: self.config.runtime_instance,
+            security_owner_instance: self.config.owner_instance,
+            realm: self.config.realm,
+            peer: candidate.peer,
+            session_generation: candidate.session_generation,
+            ingress_link_id,
+            ingress_link_generation: candidate.link_generation,
+            expires_at_us: candidate.expires_at_us,
         })
     }
 

@@ -20,11 +20,11 @@ pub use packet::{
 };
 pub use replay::{ReplayClassification, ReplayEvidence};
 pub use session::{
-    AccessDirection, AccessRequest, AclRule, Binding, C0TransactionOwner, CurrentFacts,
-    DurabilityBase, FullSecurityOwner, HandshakeCandidate, HandshakeProof, HopSequenceOwner,
-    LiteSecurityOwner, NanoSecurityOwner, OriginCounterOwner, OriginSequenceOwner,
-    ReplayMaintenance, SESSION_OPERATION_KIND, SESSION_RECORD_BYTES, SESSION_SCHEMA_ID,
-    SESSION_SCHEMA_VERSION, SecurityConfig, SecurityContextHandle, SecurityLevel, SecurityOwner,
-    SessionDomainRule, SessionDurabilityRequirement, SessionHandle, SessionPhase, SessionView,
-    decode_session_record,
+    AccessDirection, AccessRequest, AclRule, AuthenticatedPeerView, Binding, C0TransactionOwner,
+    CurrentFacts, DurabilityBase, FullSecurityOwner, HandshakeCandidate, HandshakeProof,
+    HopSequenceOwner, LiteSecurityOwner, NanoSecurityOwner, OriginCounterOwner,
+    OriginSequenceOwner, ReplayMaintenance, SESSION_OPERATION_KIND, SESSION_RECORD_BYTES,
+    SESSION_SCHEMA_ID, SESSION_SCHEMA_VERSION, SecurityConfig, SecurityContextHandle,
+    SecurityLevel, SecurityOwner, SessionDomainRule, SessionDurabilityRequirement, SessionHandle,
+    SessionPhase, SessionView, decode_session_record,
 };

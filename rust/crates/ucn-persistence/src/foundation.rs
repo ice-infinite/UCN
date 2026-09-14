@@ -124,31 +124,31 @@ pub struct PersistenceHandle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PersistenceProof {
     /// Runtime 实例。
-    pub runtime_instance: u32,
+    runtime_instance: u32,
     /// Persistence Owner 实例。
-    pub persistence_owner_instance: u16,
+    persistence_owner_instance: u16,
     /// 原始业务 Owner。
-    pub caller_owner_instance: u16,
+    caller_owner_instance: u16,
     /// 本次启动的 Domain Generation。
-    pub domain_generation: u16,
+    domain_generation: u16,
     /// Operation Kind。
-    pub operation_kind: u16,
+    operation_kind: u16,
     /// Durable Domain。
-    pub domain: DomainKey,
+    domain: DomainKey,
     /// 已发布 Record Generation。
-    pub record_generation: u64,
+    record_generation: u64,
     /// 已发布 Transaction ID。
-    pub foundation_transaction_id: u64,
+    foundation_transaction_id: u64,
     /// reload 后精确匹配的 Witness Generation。
-    pub witness_generation: u64,
+    witness_generation: u64,
     /// Body 长度。
-    pub body_bytes: u32,
+    body_bytes: u32,
     /// 活动槽。
-    pub active_slot: u8,
+    active_slot: u8,
     /// Body Digest。
-    pub body_digest: [u8; DIGEST_BYTES],
+    body_digest: [u8; DIGEST_BYTES],
     /// Coordinator 易失 continuation。
-    pub volatile_continuation: u32,
+    volatile_continuation: u32,
 }
 
 impl PersistenceProof {
@@ -170,6 +170,84 @@ impl PersistenceProof {
         body_digest: [0; DIGEST_BYTES],
         volatile_continuation: 0,
     };
+
+    /// 返回签发证明的 Runtime 实例。
+    #[must_use]
+    pub const fn runtime_instance(self) -> u32 {
+        self.runtime_instance
+    }
+
+    /// 返回签发证明的 Persistence Owner 实例。
+    #[must_use]
+    pub const fn persistence_owner_instance(self) -> u16 {
+        self.persistence_owner_instance
+    }
+
+    /// 返回原始业务 Owner 实例。
+    #[must_use]
+    pub const fn caller_owner_instance(self) -> u16 {
+        self.caller_owner_instance
+    }
+
+    /// 返回本次启动的 Domain Generation。
+    #[must_use]
+    pub const fn domain_generation(self) -> u16 {
+        self.domain_generation
+    }
+
+    /// 返回业务 Operation Kind。
+    #[must_use]
+    pub const fn operation_kind(self) -> u16 {
+        self.operation_kind
+    }
+
+    /// 返回 Durable Domain。
+    #[must_use]
+    pub const fn domain(self) -> DomainKey {
+        self.domain
+    }
+
+    /// 返回已发布 Record Generation。
+    #[must_use]
+    pub const fn record_generation(self) -> u64 {
+        self.record_generation
+    }
+
+    /// 返回已发布 Transaction ID。
+    #[must_use]
+    pub const fn foundation_transaction_id(self) -> u64 {
+        self.foundation_transaction_id
+    }
+
+    /// 返回 reload 后 Witness Generation。
+    #[must_use]
+    pub const fn witness_generation(self) -> u64 {
+        self.witness_generation
+    }
+
+    /// 返回正文长度。
+    #[must_use]
+    pub const fn body_bytes(self) -> u32 {
+        self.body_bytes
+    }
+
+    /// 返回活动槽编号。
+    #[must_use]
+    pub const fn active_slot(self) -> u8 {
+        self.active_slot
+    }
+
+    /// 返回正文摘要。
+    #[must_use]
+    pub const fn body_digest(self) -> [u8; DIGEST_BYTES] {
+        self.body_digest
+    }
+
+    /// 返回 Coordinator 易失 continuation。
+    #[must_use]
+    pub const fn volatile_continuation(self) -> u32 {
+        self.volatile_continuation
+    }
 }
 
 /// 单个域的只读恢复/提交视图。

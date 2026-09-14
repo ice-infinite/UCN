@@ -10,6 +10,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucn-admission"
+version = "0.0.0"
+dependencies = [
+ "ucn-identity",
+ "ucn-owner",
+ "ucn-persistence",
+ "ucn-types",
+]
+
+[[package]]
+name = "ucn-capability"
+version = "0.0.0"
+dependencies = [
+ "ucn-owner",
+ "ucn-persistence",
+ "ucn-security",
+ "ucn-types",
+]
+
+[[package]]
 name = "ucn-core"
 version = "0.0.0"
 dependencies = [
@@ -17,6 +37,15 @@ dependencies = [
  "ucn-owner",
  "ucn-types",
  "ucn-wire",
+]
+
+[[package]]
+name = "ucn-identity"
+version = "0.0.0"
+dependencies = [
+ "ucn-owner",
+ "ucn-persistence",
+ "ucn-types",
 ]
 
 [[package]]

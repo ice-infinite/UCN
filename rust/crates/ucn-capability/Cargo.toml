@@ -1,0 +1,18 @@
+[package]
+name = "ucn-capability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+ucn-security = { path = "../ucn-security" }
+ucn-types = { path = "../ucn-types" }
+
+[dev-dependencies]
+ucn-owner = { path = "../ucn-owner" }
+ucn-persistence = { path = "../ucn-persistence" }
+
+[lints]
+workspace = true

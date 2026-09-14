@@ -1,0 +1,18 @@
+[package]
+name = "ucn-admission"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+ucn-identity = { path = "../ucn-identity" }
+ucn-owner = { path = "../ucn-owner" }
+ucn-types = { path = "../ucn-types" }
+
+[dev-dependencies]
+ucn-persistence = { path = "../ucn-persistence" }
+
+[lints]
+workspace = true

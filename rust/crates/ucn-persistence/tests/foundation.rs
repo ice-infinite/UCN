@@ -521,8 +521,8 @@ fn synchronous_commit_reloads_and_exact_replay_uses_no_provider_io() {
     drive_ready(&mut owner, &mut provider);
     let handle = submit_and_drive(&mut owner, &mut provider, &[7, 8, 9], 1);
     let proof = owner.proof_get(handle).unwrap();
-    assert_eq!(proof.record_generation, 1);
-    assert_eq!(proof.witness_generation, 1);
+    assert_eq!(proof.record_generation(), 1);
+    assert_eq!(proof.witness_generation(), 1);
     assert_eq!(provider.witness, 1);
     owner.proof_retire(handle).unwrap();
 
@@ -563,7 +563,7 @@ fn every_provider_phase_can_complete_asynchronously_with_exact_token() {
     initialize(&mut owner, &provider, &gate, &manifest_entry, &bindings);
     drive_ready(&mut owner, &mut provider);
     let handle = submit_and_drive(&mut owner, &mut provider, &[1, 2], 1);
-    assert_eq!(owner.proof_get(handle).unwrap().body_bytes, 2);
+    assert_eq!(owner.proof_get(handle).unwrap().body_bytes(), 2);
     assert_eq!(provider.pending_seen & 0x7E, 0x7E);
 }
 
@@ -1036,8 +1036,11 @@ fn two_domains_commit_with_independent_slots_witnesses_and_handles() {
         }
         owner.step(&mut provider, 21, 1).unwrap();
     }
-    assert_eq!(owner.proof_get(primary).unwrap().domain, DOMAIN);
-    assert_eq!(owner.proof_get(secondary).unwrap().domain, SECONDARY_DOMAIN);
+    assert_eq!(owner.proof_get(primary).unwrap().domain(), DOMAIN);
+    assert_eq!(
+        owner.proof_get(secondary).unwrap().domain(),
+        SECONDARY_DOMAIN
+    );
     assert_eq!(provider.witness, 1);
     assert_eq!(provider.secondary_witness, 1);
     let mut primary_body = [0; BODY];

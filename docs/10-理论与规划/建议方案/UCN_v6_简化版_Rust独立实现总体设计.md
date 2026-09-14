@@ -79,7 +79,9 @@ rust/
    ├─ ucn-core           # 基础队列、Endpoint、静态通信
    ├─ ucn-persistence    # Record/Journal/Witness/Recovery
    ├─ ucn-security       # Session、认证、加密
-   ├─ ucn-admission      # 动态准入与 Capability
+   ├─ ucn-identity       # Authority、Lease 与 Binding
+   ├─ ucn-admission      # 动态 Bootstrap/JOIN
+   ├─ ucn-capability     # Capability、Profile 与 Resolver
    ├─ ucn-routing        # SoftRoute、Discovery、Flow
    ├─ ucn-transfer       # Reliable、Fragment、Operation
    ├─ ucn-realtime       # 可选实时和时间同步
@@ -419,3 +421,28 @@ RUST-05 只解除 RUST-06 的实施顺序阻塞。Dynamic Admission、Bootstrap/
 密码库/安全元件、真实 Flash 防回退、随机数质量、侧信道、物理 Bearer 和 MCU 实测均未完成。
 详细证据见
 `docs/08-实现与验证/版本演进/UCN_V6S_RUST_05_Security_Session实施及自审报告.md`。
+
+### 13.6 RUST-06 已实现边界
+
+RUST-06 将原先概括为单一 Admission crate 的职责拆成三个单写 Owner：
+
+- `ucn-identity`：Address Authority、保守 Lease Deadline、Binding Certificate、持久化
+  Requirement 与 reload proof 后发布；
+- `ucn-admission`：只处理 UNBOUND 节点的 Cookie、Bootstrap/JOIN transcript、严格阶段 FSM、
+  固定 pending 与有界分片重组；
+- `ucn-capability`：只保存当前认证 Peer 的 Capability 事实，并提供 Profile 交集和无副作用
+  Contract Resolver。
+
+三者不直接调用彼此的 Owner，也不直接调用 Persistence、Adapter 或 Driver。跨边界只传私有
+来源字段约束的不可变 `BindingView`、`AuthenticatedPeerView`、`PersistenceProof` 和 typed
+Requirement。缓存事实不等于实时权限；后续 RUST-07/08 的 Coordinator 在每次使用前仍必须按
+当前 Session、Binding、Capability、Path 和资源快照重验。
+
+验证包括 100 项 Rust Workspace Debug/Release/MSRV 测试、Clippy、rustdoc `-D warnings`、两个
+Cortex-M `no_std` target、7 条独立 Admission/Capability Wire Oracle 与 C Full 47/47。Host
+固定对象尺寸为 Identity `2832/7440/13584 B`、Admission `1264/4912/9776 B`、Capability
+`472/1528/2936 B`（Nano/Lite/Full），单个 Bootstrap Reassembly 为 576 B。
+
+RUST-06 只解除 RUST-07 的实施顺序阻塞。统一动态 Runtime 编排、自动路由、可靠投递、生产密码
+Provider、真实 Flash/掉电、物理 Bearer、MCU 栈/Flash/性能和实机仍未由本阶段完成。详细证据见
+`docs/08-实现与验证/版本演进/UCN_V6S_RUST_06_Admission与Capability实施及自审报告.md`。

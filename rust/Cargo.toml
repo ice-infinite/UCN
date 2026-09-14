@@ -2,7 +2,10 @@
 resolver = "3"
 members = [
     "crates/ucn-adapter",
+    "crates/ucn-admission",
+    "crates/ucn-capability",
     "crates/ucn-core",
+    "crates/ucn-identity",
     "crates/ucn-owner",
     "crates/ucn-persistence",
     "crates/ucn-security",

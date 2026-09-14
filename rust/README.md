@@ -3,7 +3,7 @@
 本目录承载 UCN v6 简化协议的独立 Rust 实现。它与仓库中的 C99 实现共享协议规范、Wire
 Registry、Golden、Negative 和持久化恢复合同，但不链接 C archive，也不通过 FFI 转发协议逻辑。
 
-当前状态：`RUST-05 / DONE / SELF-REVIEW PASS`；`RUST-06 / ALLOWED TO START`。
+当前状态：`RUST-06 / DONE / SELF-REVIEW PASS`；`RUST-07 / ALLOWED TO START`。
 
 当前已经建立：
 
@@ -21,6 +21,12 @@ Registry、Golden、Negative 和持久化恢复合同，但不链接 C archive�
 - `ucn-security` 的静态 Peer Session、完整握手候选证明、Persistence proof 后发布、O1/O2
   Origin 保护、H1/H2 逐跳/直连保护、固定 Replay Window、两阶段 mutation、精确 ACL 与
   Key/Session Generation 高水位；
+- `ucn-identity` 的 Address Authority、保守 Lease Deadline、Binding Certificate、固定 Record、
+  persist-before-use 与 reload-before-proof；
+- `ucn-admission` 的认证前 Cookie、无放大/限流、严格六阶段 JOIN FSM、固定 pending 与有界
+  Bootstrap 分片重组；
+- `ucn-capability` 的 Capability Record/Summary/Query、认证 Peer Cache、Profile Select/Ack 和
+  无副作用 Contract Resolver；
 - C/Rust 共用的逐字节 Golden 与 Negative fixture；
 - Host、Cortex-M 编译和静态检查入口。
 
@@ -28,7 +34,8 @@ Registry、Golden、Negative 和持久化恢复合同，但不链接 C archive�
 
 - C2～C5 通用 raw Codec；RUST-05 仅在 Security Owner 内验证并生成当前 C2/C3 受保护布局；
 - H3/C5 Group Security 与 C4 Routed Origin Flow Context；
-- Admission、Route、Transfer、Realtime、Group、Cluster；
+- 统一动态 Runtime 对 Identity/Admission/Capability 的 Coordinator 编排；
+- Route、Transfer、Realtime、Group、Cluster；
 - 动态寻路、多跳转发、可靠投递、持久化 Replay 状态与生产密码 Provider；
 - ESP32-S3 工具链、固件或实机证明。
 
@@ -53,3 +60,4 @@ cargo check --workspace --target thumbv7em-none-eabihf
 - [RUST-03 实施及自审报告](../docs/08-实现与验证/版本演进/UCN_V6S_RUST_03_最小静态通信实施及自审报告.md)
 - [RUST-04 实施及自审报告](../docs/08-实现与验证/版本演进/UCN_V6S_RUST_04_Persistence_Foundation实施及自审报告.md)
 - [RUST-05 实施及自审报告](../docs/08-实现与验证/版本演进/UCN_V6S_RUST_05_Security_Session实施及自审报告.md)
+- [RUST-06 实施及自审报告](../docs/08-实现与验证/版本演进/UCN_V6S_RUST_06_Admission与Capability实施及自审报告.md)
