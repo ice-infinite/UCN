@@ -82,7 +82,8 @@ rust/
    ├─ ucn-identity       # Authority、Lease 与 Binding
    ├─ ucn-admission      # 动态 Bootstrap/JOIN
    ├─ ucn-capability     # Capability、Profile 与 Resolver
-   ├─ ucn-routing        # SoftRoute、Discovery、Flow
+   ├─ ucn-routing        # 基础 Discovery、SoftRoute、RREQ/RREP/RERR
+   ├─ ucn-flow           # 高级 Probe、Stage/Commit、Label Flow
    ├─ ucn-transfer       # Reliable、Fragment、Operation
    ├─ ucn-realtime       # 可选实时和时间同步
    ├─ ucn-group          # 可选群组通信
@@ -446,3 +447,42 @@ Cortex-M `no_std` target、7 条独立 Admission/Capability Wire Oracle 与 C Fu
 RUST-06 只解除 RUST-07 的实施顺序阻塞。统一动态 Runtime 编排、自动路由、可靠投递、生产密码
 Provider、真实 Flash/掉电、物理 Bearer、MCU 栈/Flash/性能和实机仍未由本阶段完成。详细证据见
 `docs/08-实现与验证/版本演进/UCN_V6S_RUST_06_Admission与Capability实施及自审报告.md`。
+
+### 13.7 RUST-07 已实现边界
+
+RUST-07 将“能找到一条当前可用路径”和“已经原子建立一条可供高级业务使用的 Flow”保持为两个
+物理解耦模块：
+
+- `ucn-routing` 独占 RREQ/RREP/RERR、Reverse obligation、易失 SoftRoute、静态 fallback 和
+  Route Generation；RREP 的逐跳部分安装从不产生 Flow Active 语义；
+- `ucn-flow` 独占 Candidate、Probe、不可变 Proposal、Stage/Commit/Abort、Forwarding Label、
+  Receipt、`IN_DOUBT` 和 Flow Replay；它只消费 Route Owner 签发的不可变 `SoftRouteView`；
+- `ucn-flow` 在每次使用前重验后导出完整 Security Requirement，Coordinator 不再手工猜字段；
+  `ucn-security` 执行当前 Session、ACL、Policy 和 Deadline 校验后签发字段私有的
+  `FlowSecurityBinding`，Origin Replay Window 由 Flow Owner 唯一推进。
+
+基础路由使用完整 `RouteDomain = Realm + Origin Binding + Origin Session Generation +
+Destination Binding`。动态路由查找优先于静态 fallback；静态 Route 不属于动态 Route Generation，
+也不会被动态 RERR 删除。RERR 显式携带完整 Domain、Route Generation、Causal ID、失败 Link ID
+和 Link Instance Generation，错绑事件零写拒绝。普通业务成功不会延长 Route lease；所有回收均由
+固定游标和显式预算完成，输入路径不 lazy-evict 过期槽。
+
+高级 Flow 先冻结 Route、Capability、Security、Policy、MTU、Profile、Label 和绝对 Deadline，再
+执行 Probe。Probe 完成后原 Candidate 不再允许被更优 RREP 改写；路径变化必须创建新 Candidate。
+Stage/Commit 以完整 Activation Key 精确匹配，目标端最先 Active，随后 Relay，最后 Origin；若
+Commit 的外部副作用无法证明，则进入 `IN_DOUBT` 等待认证 terminal receipt。Commit 前 Abort 沿
+冻结路径向下游收敛；若 Stage 从未提交或本节点是无下游 Target，则到期可直接 Fenced，不制造
+虚假的远端撤销义务。
+
+每次使用 Active Flow 都重新验证当前 Link、Session、Capability Ref/Generation/Digest/Deadline、
+Policy Generation 和 Flow Deadline。C2/C3/C4 前缀分别为 9/7/11 B；C4 的完整 Requirement
+由 Flow Owner 导出，私有 Binding 与认证 Replay Claim 由 Security Owner 签发，Replay mutation
+由 Flow Owner 唯一提交；普通业务调用方不能构造等价 Binding。验证包括 Rust Workspace 133 项
+Debug/Release/MSRV 测试、Clippy/rustdoc、双 Cortex-M、7 条独立 Route/Flow Wire Oracle 和 C
+非历史签字基线 51/51。Host 固定对象尺寸为 Routing `1840/5408/14368 B`、Flow
+`3448/12712/41768 B`（Nano/Lite/Full）。
+
+RUST-07 只解除 RUST-08 的实施顺序阻塞。当前尚未实现统一动态 Runtime 编排、Reliable、Transfer、
+Service/Operation、生产密码 Provider、真实 Flash、物理多跳或 ESP32-S3 的 RAM/栈/性能验证。
+详细证据见
+`docs/08-实现与验证/版本演进/UCN_V6S_RUST_07_自动路由与Flow实施及自审报告.md`。

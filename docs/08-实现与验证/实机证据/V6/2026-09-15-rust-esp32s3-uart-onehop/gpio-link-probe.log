@@ -1,0 +1,53 @@
+00000.141 [B/COM53] OPEN
+00000.141 [A/COM40] OPEN
+00000.141 [A/COM40] 4 input_edges=0 input_high=true[0m
+00000.187 [B/COM53] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.187 [B/COM53] I (28) boot: Multicore bootloader
+00000.187 [B/COM53] I (28) boot: chip revision: v0.2
+00000.187 [B/COM53] I (29) boot: efuse block revision: v1.4
+00000.203 [B/COM53] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.203 [B/COM53] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.203 [B/COM53] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.203 [B/COM53] I (44) boot: Enabling RNG early entropy source...
+00000.219 [B/COM53] I (48) boot: Partition Table:
+00000.219 [B/COM53] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.219 [B/COM53] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.234 [B/COM53] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.234 [B/COM53] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.250 [B/COM53] I (77) boot: End of partition table
+00000.250 [B/COM53] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=024f4h (  9460) map
+00000.250 [A/COM40] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.266 [A/COM40] I (28) boot: Multicore bootloader
+00000.266 [B/COM53] I (90) esp_image: segment 1: paddr=0001251c vaddr=3fc89900 size=00978h (  2424) load
+00000.266 [A/COM40] I (28) boot: chip revision: v0.2
+00000.266 [A/COM40] I (29) boot: efuse block revision: v1.4
+00000.266 [A/COM40] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.266 [A/COM40] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.266 [A/COM40] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.266 [A/COM40] I (44) boot: Enabling RNG early entropy source...
+00000.266 [A/COM40] I (48) boot: Partition Table:
+00000.266 [B/COM53] I (95) esp_image: segment 2: paddr=00012e9c vaddr=40378000 size=01900h (  6400) load
+00000.266 [A/COM40] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.266 [A/COM40] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.266 [A/COM40] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.266 [A/COM40] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.266 [A/COM40] I (77) boot: End of partition table
+00000.266 [B/COM53] I (104) esp_image: segment 3: paddr=000147a4 vaddr=00000000 size=0b874h ( 47220) 
+00000.266 [A/COM40] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=024f4h (  9460) map
+00000.266 [A/COM40] I (90) esp_image: segment 1: paddr=0001251c vaddr=3fc89900 size=00978h (  2424) load
+00000.266 [A/COM40] I (95) esp_image: segment 2: paddr=00012e9c vaddr=40378000 size=01900h (  6400) load
+00000.281 [A/COM40] I (104) esp_image: segment 3: paddr=000147a4 vaddr=00000000 size=0b874h ( 47220) 
+00000.281 [B/COM53] I (121) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=063cch ( 25548) map
+00000.281 [A/COM40] I (121) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=063cch ( 25548) map
+00000.281 [B/COM53] I (129) boot: Loaded app from partition at offset 0x10000
+00000.281 [A/COM40] I (129) boot: Loaded app from partition at offset 0x10000
+00000.281 [B/COM53] I (129) boot: Disabling RNG early entropy source...
+00000.281 [A/COM40] I (129) boot: Disabling RNG early entropy source...
+00000.312 [A/COM40] [32mINFO - UCN_GPIO_PROBE READY role=A mac=7c:e8:b1:b1:ec:f4 rx=GPIO19 tx=GPIO20 period_us=70000[0m
+00000.312 [B/COM53] [32mINFO - UCN_GPIO_PROBE READY role=B mac=7c:4f:ad:2a:92:44 rx=GPIO19 tx=GPIO20 period_us=110000[0m
+00005.312 [B/COM53] [32mINFO - UCN_GPIO_PROBE SUMMARY role=B output_edges=45 input_edges=0 input_high=true[0m
+00005.312 [A/COM40] [32mINFO - UCN_GPIO_PROBE SUMMARY role=A output_edges=71 input_edges=0 input_high=true[0m
+00010.312 [B/COM53] [32mINFO - UCN_GPIO_PROBE SUMMARY role=B output_edges=90 input_edges=0 input_high=true[0m
+00010.312 [A/COM40] [32mINFO - UCN_GPIO_PROBE SUMMARY role=A output_edges=142 input_edges=0 input_high=true[0m
+00015.312 [B/COM53] [32mINFO - UCN_GPIO_PROBE SUMMARY role=B output_edges=136 input_edges=0 input_high=true[0m
+00015.312 [A/COM40] [32mINFO - UCN_GPIO_PROBE SUMMARY role=A output_edges=214 input_edges=0 input_high=true[0m

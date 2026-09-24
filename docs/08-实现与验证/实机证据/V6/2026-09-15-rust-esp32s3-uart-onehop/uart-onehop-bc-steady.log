@@ -1,0 +1,71 @@
+00000.047 [B/COM53] OPEN
+00000.047 [C/COM58] OPEN
+00000.469 [B/COM53]  PING_OK role=B sequence=169 rtt_us=324[0m
+00000.953 [C/COM58]  PING_OK role=C sequence=170 rtt_us=323[0m
+00001.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=171 rtt_us=324[0m
+00001.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=172 rtt_us=324[0m
+00002.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=173 rtt_us=324[0m
+00002.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=174 rtt_us=323[0m
+00003.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=175 rtt_us=324[0m
+00003.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=176 rtt_us=323[0m
+00004.469 [C/COM58] [32mINFO - UCN_RUST_UART Pimeout=0 rtt_min_us=322 rtt_avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00004.469 [B/COM53] [32mINFO - UCN_RUST_UART Pimeout=0 rtt_min_us=322 rtt_avg_us=433 rtt_max_us=10057 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00004.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=179 rtt_us=324[0m
+00004.469 [B/COM53] 2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00004.953 [C/COM58]  timeout=0 rtt_min_us=322 rtt_avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00005.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=179 rtt_us=324[0m
+00005.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=180 rtt_us=323[0m
+00006.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=181 rtt_us=323[0m
+00006.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=182 rtt_us=324[0m
+00007.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=183 rtt_us=323[0m
+00007.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=184 rtt_us=324[0m
+00008.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=185 rtt_us=324[0m
+00008.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=186 rtt_us=324[0m
+00009.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=187 rtt_us=324[0m
+00009.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=188 rtt_us=324[0m
+00010.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=189 rtt_us=324[0m
+00010.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=190 rtt_us=323[0m
+00011.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=191 rtt_us=323[0m
+00011.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=192 rtt_us=323[0m
+00012.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=193 rtt_us=324[0m
+00012.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=194 rtt_us=323[0m
+00013.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=195 rtt_us=324[0m
+00013.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=196 rtt_us=323[0m
+00014.469 [B/COM53] [32mINFO - UCN_RUST_UART Pimeout=0 rtt_min_us=322 rtt_avg_us=421 rtt_max_us=10057 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00014.469 [C/COM58] [32mINFO - UCN_RUST_UART Pimeout=0 rtt_min_us=322 rtt_avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00014.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=199 rtt_us=323[0m
+00014.469 [B/COM53] 2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00014.953 [C/COM58]  timeout=0 rtt_min_us=322 rtt_avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00015.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=199 rtt_us=323[0m
+00015.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=200 rtt_us=324[0m
+00016.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=201 rtt_us=324[0m
+00016.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=202 rtt_us=323[0m
+00017.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=203 rtt_us=323[0m
+00017.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=204 rtt_us=322[0m
+00018.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=205 rtt_us=324[0m
+00018.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=206 rtt_us=322[0m
+00019.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=207 rtt_us=323[0m
+00019.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=208 rtt_us=324[0m
+00020.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=209 rtt_us=324[0m
+00020.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=210 rtt_us=324[0m
+00021.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=211 rtt_us=324[0m
+00021.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=212 rtt_us=324[0m
+00022.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=213 rtt_us=324[0m
+00022.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=214 rtt_us=324[0m
+00023.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=215 rtt_us=324[0m
+00023.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=216 rtt_us=324[0m
+00024.469 [B/COM53] [32mINFO - UCN_RUST_UART Ptimeout=0 rtt_min_us=322 rtt_avg_us=412 rtt_max_us=10057 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00024.469 [C/COM58] [32mINFO - UCN_RUST_UART Ptimeout=0 rtt_min_us=322 rtt_avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00024.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=219 rtt_us=323[0m
+00024.469 [B/COM53] 2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00024.953 [C/COM58]  timeout=0 rtt_min_us=322 rtt_avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00025.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=219 rtt_us=323[0m
+00025.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=220 rtt_us=324[0m
+00026.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=221 rtt_us=323[0m
+00026.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=222 rtt_us=324[0m
+00027.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=223 rtt_us=324[0m
+00027.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=224 rtt_us=324[0m
+00028.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=225 rtt_us=322[0m
+00028.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=226 rtt_us=323[0m
+00029.469 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=227 rtt_us=324[0m
+00029.953 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=228 rtt_us=323[0m

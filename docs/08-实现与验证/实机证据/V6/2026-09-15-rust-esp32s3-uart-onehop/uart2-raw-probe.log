@@ -1,0 +1,39 @@
+00000.140 [B/COM53] OPEN
+00000.140 [A/COM40] OPEN
+00000.140 [A/COM40] 64 rx_reads=0 rx_bytes=0 tx_errors=0 rx_errors=0[0m
+00000.187 [B/COM53] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.187 [B/COM53] I (28) boot: Multicore bootloader
+00000.187 [B/COM53] I (28) boot: chip revision: v0.2
+00000.187 [B/COM53] I (29) boot: efuse block revision: v1.4
+00000.203 [B/COM53] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.203 [B/COM53] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.203 [B/COM53] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.203 [B/COM53] I (44) boot: Enabling RNG early entropy source...
+00000.218 [B/COM53] I (48) boot: Partition Table:
+00000.218 [B/COM53] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.218 [B/COM53] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.234 [B/COM53] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.234 [B/COM53] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.234 [B/COM53] I (77) boot: End of partition table
+00000.250 [B/COM53] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=033c8h ( 13256) map
+00000.250 [B/COM53] I (91) esp_image: segment 1: paddr=000133f0 vaddr=3fc897f8 size=0135ch (  4956) load
+00000.265 [B/COM53] I (96) esp_image: segment 2: paddr=00014754 vaddr=40378000 size=017f8h (  6136) load
+00000.265 [B/COM53] I (104) esp_image: segment 3: paddr=00015f54 vaddr=00000000 size=0a0c4h ( 41156) 
+00000.281 [B/COM53] I (120) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=07d38h ( 32056) map
+00000.281 [B/COM53] I (129) boot: Loaded app from partition at offset 0x10000
+00000.281 [B/COM53] I (129) boot: Disabling RNG early entropy source...
+00000.312 [B/COM53] [32mINFO - UCN_UART_RAW READY role=B mac=7c:4f:ad:2a:92:44 uart=2 baud=691200 rx=GPIO19 tx=GPIO20[0m
+00000.312 [A/COM40] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage booI (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage boo56) map
+00000.312 [A/COM40] I (91) esp_image: segment 1: paddr=000133f0 vaddr=3fc897f8 size=0135ch (  4956) load
+00000.328 [A/COM40] I (96) esp_image: segment 2: 897f8 size=0135ch (  4956) load
+00000.343 [A/COM40] I (96) esp_image: segment 2: 897f8 size=0135ch (  4956) loasize=017f8h (  6136) load
+00000.343 [A/COM40] I (10paddr=00014754 vaddr=40378000 size=017f8h (  6136) load
+00000.375 [A/COM40] I (10NG early entropy source...
+00000.375 [A/COM40] [32mINFO - UCN_UART_RAW READY role=A mac=7c:e8:b1:b1:ec:f4 uart=2 baud=691200 rx=GPIO19 tx=GPIOe=A mac=7c:e8:b1:b1:ec:f4 uart=2 baud=691200 rx=GPIO19 tx=GPIOe=A mac=7c:e8:b1:b1:ec:f4 uart=2 baud=691200 rx=GPIO19 tx=GPIO20[0m
+00000.375 [A/COM40] 20[0m
+00005.312 [B/COM53] [32mINFO - UCN_UART_RAW SUMMARY role=B tx_frames=40 tx_bytes=160 rx_reads=0 rx_bytes=0 tx_errors=0 rx_errors=0[0m
+00005.359 [A/COM40] [32mINFO - UCN_UART_RAW SUMMARY role=A tx_frames=41 tx_bytes=164 rx_reads=0 rx_bytes=0 tx_errors=0 rx_errors=0[0m
+00010.312 [A/COM40] [32mINFO - UCN_UART_RAW SUMMARY role=A tx_frames=91 tx_bytes=364 rx_reads=0 rx_bytes=0 tx_errors=0 rx_errors=0[0m
+00010.312 [B/COM53] [32mINFO - UCN_UART_RAW SUMMARY role=B tx_frames=90 tx_bytes=360 rx_reads=0 rx_bytes=0 tx_errors=0 rx_errors=0[0m
+00015.312 [A/COM40] [32mINFO - UCN_UART_RAW SUMMARY role=A tx_frames=141 tx_bytes=564 rx_reads=0 rx_bytes=0 tx_errors=0 rx_errors=0[0m
+00015.312 [B/COM53] [32mINFO - UCN_UART_RAW SUMMARY role=B tx_frames=140 tx_bytes=560 rx_reads=0 rx_bytes=0 tx_errors=0 rx_errors=0[0m

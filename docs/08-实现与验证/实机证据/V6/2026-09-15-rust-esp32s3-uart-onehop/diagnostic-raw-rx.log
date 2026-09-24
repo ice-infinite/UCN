@@ -1,0 +1,156 @@
+00000.141 [B/COM53] OPEN
+00000.141 [A/COM40] OPEN
+00000.188 [A/COM40] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.188 [B/COM53] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.188 [A/COM40] I (28) boot: Multicore bootloader
+00000.188 [B/COM53] I (28) boot: Multicore bootloader
+00000.188 [A/COM40] I (28) boot: chip revision: v0.2
+00000.188 [B/COM53] I (28) boot: chip revision: v0.2
+00000.188 [A/COM40] I (29) boot: efuse block revision: v1.4
+00000.188 [B/COM53] I (29) boot: efuse block revision: v1.4
+00000.203 [A/COM40] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.203 [B/COM53] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.203 [A/COM40] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.203 [B/COM53] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.203 [A/COM40] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.203 [B/COM53] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.203 [A/COM40] I (44) boot: Enabling RNG early entropy source...
+00000.203 [B/COM53] I (44) boot: Enabling RNG early entropy source...
+00000.203 [B/COM53] I (48) boot: Partition Table:
+00000.203 [A/COM40] I (48) boot: Partition Table:
+00000.219 [A/COM40] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.219 [B/COM53] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.219 [A/COM40] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.219 [B/COM53] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.234 [A/COM40] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.234 [B/COM53] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.234 [A/COM40] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.234 [B/COM53] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.234 [A/COM40] I (77) boot: End of partition table
+00000.234 [B/COM53] I (77) boot: End of partition table
+00000.250 [A/COM40] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=03dd8h ( 15832) map
+00000.250 [B/COM53] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=03dd8h ( 15832) map
+00000.250 [A/COM40] I (91) esp_image: segment 1: paddr=00013e00 vaddr=3fc897f8 size=01df0h (  7664) load
+00000.250 [B/COM53] I (91) esp_image: segment 1: paddr=00013e00 vaddr=3fc897f8 size=01df0h (  7664) load
+00000.266 [A/COM40] I (97) esp_image: segment 2: paddr=00015bf8 vaddr=40378000 size=017f8h (  6136) load
+00000.266 [B/COM53] I (97) esp_image: segment 2: paddr=00015bf8 vaddr=40378000 size=017f8h (  6136) load
+00000.266 [A/COM40] I (104) esp_image: segment 3: paddr=000173f8 vaddr=00000000 size=08c20h ( 35872) 
+00000.266 [B/COM53] I (104) esp_image: segment 3: paddr=000173f8 vaddr=00000000 size=08c20h ( 35872) 
+00000.281 [A/COM40] I (118) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=0a450h ( 42064) map
+00000.281 [B/COM53] I (118) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=0a450h ( 42064) map
+00000.281 [A/COM40] I (131) boot: Loaded app from partition at offset 0x10000
+00000.281 [B/COM53] I (131) boot: Loaded app from partition at offset 0x10000
+00000.281 [A/COM40] I (131) boot: Disabling RNG early entropy source...
+00000.281 [B/COM53] I (131) boot: Disabling RNG early entropy source...
+00000.313 [A/COM40] [32mIUCN_RUNFO - UCN_RUST_UART READY role=A local=1 peer=2 baud=691200 rx=GPIO19 tx=GPIO20 link_generation=1[0m
+00000.313 [B/COM53] [32mIUCN_RUNFO - UCN_RUST_UART READY role=B local=2 peer=1 baud=691200 rx=GPIO19 tx=GPIO20 link_generation=1[0m
+00000.313 [A/COM40] rce...
+00000.313 [B/COM53] rce...
+00000.516 [B/COM53] [32mINFO - [32mINFO - UCN_RUST_UART READY role=B local=2 peer=1 baud=691200
+00000.516 [A/COM40] [32mINFO - [32mINFO - UCN_RUST_UART READY role=A local=1 peer=2 baud=691200
+00001.156 [A/COM40]  rx=GPIO19 tx=N_RUST_UART BACKPRESSURE token_slot=0 token_generation=1 attempt=2[0m
+00001.156 [A/COM40] en_slot=0 token_generation=1 attempt=1[0m
+00001.359 [A/COM40] [32mINFO - UCN_RUST_UART BACKPRESSURE tok
+00001.656 [B/COM53]  rx=GPIO19 tx=N_RUST_UART BACKPRESSURE token_slot=0 token_generation=1 attempt=2[0m
+00001.656 [B/COM53] en_slot=0 token_generation=1 attempt=1[0m
+00001.859 [B/COM53] [32mINFO - UCN_RUST_UART BACKPRESSURE tok
+00001.953 [A/COM40] en_slot=0 token_generation=1 attempt=2[0m
+00002.156 [A/COM40] [33mWARN - UCN_RU
+00002.453 [B/COM53] en_slot=0 token_generation=1 attempt=2[0m
+00002.656 [B/COM53] [33mWARN - UCN_RU
+00002.953 [A/COM40] ST_UART PING_TIMEOUT role=A sequence=1[0m
+00003.156 [A/COM40] [33mWARN - UCN_RU
+00003.453 [B/COM53] ST_UART PING_TIMEOUT role=B sequence=1[0m
+00003.656 [B/COM53] [33mWARN - UCN_RU
+00003.953 [A/COM40] ST_UART PING_TIMEOUT role=A sequence=2[0m
+00004.156 [A/COM40] [33mWARN - UCN_RU
+00004.453 [B/COM53] ST_UART PING_TIMEOUT role=B sequence=2[0m
+00004.656 [B/COM53] [33mWARN - UCN_RU
+00004.953 [A/COM40] ST_UART PING_TIMEOUT role=A sequence=3[0m
+00005.156 [A/COM40] [33mWARN - UCN_RU
+00005.453 [B/COM53] ST_UART PING_TIMEOUT role=B sequence=3[0m
+00005.656 [B/COM53] [33mWARN - UCN_RU
+00005.953 [A/COM40] ST_UART PING_TIMEOUT role=A sequence=4[0m
+00006.156 [A/COM40] [33mWARN - UCN_RU
+00006.453 [B/COM53] ST_UART PING_TIMEOUT role=B sequence=4[0m
+00006.656 [B/COM53] [33mWARN - UCN_RU
+00006.953 [A/COM40] ST_UART PING_TIMEOUT role=A sequence=5[0m
+00007.156 [A/COM40] [33mWARN - UCN_RU
+00007.453 [B/COM53] ST_UART PING_TIMEOUT role=B sequence=5[0m
+00007.656 [B/COM53] [33mWARN - UCN_RU
+00007.953 [A/COM40] ST_UART PING_TIMEOUT role=A sequence=6[0m
+00008.156 [A/COM40] [33mWARN - UCN_RU
+00008.453 [B/COM53] ST_UART PING_TIMEOUT role=B sequence=6[0m
+00008.656 [B/COM53] [33mWARN - UCN_RU
+00008.953 [A/COM40] ST_UART PING_TIMEOUT role=A sequence=7[0m
+00009.156 [A/COM40] [33mWARN - UCN_RU
+00009.453 [B/COM53] ST_UART PING_TIMEOUT role=B sequence=7[0m
+00009.656 [B/COM53] [33mWARN - UCN_RU
+00009.953 [A/COM40] ST_UART PING_TIMEOUT role=A sequence=8[0m
+00010.156 [B/COM53] STrtt_min_us=0 rtt_avg_us=0 rtt_max_us=0 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00010.156 [A/COM40] [33mWARN - UCN_RUST rtt_min_us=0 rtt_avg_us=0 rtt_max_us=0 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00010.375 [A/COM40] g_ok=0 timeout=9 rtt_min_us=0 rtt_avg_us=0 rtt_max_us=0 backpressure=2 carrier_err=0 
+00010.375 [B/COM53] g_ok=0 timeout=8 rtt_min_us=0 rtt_avg_us=0 rtt_max_us=0 backpressure=2 carrier_err=0 
+00010.453 [B/COM53] wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00010.656 [B/COM53] [33mWARN - UCN_RU
+00010.953 [A/COM40] wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00011.156 [A/COM40] [33mWARN - UCN_RUS
+00011.453 [B/COM53] ST_UART PING_TIMEOUT role=B sequence=9[0m
+00011.656 [B/COM53] [33mWARN - UCN_RUS
+00011.953 [A/COM40] T_UART PING_TIMEOUT role=A sequence=10[0m
+00012.172 [A/COM40] [33mWARN - UCN_RUS
+00012.453 [B/COM53] T_UART PING_TIMEOUT role=B sequence=10[0m
+00012.656 [B/COM53] [33mWARN - UCN_RUS
+00012.953 [A/COM40] T_UART PING_TIMEOUT role=A sequence=11[0m
+00013.156 [A/COM40] [33mWARN - UCN_RUS
+00013.453 [B/COM53] T_UART PING_TIMEOUT role=B sequence=11[0m
+00013.656 [B/COM53] [33mWARN - UCN_RUS
+00013.953 [A/COM40] T_UART PING_TIMEOUT role=A sequence=12[0m
+00014.156 [A/COM40] [33mWARN - UCN_RUS
+00014.453 [B/COM53] T_UART PING_TIMEOUT role=B sequence=12[0m
+00014.656 [B/COM53] [33mWARN - UCN_RUS
+00014.953 [A/COM40] T_UART PING_TIMEOUT role=A sequence=13[0m
+00015.156 [A/COM40] [33mWARN - UCN_RUS
+00015.453 [B/COM53] T_UART PING_TIMEOUT role=B sequence=13[0m
+00015.656 [B/COM53] [33mWARN - UCN_RUS
+00015.953 [A/COM40] T_UART PING_TIMEOUT role=A sequence=14[0m
+00016.156 [A/COM40] [33mWARN - UCN_RUS
+00016.453 [B/COM53] T_UART PING_TIMEOUT role=B sequence=14[0m
+00016.656 [B/COM53] [33mWARN - UCN_RUS
+00016.953 [A/COM40] T_UART PING_TIMEOUT role=A sequence=15[0m
+00017.156 [A/COM40] [33mWARN - UCN_RUS
+00017.453 [B/COM53] T_UART PING_TIMEOUT role=B sequence=15[0m
+00017.656 [B/COM53] [33mWARN - UCN_RUS
+00017.953 [A/COM40] T_UART PING_TIMEOUT role=A sequence=16[0m
+00018.156 [A/COM40] [33mWARN - UCN_RUS
+00018.453 [B/COM53] T_UART PING_TIMEOUT role=B sequence=16[0m
+00018.656 [B/COM53] [33mWARN - UCN_RUS
+00018.953 [A/COM40] T_UART PING_TIMEOUT role=A sequence=17[0m
+00019.156 [A/COM40] [33mWARN - UCN_RUS
+00019.453 [B/COM53] T_UART PING_TIMEOUT role=B sequence=17[0m
+00019.656 [B/COM53] [33mWARN - UCN_RUS
+00019.953 [A/COM40] T_UART PING_TIMEOUT role=A sequence=18[0m
+00020.156 [B/COM53] T_8 rtt_min_us=0 rtt_avg_us=0 rtt_max_us=0 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00020.156 [A/COM40] [33mWARN - UCN_RUST_9 rtt_min_us=0 rtt_avg_us=0 rtt_max_us=0 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00020.375 [A/COM40] _ok=0 timeout=19 rtt_min_us=0 rtt_avg_us=0 rtt_max_us=0 backpressure=2 carrier_err=0 
+00020.375 [B/COM53] _ok=0 timeout=18 rtt_min_us=0 rtt_avg_us=0 rtt_max_us=0 backpressure=2 carrier_err=0 
+00020.453 [B/COM53] wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00020.672 [B/COM53] [33mWARN - UCN_RUS
+00020.953 [A/COM40] wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00021.156 [A/COM40] [33mWARN - UCN_RUS
+00021.453 [B/COM53] T_UART PING_TIMEOUT role=B sequence=19[0m
+00021.656 [B/COM53] [33mWARN - UCN_RUS
+00021.953 [A/COM40] T_UART PING_TIMEOUT role=A sequence=20[0m
+00022.156 [A/COM40] [33mWARN - UCN_RUS
+00022.453 [B/COM53] T_UART PING_TIMEOUT role=B sequence=20[0m
+00022.656 [B/COM53] [33mWARN - UCN_RUS
+00022.953 [A/COM40] T_UART PING_TIMEOUT role=A sequence=21[0m
+00023.156 [A/COM40] [33mWARN - UCN_RUS
+00023.453 [B/COM53] T_UART PING_TIMEOUT role=B sequence=21[0m
+00023.656 [B/COM53] [33mWARN - UCN_RUS
+00023.953 [A/COM40] T_UART PING_TIMEOUT role=A sequence=22[0m
+00024.156 [A/COM40] [33mWARN - UCN_RUS
+00024.453 [B/COM53] T_UART PING_TIMEOUT role=B sequence=22[0m
+00024.656 [B/COM53] [33mWARN - UCN_RUS
+00024.953 [A/COM40] T_UART PING_TIMEOUT role=A sequence=23[0m
+00025.172 [A/COM40] [33mWARN - UCN_RUS

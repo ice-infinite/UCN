@@ -107,7 +107,8 @@ bool ucn_i_handle_matches(const ucn_handle_t *handle,
     return handle != NULL && handle->reserved_zero == 0U &&
            ((expected_kind >= UCN_OBJECT_KIND_SEND &&
              expected_kind <= UCN_OBJECT_KIND_TIME_DOMAIN) ||
-            expected_kind == UCN_OBJECT_KIND_PERSISTENCE) &&
+            expected_kind == UCN_OBJECT_KIND_PERSISTENCE ||
+            expected_kind == UCN_OBJECT_KIND_CLUSTER) &&
            handle->object_kind == expected_kind &&
            runtime_instance != 0U &&
            handle->runtime_instance == runtime_instance &&

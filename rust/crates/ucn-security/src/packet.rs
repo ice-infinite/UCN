@@ -1,8 +1,8 @@
 use ucn_persistence::{CodecWorkspace, blake2s128};
 use ucn_types::{
-    C0TransactionId, ContextId, Error, ForwardingLabel, HeaderContract, HopProfile,
-    InteractionRole, OriginSecurity, OriginSequence, PayloadKind, ProtocolOpcode, Result,
-    SenderSlot,
+    C0TransactionId, ContextId, DeliveryGuarantee, Error, ForwardingLabel, HeaderContract,
+    HopProfile, InteractionRole, OriginSecurity, OriginSequence, PayloadKind, ProtocolOpcode,
+    Result, RouteGeneration, SenderSlot, ServiceId, TrafficClass,
 };
 use ucn_wire::CommonHeader;
 
@@ -103,6 +103,121 @@ pub enum OriginContext {
     },
 }
 
+/// Coordinator 请求 Security Owner 为一个已激活 Flow 签发的精确绑定。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FlowSecurityRequest {
+    /// 当前 Peer Session。
+    pub session: SessionHandle,
+    /// C2、C3 或 C4。
+    pub contract: HeaderContract,
+    /// Flow Owner 的完整 canonical Proposal fingerprint。
+    pub flow_fingerprint: Fingerprint,
+    /// 当前 Hop 的本地 Context ID。
+    pub context_id: ContextId,
+    /// C3/C4 当前 Hop Label；C2 必须为 `None`。
+    pub label: Option<ForwardingLabel>,
+    /// 父 Route Generation；虽不直接上稳态 Wire，仍参与绑定。
+    pub route_generation: RouteGeneration,
+    /// 精确 Service。
+    pub service: ServiceId,
+    /// Data 为 0；Control 为精确 Opcode。
+    pub protocol_opcode: u16,
+    /// 最高可用 Traffic Class。
+    pub traffic_ceiling: TrafficClass,
+    /// 冻结交付语义。
+    pub delivery: DeliveryGuarantee,
+    /// 冻结交互角色。
+    pub interaction: InteractionRole,
+    /// 冻结 Payload 类型。
+    pub payload_kind: PayloadKind,
+    /// 冻结 Origin 保护。
+    pub origin_security: OriginSecurity,
+    /// 冻结逐跳保护。
+    pub hop_profile: HopProfile,
+    /// ACL 方向。
+    pub direction: AccessDirection,
+    /// 创建时绑定的安全 Policy Generation。
+    pub policy_generation: u32,
+    /// Flow 与本地 Capability 的共同半开 Deadline。
+    pub expires_at_us: u64,
+}
+
+/// Security Owner 签发的不可伪造 Flow 安全绑定。
+///
+/// 字段保持私有；调用方只能把它交回同一个 Owner 的 Flow Packet API。每次使用仍会重验
+/// Session、Policy、Deadline、Wire alias 和 ACL 语义。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FlowSecurityBinding {
+    owner_instance: u32,
+    request: FlowSecurityRequest,
+}
+
+/// Security 在完成密码认证后签发、由 Flow Owner 消费的 Replay 事实。
+///
+/// Claim 本身不提交业务副作用；Flow Owner 必须先按 `flow_fingerprint + sequence` 预留，
+/// Coordinator 才能提交 Security Hop Replay 与 Flow Replay。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FlowReplayClaim {
+    security_owner_instance: u32,
+    session_generation: u32,
+    key_generation: u32,
+    flow_fingerprint: Fingerprint,
+    sequence: OriginSequence,
+    reservation_deadline_us: u64,
+    aad_digest: [u8; 16],
+    payload_digest: [u8; 16],
+}
+
+impl FlowReplayClaim {
+    /// Security Owner instance。
+    #[must_use]
+    pub const fn security_owner_instance(self) -> u32 {
+        self.security_owner_instance
+    }
+
+    /// Peer Session Generation。
+    #[must_use]
+    pub const fn session_generation(self) -> u32 {
+        self.session_generation
+    }
+
+    /// Origin Key Generation。
+    #[must_use]
+    pub const fn key_generation(self) -> u32 {
+        self.key_generation
+    }
+
+    /// 完整 Flow fingerprint。
+    #[must_use]
+    pub const fn flow_fingerprint(self) -> Fingerprint {
+        self.flow_fingerprint
+    }
+
+    /// Flow 内 Origin Sequence。
+    #[must_use]
+    pub const fn sequence(self) -> OriginSequence {
+        self.sequence
+    }
+
+    /// Claim/Flow reservation 半开 Deadline。
+    #[must_use]
+    pub const fn reservation_deadline_us(self) -> u64 {
+        self.reservation_deadline_us
+    }
+
+    /// Origin AAD 摘要。
+    #[must_use]
+    pub const fn aad_digest(self) -> [u8; 16] {
+        self.aad_digest
+    }
+
+    /// 认证明文摘要。
+    #[must_use]
+    pub const fn payload_digest(self) -> [u8; 16] {
+        self.payload_digest
+    }
+}
+
 /// 一次受保护 Packet 的只读输入计划。
 ///
 /// `prefix` 是 Common Header 与 Contract fields，`canonical_identity` 是该 Contract 在 Origin
@@ -192,6 +307,8 @@ pub struct OpenedPacket {
     pub disposition: OpenDisposition,
     /// 已提交 Origin Sequence 的只读重放证据；Fresh 固定为 `None`。
     pub duplicate_evidence: Option<crate::ReplayEvidence>,
+    /// Flow 绑定输入的 Replay Claim；普通 Session Packet 与 O0 Flow 为 `None`。
+    pub flow_replay_claim: Option<FlowReplayClaim>,
     /// 必须由 Coordinator 在业务预检后精确 commit/abort 的组合 Handle。
     pub replay: SecurityReplayHandle,
 }
@@ -214,6 +331,88 @@ enum PreparedOriginCounter<'a> {
 }
 
 impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSIONS, REPLAY_SLOTS> {
+    /// 把动态 Flow 的短 Context/Label 绑定到当前 Session 和一条已有的精确父 ACL。
+    ///
+    /// # Errors
+    ///
+    /// Session、父 ACL、Flow 组合、Policy 或 Deadline 不成立时返回错误，不签发绑定。
+    pub fn bind_flow_context(
+        &self,
+        request: FlowSecurityRequest,
+        facts: CurrentFacts,
+        parent_access: AccessRequest,
+    ) -> Result<FlowSecurityBinding> {
+        if request.session != parent_access.session
+            || request.direction != parent_access.direction
+            || request.service != parent_access.service
+            || request.protocol_opcode != parent_access.protocol_opcode
+            || request.policy_generation != facts.policy_generation
+            || request.policy_generation == 0
+            || facts.now_us >= request.expires_at_us
+            || !matches!(
+                request.contract,
+                HeaderContract::C2 | HeaderContract::C3 | HeaderContract::C4
+            )
+            || (request.contract == HeaderContract::C2 && request.label.is_some())
+            || (matches!(request.contract, HeaderContract::C3 | HeaderContract::C4)
+                && request.label.is_none())
+            || (request.payload_kind == PayloadKind::Control
+                && (request.protocol_opcode == 0
+                    || ProtocolOpcode::try_from(request.protocol_opcode).is_err()))
+            || (request.payload_kind != PayloadKind::Control && request.protocol_opcode != 0)
+        {
+            return Err(Error::Argument);
+        }
+        let combination_valid = match request.contract {
+            HeaderContract::C2 => {
+                matches!(request.hop_profile, HopProfile::H0 | HopProfile::H1)
+                    || (request.hop_profile == HopProfile::H2
+                        && request.origin_security != OriginSecurity::O0)
+            }
+            HeaderContract::C3 => {
+                request.delivery == DeliveryGuarantee::BestEffort
+                    && request.interaction == InteractionRole::OneWay
+                    && matches!(
+                        request.payload_kind,
+                        PayloadKind::Data | PayloadKind::Diagnostic
+                    )
+                    && request.origin_security == OriginSecurity::O0
+                    && matches!(request.hop_profile, HopProfile::H0 | HopProfile::H1)
+            }
+            HeaderContract::C4 => matches!(request.hop_profile, HopProfile::H0 | HopProfile::H1),
+            _ => false,
+        };
+        if !combination_valid
+            || (request.interaction != InteractionRole::OneWay
+                && request.payload_kind == PayloadKind::Data)
+        {
+            return Err(Error::Malformed);
+        }
+        let candidate = self.candidate(request.session, facts)?;
+        if request.expires_at_us > candidate.expires_at_us
+            || request.hop_profile != candidate.hop_profile
+            || (request.origin_security != OriginSecurity::O0
+                && request.origin_security != candidate.origin_level.wire())
+            || (request.origin_security == OriginSecurity::O0
+                && request.hop_profile != HopProfile::H1)
+        {
+            return Err(Error::Security);
+        }
+        let expected_parent = if request.origin_security == OriginSecurity::O0 {
+            candidate.hop_fingerprint
+        } else {
+            candidate.origin_fingerprint
+        };
+        if parent_access.context_fingerprint != expected_parent {
+            return Err(Error::Access);
+        }
+        self.authorize(parent_access, facts)?;
+        Ok(FlowSecurityBinding {
+            owner_instance: self.owner_instance(),
+            request,
+        })
+    }
+
     /// 生成 O1/O2/H1/H2/H3 受保护 Packet；失败时输出完全不写。
     ///
     /// # Errors
@@ -233,24 +432,102 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
         workspace: &mut SecurityPacketWorkspace<BYTES>,
         output: &mut [u8],
     ) -> Result<usize> {
+        self.protect_packet_inner(
+            provider,
+            origin_counter,
+            session,
+            facts,
+            access,
+            plan,
+            hop_sequence_owner,
+            None,
+            workspace,
+            output,
+        )
+    }
+
+    /// 使用 Security Owner 签发的精确 Flow 绑定保护 C2/C3/C4 Packet。
+    ///
+    /// # Errors
+    ///
+    /// 除普通 Packet 错误外，Flow、Label/Context、Policy、Session 或 Deadline 任一失配均
+    /// 在消耗序号和调用 Provider 前拒绝。
+    #[allow(clippy::too_many_arguments)]
+    pub fn protect_flow_packet<P: CryptoProvider, const BYTES: usize>(
+        &mut self,
+        provider: &mut P,
+        origin_counter: OriginCounterOwner<'_>,
+        binding: FlowSecurityBinding,
+        facts: CurrentFacts,
+        access: AccessRequest,
+        plan: PacketPlan<'_>,
+        hop_sequence_owner: Option<&mut dyn HopSequenceOwner>,
+        workspace: &mut SecurityPacketWorkspace<BYTES>,
+        output: &mut [u8],
+    ) -> Result<usize> {
+        self.protect_packet_inner(
+            provider,
+            origin_counter,
+            binding.request.session,
+            facts,
+            access,
+            plan,
+            hop_sequence_owner,
+            Some(binding),
+            workspace,
+            output,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn protect_packet_inner<P: CryptoProvider, const BYTES: usize>(
+        &mut self,
+        provider: &mut P,
+        origin_counter: OriginCounterOwner<'_>,
+        session: SessionHandle,
+        facts: CurrentFacts,
+        access: AccessRequest,
+        plan: PacketPlan<'_>,
+        hop_sequence_owner: Option<&mut dyn HopSequenceOwner>,
+        flow_binding: Option<FlowSecurityBinding>,
+        workspace: &mut SecurityPacketWorkspace<BYTES>,
+        output: &mut [u8],
+    ) -> Result<usize> {
         if access.session != session || access.direction != AccessDirection::Outbound {
             return Err(Error::Argument);
         }
         let candidate = self.candidate(session, facts)?;
         let header = self.validate_packet_plan(&plan)?;
-        if matches!(header.contract, HeaderContract::C4 | HeaderContract::C5) {
+        if header.contract == HeaderContract::C5
+            || (header.contract == HeaderContract::C4 && flow_binding.is_none())
+        {
             return Err(Error::Unsupported);
         }
-        validate_context(candidate.origin_fingerprint, plan.origin_context)?;
-        validate_wire_bindings(
-            candidate,
-            self.realm(),
-            self.address_width().bytes(),
-            header,
-            plan.prefix,
-            plan.canonical_identity,
-            AccessDirection::Outbound,
-        )?;
+        let expected_context = if let Some(binding) = flow_binding {
+            validate_flow_security_binding(
+                self.owner_instance(),
+                candidate,
+                binding,
+                facts,
+                access,
+                header,
+                plan.prefix,
+                plan.canonical_identity,
+            )?;
+            binding.request.flow_fingerprint
+        } else {
+            validate_wire_bindings(
+                candidate,
+                self.realm(),
+                self.address_width().bytes(),
+                header,
+                plan.prefix,
+                plan.canonical_identity,
+                AccessDirection::Outbound,
+            )?;
+            candidate.origin_fingerprint
+        };
+        validate_context(expected_context, plan.origin_context)?;
         if header.origin_security != OriginSecurity::O0
             && header.origin_security != candidate.origin_level.wire()
         {
@@ -262,13 +539,15 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
         if plan.hop_profile != candidate.hop_profile {
             return Err(Error::Security);
         }
-        validate_access_context(
-            access,
-            header,
-            plan.origin_context,
-            candidate.hop_fingerprint,
-        )?;
-        self.authorize(access, facts)?;
+        if flow_binding.is_none() {
+            validate_access_context(
+                access,
+                header,
+                plan.origin_context,
+                candidate.hop_fingerprint,
+            )?;
+            self.authorize(access, facts)?;
+        }
         let origin_bytes =
             usize::from(header.origin_security != OriginSecurity::O0) * ORIGIN_TAG_BYTES;
         let hop_bytes = usize::from(matches!(plan.hop_profile, HopProfile::H1 | HopProfile::H3))
@@ -428,6 +707,58 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
         workspace: &mut SecurityPacketWorkspace<BYTES>,
         plaintext_output: &mut [u8],
     ) -> Result<OpenedPacket> {
+        self.open_packet_inner(
+            provider,
+            session,
+            facts,
+            access,
+            plan,
+            None,
+            workspace,
+            plaintext_output,
+        )
+    }
+
+    /// 使用精确 Flow 绑定认证并打开 C2/C3/C4 Packet。
+    ///
+    /// # Errors
+    ///
+    /// Flow/Session/ACL/Wire/Replay 任一绑定失配时失败，明文输出保持不变。
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_flow_packet<P: CryptoProvider, const BYTES: usize>(
+        &mut self,
+        provider: &mut P,
+        binding: FlowSecurityBinding,
+        facts: CurrentFacts,
+        access: AccessRequest,
+        plan: OpenPacketPlan<'_>,
+        workspace: &mut SecurityPacketWorkspace<BYTES>,
+        plaintext_output: &mut [u8],
+    ) -> Result<OpenedPacket> {
+        self.open_packet_inner(
+            provider,
+            binding.request.session,
+            facts,
+            access,
+            plan,
+            Some(binding),
+            workspace,
+            plaintext_output,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn open_packet_inner<P: CryptoProvider, const BYTES: usize>(
+        &mut self,
+        provider: &mut P,
+        session: SessionHandle,
+        facts: CurrentFacts,
+        access: AccessRequest,
+        plan: OpenPacketPlan<'_>,
+        flow_binding: Option<FlowSecurityBinding>,
+        workspace: &mut SecurityPacketWorkspace<BYTES>,
+        plaintext_output: &mut [u8],
+    ) -> Result<OpenedPacket> {
         if access.session != session || access.direction != AccessDirection::Inbound {
             return Err(Error::Argument);
         }
@@ -436,7 +767,9 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
             return Err(Error::NoSpace);
         }
         let header = CommonHeader::decode(plan.packet)?;
-        if matches!(header.contract, HeaderContract::C4 | HeaderContract::C5) {
+        if header.contract == HeaderContract::C5
+            || (header.contract == HeaderContract::C4 && flow_binding.is_none())
+        {
             return Err(Error::Unsupported);
         }
         let origin_bytes =
@@ -468,22 +801,39 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
         {
             return Err(Error::Security);
         }
-        validate_context(candidate.origin_fingerprint, plan.origin_context)?;
-        validate_wire_bindings(
-            candidate,
-            self.realm(),
-            self.address_width().bytes(),
-            header,
-            structural.prefix,
-            structural.canonical_identity,
-            AccessDirection::Inbound,
-        )?;
-        validate_access_context(
-            access,
-            header,
-            plan.origin_context,
-            candidate.hop_fingerprint,
-        )?;
+        let expected_context = if let Some(binding) = flow_binding {
+            validate_flow_security_binding(
+                self.owner_instance(),
+                candidate,
+                binding,
+                facts,
+                access,
+                header,
+                structural.prefix,
+                structural.canonical_identity,
+            )?;
+            binding.request.flow_fingerprint
+        } else {
+            validate_wire_bindings(
+                candidate,
+                self.realm(),
+                self.address_width().bytes(),
+                header,
+                structural.prefix,
+                structural.canonical_identity,
+                AccessDirection::Inbound,
+            )?;
+            candidate.origin_fingerprint
+        };
+        validate_context(expected_context, plan.origin_context)?;
+        if flow_binding.is_none() {
+            validate_access_context(
+                access,
+                header,
+                plan.origin_context,
+                candidate.hop_fingerprint,
+            )?;
+        }
         if plaintext_output.len() < payload.len() || workspace.plaintext.len() < payload.len() {
             return Err(Error::NoSpace);
         }
@@ -604,29 +954,51 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
         let mut hop_handle = None;
         let mut disposition = OpenDisposition::FreshAuthenticated;
         let mut duplicate_evidence = None;
+        let mut flow_replay_claim = None;
         if let Some(sequence) = origin_sequence {
-            match self.classify_origin_replay(session, facts, sequence)? {
-                crate::ReplayClassification::Fresh => {
-                    origin_handle = Some(self.reserve_origin_replay(
+            if let Some(binding) = flow_binding {
+                let claim_sequence =
+                    OriginSequence::new(u32::try_from(sequence).map_err(|_| Error::Malformed)?)?;
+                flow_replay_claim = Some(FlowReplayClaim {
+                    security_owner_instance: self.owner_instance(),
+                    session_generation: candidate.session_generation.get(),
+                    key_generation: candidate.origin_rx.key_generation,
+                    flow_fingerprint: expected_context,
+                    sequence: claim_sequence,
+                    reservation_deadline_us: self.flow_replay_claim_deadline(
                         session,
                         facts,
-                        sequence,
-                        aad_digest,
-                        payload_digest,
-                    )?);
+                        binding.request.expires_at_us,
+                    )?,
+                    aad_digest,
+                    payload_digest,
+                });
+            } else {
+                match self.classify_origin_replay(session, facts, sequence)? {
+                    crate::ReplayClassification::Fresh => {
+                        origin_handle = Some(self.reserve_origin_replay(
+                            session,
+                            facts,
+                            expected_context,
+                            sequence,
+                            aad_digest,
+                            payload_digest,
+                        )?);
+                    }
+                    crate::ReplayClassification::Duplicate => {
+                        disposition = OpenDisposition::AuthenticatedReplayCandidate;
+                        duplicate_evidence = Some(self.origin_replay_evidence(
+                            session,
+                            facts,
+                            expected_context,
+                            sequence,
+                            aad_digest,
+                            payload_digest,
+                        )?);
+                    }
+                    crate::ReplayClassification::Stale => return Err(Error::Replay),
+                    crate::ReplayClassification::InFlight => return Err(Error::State),
                 }
-                crate::ReplayClassification::Duplicate => {
-                    disposition = OpenDisposition::AuthenticatedReplayCandidate;
-                    duplicate_evidence = Some(self.origin_replay_evidence(
-                        session,
-                        facts,
-                        sequence,
-                        aad_digest,
-                        payload_digest,
-                    )?);
-                }
-                crate::ReplayClassification::Stale => return Err(Error::Replay),
-                crate::ReplayClassification::InFlight => return Err(Error::State),
             }
         }
         if let Some(sequence) = hop_sequence {
@@ -646,14 +1018,16 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
                 }
             }
         }
-        if let Err(error) = self.authorize(access, facts) {
-            if let Some(handle) = origin_handle {
-                let _ = self.abort_replay(session, handle, false);
+        if flow_binding.is_none() {
+            if let Err(error) = self.authorize(access, facts) {
+                if let Some(handle) = origin_handle {
+                    let _ = self.abort_replay(session, handle, false);
+                }
+                if let Some(handle) = hop_handle {
+                    let _ = self.abort_replay(session, handle, true);
+                }
+                return Err(error);
             }
-            if let Some(handle) = hop_handle {
-                let _ = self.abort_replay(session, handle, true);
-            }
-            return Err(error);
         }
         let payload_bytes = if disposition == OpenDisposition::FreshAuthenticated {
             plaintext_output[..payload.len()]
@@ -666,6 +1040,7 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
             payload_bytes,
             disposition,
             duplicate_evidence,
+            flow_replay_claim,
             replay: SecurityReplayHandle {
                 owner_instance: self.owner_instance(),
                 session,
@@ -1209,6 +1584,68 @@ fn validate_wire_bindings(
             }
         }
         HeaderContract::C3 | HeaderContract::C4 | HeaderContract::C5 => {}
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_flow_security_binding(
+    owner_instance: u32,
+    candidate: crate::HandshakeCandidate,
+    binding: FlowSecurityBinding,
+    facts: CurrentFacts,
+    access: AccessRequest,
+    header: CommonHeader,
+    prefix: &[u8],
+    canonical_identity: &[u8],
+) -> Result<()> {
+    let request = binding.request;
+    if binding.owner_instance != owner_instance
+        || request.session != access.session
+        || request.direction != access.direction
+        || request.policy_generation != facts.policy_generation
+        || request.policy_generation != candidate.policy_generation
+        || facts.now_us >= request.expires_at_us
+        || header.contract != request.contract
+        || header.delivery != request.delivery
+        || header.interaction != request.interaction
+        || header.payload_kind != request.payload_kind
+        || header.origin_security != request.origin_security
+        || request.hop_profile != candidate.hop_profile
+        || u8::from(header.traffic_class) < u8::from(request.traffic_ceiling)
+        || access.context_fingerprint != request.flow_fingerprint
+        || access.service != request.service
+        || access.protocol_opcode != request.protocol_opcode
+        || canonical_identity != request.flow_fingerprint.bytes()
+    {
+        return Err(Error::Security);
+    }
+    match request.contract {
+        HeaderContract::C2 => {
+            if request.label.is_some()
+                || read_u16_be(prefix, 3) != request.context_id.get()
+                || prefix.len() != 9
+            {
+                return Err(Error::Security);
+            }
+        }
+        HeaderContract::C3 => {
+            if read_u16_be(prefix, 3) != request.label.ok_or(Error::State)?.get()
+                || read_u16_be(prefix, 5) != request.context_id.get()
+                || prefix.len() != 7
+            {
+                return Err(Error::Security);
+            }
+        }
+        HeaderContract::C4 => {
+            if read_u16_be(prefix, 3) != request.label.ok_or(Error::State)?.get()
+                || read_u16_be(prefix, 5) != request.context_id.get()
+                || prefix.len() != 11
+            {
+                return Err(Error::Security);
+            }
+        }
+        _ => return Err(Error::Unsupported),
     }
     Ok(())
 }

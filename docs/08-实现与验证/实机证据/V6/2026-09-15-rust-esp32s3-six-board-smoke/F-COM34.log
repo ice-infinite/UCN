@@ -1,0 +1,36 @@
+00000.110 [F/COM34] OPEN
+00000.157 [F/COM34] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.157 [F/COM34] I (28) boot: Multicore bootloader
+00000.157 [F/COM34] I (28) boot: chip revision: v0.2
+00000.157 [F/COM34] I (29) boot: efuse block revision: v1.3
+00000.172 [F/COM34] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.172 [F/COM34] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.172 [F/COM34] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.172 [F/COM34] I (44) boot: Enabling RNG early entropy source...
+00000.188 [F/COM34] I (48) boot: Partition Table:
+00000.188 [F/COM34] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.188 [F/COM34] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.204 [F/COM34] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.204 [F/COM34] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.204 [F/COM34] I (77) boot: End of partition table
+00000.219 [F/COM34] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=0264ch (  9804) map
+00000.219 [F/COM34] I (90) esp_image: segment 1: paddr=00012674 vaddr=3fc8978c size=009b4h (  2484) load
+00000.235 [F/COM34] I (95) esp_image: segment 2: paddr=00013030 vaddr=40378000 size=0178ch (  6028) load
+00000.235 [F/COM34] I (104) esp_image: segment 3: paddr=000147c4 vaddr=00000000 size=0b854h ( 47188) 
+00000.250 [F/COM34] I (121) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=0666ch ( 26220) map
+00000.250 [F/COM34] I (129) boot: Loaded app from partition at offset 0x10000
+00000.250 [F/COM34] I (129) boot: Disabling RNG early entropy source...
+00000.266 [F/COM34] [32mINFO - UCN_RUST_HW BOOT protocol=6 target=ESP32-S3[0m
+00000.282 [F/COM34] [32mINFO - UCN_RUST_HW SIZE core_nano=5896 route_nano=1832 flow_nano=3424 adapter_1_2_2_64=276[0m
+00000.297 [F/COM34] [32mINFO - UCN_RUST_HW LINKED admission=1256 capability=472 identity=2808 owner=36 persistence=1976 security=2328[0m
+00000.297 [F/COM34] [32mINFO - UCN_RUST_HW SELFTEST wire=PASS routing=PASS flow=PASS overall=PASS[0m
+00000.297 [F/COM34] [32mINFO - UCN_RUST_HW HEARTBEAT count=1 overall=PASS[0m
+00001.297 [F/COM34] [32mINFO - UCN_RUST_HW HEARTBEAT count=2 overall=PASS[0m
+00002.297 [F/COM34] [32mINFO - UCN_RUST_HW HEARTBEAT count=3 overall=PASS[0m
+00003.297 [F/COM34] [32mINFO - UCN_RUST_HW HEARTBEAT count=4 overall=PASS[0m
+00004.297 [F/COM34] [32mINFO - UCN_RUST_HW HEARTBEAT count=5 overall=PASS[0m
+00005.297 [F/COM34] [32mINFO - UCN_RUST_HW HEARTBEAT count=6 overall=PASS[0m
+00006.297 [F/COM34] [32mINFO - UCN_RUST_HW HEARTBEAT count=7 overall=PASS[0m
+00007.297 [F/COM34] [32mINFO - UCN_RUST_HW HEARTBEAT count=8 overall=PASS[0m
+00008.297 [F/COM34] [32mINFO - UCN_RUST_HW HEARTBEAT count=9 overall=PASS[0m
+00009.297 [F/COM34] [32mINFO - UCN_RUST_HW HEARTBEAT count=10 overall=PASS[0m

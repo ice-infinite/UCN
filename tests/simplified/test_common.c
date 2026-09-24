@@ -1,5 +1,6 @@
 #include "ucn/ucn_types.h"
 #include "internal/ucn_checked.h"
+#include "internal/ucn_digest.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -132,12 +133,53 @@ static int test_range_overlap(void)
     return 0;
 }
 
+static int test_canonical_digest(void)
+{
+    static const uint8_t empty_expected[16] = {
+        0xE3U, 0xB0U, 0xC4U, 0x42U, 0x98U, 0xFCU, 0x1CU, 0x14U,
+        0x9AU, 0xFBU, 0xF4U, 0xC8U, 0x99U, 0x6FU, 0xB9U, 0x24U
+    };
+    static const uint8_t abc_expected[16] = {
+        0xBAU, 0x78U, 0x16U, 0xBFU, 0x8FU, 0x01U, 0xCFU, 0xEAU,
+        0x41U, 0x41U, 0x40U, 0xDEU, 0x5DU, 0xAEU, 0x22U, 0x23U
+    };
+    ucn_i_sha256_workspace_t workspace;
+    ucn_i_sha256_workspace_t workspace_before;
+    uint8_t digest[16];
+
+    memset(&workspace, 0, sizeof(workspace));
+    memset(digest, 0xA5, sizeof(digest));
+    CHECK(ucn_i_sha256_128(NULL, 0U, digest, &workspace) == UCN_OK);
+    CHECK(memcmp(digest, empty_expected, sizeof(digest)) == 0);
+    CHECK(ucn_i_sha256_128((const uint8_t *)"abc", 3U, digest,
+                           &workspace) == UCN_OK);
+    CHECK(memcmp(digest, abc_expected, sizeof(digest)) == 0);
+    memset(digest, 0xA5, sizeof(digest));
+    CHECK(ucn_i_sha256_128(NULL, 1U, digest, &workspace) ==
+          UCN_ERR_ARGUMENT);
+    CHECK(digest[0] == 0xA5U && digest[15] == 0xA5U);
+
+    memset(&workspace, 0x5A, sizeof(workspace));
+    workspace_before = workspace;
+    CHECK(ucn_i_sha256_128((const uint8_t *)"abc", 3U,
+                           ((uint8_t *)&workspace) + 1U,
+                           &workspace) == UCN_ERR_ARGUMENT);
+    CHECK(memcmp(&workspace, &workspace_before, sizeof(workspace)) == 0);
+
+    memset(digest, 0xA5, sizeof(digest));
+    CHECK(ucn_i_sha256_128((const uint8_t *)&workspace, 3U,
+                           digest, &workspace) == UCN_ERR_ARGUMENT);
+    CHECK(digest[0] == 0xA5U && digest[15] == 0xA5U);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_result_and_handle_abi() == 0);
     CHECK(test_checked_generations() == 0);
     CHECK(test_checked_time_and_size() == 0);
     CHECK(test_range_overlap() == 0);
+    CHECK(test_canonical_digest() == 0);
     puts("UCN simplified common tests passed");
     return 0;
 }

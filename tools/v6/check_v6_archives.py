@@ -35,6 +35,11 @@ def main() -> int:
     archives = sorted(build_dir.rglob("libucn*.a"))
     archives.extend(sorted(build_dir.rglob("ucn*.lib")))
     errors: list[str] = []
+    composition_dependencies = {
+        "ucn_storage_required", "ucn_init", "ucn_start", "ucn_step",
+        "ucn_stop", "ucn_deinit", "ucn_persistence_init_in_place",
+        "ucn_persistence_deinit",
+    }
     if not archives:
         errors.append("no UCN static archives found")
     for archive in archives:
@@ -55,8 +60,33 @@ def main() -> int:
             "libucn_persistence.a", "ucn_persistence.lib",
             "libucn_persistence_coordinator.a",
             "ucn_persistence_coordinator.lib")
+        is_simplified_scaffold = (
+            archive.name in (
+                "libucn_module_scaffold.a", "ucn_module_scaffold.lib") or
+            archive.name.startswith("libucn_v6s_") and
+            archive.name.endswith("_scaffold.a") or
+            archive.name.startswith("ucn_v6s_") and
+            archive.name.endswith("_scaffold.lib")
+        )
+        is_simplified_private_module = archive.name in (
+            "libucn_v6s_security_session.a",
+            "ucn_v6s_security_session.lib",
+            "libucn_v6s_admission.a", "ucn_v6s_admission.lib",
+            "libucn_v6s_identity_binding.a", "ucn_v6s_identity_binding.lib",
+            "libucn_v6s_capability.a", "ucn_v6s_capability.lib",
+            "libucn_v6s_route.a", "ucn_v6s_route.lib",
+            "libucn_v6s_flow.a", "ucn_v6s_flow.lib",
+            "libucn_v6s_transport.a", "ucn_v6s_transport.lib",
+            "libucn_v6s_service.a", "ucn_v6s_service.lib",
+            "libucn_v6s_realtime.a", "ucn_v6s_realtime.lib",
+            "libucn_v6s_group.a", "ucn_v6s_group.lib",
+            "libucn_v6s_cluster.a", "ucn_v6s_cluster.lib",
+            "libucn_v6s_composition.a", "ucn_v6s_composition.lib")
+        is_simplified_composition = archive.name in (
+            "libucn_v6s_composition.a", "ucn_v6s_composition.lib")
         if not (is_v6_module or is_simplified_common or is_simplified_kernel
-                or is_simplified_persistence):
+                or is_simplified_persistence or is_simplified_scaffold
+                or is_simplified_private_module):
             errors.append(f"legacy archive name: {archive.name}")
             continue
         tool_name = Path(args.symbol_tool).name.lower()
@@ -88,6 +118,10 @@ def main() -> int:
                                symbol.startswith("ucn_persist_") or
                                symbol.startswith("ucn_i_persist_") or
                                symbol.startswith("ucn_i_persistence_"))
+                elif is_simplified_scaffold or is_simplified_private_module:
+                    allowed = (symbol.startswith("ucn_i_") or
+                               (is_simplified_composition and
+                                symbol in composition_dependencies))
                 elif is_simplified_kernel:
                     # The installed aggregate owns both the public facade and
                     # its private implementation symbols.  The test-only
@@ -136,6 +170,10 @@ def main() -> int:
                                symbol.startswith("ucn_i_persistence_") or
                                symbol.startswith("ucn_persistence_") or
                                symbol.startswith("ucn_persist_"))
+                elif is_simplified_scaffold or is_simplified_private_module:
+                    allowed = (symbol.startswith("ucn_i_") or
+                               (is_simplified_composition and
+                                symbol in composition_dependencies))
                 elif is_simplified_kernel:
                     allowed = symbol.startswith("ucn_i_")
                 else:

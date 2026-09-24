@@ -1,0 +1,4 @@
+5aef44ddd01a646b6823c98695318485fe543aa04b6353efa71c5df9ef88fe3f  target/xtensa-esp32s3-none-elf/release/ucn-v6s-rust-esp32s3-smoke
+b28d4551fdaf4e778675f97f7656ed0988e4ad0828a49ce982f39ec970dc9024  target/ucn-v6s-rust-esp32s3-smoke.bin
+e339d30d465d2ee3c1cdcd98377904d08b26c44f0248df66ffef6495638ae0bd  src/main.rs
+38e18a5f4d60571e3b0cdef406c1426255e097eed4c3f791f61cb33121094267  tools/capture_multi_serial.py

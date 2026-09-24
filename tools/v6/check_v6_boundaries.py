@@ -16,7 +16,11 @@ def main() -> int:
     errors: list[str] = []
     runtime_files = sorted((root / "src" / "v6").rglob("*.c"))
     runtime_files.extend(sorted((root / "src" / "core").rglob("*.c")))
-    for directory in ("wire", "adapter", "runtime", "persistence"):
+    for directory in (
+        "wire", "adapter", "runtime", "persistence", "security",
+        "admission", "capability", "routing", "transport", "service", "realtime",
+        "group", "cluster",
+    ):
         runtime_files.extend(sorted((root / "src" / directory).rglob("*.c")))
     public_files = sorted((root / "include" / "ucn").rglob("*.h"))
     if not runtime_files or not public_files:
@@ -96,7 +100,12 @@ def main() -> int:
         root / "src" / "v6", root / "src" / "core",
         root / "src" / "internal", root / "src" / "wire",
         root / "src" / "adapter", root / "src" / "runtime",
-        root / "src" / "persistence",
+        root / "src" / "persistence", root / "src" / "security",
+        root / "src" / "admission", root / "src" / "capability",
+        root / "src" / "routing",
+        root / "src" / "transport", root / "src" / "service",
+        root / "src" / "realtime", root / "src" / "group",
+        root / "src" / "cluster",
     )
     for path in (root / "src").rglob("*"):
         if path.is_file() and not any(base in path.parents for base in allowed_source_roots):

@@ -13,10 +13,14 @@ add_compile_options($<$<C_COMPILER_ID:MSVC>:/utf-8>)
 
 option(UCN_BUILD_TESTS "Build UCN v6 unit and validation tests" ON)
 option(UCN_FEATURE_REALTIME "Build the optional v6 Realtime module" ON)
+option(UCN_FEATURE_GROUP "Build the optional simplified Group module" ON)
 option(UCN_FEATURE_CLUSTER "Build the optional v6 Cluster module" ON)
 option(UCN_FEATURE_ADAPTER "Build v6 Adapter, bearer, RTOS, and reference ports" ON)
 option(UCN_FEATURE_PERSISTENCE
     "Build the optional simplified Persistence Foundation" OFF)
+option(UCN_VERIFY_IMPL02_SIGNED_CANDIDATE
+    "Reproduce the historical signed IMPL-02 exact candidate (expected to fail after later-stage changes)"
+    OFF)
 set(UCN_PROFILE "FULL" CACHE STRING "UCN v6 resource profile: NANO, LITE, or FULL")
 set_property(CACHE UCN_PROFILE PROPERTY STRINGS NANO LITE FULL)
 set(UCN_USER_CONFIG_HEADER "" CACHE STRING
@@ -37,7 +41,7 @@ else()
     message(FATAL_ERROR "UCN_PROFILE must be NANO, LITE, or FULL")
 endif()
 
-foreach(feature REALTIME CLUSTER ADAPTER)
+foreach(feature REALTIME GROUP CLUSTER ADAPTER)
     if(UCN_FEATURE_${feature})
         set(UCN_FEATURE_${feature}_VALUE 1)
     else()
@@ -47,6 +51,7 @@ endforeach()
 
 message(STATUS
     "UCN v6 profile=${UCN_PROFILE_UPPER} realtime=${UCN_FEATURE_REALTIME} "
+    "group=${UCN_FEATURE_GROUP} "
     "cluster=${UCN_FEATURE_CLUSTER} adapter=${UCN_FEATURE_ADAPTER} "
     "persistence=${UCN_FEATURE_PERSISTENCE}")
 
@@ -69,6 +74,7 @@ endfunction()
 
 add_library(ucn_common STATIC
     src/core/ucn_checked.c
+    src/core/ucn_digest.c
     src/core/ucn_owner.c)
 add_library(UCN::common ALIAS ucn_common)
 set_target_properties(ucn_common PROPERTIES EXPORT_NAME common)
@@ -81,6 +87,251 @@ ucn_target_defaults(ucn_coordinator)
 target_include_directories(ucn_coordinator PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(ucn_coordinator PRIVATE ucn_common)
+
+# IMPL-03..08 architecture scaffolds. These targets are deliberately private,
+# excluded from product builds without tests, and absent from install/export.
+# They freeze module ownership and Coordinator-routed dependency direction;
+# they contain no public API, business state, Wire codec, or success path.
+add_library(ucn_module_scaffold STATIC EXCLUDE_FROM_ALL
+    src/core/ucn_module_scaffold.c)
+ucn_target_defaults(ucn_module_scaffold)
+target_include_directories(ucn_module_scaffold PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(ucn_module_scaffold PRIVATE ucn_common)
+
+function(ucn_add_v6s_module_scaffold target source)
+    add_library(${target} STATIC EXCLUDE_FROM_ALL ${source})
+    ucn_target_defaults(${target})
+    target_include_directories(${target} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(${target} PRIVATE
+        ucn_common ucn_coordinator)
+endfunction()
+
+ucn_add_v6s_module_scaffold(ucn_v6s_security_scaffold
+    src/security/ucn_security_scaffold.c)
+ucn_add_v6s_module_scaffold(ucn_v6s_admission_scaffold
+    src/admission/ucn_admission_scaffold.c)
+ucn_add_v6s_module_scaffold(ucn_v6s_routing_scaffold
+    src/routing/ucn_routing_scaffold.c)
+ucn_add_v6s_module_scaffold(ucn_v6s_transport_scaffold
+    src/transport/ucn_transport_scaffold.c)
+ucn_add_v6s_module_scaffold(ucn_v6s_service_scaffold
+    src/service/ucn_service_scaffold.c)
+ucn_add_v6s_module_scaffold(ucn_v6s_realtime_scaffold
+    src/realtime/ucn_realtime_scaffold.c)
+ucn_add_v6s_module_scaffold(ucn_v6s_group_scaffold
+    src/group/ucn_group_scaffold.c)
+ucn_add_v6s_module_scaffold(ucn_v6s_cluster_scaffold
+    src/cluster/ucn_cluster_scaffold.c)
+
+# IMPL-03 detailed implementation is built only by its focused test while it
+# is below the public/product connection boundary.  It owns fixed Session
+# state and emits immutable Persistence requirements; it cannot call the
+# Persistence Owner or enter the product archive yet.
+add_library(ucn_v6s_security_session STATIC EXCLUDE_FROM_ALL
+    src/security/ucn_security_session.c)
+ucn_target_defaults(ucn_v6s_security_session)
+target_include_directories(ucn_v6s_security_session PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(ucn_v6s_security_session PUBLIC
+    UCN_PROFILE=${UCN_PROFILE_VALUE})
+target_link_libraries(ucn_v6s_security_session PRIVATE ucn_common)
+
+# IMPL-04 keeps Dynamic Admission and Capability as two independent private
+# Owners. They exchange only immutable Coordinator-routed views and do not
+# link Security or Persistence Owner archives directly.
+add_library(ucn_v6s_admission STATIC EXCLUDE_FROM_ALL
+    src/admission/ucn_admission.c)
+ucn_target_defaults(ucn_v6s_admission)
+target_include_directories(ucn_v6s_admission PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(ucn_v6s_admission PUBLIC
+    UCN_PROFILE=${UCN_PROFILE_VALUE})
+target_link_libraries(ucn_v6s_admission PRIVATE ucn_common)
+
+add_library(ucn_v6s_identity_binding STATIC EXCLUDE_FROM_ALL
+    src/admission/ucn_identity_binding.c)
+ucn_target_defaults(ucn_v6s_identity_binding)
+target_include_directories(ucn_v6s_identity_binding PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(ucn_v6s_identity_binding PUBLIC
+    UCN_PROFILE=${UCN_PROFILE_VALUE})
+target_link_libraries(ucn_v6s_identity_binding PRIVATE ucn_common)
+
+add_library(ucn_v6s_capability STATIC EXCLUDE_FROM_ALL
+    src/capability/ucn_capability.c)
+ucn_target_defaults(ucn_v6s_capability)
+target_include_directories(ucn_v6s_capability PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(ucn_v6s_capability PUBLIC
+    UCN_PROFILE=${UCN_PROFILE_VALUE})
+target_link_libraries(ucn_v6s_capability PRIVATE ucn_common)
+
+# IMPL-05 base routing is a private, fixed-capacity Owner.  It consumes only
+# Coordinator-provided immutable Link/identity facts and does not link the
+# Security, Admission, Capability, Flow, or public Runtime archives.
+add_library(ucn_v6s_route STATIC EXCLUDE_FROM_ALL
+    src/routing/ucn_route.c)
+ucn_target_defaults(ucn_v6s_route)
+target_include_directories(ucn_v6s_route PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(ucn_v6s_route PUBLIC
+    UCN_PROFILE=${UCN_PROFILE_VALUE})
+target_link_libraries(ucn_v6s_route PRIVATE ucn_common)
+
+# Advanced Flow stays a private typed model until the five Stage/Commit
+# message bodies and their Golden/Negative vectors are externally frozen.
+# Only the already frozen prefix and Label Setup codecs are implemented here.
+add_library(ucn_v6s_flow STATIC EXCLUDE_FROM_ALL
+    src/routing/ucn_flow.c)
+ucn_target_defaults(ucn_v6s_flow)
+target_include_directories(ucn_v6s_flow PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(ucn_v6s_flow PUBLIC
+    UCN_PROFILE=${UCN_PROFILE_VALUE})
+target_link_libraries(ucn_v6s_flow PRIVATE ucn_common)
+
+# IMPL-06 Transport owns C1 Reliable receipts/retry state, the frozen
+# Setup/Fragment/SACK codecs, fixed-window Transfer state, and a typed durable
+# C1 parent high-water consumer. It remains private and never links Route,
+# Flow, Security, Persistence, Adapter, or the public Runtime directly.
+add_library(ucn_v6s_transport STATIC EXCLUDE_FROM_ALL
+    src/transport/ucn_transport.c
+    src/transport/ucn_transport_codec.c
+    src/transport/ucn_transfer.c
+    src/transport/ucn_transport_parent.c)
+ucn_target_defaults(ucn_v6s_transport)
+target_include_directories(ucn_v6s_transport PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(ucn_v6s_transport PUBLIC
+    UCN_PROFILE=${UCN_PROFILE_VALUE})
+target_link_libraries(ucn_v6s_transport PRIVATE ucn_common)
+
+# IMPL-07 starts as a private Service/QoS owner. It owns only volatile
+# Request/Result correlation, retained duplicate receipts, and fixed queue
+# references. Durable Operation and public Runtime wiring remain separate.
+add_library(ucn_v6s_service STATIC EXCLUDE_FROM_ALL
+    src/service/ucn_service.c
+    src/service/ucn_qos.c
+    src/service/ucn_operation.c
+    src/service/ucn_operation_id.c)
+ucn_target_defaults(ucn_v6s_service)
+target_include_directories(ucn_v6s_service PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(ucn_v6s_service PUBLIC
+    UCN_PROFILE=${UCN_PROFILE_VALUE})
+target_link_libraries(ucn_v6s_service PRIVATE ucn_common)
+
+# IMPL-08A Realtime is private and opt-in. Ordinary communication carries no
+# time metadata; the owner consumes only immutable Coordinator-routed facts.
+if(UCN_FEATURE_REALTIME)
+    add_library(ucn_v6s_realtime STATIC EXCLUDE_FROM_ALL
+        src/realtime/ucn_realtime.c
+        src/realtime/ucn_realtime_codec.c
+        src/realtime/ucn_realtime_domain.c
+        src/realtime/ucn_realtime_sync.c
+        src/realtime/ucn_realtime_policy.c)
+    ucn_target_defaults(ucn_v6s_realtime)
+    target_include_directories(ucn_v6s_realtime PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(ucn_v6s_realtime PUBLIC
+        UCN_PROFILE=${UCN_PROFILE_VALUE})
+    target_link_libraries(ucn_v6s_realtime PRIVATE ucn_common)
+endif()
+
+# IMPL-08B Group is an independent private Owner. Static Group needs no
+# runtime Persistence; Dynamic Group emits only immutable typed requirements
+# and consumes Coordinator-routed proof. It never links Cluster, Realtime,
+# Security, Route, Adapter, or Persistence directly.
+if(UCN_FEATURE_GROUP)
+    add_library(ucn_v6s_group STATIC EXCLUDE_FROM_ALL
+        src/group/ucn_group.c
+        src/group/ucn_group_send.c
+        src/group/ucn_group_receive.c
+        src/group/ucn_group_step.c)
+    ucn_target_defaults(ucn_v6s_group)
+    target_include_directories(ucn_v6s_group PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(ucn_v6s_group PUBLIC
+        UCN_PROFILE=${UCN_PROFILE_VALUE})
+    target_link_libraries(ucn_v6s_group PRIVATE ucn_common)
+endif()
+
+# IMPL-08C Cluster is an independent private management-plane Owner. It
+# consumes only Coordinator-routed immutable identity/security/Flow and
+# Persistence facts. It never links Realtime, Group, Route, Security,
+# Adapter, Coordinator, or Persistence directly.
+if(UCN_FEATURE_CLUSTER)
+    add_library(ucn_v6s_cluster STATIC EXCLUDE_FROM_ALL
+        src/cluster/ucn_cluster.c
+        src/cluster/ucn_cluster_config.c
+        src/cluster/ucn_cluster_transition.c
+        src/cluster/ucn_cluster_snapshot.c
+        src/cluster/ucn_cluster_lineage.c
+        src/cluster/ucn_cluster_directory.c
+        src/cluster/ucn_cluster_persistence.c
+        src/cluster/ucn_cluster_step.c)
+    ucn_target_defaults(ucn_v6s_cluster)
+    target_include_directories(ucn_v6s_cluster PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(ucn_v6s_cluster PUBLIC
+        UCN_PROFILE=${UCN_PROFILE_VALUE})
+    target_link_libraries(ucn_v6s_cluster PRIVATE ucn_common)
+endif()
+
+# IMPL-09-00 product composition planner.  It is a private, pure preflight:
+# no Owner is initialized and no public/product target links the detailed
+# modules yet.  The planner freezes capability-to-module closure, deterministic
+# startup order, and fixed private-owner resource accounting before wiring
+# real cross-Owner side effects.
+add_library(ucn_v6s_composition STATIC EXCLUDE_FROM_ALL
+    src/runtime/ucn_composition.c)
+ucn_target_defaults(ucn_v6s_composition)
+target_include_directories(ucn_v6s_composition PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(ucn_v6s_composition PUBLIC
+    UCN_PROFILE=${UCN_PROFILE_VALUE}
+    UCN_FEATURE_PERSISTENCE_ENABLED=$<BOOL:${UCN_FEATURE_PERSISTENCE}>
+    UCN_V6S_FEATURE_ADAPTER_ENABLED=${UCN_FEATURE_ADAPTER_VALUE}
+    UCN_V6S_FEATURE_REALTIME_ENABLED=${UCN_FEATURE_REALTIME_VALUE}
+    UCN_V6S_FEATURE_GROUP_ENABLED=${UCN_FEATURE_GROUP_VALUE}
+    UCN_V6S_FEATURE_CLUSTER_ENABLED=${UCN_FEATURE_CLUSTER_VALUE})
+target_link_libraries(ucn_v6s_composition PRIVATE
+    ucn_common
+    ucn_coordinator
+    ucn_kernel
+    ucn_v6s_identity_binding
+    ucn_v6s_security_session
+    ucn_v6s_admission
+    ucn_v6s_capability
+    ucn_v6s_route
+    ucn_v6s_flow
+    ucn_v6s_transport
+    ucn_v6s_service)
+if(UCN_FEATURE_PERSISTENCE)
+    target_link_libraries(ucn_v6s_composition PRIVATE ucn_persistence)
+endif()
+if(UCN_FEATURE_REALTIME)
+    target_link_libraries(ucn_v6s_composition PRIVATE ucn_v6s_realtime)
+endif()
+if(UCN_FEATURE_GROUP)
+    target_link_libraries(ucn_v6s_composition PRIVATE ucn_v6s_group)
+endif()
+if(UCN_FEATURE_CLUSTER)
+    target_link_libraries(ucn_v6s_composition PRIVATE ucn_v6s_cluster)
+endif()
+
+set(UCN_V6S_SCAFFOLD_TARGETS
+    ucn_module_scaffold
+    ucn_v6s_security_scaffold
+    ucn_v6s_admission_scaffold
+    ucn_v6s_routing_scaffold
+    ucn_v6s_transport_scaffold
+    ucn_v6s_service_scaffold
+    ucn_v6s_realtime_scaffold
+    ucn_v6s_group_scaffold
+    ucn_v6s_cluster_scaffold)
 
 add_library(ucn_wire STATIC src/wire/ucn_wire.c)
 ucn_target_defaults(ucn_wire)
@@ -100,7 +351,9 @@ add_library(ucn_kernel STATIC src/runtime/ucn_node.c)
 ucn_target_defaults(ucn_kernel)
 target_include_directories(ucn_kernel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_compile_definitions(ucn_kernel PUBLIC UCN_PROFILE=${UCN_PROFILE_VALUE})
+target_compile_definitions(ucn_kernel PUBLIC
+    UCN_PROFILE=${UCN_PROFILE_VALUE}
+    UCN_FEATURE_PERSISTENCE_ENABLED=$<BOOL:${UCN_FEATURE_PERSISTENCE}>)
 target_link_libraries(ucn_kernel PUBLIC ucn_common PRIVATE ucn_wire ucn_adapter)
 
 # Public simplified archive.  The module targets above remain independently
@@ -294,6 +547,30 @@ if(UCN_BUILD_TESTS AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
         target_compile_options(ucn_persistence_coordinator PRIVATE
             -fcallgraph-info=su)
     endif()
+    foreach(ucn_scaffold_target IN LISTS UCN_V6S_SCAFFOLD_TARGETS)
+        target_compile_options(${ucn_scaffold_target} PRIVATE -fstack-usage)
+    endforeach()
+    target_compile_options(ucn_v6s_security_session PRIVATE -fstack-usage)
+    target_compile_options(ucn_v6s_admission PRIVATE -fstack-usage)
+    target_compile_options(ucn_v6s_identity_binding PRIVATE -fstack-usage)
+    target_compile_options(ucn_v6s_capability PRIVATE -fstack-usage)
+    target_compile_options(ucn_v6s_route PRIVATE -fstack-usage)
+    target_compile_options(ucn_v6s_flow PRIVATE -fstack-usage)
+    target_compile_options(ucn_v6s_transport PRIVATE -fstack-usage)
+    target_compile_options(ucn_v6s_service PRIVATE -fstack-usage)
+    if(TARGET ucn_v6s_realtime)
+        target_compile_options(ucn_v6s_realtime PRIVATE
+            -fstack-usage -fcallgraph-info=su)
+    endif()
+    if(TARGET ucn_v6s_group)
+        target_compile_options(ucn_v6s_group PRIVATE
+            -fstack-usage -fcallgraph-info=su)
+    endif()
+    if(TARGET ucn_v6s_cluster)
+        target_compile_options(ucn_v6s_cluster PRIVATE
+            -fstack-usage -fcallgraph-info=su)
+    endif()
+    target_compile_options(ucn_v6s_composition PRIVATE -fstack-usage)
 endif()
 
 add_library(ucn INTERFACE)
@@ -419,7 +696,7 @@ if(UCN_BUILD_TESTS)
         COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6s_freeze_contracts.py
             --root ${CMAKE_CURRENT_SOURCE_DIR})
-    if(UCN_FEATURE_PERSISTENCE)
+    if(UCN_FEATURE_PERSISTENCE AND UCN_VERIFY_IMPL02_SIGNED_CANDIDATE)
         add_test(NAME v6s_impl02_candidate_gate
             COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/generate_v6s_impl02_manifest.py
@@ -480,6 +757,81 @@ if(UCN_BUILD_TESTS)
                 --source-prefix /src/adapter/
                 --source-prefix /src/runtime/
                 --source-prefix /src/persistence/)
+        if(NOT CMAKE_C_FLAGS MATCHES "-fsanitize=")
+            add_test(NAME v6s_security_stack_usage_gate
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
+                    --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+                    --limit-bytes 256
+                    --source-prefix /src/security/)
+            add_test(NAME v6s_admission_stack_usage_gate
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
+                    --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+                    --limit-bytes 256
+                    --source-prefix /src/admission/
+                    --source-prefix /src/capability/)
+            add_test(NAME v6s_routing_stack_usage_gate
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
+                    --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+                    --limit-bytes 1024
+                    --source-prefix /src/routing/)
+            add_test(NAME v6s_transport_stack_usage_gate
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
+                    --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+                    --limit-bytes 1024
+                    --source-prefix /src/transport/)
+            add_test(NAME v6s_service_stack_usage_gate
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
+                    --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+                    --limit-bytes 1024
+                    --source-prefix /src/service/)
+            if(TARGET ucn_v6s_realtime)
+                add_test(NAME v6s_realtime_stack_usage_gate
+                    COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
+                        --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+                        --limit-bytes 384
+                        --source-prefix /src/realtime/)
+                add_test(NAME v6s_realtime_call_stack_gate
+                    COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_call_stack.py
+                        --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+                        --limit-bytes ${UCN_SIMPLIFIED_CALL_STACK_LIMIT}
+                        --source-prefix /src/realtime/)
+            endif()
+            if(TARGET ucn_v6s_group)
+                add_test(NAME v6s_group_stack_usage_gate
+                    COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
+                        --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+                        --limit-bytes 384
+                        --source-prefix /src/group/)
+                add_test(NAME v6s_group_call_stack_gate
+                    COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_call_stack.py
+                        --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+                        --limit-bytes ${UCN_SIMPLIFIED_CALL_STACK_LIMIT}
+                        --source-prefix /src/group/)
+            endif()
+            if(TARGET ucn_v6s_cluster)
+                add_test(NAME v6s_cluster_stack_usage_gate
+                    COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
+                        --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+                        --limit-bytes 384
+                        --source-prefix /src/cluster/)
+                add_test(NAME v6s_cluster_call_stack_gate
+                    COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_call_stack.py
+                        --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+                        --limit-bytes ${UCN_SIMPLIFIED_CALL_STACK_LIMIT}
+                        --source-prefix /src/cluster/)
+            endif()
+        endif()
     endif()
     add_test(NAME v6_removed_cmake_surface_gate
         COMMAND ${Python3_EXECUTABLE}
@@ -539,6 +891,358 @@ if(UCN_BUILD_TESTS)
         tests/simplified/test_coordinator.c ucn_coordinator)
     target_include_directories(ucn_coordinator_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_executable(ucn_v6s_module_scaffold_tests
+        tests/simplified/test_module_scaffolds.c)
+    ucn_target_defaults(ucn_v6s_module_scaffold_tests)
+    target_include_directories(ucn_v6s_module_scaffold_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(ucn_v6s_module_scaffold_tests PRIVATE
+        ucn_module_scaffold
+        ucn_v6s_security_scaffold
+        ucn_v6s_admission_scaffold
+        ucn_v6s_routing_scaffold
+        ucn_v6s_transport_scaffold
+        ucn_v6s_service_scaffold
+        ucn_v6s_realtime_scaffold
+        ucn_v6s_group_scaffold
+        ucn_v6s_cluster_scaffold)
+    add_test(NAME ucn_v6s_module_scaffold_tests
+        COMMAND ucn_v6s_module_scaffold_tests)
+    ucn_add_test(ucn_v6s_security_session_tests
+        tests/simplified/test_security_session.c
+        ucn_v6s_security_session)
+    target_include_directories(ucn_v6s_security_session_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    ucn_add_test(ucn_v6s_security_resource_report
+        tests/simplified/test_security_resources.c
+        ucn_v6s_security_session)
+    target_include_directories(ucn_v6s_security_resource_report PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    if(UNIX)
+        add_executable(ucn_v6s_security_concurrency_tests
+            tests/simplified/test_security_concurrency.c)
+        ucn_target_defaults(ucn_v6s_security_concurrency_tests)
+        target_include_directories(ucn_v6s_security_concurrency_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(ucn_v6s_security_concurrency_tests PRIVATE
+            UCN_PROFILE=${UCN_PROFILE_VALUE})
+        target_link_libraries(ucn_v6s_security_concurrency_tests PRIVATE
+            ucn_v6s_security_session pthread)
+        add_test(NAME ucn_v6s_security_concurrency_tests
+            COMMAND ucn_v6s_security_concurrency_tests)
+    endif()
+    ucn_add_test(ucn_v6s_admission_tests
+        tests/simplified/test_admission.c
+        ucn_v6s_admission)
+    target_include_directories(ucn_v6s_admission_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR})
+    if(UNIX)
+        add_executable(ucn_v6s_admission_concurrency_tests
+            tests/simplified/test_admission_concurrency.c)
+        ucn_target_defaults(ucn_v6s_admission_concurrency_tests)
+        target_include_directories(
+            ucn_v6s_admission_concurrency_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(
+            ucn_v6s_admission_concurrency_tests PRIVATE
+            UCN_PROFILE=${UCN_PROFILE_VALUE})
+        target_link_libraries(
+            ucn_v6s_admission_concurrency_tests PRIVATE
+            ucn_v6s_admission Threads::Threads)
+        add_test(NAME ucn_v6s_admission_concurrency_tests
+            COMMAND ucn_v6s_admission_concurrency_tests)
+    endif()
+    ucn_add_test(ucn_v6s_identity_binding_tests
+        tests/simplified/test_identity_binding.c
+        ucn_v6s_identity_binding)
+    target_include_directories(ucn_v6s_identity_binding_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    ucn_add_test(ucn_v6s_capability_tests
+        tests/simplified/test_capability.c
+        ucn_v6s_capability)
+    target_include_directories(ucn_v6s_capability_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR})
+    ucn_add_test(ucn_v6s_route_tests
+        tests/simplified/test_route.c
+        ucn_v6s_route)
+    target_include_directories(ucn_v6s_route_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR})
+    ucn_add_test(ucn_v6s_flow_tests
+        tests/simplified/test_flow.c
+        ucn_v6s_flow)
+    target_include_directories(ucn_v6s_flow_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR})
+    ucn_add_test(ucn_v6s_transport_reliable_tests
+        tests/simplified/test_transport_reliable.c
+        ucn_v6s_transport)
+    target_include_directories(ucn_v6s_transport_reliable_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    ucn_add_test(ucn_v6s_transfer_tests
+        tests/simplified/test_transfer.c
+        ucn_v6s_transport)
+    target_include_directories(ucn_v6s_transfer_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    ucn_add_test(ucn_v6s_transport_parent_tests
+        tests/simplified/test_transport_parent.c
+        ucn_v6s_transport)
+    target_include_directories(ucn_v6s_transport_parent_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    ucn_add_test(ucn_v6s_service_tests
+        tests/simplified/test_service.c
+        ucn_v6s_service)
+    target_include_directories(ucn_v6s_service_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    ucn_add_test(ucn_v6s_qos_tests
+        tests/simplified/test_qos.c
+        ucn_v6s_service)
+    target_include_directories(ucn_v6s_qos_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    ucn_add_test(ucn_v6s_operation_tests
+        tests/simplified/test_operation.c
+        ucn_v6s_service)
+    target_include_directories(ucn_v6s_operation_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_executable(ucn_v6s_service_resource_report
+        tests/simplified/test_service_resources.c)
+    ucn_target_defaults(ucn_v6s_service_resource_report)
+    target_include_directories(ucn_v6s_service_resource_report PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(ucn_v6s_service_resource_report PRIVATE
+        UCN_PROFILE=${UCN_PROFILE_VALUE})
+    target_link_libraries(ucn_v6s_service_resource_report PRIVATE
+        ucn_v6s_service)
+    add_test(NAME ucn_v6s_service_resource_report
+        COMMAND ucn_v6s_service_resource_report)
+    ucn_add_test(ucn_v6s_composition_tests
+        tests/simplified/test_composition.c
+        ucn_v6s_composition)
+    target_include_directories(ucn_v6s_composition_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    ucn_add_test(ucn_v6s_composition_storage_tests
+        tests/simplified/test_composition_storage.c
+        ucn_v6s_composition)
+    target_include_directories(ucn_v6s_composition_storage_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    if(UCN_FEATURE_ADAPTER)
+        ucn_add_test(ucn_v6s_composition_lifecycle_tests
+            tests/simplified/test_composition_lifecycle.c
+            ucn_v6s_composition)
+        target_include_directories(
+            ucn_v6s_composition_lifecycle_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    endif()
+    if(UCN_FEATURE_REALTIME)
+      ucn_add_test(ucn_v6s_realtime_codec_tests
+        tests/simplified/test_realtime_codec.c
+        ucn_v6s_realtime)
+    target_include_directories(ucn_v6s_realtime_codec_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    ucn_add_test(ucn_v6s_realtime_domain_tests
+        tests/simplified/test_realtime_domain.c
+        ucn_v6s_realtime)
+    target_include_directories(ucn_v6s_realtime_domain_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    ucn_add_test(ucn_v6s_realtime_sync_tests
+        tests/simplified/test_realtime_sync.c
+        ucn_v6s_realtime)
+    target_include_directories(ucn_v6s_realtime_sync_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    ucn_add_test(ucn_v6s_realtime_policy_tests
+        tests/simplified/test_realtime_policy.c
+        ucn_v6s_realtime)
+    target_include_directories(ucn_v6s_realtime_policy_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_executable(ucn_v6s_realtime_resource_report
+        tests/simplified/test_realtime_resources.c)
+    ucn_target_defaults(ucn_v6s_realtime_resource_report)
+    target_include_directories(ucn_v6s_realtime_resource_report PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(ucn_v6s_realtime_resource_report PRIVATE
+        UCN_PROFILE=${UCN_PROFILE_VALUE})
+    target_link_libraries(ucn_v6s_realtime_resource_report PRIVATE
+        ucn_v6s_realtime)
+    add_test(NAME ucn_v6s_realtime_resource_report
+        COMMAND ucn_v6s_realtime_resource_report)
+    if(UNIX)
+        add_executable(ucn_v6s_realtime_concurrency_tests
+            tests/simplified/test_realtime_concurrency.c)
+        ucn_target_defaults(ucn_v6s_realtime_concurrency_tests)
+        target_include_directories(ucn_v6s_realtime_concurrency_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(ucn_v6s_realtime_concurrency_tests PRIVATE
+            UCN_PROFILE=${UCN_PROFILE_VALUE})
+        target_link_libraries(ucn_v6s_realtime_concurrency_tests PRIVATE
+            ucn_v6s_realtime Threads::Threads)
+        add_test(NAME ucn_v6s_realtime_concurrency_tests
+            COMMAND ucn_v6s_realtime_concurrency_tests)
+    endif()
+    endif()
+    if(UCN_FEATURE_GROUP)
+      ucn_add_test(ucn_v6s_group_context_tests
+        tests/simplified/test_group_context.c
+        ucn_v6s_group)
+      target_include_directories(ucn_v6s_group_context_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+      ucn_add_test(ucn_v6s_group_send_tests
+        tests/simplified/test_group_send.c
+        ucn_v6s_group)
+      target_include_directories(ucn_v6s_group_send_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+      ucn_add_test(ucn_v6s_group_receive_tests
+        tests/simplified/test_group_receive.c
+        ucn_v6s_group)
+      target_include_directories(ucn_v6s_group_receive_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+      add_executable(ucn_v6s_group_resource_report
+        tests/simplified/test_group_resources.c)
+      ucn_target_defaults(ucn_v6s_group_resource_report)
+      target_include_directories(ucn_v6s_group_resource_report PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+      target_compile_definitions(ucn_v6s_group_resource_report PRIVATE
+        UCN_PROFILE=${UCN_PROFILE_VALUE})
+      target_link_libraries(ucn_v6s_group_resource_report PRIVATE
+        ucn_v6s_group)
+      add_test(NAME ucn_v6s_group_resource_report
+        COMMAND ucn_v6s_group_resource_report)
+      if(UNIX)
+        add_executable(ucn_v6s_group_concurrency_tests
+          tests/simplified/test_group_concurrency.c)
+        ucn_target_defaults(ucn_v6s_group_concurrency_tests)
+        target_include_directories(ucn_v6s_group_concurrency_tests PRIVATE
+          ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(ucn_v6s_group_concurrency_tests PRIVATE
+          UCN_PROFILE=${UCN_PROFILE_VALUE})
+        target_link_libraries(ucn_v6s_group_concurrency_tests PRIVATE
+          ucn_v6s_group Threads::Threads)
+        add_test(NAME ucn_v6s_group_concurrency_tests
+          COMMAND ucn_v6s_group_concurrency_tests)
+      endif()
+    endif()
+    if(UCN_FEATURE_CLUSTER)
+      ucn_add_test(ucn_v6s_cluster_context_tests
+        tests/simplified/test_cluster_context.c
+        ucn_v6s_cluster)
+      target_include_directories(ucn_v6s_cluster_context_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+      ucn_add_test(ucn_v6s_cluster_transition_tests
+        tests/simplified/test_cluster_transition.c
+        ucn_v6s_cluster)
+      target_include_directories(ucn_v6s_cluster_transition_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+      ucn_add_test(ucn_v6s_cluster_snapshot_tests
+        tests/simplified/test_cluster_snapshot.c
+        ucn_v6s_cluster)
+      target_include_directories(ucn_v6s_cluster_snapshot_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+      ucn_add_test(ucn_v6s_cluster_lineage_tests
+        tests/simplified/test_cluster_lineage.c
+        ucn_v6s_cluster)
+      target_include_directories(ucn_v6s_cluster_lineage_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+      ucn_add_test(ucn_v6s_cluster_directory_tests
+        tests/simplified/test_cluster_directory.c
+        ucn_v6s_cluster)
+      target_include_directories(ucn_v6s_cluster_directory_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+      add_executable(ucn_v6s_cluster_resource_report
+        tests/simplified/test_cluster_resources.c)
+      ucn_target_defaults(ucn_v6s_cluster_resource_report)
+      target_include_directories(ucn_v6s_cluster_resource_report PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+      target_compile_definitions(ucn_v6s_cluster_resource_report PRIVATE
+        UCN_PROFILE=${UCN_PROFILE_VALUE})
+      target_link_libraries(ucn_v6s_cluster_resource_report PRIVATE
+        ucn_v6s_cluster)
+      add_test(NAME ucn_v6s_cluster_resource_report
+        COMMAND ucn_v6s_cluster_resource_report)
+      if(UNIX)
+        add_executable(ucn_v6s_cluster_concurrency_tests
+          tests/simplified/test_cluster_concurrency.c)
+        ucn_target_defaults(ucn_v6s_cluster_concurrency_tests)
+        target_include_directories(ucn_v6s_cluster_concurrency_tests PRIVATE
+          ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(ucn_v6s_cluster_concurrency_tests PRIVATE
+          UCN_PROFILE=${UCN_PROFILE_VALUE})
+        target_link_libraries(ucn_v6s_cluster_concurrency_tests PRIVATE
+          ucn_v6s_cluster Threads::Threads)
+        add_test(NAME ucn_v6s_cluster_concurrency_tests
+          COMMAND ucn_v6s_cluster_concurrency_tests)
+      endif()
+    endif()
+    if(UNIX)
+        add_executable(ucn_v6s_service_concurrency_tests
+            tests/simplified/test_service_concurrency.c)
+        ucn_target_defaults(ucn_v6s_service_concurrency_tests)
+        target_include_directories(ucn_v6s_service_concurrency_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(ucn_v6s_service_concurrency_tests PRIVATE
+            UCN_PROFILE=${UCN_PROFILE_VALUE})
+        target_link_libraries(ucn_v6s_service_concurrency_tests PRIVATE
+            ucn_v6s_service Threads::Threads)
+        add_test(NAME ucn_v6s_service_concurrency_tests
+            COMMAND ucn_v6s_service_concurrency_tests)
+    endif()
+    add_executable(ucn_v6s_transport_resource_report
+        tests/simplified/test_transport_resources.c)
+    ucn_target_defaults(ucn_v6s_transport_resource_report)
+    target_include_directories(ucn_v6s_transport_resource_report PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(ucn_v6s_transport_resource_report PRIVATE
+        UCN_PROFILE=${UCN_PROFILE_VALUE})
+    target_link_libraries(ucn_v6s_transport_resource_report PRIVATE
+        ucn_v6s_transport)
+    add_test(NAME ucn_v6s_transport_resource_report
+        COMMAND ucn_v6s_transport_resource_report)
+    if(UNIX)
+        add_executable(ucn_v6s_transport_concurrency_tests
+            tests/simplified/test_transport_concurrency.c)
+        ucn_target_defaults(ucn_v6s_transport_concurrency_tests)
+        target_include_directories(ucn_v6s_transport_concurrency_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(ucn_v6s_transport_concurrency_tests PRIVATE
+            UCN_PROFILE=${UCN_PROFILE_VALUE})
+        target_link_libraries(ucn_v6s_transport_concurrency_tests PRIVATE
+            ucn_v6s_transport Threads::Threads)
+        add_test(NAME ucn_v6s_transport_concurrency_tests
+            COMMAND ucn_v6s_transport_concurrency_tests)
+    endif()
+    add_executable(ucn_v6s_routing_resource_report
+        tests/simplified/test_routing_resources.c)
+    ucn_target_defaults(ucn_v6s_routing_resource_report)
+    target_include_directories(ucn_v6s_routing_resource_report PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(ucn_v6s_routing_resource_report PRIVATE
+        UCN_PROFILE=${UCN_PROFILE_VALUE})
+    target_link_libraries(ucn_v6s_routing_resource_report PRIVATE
+        ucn_v6s_route ucn_v6s_flow)
+    add_test(NAME ucn_v6s_routing_resource_report
+        COMMAND ucn_v6s_routing_resource_report)
+    if(UNIX)
+        add_executable(ucn_v6s_routing_concurrency_tests
+            tests/simplified/test_routing_concurrency.c)
+        ucn_target_defaults(ucn_v6s_routing_concurrency_tests)
+        target_include_directories(ucn_v6s_routing_concurrency_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(ucn_v6s_routing_concurrency_tests PRIVATE
+            UCN_PROFILE=${UCN_PROFILE_VALUE})
+        target_link_libraries(ucn_v6s_routing_concurrency_tests PRIVATE
+            ucn_v6s_route ucn_v6s_flow Threads::Threads)
+        add_test(NAME ucn_v6s_routing_concurrency_tests
+            COMMAND ucn_v6s_routing_concurrency_tests)
+    endif()
+    add_executable(ucn_v6s_admission_resource_report
+        tests/simplified/test_admission_resources.c)
+    ucn_target_defaults(ucn_v6s_admission_resource_report)
+    target_include_directories(ucn_v6s_admission_resource_report PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(ucn_v6s_admission_resource_report PRIVATE
+        UCN_PROFILE=${UCN_PROFILE_VALUE})
+    add_test(NAME ucn_v6s_admission_resource_report
+        COMMAND ucn_v6s_admission_resource_report)
     ucn_add_test(ucn_common_resource_report
         tests/simplified/test_common_resources.c ucn_coordinator)
     target_include_directories(ucn_common_resource_report PRIVATE
@@ -568,6 +1272,14 @@ if(UCN_BUILD_TESTS)
         target_compile_definitions(v6s_persistence_test_support PUBLIC
             UCN_PROFILE=${UCN_PROFILE_VALUE}
             UCN_FEATURE_PERSISTENCE_ENABLED=1)
+        if(TARGET ucn_v6s_composition_lifecycle_tests)
+            target_include_directories(
+                ucn_v6s_composition_lifecycle_tests PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/simplified)
+            target_link_libraries(
+                ucn_v6s_composition_lifecycle_tests PRIVATE
+                v6s_persistence_test_support)
+        endif()
 
         ucn_add_test(ucn_persistence_codec_tests
             tests/simplified/test_persistence_codec.c ucn_persistence)
@@ -607,6 +1319,120 @@ if(UCN_BUILD_TESTS)
             tests/simplified/test_persistence_resources.c ucn_persistence)
         target_include_directories(ucn_persistence_resource_report PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+        add_executable(ucn_v6s_identity_persistence_integration_tests
+            tests/simplified/test_identity_persistence_integration.c)
+        ucn_target_defaults(ucn_v6s_identity_persistence_integration_tests)
+        target_include_directories(
+            ucn_v6s_identity_persistence_integration_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/simplified
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(
+            ucn_v6s_identity_persistence_integration_tests PRIVATE
+            UCN_PROFILE=${UCN_PROFILE_VALUE}
+            UCN_FEATURE_PERSISTENCE_ENABLED=1)
+        target_link_libraries(
+            ucn_v6s_identity_persistence_integration_tests PRIVATE
+            ucn_v6s_identity_binding ucn_persistence
+            v6s_persistence_test_support)
+        add_test(NAME ucn_v6s_identity_persistence_integration_tests
+            COMMAND ucn_v6s_identity_persistence_integration_tests)
+
+        add_executable(ucn_v6s_transport_persistence_integration_tests
+            tests/simplified/test_transport_persistence_integration.c)
+        ucn_target_defaults(ucn_v6s_transport_persistence_integration_tests)
+        target_include_directories(
+            ucn_v6s_transport_persistence_integration_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/simplified
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(
+            ucn_v6s_transport_persistence_integration_tests PRIVATE
+            UCN_PROFILE=${UCN_PROFILE_VALUE}
+            UCN_FEATURE_PERSISTENCE_ENABLED=1)
+        target_link_libraries(
+            ucn_v6s_transport_persistence_integration_tests PRIVATE
+            ucn_v6s_transport ucn_persistence
+            v6s_persistence_test_support)
+        add_test(NAME ucn_v6s_transport_persistence_integration_tests
+            COMMAND ucn_v6s_transport_persistence_integration_tests)
+
+        add_executable(ucn_v6s_service_persistence_integration_tests
+            tests/simplified/test_service_persistence_integration.c)
+        ucn_target_defaults(ucn_v6s_service_persistence_integration_tests)
+        target_include_directories(
+            ucn_v6s_service_persistence_integration_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/simplified
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(
+            ucn_v6s_service_persistence_integration_tests PRIVATE
+            UCN_PROFILE=${UCN_PROFILE_VALUE}
+            UCN_FEATURE_PERSISTENCE_ENABLED=1)
+        target_link_libraries(
+            ucn_v6s_service_persistence_integration_tests PRIVATE
+            ucn_v6s_service ucn_persistence
+            v6s_persistence_test_support)
+        add_test(NAME ucn_v6s_service_persistence_integration_tests
+            COMMAND ucn_v6s_service_persistence_integration_tests)
+
+        if(UCN_FEATURE_REALTIME)
+          add_executable(ucn_v6s_realtime_persistence_integration_tests
+            tests/simplified/test_realtime_persistence_integration.c)
+        ucn_target_defaults(ucn_v6s_realtime_persistence_integration_tests)
+        target_include_directories(
+            ucn_v6s_realtime_persistence_integration_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/simplified
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(
+            ucn_v6s_realtime_persistence_integration_tests PRIVATE
+            UCN_PROFILE=${UCN_PROFILE_VALUE}
+            UCN_FEATURE_PERSISTENCE_ENABLED=1)
+        target_link_libraries(
+            ucn_v6s_realtime_persistence_integration_tests PRIVATE
+            ucn_v6s_realtime ucn_persistence
+            v6s_persistence_test_support)
+        add_test(NAME ucn_v6s_realtime_persistence_integration_tests
+            COMMAND ucn_v6s_realtime_persistence_integration_tests)
+        endif()
+
+        if(UCN_FEATURE_GROUP)
+          add_executable(ucn_v6s_group_persistence_integration_tests
+            tests/simplified/test_group_persistence_integration.c)
+          ucn_target_defaults(ucn_v6s_group_persistence_integration_tests)
+          target_include_directories(
+            ucn_v6s_group_persistence_integration_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/simplified
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+          target_compile_definitions(
+            ucn_v6s_group_persistence_integration_tests PRIVATE
+            UCN_PROFILE=${UCN_PROFILE_VALUE}
+            UCN_FEATURE_PERSISTENCE_ENABLED=1)
+          target_link_libraries(
+            ucn_v6s_group_persistence_integration_tests PRIVATE
+            ucn_v6s_group ucn_persistence
+            v6s_persistence_test_support)
+          add_test(NAME ucn_v6s_group_persistence_integration_tests
+            COMMAND ucn_v6s_group_persistence_integration_tests)
+        endif()
+
+        if(UCN_FEATURE_CLUSTER)
+          add_executable(ucn_v6s_cluster_persistence_integration_tests
+            tests/simplified/test_cluster_persistence_integration.c)
+          ucn_target_defaults(ucn_v6s_cluster_persistence_integration_tests)
+          target_include_directories(
+            ucn_v6s_cluster_persistence_integration_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/simplified
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+          target_compile_definitions(
+            ucn_v6s_cluster_persistence_integration_tests PRIVATE
+            UCN_PROFILE=${UCN_PROFILE_VALUE}
+            UCN_FEATURE_PERSISTENCE_ENABLED=1)
+          target_link_libraries(
+            ucn_v6s_cluster_persistence_integration_tests PRIVATE
+            ucn_v6s_cluster ucn_persistence
+            v6s_persistence_test_support)
+          add_test(NAME ucn_v6s_cluster_persistence_integration_tests
+            COMMAND ucn_v6s_cluster_persistence_integration_tests)
+        endif()
 
         if(UNIX)
             add_executable(ucn_persistence_concurrency_tests

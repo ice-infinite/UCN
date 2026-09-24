@@ -67,6 +67,7 @@ QUORUM 或 SUBSET。非本地范围至少要求支持逐成员身份、Reliable 
 ```text
 GroupContext
     state
+    owner_realm_id             # 一个 Group Owner 只服务一个逻辑 Realm
     group_id
     group_generation
     policy_generation
@@ -94,6 +95,11 @@ TreeContext                 # 只有 Tree 发送方式启用时存在
 
 成员表、Group Key 和密码 Replay Window 不能在 GroupContext 中复制。Group 只保存对应 Owner 的代际 Handle。
 
+Group Owner 在初始化时绑定唯一非零 `realm_id`。其后 Static 安装、Dynamic 管理、Durable
+reload、RX 和 dependency event 都只解释该 Realm 内的短 `group_id`；若产品同时加入多个
+Realm，必须建立彼此独立的 Group Owner/Coordinator 路由，不能让同一个 Owner 依赖隐式
+Realm 猜测。这一约束不增加 Wire 字节，只消除短 Group ID 的跨 Realm 歧义。
+
 ## 5. Group Context 状态
 
 ```mermaid
@@ -103,10 +109,15 @@ stateDiagram-v2
     ACTIVE --> FENCED: Policy/Key/Member/Tree generation 变化
     FENCED --> ACTIVE: 新完整 Context 原子安装
     FENCED --> RETIRED: 明确退休
-    RETIRED --> RETIRED: 永久占位，不复用身份
+    RETIRED --> [*]: Dynamic 释放活动运行槽
+    RETIRED --> RETIRED: Static Manifest 槽永久占位
 ```
 
 `RETIRED` 的静态槽或动态 ID 不能因为删除后看似空闲就复用，避免旧 Group 帧形成 ABA。
+这里的“动态 ID 不复用”由持久化单调高水位证明，不要求已退休动态 Group 永久占用
+`active_groups[]` RAM 槽：退休记录 durable 并 reload 后释放活动运行槽，下一次创建只能取得
+`checked_next(high_water)` 的新 ID。静态 Group 没有运行期高水位分配器，因此其 Manifest 槽
+仍永久保持 `RETIRED`。
 
 ## 6. Group ID 与 Generation
 

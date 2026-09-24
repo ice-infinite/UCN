@@ -2,6 +2,14 @@
 
 use std::boxed::Box;
 
+use ucn_capability::{
+    CachedPeerCapability, CapabilityRecord, LinkCapability, MessageClass, PeerCapability,
+    PeerCapabilityRef, capability_digest,
+};
+use ucn_flow::{
+    ActivationSubmit, FlowConfig, FlowCurrentFacts, FlowHopFacts, FlowOwner, FlowReplayAdmission,
+    FlowRequirements, FlowTxRequest, ProbeAck, RelayCommitAction, RelayStageAction,
+};
 use ucn_owner::CallbackGate;
 use ucn_persistence::{
     ATOMIC_COMMIT_MARKER_16, BlobState, Completion, DIGEST_BLAKE2S_128, DomainBinding, DomainKey,
@@ -10,6 +18,7 @@ use ucn_persistence::{
     ProviderGate, ProviderGeometry, RecordMeta, RequestState, WITNESS_INDEPENDENT_MONOTONIC,
     WitnessView, body_digest,
 };
+use ucn_routing::{LinkRef, ReplyAction, RouteConfig, RouteOwner, RrepMessage, RrepPayload};
 use ucn_security::{
     AccessDirection, AccessRequest, AclRule, Binding, C0TransactionOwner, CryptoProvider,
     CurrentFacts, DurabilityBase, Fingerprint, HandshakeCandidate, HandshakeProof,
@@ -19,10 +28,12 @@ use ucn_security::{
     SessionHandle, SessionPhase, decode_session_record,
 };
 use ucn_types::{
-    AddressWidth, BindingGeneration, C0TransactionId, Error, HeaderContract, HopProfile,
-    HopSequence, KeyId, LinkInstanceGeneration, NodeAddress, OriginSequence, PeerSessionGeneration,
-    ProtocolOpcode, RealmId, Result, ServiceId, SuiteId,
+    AddressWidth, BindingGeneration, C0TransactionId, DeliveryGuarantee, Error, HeaderContract,
+    HopLimit, HopProfile, HopSequence, InteractionRole, KeyId, LinkInstanceGeneration, NodeAddress,
+    OriginSecurity, OriginSequence, PayloadKind, PeerSessionGeneration, ProtocolOpcode, RealmId,
+    Result, ServiceId, SuiteId, TrafficClass,
 };
+use ucn_wire::CommonHeader;
 
 const BODY: usize = 256;
 const SLOT: usize = ENVELOPE_BYTES + BODY + MARKER_BYTES;
@@ -655,6 +666,486 @@ fn access(
         protocol_opcode: opcode,
         direction,
     }
+}
+
+type TestRouteOwner = RouteOwner<2, 4, 4, 2>;
+type TestFlowOwner = FlowOwner<2, 2, 2, 2>;
+
+struct ActiveFlowPair {
+    origin_owner: TestFlowOwner,
+    origin_flow: ucn_flow::FlowHandle,
+    target_owner: TestFlowOwner,
+    target_flow: ucn_flow::FlowHandle,
+    proposal: ucn_flow::FlowProposal,
+    capability: CachedPeerCapability,
+}
+
+fn flow_link(id: u16, peer: Binding, cost: u32) -> LinkRef {
+    LinkRef::new(
+        id,
+        LinkInstanceGeneration::new(1).unwrap(),
+        peer,
+        200,
+        cost,
+        0x010B,
+    )
+    .unwrap()
+}
+
+#[allow(clippy::too_many_lines)]
+fn active_target_flow(source: Binding, relay: Binding, target: Binding) -> ActiveFlowPair {
+    let realm = RealmId::new(0x0102_0304).unwrap();
+    let mut routes = TestRouteOwner::new(
+        RouteConfig {
+            owner_instance: 51,
+            realm,
+            address_width: AddressWidth::A1,
+            local: source,
+            local_session_generation: PeerSessionGeneration::new(1).unwrap(),
+            discovery_lifetime_us: 1_000,
+            discovery_retry_us: 100,
+            discovery_max_attempts: 3,
+            reverse_lifetime_us: 800,
+            route_lifetime_us: 8_000,
+            maximum_hops: HopLimit::new(8).unwrap(),
+        },
+        1,
+    )
+    .unwrap();
+    let discovery = routes
+        .ensure_discovery(target.address, 0x010B, 64, 0, 1)
+        .unwrap();
+    let route = match routes
+        .on_rrep(
+            RrepMessage {
+                key: discovery.request.key,
+                payload: RrepPayload {
+                    destination_principal: target.principal,
+                    destination_binding_generation: target.generation.get(),
+                    hop_count: 1,
+                    accumulated_cost: 10,
+                    path_frame_mtu: 180,
+                    capability_bits: 0x010B,
+                },
+            },
+            flow_link(7, relay, 10),
+            2,
+        )
+        .unwrap()
+    {
+        ReplyAction::ReachedOrigin(route) => route,
+        ReplyAction::Forward { .. } => panic!("origin route expected"),
+    };
+    let capability_record = CapabilityRecord {
+        capability_generation: 1,
+        link: LinkCapability {
+            link_instance_generation: 1,
+            carrier_mtu: 220,
+            link_frame_mtu: 200,
+            processing_frame_mtu: 200,
+            carrier_header_bytes: 4,
+            carrier_padding_bytes: 0,
+            carrier_crc_bytes: 4,
+            carrier_tag_bytes: 0,
+            carrier_max_fragments: 1,
+            link_flags: 0x000C,
+            nominal_rate_bps: 1_000_000,
+            hardware_priority_count: 4,
+            timestamp_capability_bits: 0,
+            timestamp_uncertainty_us: 0,
+        },
+        peer: PeerCapability {
+            feature_bits: 0x0000_010B,
+            hop_suite_bits: 0x0000_0002,
+            e2e_suite_bits: 0x0000_0006,
+            max_message_class: MessageClass::T128,
+            max_rx_window: 8,
+            max_concurrent_transfers: 2,
+            realtime_mode_bits: 0,
+            clock_domain_id: 0,
+            clock_domain_generation: 0,
+        },
+    };
+    let capability = CachedPeerCapability {
+        peer_ref: PeerCapabilityRef {
+            runtime_instance: 11,
+            security_owner_instance: 41,
+            realm,
+            principal: relay.principal,
+            binding: relay,
+            session_generation: 1,
+            ingress_link_id: 7,
+            ingress_link_generation: 1,
+        },
+        record: capability_record,
+        digest: capability_digest(capability_record).unwrap(),
+        discovery_deadline_us: 9_000,
+        capability_deadline_us: 9_000,
+    };
+    let config = |owner_instance, local| FlowConfig {
+        owner_instance,
+        realm,
+        local,
+        policy_generation: 1,
+        probe_lifetime_us: 500,
+        stage_lifetime_us: 500,
+        commit_lifetime_us: 500,
+        flow_lifetime_us: 5_000,
+        receipt_lifetime_us: 1_000,
+    };
+    let mut origin = TestFlowOwner::new(config(61, source), 1, 1, 1, 1, 1, 1).unwrap();
+    let requirements = FlowRequirements {
+        contract: HeaderContract::C4,
+        service: ServiceId::new(1).unwrap(),
+        traffic_ceiling: TrafficClass::Q1,
+        delivery: DeliveryGuarantee::Reliable,
+        interaction: InteractionRole::OneWay,
+        payload_kind: PayloadKind::Data,
+        protocol_opcode: 0,
+        origin_security: OriginSecurity::O1,
+        hop_profile: HopProfile::H0,
+        required_feature_bits: 0x0000_010B,
+        minimum_payload_bytes: 4,
+        policy_generation: 1,
+        path_profile_id: 1,
+        expires_at_us: 9_000,
+    };
+    let candidate = origin
+        .import_candidate(route, capability, requirements, 3)
+        .unwrap();
+    let probe = origin.begin_probe(candidate, 4).unwrap();
+    origin
+        .on_probe_ack(
+            candidate,
+            ProbeAck {
+                key: probe.proposal.key(),
+                path_frame_mtu: 180,
+                capability_bits: 0x010B,
+                measured_rtt_us: 1,
+            },
+            5,
+        )
+        .unwrap();
+    let origin_facts = |now_us| FlowCurrentFacts {
+        now_us,
+        local: source,
+        destination: target,
+        origin_session_generation: 1,
+        next_hop: flow_link(7, relay, 10),
+        capability_ref: capability.peer_ref,
+        capability_generation: capability.record.capability_generation,
+        capability_digest: capability.digest,
+        capability_deadline_us: capability.capability_deadline_us,
+        policy_generation: 1,
+    };
+    let (origin_activation, stage) = origin.begin_stage(candidate, origin_facts(6)).unwrap();
+    origin
+        .complete_stage_submit(origin_activation, ActivationSubmit::Submitted)
+        .unwrap();
+    let upstream = flow_link(7, relay, 10);
+    let target_facts = |now_us| FlowHopFacts {
+        now_us,
+        local: target,
+        upstream,
+        downstream: None,
+        policy_generation: 1,
+        path_frame_mtu: 180,
+        capability_bits: 0x010B,
+        hop_profile: HopProfile::H0,
+        capability_deadline_us: 9_000,
+        security_owner_instance: 41,
+        peer_session_generation: 1,
+        origin_key_generation: 1,
+    };
+    let mut target_owner = TestFlowOwner::new(config(62, target), 1, 1, 1, 1, 1, 1).unwrap();
+    let stage_ack = match target_owner.accept_stage(&stage, target_facts(7)).unwrap() {
+        RelayStageAction::Ack { ack, .. } => ack,
+        RelayStageAction::Forward { .. } => panic!("target must ack"),
+    };
+    let commit = origin
+        .on_stage_ack(origin_activation, stage_ack, origin_facts(8))
+        .unwrap();
+    let (target_flow, commit_ack) = match target_owner
+        .accept_commit(&commit, target_facts(9))
+        .unwrap()
+    {
+        RelayCommitAction::Ack { flow, ack, .. } => (flow, ack),
+        RelayCommitAction::Forward { .. } => panic!("target must ack"),
+    };
+    origin
+        .complete_commit_submit(origin_activation, ActivationSubmit::Submitted)
+        .unwrap();
+    let origin_flow = origin
+        .on_commit_ack(origin_activation, commit_ack, origin_facts(10))
+        .unwrap();
+    ActiveFlowPair {
+        origin_owner: origin,
+        origin_flow,
+        target_owner,
+        target_flow,
+        proposal: probe.proposal,
+        capability,
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn c4_requires_an_exact_flow_binding_and_replay_uses_the_flow_domain() {
+    let session_fingerprint = Fingerprint::new([0x20; 16]).unwrap();
+    let candidate = candidate(
+        SecurityLevel::Authenticated,
+        HopProfile::H0,
+        SuiteId::OriginHmacSha256_128,
+        session_fingerprint.bytes(),
+        [0x30; 16],
+    );
+    let relay = binding(0x42, 3, 0xD4);
+    let ActiveFlowPair {
+        mut origin_owner,
+        origin_flow,
+        target_owner: mut target_flow_owner,
+        target_flow,
+        proposal,
+        capability,
+    } = active_target_flow(candidate.local, relay, candidate.peer);
+    let flow_fingerprint = proposal.fingerprint().unwrap();
+    let setup = proposal.key().label_setup();
+    let (mut owner, handle, facts, mut crypto, _, _) = activate_candidate(candidate, 0);
+    let origin_flow_facts = FlowCurrentFacts {
+        now_us: facts.now_us,
+        local: candidate.local,
+        destination: candidate.peer,
+        origin_session_generation: 1,
+        next_hop: flow_link(7, relay, 10),
+        capability_ref: capability.peer_ref,
+        capability_generation: capability.record.capability_generation,
+        capability_digest: capability.digest,
+        capability_deadline_us: capability.capability_deadline_us,
+        policy_generation: 1,
+    };
+    let (flow_plan, request) = origin_owner
+        .origin_security_request(
+            origin_flow,
+            origin_flow_facts,
+            FlowTxRequest {
+                contract: HeaderContract::C4,
+                traffic_class: TrafficClass::Q1,
+                delivery: DeliveryGuarantee::Reliable,
+                interaction: InteractionRole::OneWay,
+                payload_kind: PayloadKind::Data,
+                protocol_opcode: 0,
+                origin_security: OriginSecurity::O1,
+                payload_bytes: 4,
+            },
+            handle,
+        )
+        .unwrap();
+    assert_eq!(flow_plan.forward_label, setup.forward_label);
+    assert_eq!(request.flow_fingerprint, flow_fingerprint);
+    let outbound_binding = owner
+        .bind_flow_context(
+            request,
+            facts,
+            access(handle, AccessDirection::Outbound, 0, session_fingerprint),
+        )
+        .unwrap();
+    let target_facts = FlowHopFacts {
+        now_us: facts.now_us,
+        local: candidate.peer,
+        upstream: flow_link(7, relay, 10),
+        downstream: None,
+        policy_generation: 1,
+        path_frame_mtu: 180,
+        capability_bits: 0x010B,
+        hop_profile: HopProfile::H0,
+        capability_deadline_us: 9_000,
+        security_owner_instance: 41,
+        peer_session_generation: 1,
+        origin_key_generation: 1,
+    };
+    let inbound_request = target_flow_owner
+        .hop_security_request(target_flow, target_facts, handle, AccessDirection::Inbound)
+        .unwrap();
+    assert_eq!(inbound_request.flow_fingerprint, flow_fingerprint);
+    let inbound_binding = owner
+        .bind_flow_context(
+            inbound_request,
+            facts,
+            access(handle, AccessDirection::Inbound, 0, session_fingerprint),
+        )
+        .unwrap();
+
+    let mut prefix = [0_u8; 11];
+    CommonHeader {
+        contract: HeaderContract::C4,
+        traffic_class: TrafficClass::Q1,
+        delivery: DeliveryGuarantee::Reliable,
+        interaction: InteractionRole::OneWay,
+        payload_kind: PayloadKind::Data,
+        origin_security: OriginSecurity::O1,
+        hop_limit: HopLimit::new(7).unwrap(),
+    }
+    .encode(&mut prefix);
+    prefix[3..5].copy_from_slice(&setup.forward_label.get().to_be_bytes());
+    prefix[5..7].copy_from_slice(&proposal.context_id().get().to_be_bytes());
+    prefix[7..11].copy_from_slice(&1_u32.to_be_bytes());
+    let payload = [0xDE, 0xAD, 0xBE, 0xEF];
+    let origin_context = OriginContext::Sequenced {
+        contract: HeaderContract::C4,
+        fingerprint: flow_fingerprint,
+        sequence: OriginSequence::new(1).unwrap(),
+    };
+    let dynamic_access = access(handle, AccessDirection::Outbound, 0, flow_fingerprint);
+    let plan = PacketPlan {
+        prefix: &prefix,
+        payload: &payload,
+        canonical_identity: &flow_fingerprint.bytes(),
+        origin_context,
+        hop_profile: HopProfile::H0,
+    };
+    let mut workspace = SecurityPacketWorkspace::<128>::new();
+    let mut packet = [0xA5_u8; 64];
+    assert_eq!(
+        owner.protect_packet(
+            &mut crypto,
+            OriginCounterOwner::Sequence(&mut origin_owner),
+            handle,
+            facts,
+            dynamic_access,
+            plan,
+            None,
+            &mut workspace,
+            &mut packet,
+        ),
+        Err(Error::Unsupported)
+    );
+    assert_eq!(
+        OriginSequenceOwner::preview(&origin_owner).unwrap().get(),
+        1
+    );
+    let packet_bytes = owner
+        .protect_flow_packet(
+            &mut crypto,
+            OriginCounterOwner::Sequence(&mut origin_owner),
+            outbound_binding,
+            facts,
+            dynamic_access,
+            plan,
+            None,
+            &mut workspace,
+            &mut packet,
+        )
+        .unwrap();
+    assert_eq!(
+        OriginSequenceOwner::preview(&origin_owner).unwrap().get(),
+        2
+    );
+
+    let mut wrong_prefix = prefix;
+    wrong_prefix[4] ^= 1;
+    wrong_prefix[7..11].copy_from_slice(&2_u32.to_be_bytes());
+    let wrong_plan = PacketPlan {
+        prefix: &wrong_prefix,
+        payload: &payload,
+        canonical_identity: &flow_fingerprint.bytes(),
+        origin_context: OriginContext::Sequenced {
+            contract: HeaderContract::C4,
+            fingerprint: flow_fingerprint,
+            sequence: OriginSequence::new(2).unwrap(),
+        },
+        hop_profile: HopProfile::H0,
+    };
+    let before = packet;
+    assert_eq!(
+        owner.protect_flow_packet(
+            &mut crypto,
+            OriginCounterOwner::Sequence(&mut origin_owner),
+            outbound_binding,
+            facts,
+            dynamic_access,
+            wrong_plan,
+            None,
+            &mut workspace,
+            &mut packet,
+        ),
+        Err(Error::Security)
+    );
+    assert_eq!(
+        OriginSequenceOwner::preview(&origin_owner).unwrap().get(),
+        2
+    );
+    assert_eq!(packet, before);
+
+    let mut plaintext = [0xCC_u8; 8];
+    let opened = owner
+        .open_flow_packet(
+            &mut crypto,
+            inbound_binding,
+            facts,
+            access(handle, AccessDirection::Inbound, 0, flow_fingerprint),
+            OpenPacketPlan {
+                packet: &packet[..packet_bytes],
+                prefix_bytes: prefix.len(),
+                canonical_identity: &flow_fingerprint.bytes(),
+                origin_context,
+                hop_profile: HopProfile::H0,
+            },
+            &mut workspace,
+            &mut plaintext,
+        )
+        .unwrap();
+    assert_eq!(&plaintext[..opened.payload_bytes], payload);
+    let claim = opened.flow_replay_claim.expect("flow replay claim");
+    assert_eq!(claim.flow_fingerprint(), flow_fingerprint);
+    assert_eq!(claim.sequence().get(), 1);
+    assert_eq!(claim.security_owner_instance(), 41);
+    let abandoned = match target_flow_owner
+        .reserve_authenticated_rx(target_flow, target_facts, claim)
+        .unwrap()
+    {
+        FlowReplayAdmission::Fresh(handle) => handle,
+        FlowReplayAdmission::Duplicate => panic!("first packet must be fresh"),
+    };
+    target_flow_owner.abort_authenticated_rx(abandoned).unwrap();
+    let flow_replay = match target_flow_owner
+        .reserve_authenticated_rx(target_flow, target_facts, claim)
+        .unwrap()
+    {
+        FlowReplayAdmission::Fresh(handle) => handle,
+        FlowReplayAdmission::Duplicate => panic!("abort must not commit the sequence"),
+    };
+    target_flow_owner
+        .commit_authenticated_rx(flow_replay, facts.now_us)
+        .unwrap();
+    let evidence = owner.replay_commit(opened.replay, facts).unwrap();
+    assert_eq!(evidence.origin, None);
+
+    let duplicate = owner
+        .open_flow_packet(
+            &mut crypto,
+            inbound_binding,
+            facts,
+            access(handle, AccessDirection::Inbound, 0, flow_fingerprint),
+            OpenPacketPlan {
+                packet: &packet[..packet_bytes],
+                prefix_bytes: prefix.len(),
+                canonical_identity: &flow_fingerprint.bytes(),
+                origin_context,
+                hop_profile: HopProfile::H0,
+            },
+            &mut workspace,
+            &mut plaintext,
+        )
+        .unwrap();
+    assert_eq!(
+        target_flow_owner.reserve_authenticated_rx(
+            target_flow,
+            target_facts,
+            duplicate.flow_replay_claim.unwrap()
+        ),
+        Ok(FlowReplayAdmission::Duplicate)
+    );
+    owner.replay_commit(duplicate.replay, facts).unwrap();
 }
 
 #[test]

@@ -1076,6 +1076,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         &mut self,
         session: SessionHandle,
         facts: CurrentFacts,
+        context_fingerprint: Fingerprint,
         sequence: u64,
         aad_digest: [u8; 16],
         payload_digest: [u8; 16],
@@ -1098,7 +1099,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
             session.slot_generation,
             candidate.session_generation.get(),
             candidate.origin_rx.key_generation,
-            candidate.origin_fingerprint.bytes(),
+            context_fingerprint.bytes(),
             sequence,
             facts.now_us,
             deadline,
@@ -1237,10 +1238,30 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         slot.origin_replay.classify(sequence)
     }
 
+    pub(crate) fn flow_replay_claim_deadline(
+        &self,
+        session: SessionHandle,
+        facts: CurrentFacts,
+        flow_deadline_us: u64,
+    ) -> Result<u64> {
+        let candidate = self.candidate(session, facts)?;
+        let deadline = facts
+            .now_us
+            .checked_add(self.config.replay_reservation_lifetime_us)
+            .ok_or(Error::Exhausted)?
+            .min(candidate.expires_at_us)
+            .min(flow_deadline_us);
+        if facts.now_us >= deadline {
+            return Err(Error::Timeout);
+        }
+        Ok(deadline)
+    }
+
     pub(crate) fn origin_replay_evidence(
         &self,
         session: SessionHandle,
         facts: CurrentFacts,
+        context_fingerprint: Fingerprint,
         sequence: u64,
         aad_digest: [u8; 16],
         payload_digest: [u8; 16],
@@ -1252,7 +1273,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
             sequence,
             candidate.session_generation.get(),
             candidate.origin_rx.key_generation,
-            candidate.origin_fingerprint.bytes(),
+            context_fingerprint.bytes(),
             aad_digest,
             payload_digest,
         )

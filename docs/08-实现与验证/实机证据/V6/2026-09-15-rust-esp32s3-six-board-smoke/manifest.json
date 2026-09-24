@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "protocol": "UCN-v6",
+  "source_commit": "9b22a04d149d7c177363c8066486b1de6fff7f79",
+  "source_branch": "v6-simplified-rust",
+  "source_worktree_dirty": true,
+  "scope": "Rust ESP32-S3 six-board boot, codec self-test, linkability and heartbeat smoke only",
+  "gates": [
+    {
+      "id": "rust-esp32s3-board-a-smoke",
+      "status": "PASS",
+      "required": true,
+      "artifact": "A-COM40.json",
+      "sha256": "e27e5e26357299b6b34b12fcc5becd910ac0d0953d2afd232a4f3871d5760283"
+    },
+    {
+      "id": "rust-esp32s3-board-b-smoke",
+      "status": "PASS",
+      "required": true,
+      "artifact": "B-COM53.json",
+      "sha256": "1dda2b100f3011837f06395e3a70b33c99484a89d8532e9f17aa5b8f7b3f8183"
+    },
+    {
+      "id": "rust-esp32s3-board-c-smoke",
+      "status": "PASS",
+      "required": true,
+      "artifact": "C-COM58.json",
+      "sha256": "d9fbbd61ea092821f743815b597b0664db36937e3e48a4cb4ccb19eab471ca3c"
+    },
+    {
+      "id": "rust-esp32s3-board-d-smoke",
+      "status": "PASS",
+      "required": true,
+      "artifact": "D-COM56.json",
+      "sha256": "9cd3028246088c04a3965907edc4f2222b77ddcc84d3ea643cb488dfe7da00b8"
+    },
+    {
+      "id": "rust-esp32s3-board-e-smoke",
+      "status": "PASS",
+      "required": true,
+      "artifact": "E-COM5.json",
+      "sha256": "c00c2ed48d98933c22cf1b758e440dc4a9ce6d72d0795beb83066d4e53bb75d2"
+    },
+    {
+      "id": "rust-esp32s3-board-f-smoke",
+      "status": "PASS",
+      "required": true,
+      "artifact": "F-COM34.json",
+      "sha256": "210184070166f4719d12f47d52e7ea1144cabebb7b77a0524419dec4b9e7afc0"
+    },
+    {
+      "id": "rust-esp32s3-physical-bearer",
+      "status": "HOLD",
+      "required": true
+    },
+    {
+      "id": "rust-esp32s3-flash-powercut",
+      "status": "HOLD",
+      "required": true
+    },
+    {
+      "id": "rust-esp32s3-long-stability",
+      "status": "HOLD",
+      "required": true
+    }
+  ],
+  "release_ready": false
+}

@@ -1,0 +1,54 @@
+00000.141 [A/COM53] OPEN
+00000.141 [B/COM58] OPEN
+00000.188 [A/COM53] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.188 [A/COM53] I (28) boot: Multicore bootloader
+00000.188 [B/COM58] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.188 [B/COM58] I (28) boot: Multicore bootloader
+00000.188 [A/COM53] I (28) boot: chip revision: v0.2
+00000.188 [A/COM53] I (29) boot: efuse block revision: v1.4
+00000.188 [B/COM58] I (28) boot: chip revision: v0.2
+00000.188 [B/COM58] I (29) boot: efuse block revision: v1.4
+00000.203 [A/COM53] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.203 [B/COM58] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.203 [A/COM53] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.203 [B/COM58] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.203 [A/COM53] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.203 [A/COM53] I (44) boot: Enabling RNG early entropy source...
+00000.203 [B/COM58] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.203 [B/COM58] I (44) boot: Enabling RNG early entropy source...
+00000.219 [A/COM53] I (48) boot: Partition Table:
+00000.219 [B/COM58] I (48) boot: Partition Table:
+00000.219 [A/COM53] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.219 [B/COM58] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.219 [A/COM53] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.219 [B/COM58] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.235 [A/COM53] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.235 [B/COM58] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.235 [A/COM53] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.235 [A/COM53] I (77) boot: End of partition table
+00000.235 [B/COM58] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.250 [B/COM58] I (77) boot: End of partition table
+00000.250 [A/COM53] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=03284h ( 12932) map
+00000.250 [B/COM58] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=03284h ( 12932) map
+00000.250 [A/COM53] I (91) esp_image: segment 1: paddr=000132ac vaddr=3fc89a44 size=01318h (  4888) load
+00000.250 [B/COM58] I (91) esp_image: segment 1: paddr=000132ac vaddr=3fc89a44 size=01318h (  4888) load
+00000.266 [A/COM53] I (96) esp_image: segment 2: paddr=000145cc vaddr=40378000 size=01a44h (  6724) load
+00000.266 [B/COM58] I (96) esp_image: segment 2: paddr=000145cc vaddr=40378000 size=01a44h (  6724) load
+00000.266 [A/COM53] I (104) esp_image: segment 3: paddr=00016018 vaddr=00000000 size=0a000h ( 40960) 
+00000.282 [B/COM58] I (104) esp_image: segment 3: paddr=00016018 vaddr=00000000 size=0a000h ( 40960) 
+00000.282 [A/COM53] I (120) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=07a94h ( 31380) map
+00000.282 [B/COM58] I (120) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=07a94h ( 31380) map
+00000.282 [A/COM53] I (129) boot: Loaded app from partition at offset 0x10000
+00000.282 [B/COM58] I (129) boot: Loaded app from partition at offset 0x10000
+00000.282 [A/COM53] I (129) boot: Disabling RNG early entropy source...
+00000.282 [B/COM58] I (129) boot: Disabling RNG early entropy source...
+00000.297 [A/COM53] [32mINFO - UCN_BITBANG READY role=B mac=7c:4f:ad:2a:92:44 baud=9600 tx=GPIO16[0m
+00000.313 [B/COM58] [32mINFO - UCN_BITBANG READY role=C mac=7c:4f:ad:29:9c:d8 baud=9600 rx=GPIO15[0m
+00005.313 [B/COM58] [32mINFO - UCN_BITBANG RX_SUMMARY role=C bytes=0 gpio_edges=45 errors=0[0m
+00006.313 [A/COM53] [32mINFO - UCN_BITBANG TX_SUMMARY role=B frames=227[0m
+00010.313 [B/COM58] [32mINFO - UCN_BITBANG RX_SUMMARY role=C bytes=0 gpio_edges=91 errors=0[0m
+00011.313 [A/COM53] [32mINFO - UCN_BITBANG TX_SUMMARY role=B frames=453[0m
+00015.313 [B/COM58] [32mINFO - UCN_BITBANG RX_SUMMARY role=C bytes=0 gpio_edges=136 errors=0[0m
+00016.313 [A/COM53] [32mINFO - UCN_BITBANG TX_SUMMARY role=B frames=679[0m
+00020.313 [B/COM58] [32mINFO - UCN_BITBANG RX_SUMMARY role=C bytes=0 gpio_edges=182 errors=0[0m
+00021.313 [A/COM53] [32mINFO - UCN_BITBANG TX_SUMMARY role=B frames=906[0m

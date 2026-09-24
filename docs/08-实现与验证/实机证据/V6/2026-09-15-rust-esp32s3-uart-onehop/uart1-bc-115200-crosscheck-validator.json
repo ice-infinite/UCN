@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "duration_s": 25.0,
+  "minimum_pings_per_node": 10,
+  "nodes": [
+    {
+      "label": "A",
+      "port": "COM53",
+      "opened": true,
+      "boot_seen": false,
+      "ready_seen": false,
+      "role_seen": "",
+      "ping_sequences": [],
+      "rtt_us": [],
+      "backpressure_events": 0,
+      "summary": {},
+      "fault_lines": 0,
+      "read_error": "",
+      "rtt_count": 0,
+      "rtt_min_us": 0,
+      "rtt_mean_us": 0,
+      "rtt_p50_us": 0,
+      "rtt_p95_us": 0,
+      "rtt_max_us": 0,
+      "passed": false
+    },
+    {
+      "label": "B",
+      "port": "COM58",
+      "opened": true,
+      "boot_seen": false,
+      "ready_seen": false,
+      "role_seen": "",
+      "ping_sequences": [],
+      "rtt_us": [],
+      "backpressure_events": 0,
+      "summary": {},
+      "fault_lines": 0,
+      "read_error": "",
+      "rtt_count": 0,
+      "rtt_min_us": 0,
+      "rtt_mean_us": 0,
+      "rtt_p50_us": 0,
+      "rtt_p95_us": 0,
+      "rtt_max_us": 0,
+      "passed": false
+    }
+  ],
+  "combined_rtt": {
+    "count": 0,
+    "min_us": 0,
+    "mean_us": 0,
+    "p50_us": 0,
+    "p95_us": 0,
+    "max_us": 0
+  },
+  "overall_pass": false
+}

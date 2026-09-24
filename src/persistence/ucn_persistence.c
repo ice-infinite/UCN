@@ -1131,7 +1131,7 @@ bool ucn_i_persistence_request_is_well_formed(
            request->volatile_continuation.object_kind >=
                UCN_OBJECT_KIND_SEND &&
            request->volatile_continuation.object_kind <=
-               UCN_OBJECT_KIND_PERSISTENCE &&
+               UCN_OBJECT_KIND_CLUSTER &&
            request->volatile_continuation.reserved_zero == 0U;
 }
 

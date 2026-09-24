@@ -1,0 +1,46 @@
+[package]
+name = "ucn-v6s-rust-esp32s3-smoke"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[[bin]]
+name = "ucn-v6s-rust-esp32s3-smoke"
+path = "src/main.rs"
+
+[dependencies]
+critical-section = "1.2.0"
+esp-backtrace = { version = "0.19.0", features = [
+    "esp32s3",
+    "panic-handler",
+    "println",
+] }
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3", "log-04"] }
+esp-hal = { version = "~1.1.0", features = ["esp32s3", "log-04"] }
+esp-println = { version = "0.17.0", features = ["esp32s3", "log-04"] }
+log = "0.4.27"
+ucn-adapter = { path = "../../../rust/crates/ucn-adapter" }
+ucn-admission = { path = "../../../rust/crates/ucn-admission" }
+ucn-capability = { path = "../../../rust/crates/ucn-capability" }
+ucn-core = { path = "../../../rust/crates/ucn-core" }
+ucn-flow = { path = "../../../rust/crates/ucn-flow" }
+ucn-identity = { path = "../../../rust/crates/ucn-identity" }
+ucn-owner = { path = "../../../rust/crates/ucn-owner" }
+ucn-persistence = { path = "../../../rust/crates/ucn-persistence" }
+ucn-routing = { path = "../../../rust/crates/ucn-routing" }
+ucn-security = { path = "../../../rust/crates/ucn-security" }
+ucn-types = { path = "../../../rust/crates/ucn-types" }
+ucn-wire = { path = "../../../rust/crates/ucn-wire" }
+
+[profile.dev]
+opt-level = "s"
+panic = "abort"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
+panic = "abort"
+

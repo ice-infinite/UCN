@@ -1,0 +1,19 @@
+[package]
+name = "ucn-flow"
+description = "Immutable advanced Flow activation and label fast path for UCN v6 simplified"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ucn-capability = { path = "../ucn-capability" }
+ucn-persistence = { path = "../ucn-persistence" }
+ucn-routing = { path = "../ucn-routing" }
+ucn-security = { path = "../ucn-security" }
+ucn-types = { path = "../ucn-types" }
+ucn-wire = { path = "../ucn-wire" }
+
+[lints]
+workspace = true

@@ -13,5 +13,10 @@ ucn-persistence = { path = "../ucn-persistence" }
 ucn-types = { path = "../ucn-types" }
 ucn-wire = { path = "../ucn-wire" }
 
+[dev-dependencies]
+ucn-capability = { path = "../ucn-capability" }
+ucn-flow = { path = "../ucn-flow" }
+ucn-routing = { path = "../ucn-routing" }
+
 [lints]
 workspace = true

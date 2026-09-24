@@ -5,7 +5,6 @@
 #include <limits.h>
 #include <string.h>
 
-#define UCN_I_CALLBACK_GATE_MAGIC UINT32_C(0x55434754)
 #define UCN_I_OWNER_MAILBOX_MAGIC UINT32_C(0x55434D42)
 
 static bool bytes_are_zero(const void *object, size_t size)

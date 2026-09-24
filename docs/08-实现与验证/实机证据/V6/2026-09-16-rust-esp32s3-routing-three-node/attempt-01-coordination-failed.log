@@ -1,0 +1,202 @@
+00000.156 [B/COM53] OPEN
+00000.156 [D/COM56] OPEN
+00000.156 [C/COM58] OPEN
+00000.187 [D/COM56] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.203 [C/COM58] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.203 [B/COM53] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.203 [C/COM58] I (28) boot: Multicore bootloader
+00000.203 [B/COM53] I (28) boot: Multicore bootloader
+00000.203 [D/COM56] I (28) boot: Multicore bootloader
+00000.203 [D/COM56] I (28) boot: chip revision: v0.2
+00000.203 [C/COM58] I (28) boot: chip revision: v0.2
+00000.203 [B/COM53] I (28) boot: chip revision: v0.2
+00000.203 [D/COM56] I (29) boot: efuse block revision: v1.4
+00000.203 [C/COM58] I (29) boot: efuse block revision: v1.4
+00000.203 [B/COM53] I (29) boot: efuse block revision: v1.4
+00000.203 [D/COM56] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.203 [C/COM58] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.203 [B/COM53] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.219 [D/COM56] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.219 [C/COM58] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.219 [B/COM53] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.219 [D/COM56] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.219 [C/COM58] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.219 [B/COM53] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.219 [C/COM58] I (44) boot: Enabling RNG early entropy source...
+00000.219 [D/COM56] I (44) boot: Enabling RNG early entropy source...
+00000.219 [B/COM53] I (44) boot: Enabling RNG early entropy source...
+00000.219 [D/COM56] I (48) boot: Partition Table:
+00000.219 [B/COM53] I (48) boot: Partition Table:
+00000.219 [C/COM58] I (48) boot: Partition Table:
+00000.234 [D/COM56] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.234 [C/COM58] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.234 [B/COM53] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.234 [D/COM56] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.234 [B/COM53] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.234 [C/COM58] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.234 [D/COM56] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.234 [C/COM58] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.234 [B/COM53] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.250 [D/COM56] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.250 [C/COM58] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.250 [B/COM53] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.250 [D/COM56] I (77) boot: End of partition table
+00000.250 [C/COM58] I (77) boot: End of partition table
+00000.250 [B/COM53] I (77) boot: End of partition table
+00000.266 [D/COM56] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=04580h ( 17792) map
+00000.266 [C/COM58] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=04580h ( 17792) map
+00000.266 [B/COM53] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=04580h ( 17792) map
+00000.266 [D/COM56] I (92) esp_image: segment 1: paddr=000145a8 vaddr=3fc89ac8 size=01f5ch (  8028) load
+00000.266 [C/COM58] I (92) esp_image: segment 1: paddr=000145a8 vaddr=3fc89ac8 size=01f5ch (  8028) load
+00000.266 [B/COM53] I (92) esp_image: segment 1: paddr=000145a8 vaddr=3fc89ac8 size=01f5ch (  8028) load
+00000.281 [D/COM56] I (97) esp_image: segment 2: paddr=0001650c vaddr=40378000 size=01ac8h (  6856) load
+00000.281 [C/COM58] I (97) esp_image: segment 2: paddr=0001650c vaddr=40378000 size=01ac8h (  6856) load
+00000.281 [B/COM53] I (97) esp_image: segment 2: paddr=0001650c vaddr=40378000 size=01ac8h (  6856) load
+00000.281 [D/COM56] I (104) esp_image: segment 3: paddr=00017fdc vaddr=00000000 size=0803ch ( 32828) 
+00000.281 [C/COM58] I (104) esp_image: segment 3: paddr=00017fdc vaddr=00000000 size=0803ch ( 32828) 
+00000.281 [B/COM53] I (104) esp_image: segment 3: paddr=00017fdc vaddr=00000000 size=0803ch ( 32828) 
+00000.281 [C/COM58] I (118) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=0fa7ch ( 64124) map
+00000.281 [B/COM53] I (118) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=0fa7ch ( 64124) map
+00000.281 [D/COM56] I (118) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=0fa7ch ( 64124) map
+00000.297 [D/COM56] I (135) boot: Loaded app from partition at offset 0x10000
+00000.297 [C/COM58] I (135) boot: Loaded app from partition at offset 0x10000
+00000.297 [B/COM53] I (135) boot: Loaded app from partition at offset 0x10000
+00000.297 [D/COM56] I (136) boot: Disabling RNG early entropy source...
+00000.312 [C/COM58] I (136) boot: Disabling RNG early entropy source...
+00000.312 [B/COM53] I (136) boot: Disabling RNG early entropy source...
+00000.312 [D/COM56] [32mINFUCN_RUST_ - UCN_RUST_ROUTE READY role=D topology=B-C-D baud=691200 link=2 peer=3 rx=GPIO15 tx=GPIO16[0m
+00000.328 [D/COM56] source...
+00000.328 [C/COM58] [32mINFUCN_RUST_ROUUCN_RUST_ROUTE READY role=C topology=B-C-D baud=691200 west=GPIO19/20 east=GPIO15/16[0m
+00000.328 [B/COM53] [32mINFUCN_RUST_R- UCN_RUST_ROUTE READY role=B topology=B-C-D baud=691200 link=1 peer=3 rx=GPIO19 tx=GPIO20[0m
+00000.328 [C/COM58] opy source...
+00000.328 [B/COM53] source...
+00001.828 [B/COM53] [32mINFO - [32mINFO - UCN_RUST_ROUTE READY role=B topology=B-C-D baud=6
+00001.828 [C/COM58] [32mINFO - [32mINFO - UCN_RUST_ROUTE READY role=C topology=B-C-D ba
+00001.828 [D/COM56] [32mINFO - [32mINFO - UCN_RUST_ROUTE READY role=D topology=B-C-D baud=6
+00002.172 [B/COM53] 91=30 mtu=128 generation=1 causal=100[0m
+00002.172 [B/COM53] [32mINFO - UCN_RUST_ROUTE RERR_GUARD role=B preserved=1[0m
+00002.172 [B/COM53] L destination=4 hops=2 cost=30 mtu=128 generation=1 causal=100[0m
+00002.875 [C/COM58] ud=691200 west=GPIO19/20 east=GPIO15/16[0m
+00003.172 [C/COM58] [32mINFO - UCN_RUST_ROUTE RELAY_DATA_ACTIVE role=C origin=B destination=D[0m
+00003.172 [D/COM56] 91=30 mtu=128 generation=2 causal=200[0m
+00003.172 [D/COM56] m
+00003.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE RERR_GUARD role=B preserved=1[0m
+00003.875 [B/COM53] [33mWARN - UCN_RUST_ROUTE PING_TIMEOUT role=B[0m
+00004.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE ROUTE_ACTIVE role=D phase=INITIAL destination=2 hops=2 cost=30 mtu=128 generation=2 causal=200[0m
+00004.672 [C/COM58] [32mINFO - UCN_RUST_
+00004.875 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=2 rtt_us=1114[0m
+00005.172 [C/COM58] RO routes=4 carrier_err=0 wire_err=0 route_err=1 tx_err=0 rx_err=0 timeout=0[0m
+00005.172 [B/COM53] [32mINFO - UCN_RUST_ROUTE 6 rtt_max=1114 route=1 recovered=0 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00005.172 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING0 rtt_max=1020 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00005.359 [D/COM56] rtt_avg=1020 rtt_max=1020 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00005.875 [B/COM53] rtt_avg=1066 rtt_max=1114 route=1 recovered=0 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00006.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10005 rtt_us=1020[0m
+00006.672 [C/COM58] le=C tx=11 rx=12 fwd_rreq=2 fwd_rrep=2 fwd_data=7 routes=4 carrier_err=0 wire_err=0 
+00006.875 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=6 rtt_us=1020[0m
+00007.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10007 rtt_us=1019[0m
+00007.875 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=8 rtt_us=1021[0m
+00008.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10009 rtt_us=1019[0m
+00008.875 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=10 rtt_us=1020[0m
+00009.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10011 rtt_us=1019[0m
+00009.875 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=12 rtt_us=1019[0m
+00010.172 [C/COM58] ro7 routes=4 carrier_err=0 wire_err=0 route_err=1 tx_err=0 rx_err=0 timeout=0[0m
+00010.172 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00010.172 [B/COM53] [32mINFO - UCN_RUST_ROUTE P033 rtt_max=1114 route=1 recovered=0 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00010.359 [D/COM56] rtt_avg=1019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00010.875 [B/COM53] rtt_avg=1033 rtt_max=1114 route=1 recovered=0 rerr_guard=1 carrier_err=0 wire_err=0 roRUST_ROUTE ROUTE_INVALIDATED role=B removed=1 resolve_rejected=1[0m
+00010.875 [B/COM53] PING_OK role=B sequence=16 rtt_us=1019[0m
+00010.969 [B/COM53] [32mINFO - UCN_RUST_ROUTE ROUTE_INVALIDATEst=30 mtu=128 generation=3 causal=101[0m
+00011.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10015 rtt_us=1020[0m
+00011.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE ROUTE_ACTIVE role=B phase=RECOVERED destination=4 hops=2 cost=30 mtu=128 generation=3 causal=101[0m
+00011.687 [C/COM58] e=C tx=31 rx=32 fwd_rreq=2 fwd_rrep=2 fwd_data=27 routes=4 carrier_err=0 wire_err=0 
+00012.375 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10017 rtt_us=1018[0m
+00012.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=18 rtt_us=1020[0m
+00013.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10019 rtt_us=1020[0m
+00013.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=20 rtt_us=1019[0m
+00014.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10021 rtt_us=1020[0m
+00014.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=22 rtt_us=1021[0m
+00015.172 [C/COM58] ro7 routes=4 carrier_err=0 wire_err=0 route_err=1 tx_err=0 rx_err=0 timeout=0[0m
+00015.172 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING1019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00015.172 [B/COM53] [32mINFO - UCN_RUST_ROUTE P1027 rtt_max=1114 route=1 recovered=1 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00015.359 [D/COM56] rtt_avg=1019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00015.672 [B/COM53] rtt_avg=1027 rtt_max=1114 route=1 recovered=1 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00016.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10025 rtt_us=1020[0m
+00016.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=26 rtt_us=1020[0m
+00016.672 [C/COM58] e=C tx=53 rx=54 fwd_rreq=3 fwd_rrep=3 fwd_data=47 routes=4 carrier_err=0 wire_err=0 
+00017.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10027 rtt_us=1021[0m
+00017.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=28 rtt_us=1020[0m
+00018.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10029 rtt_us=1019[0m
+00018.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=30 rtt_us=1020[0m
+00019.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10031 rtt_us=1019[0m
+00019.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=32 rtt_us=1021[0m
+00020.172 [C/COM58] ro7 routes=4 carrier_err=0 wire_err=0 route_err=1 tx_err=0 rx_err=0 timeout=0[0m
+00020.172 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING1019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00020.172 [B/COM53] [32mINFO - UCN_RUST_ROUTE P1025 rtt_max=1114 route=1 recovered=1 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00020.359 [D/COM56] rtt_avg=1019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00020.672 [B/COM53] rtt_avg=1025 rtt_max=1114 route=1 recovered=1 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00021.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10035 rtt_us=1020[0m
+00021.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=36 rtt_us=1018[0m
+00021.672 [C/COM58] e=C tx=73 rx=74 fwd_rreq=3 fwd_rrep=3 fwd_data=67 routes=4 carrier_err=0 wire_err=0 
+00022.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10037 rtt_us=1018[0m
+00022.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=38 rtt_us=1020[0m
+00023.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10039 rtt_us=1019[0m
+00023.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=40 rtt_us=1020[0m
+00024.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10041 rtt_us=1019[0m
+00024.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=42 rtt_us=1019[0m
+00025.172 [C/COM58] ro7 routes=4 carrier_err=0 wire_err=0 route_err=1 tx_err=0 rx_err=0 timeout=0[0m
+00025.172 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING1019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00025.172 [B/COM53] [32mINFO - UCN_RUST_ROUTE P1023 rtt_max=1114 route=1 recovered=1 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00025.359 [D/COM56] rtt_avg=1019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00025.672 [B/COM53] rtt_avg=1023 rtt_max=1114 route=1 recovered=1 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00026.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10045 rtt_us=1020[0m
+00026.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=46 rtt_us=1020[0m
+00026.672 [C/COM58] e=C tx=93 rx=94 fwd_rreq=3 fwd_rrep=3 fwd_data=87 routes=4 carrier_err=0 wire_err=0 
+00027.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10047 rtt_us=1020[0m
+00027.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=48 rtt_us=1020[0m
+00028.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10049 rtt_us=1020[0m
+00028.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=50 rtt_us=1021[0m
+00029.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10051 rtt_us=1020[0m
+00029.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=52 rtt_us=1022[0m
+00030.172 [C/COM58] ro=107 routes=4 carrier_err=0 wire_err=0 route_err=1 tx_err=0 rx_err=0 timeout=0[0m
+00030.172 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING1019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00030.172 [B/COM53] [32mINFO - UCN_RUST_ROUTE P1023 rtt_max=1114 route=1 recovered=1 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00030.359 [D/COM56] rtt_avg=1019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00030.672 [B/COM53] rtt_avg=1023 rtt_max=1114 route=1 recovered=1 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00031.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10055 rtt_us=1020[0m
+00031.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=56 rtt_us=1021[0m
+00031.687 [C/COM58]  tx=113 rx=114 fwd_rreq=3 fwd_rrep=3 fwd_data=107 routes=4 carrier_err=0 wire_err=0 
+00032.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10057 rtt_us=1020[0m
+00032.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=58 rtt_us=1020[0m
+00033.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10059 rtt_us=1020[0m
+00033.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=60 rtt_us=1019[0m
+00034.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10061 rtt_us=1019[0m
+00034.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=62 rtt_us=1019[0m
+00035.172 [C/COM58] ro=127 routes=4 carrier_err=0 wire_err=0 route_err=1 tx_err=0 rx_err=0 timeout=0[0m
+00035.172 [B/COM53] [32mINFO - UCN_RUST_ROUTE P1022 rtt_max=1114 route=1 recovered=1 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00035.172 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING1019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00035.359 [D/COM56] rtt_avg=1019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00035.672 [B/COM53] rtt_avg=1022 rtt_max=1114 route=1 recovered=1 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00036.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10065 rtt_us=1020[0m
+00036.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=66 rtt_us=1018[0m
+00036.672 [C/COM58]  tx=133 rx=134 fwd_rreq=3 fwd_rrep=3 fwd_data=127 routes=4 carrier_err=0 wire_err=0 
+00037.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10067 rtt_us=1019[0m
+00037.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=68 rtt_us=1019[0m
+00038.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10069 rtt_us=1020[0m
+00038.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=70 rtt_us=1020[0m
+00039.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10071 rtt_us=1019[0m
+00039.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=72 rtt_us=1018[0m
+00040.172 [C/COM58] ro=147 routes=4 carrier_err=0 wire_err=0 route_err=1 tx_err=0 rx_err=0 timeout=0[0m
+00040.172 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING1019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00040.172 [B/COM53] [32mINFO - UCN_RUST_ROUTE P1022 rtt_max=1114 route=1 recovered=1 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00040.359 [D/COM56] rtt_avg=1019 rtt_max=1021 route=1 recovered=0 rerr_guard=0 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=0[0m
+00040.672 [B/COM53] rtt_avg=1022 rtt_max=1114 route=1 recovered=1 rerr_guard=1 carrier_err=0 wire_err=0 route_err=0 tx_err=0 rx_err=0 timeout=1[0m
+00041.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10075 rtt_us=1020[0m
+00041.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=76 rtt_us=1018[0m
+00041.687 [C/COM58]  tx=153 rx=154 fwd_rreq=3 fwd_rrep=3 fwd_data=147 routes=4 carrier_err=0 wire_err=0 
+00042.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10077 rtt_us=1021[0m
+00042.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=78 rtt_us=1021[0m
+00043.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10079 rtt_us=1019[0m
+00043.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=80 rtt_us=1019[0m
+00044.359 [D/COM56] [32mINFO - UCN_RUST_ROUTE PING_OK role=D sequence=10081 rtt_us=1020[0m
+00044.672 [B/COM53] [32mINFO - UCN_RUST_ROUTE PING_OK role=B sequence=82 rtt_us=1019[0m
+00045.172 [C/COM58] ro=167 routes=4 carrier_err=0 wire_err=0 route_err=1 tx_err=0 rx_err=0 timeout=0[0m

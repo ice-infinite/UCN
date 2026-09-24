@@ -40,6 +40,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucn-flow"
+version = "0.0.0"
+dependencies = [
+ "ucn-capability",
+ "ucn-persistence",
+ "ucn-routing",
+ "ucn-security",
+ "ucn-types",
+ "ucn-wire",
+]
+
+[[package]]
 name = "ucn-identity"
 version = "0.0.0"
 dependencies = [
@@ -64,11 +76,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucn-routing"
+version = "0.0.0"
+dependencies = [
+ "ucn-security",
+ "ucn-types",
+]
+
+[[package]]
 name = "ucn-security"
 version = "0.0.0"
 dependencies = [
+ "ucn-capability",
+ "ucn-flow",
  "ucn-owner",
  "ucn-persistence",
+ "ucn-routing",
  "ucn-types",
  "ucn-wire",
 ]

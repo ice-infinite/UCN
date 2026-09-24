@@ -1,0 +1,66 @@
+[package]
+name = "ucn-v6s-rust-esp32s3-uart-onehop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[features]
+default = []
+probe-uart1 = []
+probe-blocking-rx = []
+probe-swapped-pins = []
+probe-loopback = []
+probe-force-rx-clock = []
+
+[[bin]]
+name = "ucn-v6s-rust-esp32s3-uart-onehop"
+path = "src/main.rs"
+
+[[bin]]
+name = "ucn-v6s-rust-gpio-link-probe"
+path = "src/bin/gpio_link_probe.rs"
+
+[[bin]]
+name = "ucn-v6s-rust-uart2-raw-probe"
+path = "src/bin/uart2_raw_probe.rs"
+
+[[bin]]
+name = "ucn-v6s-rust-uart1-bc-probe"
+path = "src/bin/uart1_bc_probe.rs"
+
+[[bin]]
+name = "ucn-v6s-rust-uart-rx-bitbang-probe"
+path = "src/bin/uart_rx_bitbang_probe.rs"
+
+[[bin]]
+name = "ucn-v6s-rust-routing-three-node"
+path = "src/bin/routing_three_node.rs"
+
+[dependencies]
+critical-section = "1.2.0"
+esp-backtrace = { version = "0.19.0", features = [
+    "esp32s3",
+    "panic-handler",
+    "println",
+] }
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3", "log-04"] }
+esp-hal = { version = "~1.2.0", features = ["esp32s3", "log-04", "unstable"] }
+esp-println = { version = "0.17.0", features = ["esp32s3", "log-04"] }
+log = "0.4.27"
+ucn-adapter = { path = "../../../rust/crates/ucn-adapter" }
+ucn-routing = { path = "../../../rust/crates/ucn-routing" }
+ucn-security = { path = "../../../rust/crates/ucn-security" }
+ucn-types = { path = "../../../rust/crates/ucn-types" }
+ucn-wire = { path = "../../../rust/crates/ucn-wire" }
+
+[profile.dev]
+opt-level = "s"
+panic = "abort"
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = "fat"
+opt-level = "s"
+panic = "abort"

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 import struct
+import hashlib
 from pathlib import Path
 
 
@@ -22,15 +23,6 @@ def fixture(name: str) -> bytes:
     if match is None:
         raise AssertionError(f"missing fixture: {name}")
     return bytes(int(value, 16) for value in re.findall(r"0x([0-9A-Fa-f]{2})", match.group(1)))
-
-
-def crc32c(value: bytes) -> int:
-    crc = 0xFFFFFFFF
-    for byte in value:
-        crc ^= byte
-        for _ in range(8):
-            crc = (crc >> 1) ^ (0x82F63B78 if crc & 1 else 0)
-    return crc ^ 0xFFFFFFFF
 
 
 def main() -> None:
@@ -83,10 +75,7 @@ def main() -> None:
         0,
         0,
     )
-    digest = b"".join(
-        struct.pack(">I", crc32c(bytes((0xA5 + index * 0x17,)) + capability))
-        for index in range(4)
-    )
+    digest = hashlib.sha256(capability).digest()[:16]
     summary = struct.pack(">II", 0x01020304, 0x11121314) + digest
     query = struct.pack(">I", 0x01020304) + digest
 

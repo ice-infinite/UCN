@@ -1,0 +1,15 @@
+[package]
+name = "ucn-routing"
+description = "Allocation-free discovery, SoftRoute and exact RERR owner for UCN v6 simplified"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ucn-security = { path = "../ucn-security" }
+ucn-types = { path = "../ucn-types" }
+
+[lints]
+workspace = true

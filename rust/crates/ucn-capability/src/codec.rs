@@ -301,7 +301,107 @@ pub fn decode_capability_record(input: &[u8]) -> Result<CapabilityRecord> {
     Ok(record)
 }
 
-/// 计算与 C 版本一致的四路 salted CRC32C 16 B 摘要。
+const SHA256_K: [u32; 64] = [
+    0x428A_2F98, 0x7137_4491, 0xB5C0_FBCF, 0xE9B5_DBA5,
+    0x3956_C25B, 0x59F1_11F1, 0x923F_82A4, 0xAB1C_5ED5,
+    0xD807_AA98, 0x1283_5B01, 0x2431_85BE, 0x550C_7DC3,
+    0x72BE_5D74, 0x80DE_B1FE, 0x9BDC_06A7, 0xC19B_F174,
+    0xE49B_69C1, 0xEFBE_4786, 0x0FC1_9DC6, 0x240C_A1CC,
+    0x2DE9_2C6F, 0x4A74_84AA, 0x5CB0_A9DC, 0x76F9_88DA,
+    0x983E_5152, 0xA831_C66D, 0xB003_27C8, 0xBF59_7FC7,
+    0xC6E0_0BF3, 0xD5A7_9147, 0x06CA_6351, 0x1429_2967,
+    0x27B7_0A85, 0x2E1B_2138, 0x4D2C_6DFC, 0x5338_0D13,
+    0x650A_7354, 0x766A_0ABB, 0x81C2_C92E, 0x9272_2C85,
+    0xA2BF_E8A1, 0xA81A_664B, 0xC24B_8B70, 0xC76C_51A3,
+    0xD192_E819, 0xD699_0624, 0xF40E_3585, 0x106A_A070,
+    0x19A4_C116, 0x1E37_6C08, 0x2748_774C, 0x34B0_BCB5,
+    0x391C_0CB3, 0x4ED8_AA4A, 0x5B9C_CA4F, 0x682E_6FF3,
+    0x748F_82EE, 0x78A5_636F, 0x84C8_7814, 0x8CC7_0208,
+    0x90BE_FFFA, 0xA450_6CEB, 0xBEF9_A3F7, 0xC671_78F2,
+];
+
+fn sha256_compress(state: &mut [u32; 8], block: &[u8; 64]) {
+    let mut words = [0_u32; 64];
+    for (index, chunk) in block.chunks_exact(4).take(16).enumerate() {
+        words[index] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    for index in 16..64 {
+        let left = words[index - 15];
+        let right = words[index - 2];
+        let s0 = left.rotate_right(7) ^ left.rotate_right(18) ^ (left >> 3);
+        let s1 = right.rotate_right(17) ^ right.rotate_right(19) ^ (right >> 10);
+        words[index] = words[index - 16]
+            .wrapping_add(s0)
+            .wrapping_add(words[index - 7])
+            .wrapping_add(s1);
+    }
+    let mut a = state[0];
+    let mut b = state[1];
+    let mut c = state[2];
+    let mut d = state[3];
+    let mut e = state[4];
+    let mut f = state[5];
+    let mut g = state[6];
+    let mut h = state[7];
+    for index in 0..64 {
+        let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        let choose = (e & f) ^ ((!e) & g);
+        let temp1 = h
+            .wrapping_add(s1)
+            .wrapping_add(choose)
+            .wrapping_add(SHA256_K[index])
+            .wrapping_add(words[index]);
+        let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        let majority = (a & b) ^ (a & c) ^ (b & c);
+        let temp2 = s0.wrapping_add(majority);
+        h = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(temp1);
+        d = c;
+        c = b;
+        b = a;
+        a = temp1.wrapping_add(temp2);
+    }
+    for (slot, value) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+        *slot = slot.wrapping_add(value);
+    }
+}
+
+fn sha256_128(bytes: &[u8]) -> Result<[u8; CAPABILITY_DIGEST_BYTES]> {
+    let bit_length = u64::try_from(bytes.len())
+        .map_err(|_| Error::Exhausted)?
+        .checked_mul(8)
+        .ok_or(Error::Exhausted)?;
+    let mut state = [
+        0x6A09_E667, 0xBB67_AE85, 0x3C6E_F372, 0xA54F_F53A,
+        0x510E_527F, 0x9B05_688C, 0x1F83_D9AB, 0x5BE0_CD19,
+    ];
+    let mut chunks = bytes.chunks_exact(64);
+    for chunk in &mut chunks {
+        let mut block = [0_u8; 64];
+        block.copy_from_slice(chunk);
+        sha256_compress(&mut state, &block);
+    }
+    let remainder = chunks.remainder();
+    let mut tail = [0_u8; 128];
+    tail[..remainder.len()].copy_from_slice(remainder);
+    tail[remainder.len()] = 0x80;
+    let total_tail = if remainder.len() < 56 { 64 } else { 128 };
+    tail[total_tail - 8..total_tail].copy_from_slice(&bit_length.to_be_bytes());
+    for chunk in tail[..total_tail].chunks_exact(64) {
+        let mut block = [0_u8; 64];
+        block.copy_from_slice(chunk);
+        sha256_compress(&mut state, &block);
+    }
+    let mut digest = [0_u8; CAPABILITY_DIGEST_BYTES];
+    for (chunk, value) in digest.chunks_exact_mut(4).zip(state.iter().take(4)) {
+        chunk.copy_from_slice(&value.to_be_bytes());
+    }
+    Ok(digest)
+}
+
+/// 计算与 C 版本一致的 SHA-256 前 16 B canonical 摘要。
 ///
 /// # Errors
 ///
@@ -309,13 +409,7 @@ pub fn decode_capability_record(input: &[u8]) -> Result<CapabilityRecord> {
 pub fn capability_digest(record: CapabilityRecord) -> Result<[u8; CAPABILITY_DIGEST_BYTES]> {
     let mut encoded = [0; CAPABILITY_RECORD_BYTES];
     encode_capability_record(record, &mut encoded)?;
-    let mut salted = [0; CAPABILITY_RECORD_BYTES + 1];
-    salted[1..].copy_from_slice(&encoded);
-    let mut digest = [0; CAPABILITY_DIGEST_BYTES];
-    for index in 0..4 {
-        salted[0] = 0xA5 + u8::try_from(index).map_err(|_| Error::State)? * 0x17;
-        digest[index * 4..index * 4 + 4].copy_from_slice(&crc32c(&salted).to_be_bytes());
-    }
+    let digest = sha256_128(&encoded)?;
     if digest.iter().all(|byte| *byte == 0) {
         return Err(Error::State);
     }
@@ -428,16 +522,4 @@ fn get32(input: &[u8], offset: usize) -> Result<u32> {
             .try_into()
             .map_err(|_| Error::Malformed)?,
     ))
-}
-
-fn crc32c(bytes: &[u8]) -> u32 {
-    let mut crc = !0_u32;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0_u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0x82F6_3B78 & mask);
-        }
-    }
-    !crc
 }

@@ -11,6 +11,11 @@ fn profile_storage_is_fixed_and_bounded() {
     let nano = size_of::<NanoSecurityOwner<'static>>();
     let lite = size_of::<LiteSecurityOwner<'static>>();
     let full = size_of::<FullSecurityOwner<'static>>();
+    std::println!(
+        "security_storage nano={nano} lite={lite} full={full} work256={} work512={}",
+        size_of::<SecurityPacketWorkspace<256>>(),
+        size_of::<SecurityPacketWorkspace<512>>()
+    );
     assert!(nano <= 4_096);
     assert!(lite <= 16_384);
     assert!(full <= 32_768);
@@ -22,10 +27,5 @@ fn profile_storage_is_fixed_and_bounded() {
     assert_eq!(
         align_of::<LiteSecurityOwner<'static>>(),
         align_of::<FullSecurityOwner<'static>>()
-    );
-    std::println!(
-        "security_storage nano={nano} lite={lite} full={full} work256={} work512={}",
-        size_of::<SecurityPacketWorkspace<256>>(),
-        size_of::<SecurityPacketWorkspace<512>>()
     );
 }

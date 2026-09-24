@@ -98,18 +98,7 @@ impl<const SLOTS: usize> ReplayWindow<SLOTS> {
         {
             return Ok(ReplayClassification::InFlight);
         }
-        if !self.initialized || sequence > self.highest {
-            return Ok(ReplayClassification::Fresh);
-        }
-        let distance = self.highest - sequence;
-        if distance >= 64 {
-            return Ok(ReplayClassification::Stale);
-        }
-        if self.bitmap & (1_u64 << distance) != 0 {
-            Ok(ReplayClassification::Duplicate)
-        } else {
-            Ok(ReplayClassification::Fresh)
-        }
+        self.classification_without_reservations(sequence)
     }
 
     #[allow(clippy::too_many_arguments)]

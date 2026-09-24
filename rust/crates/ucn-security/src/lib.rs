@@ -14,9 +14,10 @@ mod session;
 
 pub use crypto::{CryptoProvider, KeySelector, OpenOriginRequest, SealOriginRequest};
 pub use packet::{
-    Fingerprint, HOP_TAG_BYTES, HOP_TRAILER_BYTES, NONCE_BYTES, ORIGIN_TAG_BYTES, OpenDisposition,
-    OpenPacketPlan, OpenedPacket, OriginContext, PacketPlan, ReplayCommitEvidence,
-    SecurityPacketWorkspace, SecurityReplayHandle, SenderDirection,
+    Fingerprint, FlowReplayClaim, FlowSecurityBinding, FlowSecurityRequest, HOP_TAG_BYTES,
+    HOP_TRAILER_BYTES, NONCE_BYTES, ORIGIN_TAG_BYTES, OpenDisposition, OpenPacketPlan,
+    OpenedPacket, OriginContext, PacketPlan, ReplayCommitEvidence, SecurityPacketWorkspace,
+    SecurityReplayHandle, SenderDirection,
 };
 pub use replay::{ReplayClassification, ReplayEvidence};
 pub use session::{

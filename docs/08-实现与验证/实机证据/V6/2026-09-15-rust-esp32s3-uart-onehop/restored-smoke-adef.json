@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "duration_s": 15.0,
+  "ports": [
+    {
+      "label": "A",
+      "port": "COM40",
+      "opened": true,
+      "heartbeats": 15,
+      "duplicate_heartbeats": 0,
+      "duplicate_lines": 0,
+      "boot_seen": true,
+      "first_count": 1,
+      "last_count": 15,
+      "selftest_pass_seen": true,
+      "fault_lines": 0,
+      "read_error": "",
+      "require_selftest": true,
+      "passed": true
+    },
+    {
+      "label": "D",
+      "port": "COM56",
+      "opened": true,
+      "heartbeats": 15,
+      "duplicate_heartbeats": 0,
+      "duplicate_lines": 239,
+      "boot_seen": true,
+      "first_count": 1,
+      "last_count": 15,
+      "selftest_pass_seen": true,
+      "fault_lines": 0,
+      "read_error": "",
+      "require_selftest": true,
+      "passed": true
+    },
+    {
+      "label": "E",
+      "port": "COM5",
+      "opened": true,
+      "heartbeats": 15,
+      "duplicate_heartbeats": 0,
+      "duplicate_lines": 0,
+      "boot_seen": true,
+      "first_count": 1,
+      "last_count": 15,
+      "selftest_pass_seen": true,
+      "fault_lines": 0,
+      "read_error": "",
+      "require_selftest": true,
+      "passed": true
+    },
+    {
+      "label": "F",
+      "port": "COM34",
+      "opened": true,
+      "heartbeats": 15,
+      "duplicate_heartbeats": 0,
+      "duplicate_lines": 0,
+      "boot_seen": true,
+      "first_count": 1,
+      "last_count": 15,
+      "selftest_pass_seen": true,
+      "fault_lines": 0,
+      "read_error": "",
+      "require_selftest": true,
+      "passed": true
+    }
+  ],
+  "overall_pass": true
+}

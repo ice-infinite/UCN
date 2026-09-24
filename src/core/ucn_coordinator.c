@@ -4,7 +4,6 @@
 
 #include <string.h>
 
-#define UCN_I_COORDINATOR_MAGIC UINT32_C(0x5543434F)
 #define UCN_I_REQUIREMENT_CANONICAL_BYTES 56U
 #define UCN_I_TERMINAL_NONE UINT8_C(0)
 #define UCN_I_TERMINAL_STAGED UINT8_C(1)
@@ -252,7 +251,8 @@ static bool binding_is_valid(const ucn_i_owner_binding_t *binding)
            binding->owner_id <= UCN_I_OWNER_PERSISTENCE &&
            ((binding->object_kind >= UCN_OBJECT_KIND_SEND &&
              binding->object_kind <= UCN_OBJECT_KIND_TIME_DOMAIN) ||
-            binding->object_kind == UCN_OBJECT_KIND_PERSISTENCE) &&
+            binding->object_kind == UCN_OBJECT_KIND_PERSISTENCE ||
+            binding->object_kind == UCN_OBJECT_KIND_CLUSTER) &&
            binding->reserved_zero == 0U;
 }
 

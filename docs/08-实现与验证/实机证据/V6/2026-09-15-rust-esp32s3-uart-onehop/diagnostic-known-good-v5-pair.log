@@ -1,0 +1,58 @@
+00000.140 [B/COM53] OPEN
+00000.140 [A/COM40] OPEN
+00000.187 [B/COM53] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.187 [A/COM40] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.187 [B/COM53] I (28) boot: Multicore bootloader
+00000.187 [A/COM40] I (28) boot: Multicore bootloader
+00000.187 [B/COM53] I (28) boot: chip revision: v0.2
+00000.187 [A/COM40] I (28) boot: chip revision: v0.2
+00000.187 [B/COM53] I (29) boot: efuse block revision: v1.4
+00000.187 [A/COM40] I (29) boot: efuse block revision: v1.4
+00000.203 [B/COM53] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.203 [A/COM40] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.203 [B/COM53] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.203 [A/COM40] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.203 [B/COM53] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.203 [A/COM40] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.203 [B/COM53] I (44) boot: Enabling RNG early entropy source...
+00000.203 [A/COM40] I (44) boot: Enabling RNG early entropy source...
+00000.218 [B/COM53] I (48) boot: Partition Table:
+00000.218 [A/COM40] I (48) boot: Partition Table:
+00000.218 [B/COM53] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.218 [A/COM40] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.218 [B/COM53] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.218 [A/COM40] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.234 [B/COM53] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.234 [A/COM40] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.234 [B/COM53] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.234 [A/COM40] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.234 [B/COM53] I (77) boot: End of partition table
+00000.234 [A/COM40] I (77) boot: End of partition table
+00000.250 [B/COM53] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c080020 size=06900h ( 26880) map
+00000.250 [A/COM40] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c080020 size=06d80h ( 28032) map
+00000.250 [B/COM53] I (94) esp_image: segment 1: paddr=00016928 vaddr=3fc91700 size=03dbch ( 15804) load
+00000.250 [A/COM40] I (94) esp_image: segment 1: paddr=00016da8 vaddr=3fc91700 size=03dbch ( 15804) load
+00000.265 [B/COM53] I (99) esp_image: segment 2: paddr=0001a6ec vaddr=40374000 size=0592ch ( 22828) load
+00000.265 [A/COM40] I (99) esp_image: segment 2: paddr=0001ab6c vaddr=40374000 size=054ach ( 21676) load
+00000.265 [B/COM53] I (109) esp_image: segment 3: paddr=00020020 vaddr=42000020 size=79120h (495904) map
+00000.265 [A/COM40] I (109) esp_image: segment 3: paddr=00020020 vaddr=42000020 size=7a9e0h (502240) map
+00000.390 [B/COM53] I (234) esp_image: segment 4: paddr=00099148 vaddr=4037992c size=07d78h ( 32120) load
+00000.390 [A/COM40] I (236) esp_image: segment 4: paddr=0009aa08 vaddr=403794ac size=081f8h ( 33272) load
+00000.406 [B/COM53] I (250) boot: Loaded app from partition at offset 0x10000
+00000.406 [A/COM40] I (252) boot: Loaded app from partition at offset 0x10000
+00000.406 [B/COM53] I (250) boot: Disabling RNG early entropy source...
+00000.406 [A/COM40] I (252) boot: Disabling RNG early entropy source...
+00000.781 [B/COM53] V5BENCH BOOT role=B node=0x10000002 protocol=5 reset_reason=1 board=ESP32-S3-N16R8
+00000.796 [A/COM40] V5BENCH BOOT role=A node=0x10000001 protocol=5 reset_reason=1 board=ESP32-S3-N16R8
+00000.796 [B/COM53] V5GUARD READY role=B object=0x3fc954f8 node=0x3fc955f8 node_bytes=10184 before_bytes=256 after_bytes=1024
+00000.796 [A/COM40] V5GUARD READY role=A object=0x3fc967b0 node=0x3fc968b0 node_bytes=10184 before_bytes=256 after_bytes=1024
+00000.812 [B/COM53] V5GUARD READY role=B object=wifi guarded=0x3fc9a840 adapter=0x3fc9a940 adapter_bytes=9048 before_bytes=256 after_bytes=1024
+00000.812 [A/COM40] V5GUARD READY role=A object=wifi guarded=0x3fc9de2c adapter=0x3fc9df2c adapter_bytes=9048 before_bytes=256 after_bytes=1024
+00000.843 [B/COM53] V5BENCH READY role=B node=0x10000002 espnow=off wifi_cost=45 uart_cost=34 uart0=on/RX19/TX20/0x70 uart1=on/RX15/TX16/0x71 session=0x3463F269 topology=A-B-C-D-E-F/uart-only-q3-contention single_origin=0 auto_transfer=0 transfer_stress=0 hop_benchmark=0 hop_rounds=10 hop_target=0 transfer_window=2 event_owner=1 drain=24/2000us fallback=10ms all_pairs=0 parallel=0 diagnostic_cycles=0
+00000.843 [A/COM40] V5BENCH READY role=A node=0x10000001 espnow=off wifi_cost=45 uart_cost=34 uart0=on/RX19/TX20/0x70 session=0xE67E3461 topology=A-B-C-D-E-F/uart-only-q3-contention single_origin=0 auto_transfer=0 transfer_stress=0 hop_benchmark=0 hop_rounds=10 hop_target=0 transfer_window=2 event_owner=1 drain=24/2000us fallback=10ms all_pairs=0 parallel=0 diagnostic_cycles=0
+00000.859 [B/COM53] V5RT CONFIG role=B enabled=1 source=0 target_hops=5 samples_per_class=200 interval_ms=10 wait_for_bulk=0
+00000.859 [A/COM40] V5RT CONFIG role=A enabled=1 source=1 target_hops=5 samples_per_class=100 interval_ms=10 wait_for_bulk=0
+00000.859 [A/COM40] V5RT CLASS role=A primary=Q0 second=Q3
+00000.859 [B/COM53] V5RT CLASS role=B primary=Q0 second=Q3
+00000.859 [B/COM53] V5RT BACKLOG_CONFIG role=B enabled=1 source=0 sink=0 class=Q3 payload=16 fill_budget=4 report_delay_ms=2000
+00000.859 [A/COM40] V5RT BACKLOG_CONFIG role=A enabled=1 source=1 sink=0 class=Q3 payload=16 fill_budget=4 report_delay_ms=2000

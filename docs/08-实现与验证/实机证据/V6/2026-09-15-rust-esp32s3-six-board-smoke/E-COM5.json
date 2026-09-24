@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "duration_s": 10.0,
+  "ports": [
+    {
+      "label": "E",
+      "port": "COM5",
+      "opened": true,
+      "heartbeats": 10,
+      "duplicate_heartbeats": 0,
+      "duplicate_lines": 0,
+      "first_count": 1,
+      "last_count": 10,
+      "selftest_pass_seen": true,
+      "fault_lines": 0,
+      "read_error": "",
+      "require_selftest": true,
+      "passed": true
+    }
+  ],
+  "overall_pass": true
+}

@@ -1,0 +1,132 @@
+00000.156 [B/COM53] OPEN
+00000.156 [C/COM58] OPEN
+00000.187 [B/COM53] I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.203 [B/COM53] I (28) boot: Multicore bootloader
+00000.203 [B/COM53] I (28) boot: chip revision: v0.2
+00000.203 [B/COM53] I (29) boot: efuse block revision: v1.4
+00000.203 [B/COM53] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.219 [B/COM53] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.219 [B/COM53] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.219 [B/COM53] I (44) boot: Enabling RNG early entropy source...
+00000.219 [B/COM53] I (48) boot: Partition Table:
+00000.234 [B/COM53] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.234 [B/COM53] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.234 [B/COM53] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.250 [B/COM53] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.250 [B/COM53] I (77) boot: End of partition table
+00000.250 [C/COM58] avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0I (28) boot: ESP-IDF v6.1-beta1-497-g14f663f003e 2nd stage bootloader
+00000.250 [C/COM58] I (28) boot: Multicore bootloader
+00000.250 [C/COM58] I (28) boot: chip revision: v0.2
+00000.250 [C/COM58] I (29) boot: efuse block revision: v1.4
+00000.250 [C/COM58] I (32) boot.esp32s3: Boot SPI Speed : 40MHz
+00000.250 [C/COM58] I (36) boot.esp32s3: SPI Mode       : DIO
+00000.265 [C/COM58] I (40) boot.esp32s3: SPI Flash Size : 16MB
+00000.265 [B/COM53] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=0419ch ( 16796) map
+00000.265 [C/COM58] I (44) boot: Enabling RNG early entropy source...
+00000.265 [C/COM58] I (48) boot: Partition Table:
+00000.265 [C/COM58] I (51) boot: ## Label            Usage          Type ST Offset   Length
+00000.265 [C/COM58] I (57) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+00000.265 [C/COM58] I (64) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+00000.265 [B/COM53] I (92) esp_image: segment 1: paddr=000141c4 vaddr=3fc89ac8 size=01f10h (  7952) load
+00000.265 [C/COM58] I (70) boot:  2 factory          factory app      00 00 00010000 00fa0000
+00000.265 [C/COM58] I (77) boot: End of partition table
+00000.265 [C/COM58] I (80) esp_image: segment 0: paddr=00010020 vaddr=3c000020 size=0419ch ( 16796) map
+00000.265 [C/COM58] I (92) esp_image: segment 1: paddr=000141c4 vaddr=3fc89ac8 size=01f10h (  7952) load
+00000.265 [B/COM53] I (97) esp_image: segment 2: paddr=000160dc vaddr=40378000 size=01ac8h (  6856) load
+00000.265 [C/COM58] I (97) esp_image: segment 2: paddr=000160dc vaddr=40378000 size=01ac8h (  6856) load
+00000.281 [B/COM53] I (104) esp_image: segment 3: paddr=00017bac vaddr=00000000 size=0846ch ( 33900) 
+00000.281 [C/COM58] I (104) esp_image: segment 3: paddr=00017bac vaddr=00000000 size=0846ch ( 33900) 
+00000.281 [B/COM53] I (118) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=0ae80h ( 44672) map
+00000.281 [C/COM58] I (118) esp_image: segment 4: paddr=00020020 vaddr=42010020 size=0ae80h ( 44672) map
+00000.297 [B/COM53] I (131) boot: Loaded app from partition at offset 0x10000
+00000.297 [C/COM58] I (131) boot: Loaded app from partition at offset 0x10000
+00000.297 [B/COM53] I (131) boot: Disabling RNG early entropy source...
+00000.297 [C/COM58] I (131) boot: Disabling RNG early entropy source...
+00000.312 [B/COM53] [32mINUCN_RUSTO - UCN_RUST_UART READY role=B local=2 peer=3 baud=691200 rx=GPIO19 tx=GPIO20 link_generation=1[0m
+00000.312 [B/COM53] rce...
+00000.312 [C/COM58] [32mINUCN_RUSTO - UCN_RUST_UART READY role=C local=3 peer=2 baud=691200 rx=GPIO19 tx=GPIO20 link_generation=1[0m
+00000.312 [C/COM58] rce...
+00001.172 [B/COM53] [32mINFO - [32mINFO - UCN_RUST_UART READY role=B local=2 peer=3 baud=691200 rx=GPIO19 txCN_RUST_UART BACKPRESSURE token_slot=0 token_generation=1 attempt=2[0m
+00001.172 [C/COM58] [32mINFO - [32mINFO - UCN_RUST_UART READY role=C local=3 peer=2 baud=691200 rx=GPIOESSURE token_slot=0 token_generation=1 attempt=1[0m
+00001.172 [B/COM53] en_slot=0 token_generation=1 attempt=1[0m
+00001.172 [C/COM58] [32mINFO - UCN_RUST_UART BACKPRESSURE token_slot=0 token_generation=1 attempt=2[0m
+00001.172 [B/COM53] [32mINFO - UCN_RUST_UART BACKPRESSURE token_sNG_OK role=B sequence=1 rtt_us=10057[0m
+00001.187 [C/COM58] en_slot=0 token_generation=1 attempt=1[0m
+00001.187 [B/COM53] 32mINFO - UCN_RUST_UART FIRST_RX_BYTES count=1 b0=0xD6[0m
+00001.656 [C/COM58] [32mINFO - UCN_RUST_UART BACKPRESSURE token_slot=0 token_generation=1 attempt=2[0m
+00002.156 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=1 rtt_us=10057[0m
+00002.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=2 rtt_us=338[0m
+00003.156 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=3 rtt_us=324[0m
+00003.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=4 rtt_us=323[0m
+00004.156 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=5 rtt_us=324[0m
+00004.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=6 rtt_us=324[0m
+00005.156 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=7 rtt_us=324[0m
+00005.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=8 rtt_us=324[0m
+00006.156 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=9 rtt_us=323[0m
+00006.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=10 rtt_us=323[0m
+00007.156 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=11 rtt_us=324[0m
+00007.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=12 rtt_us=323[0m
+00008.156 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=13 rtt_us=323[0m
+00008.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=14 rtt_us=323[0m
+00009.156 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=15 rtt_us=324[0m
+00009.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=16 rtt_us=322[0m
+00010.172 [C/COM58] [32mINFO - UCN_RUST_UART ut=0 rtt_min_us=322 rtt_avg_us=324 rtt_max_us=338 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00010.172 [B/COM53] [32mINFO - UCN_RUST_UART ut=0 rtt_min_us=323 rtt_avg_us=1405 rtt_max_us=10057 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00010.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=19 rtt_us=324[0m
+00010.172 [B/COM53] =2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00010.656 [C/COM58]  timeout=0 rtt_min_us=322 rtt_avg_us=324 rtt_max_us=338 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00011.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=19 rtt_us=324[0m
+00011.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=20 rtt_us=323[0m
+00012.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=21 rtt_us=325[0m
+00012.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=22 rtt_us=324[0m
+00013.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=23 rtt_us=323[0m
+00013.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=24 rtt_us=324[0m
+00014.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=25 rtt_us=324[0m
+00014.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=26 rtt_us=323[0m
+00015.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=27 rtt_us=324[0m
+00015.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=28 rtt_us=323[0m
+00016.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=29 rtt_us=323[0m
+00016.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=30 rtt_us=323[0m
+00017.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=31 rtt_us=324[0m
+00017.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=32 rtt_us=323[0m
+00018.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=33 rtt_us=323[0m
+00018.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=34 rtt_us=324[0m
+00019.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=35 rtt_us=324[0m
+00019.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=36 rtt_us=324[0m
+00020.172 [B/COM53] [32mINFO - UCN_RUST_UART out=0 rtt_min_us=323 rtt_avg_us=836 rtt_max_us=10057 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00020.172 [C/COM58] [32mINFO - UCN_RUST_UART out=0 rtt_min_us=322 rtt_avg_us=324 rtt_max_us=338 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00020.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=39 rtt_us=324[0m
+00020.172 [B/COM53] =2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00020.656 [C/COM58]  timeout=0 rtt_min_us=322 rtt_avg_us=324 rtt_max_us=338 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00021.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=39 rtt_us=324[0m
+00021.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=40 rtt_us=323[0m
+00022.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=41 rtt_us=323[0m
+00022.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=42 rtt_us=324[0m
+00023.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=43 rtt_us=324[0m
+00023.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=44 rtt_us=324[0m
+00024.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=45 rtt_us=323[0m
+00024.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=46 rtt_us=323[0m
+00025.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=47 rtt_us=323[0m
+00025.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=48 rtt_us=323[0m
+00026.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=49 rtt_us=323[0m
+00026.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=50 rtt_us=323[0m
+00027.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=51 rtt_us=324[0m
+00027.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=52 rtt_us=323[0m
+00028.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=53 rtt_us=323[0m
+00028.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=54 rtt_us=324[0m
+00029.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=55 rtt_us=323[0m
+00029.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=56 rtt_us=324[0m
+00030.172 [B/COM53] [32mINFO - UCN_RUST_UART eout=0 rtt_min_us=323 rtt_avg_us=659 rtt_max_us=10057 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00030.172 [C/COM58] [32mINFO - UCN_RUST_UART eout=0 rtt_min_us=322 rtt_avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00030.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=59 rtt_us=323[0m
+00030.172 [B/COM53] =2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00030.656 [C/COM58]  timeout=0 rtt_min_us=322 rtt_avg_us=323 rtt_max_us=338 backpressure=2 carrier_err=0 wire_err=0 seq_err=0 tx_err=0 rx_err=0[0m
+00031.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=59 rtt_us=323[0m
+00031.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=60 rtt_us=323[0m
+00032.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=61 rtt_us=323[0m
+00032.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=62 rtt_us=324[0m
+00033.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=63 rtt_us=323[0m
+00033.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=64 rtt_us=324[0m
+00034.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=65 rtt_us=324[0m
+00034.656 [C/COM58] [32mINFO - UCN_RUST_UART PING_OK role=C sequence=66 rtt_us=323[0m
+00035.172 [B/COM53] [32mINFO - UCN_RUST_UART PING_OK role=B sequence=67 rtt_us=324[0m
