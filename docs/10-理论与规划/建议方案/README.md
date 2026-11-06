@@ -6,6 +6,10 @@
 
 ## 当前建议
 
+- [原生API/RMW/设备三方案联合自审](../../09-审计与整改/UCN_V6_原生API_RMW_设备对接三方案联合自审报告.md)：全文交叉核对与9组整改、反例、分层/费用账、范围和未完成项；仅内部文档自审，不表示代码或实机放行。
+- [UCN v6 原生发布订阅与统一用户API简化详细设计](UCN_v6_原生发布订阅与统一用户API简化详细设计方案.md)：MCU优先Pub/Sub、保留最小send，C/C++/Rust调用示例、静态通道与可选动态匹配、应用Executor与物理退休、RMW共享边界、逐项费用/难度及API-00～09。普通Header新增0 B；仅候选文档，不表示SDK或模块已实现。
+- [UCN v6 rmw_ucn ROS 2中间件后端详细设计](UCN_v6_rmw_ucn_ROS2中间件后端详细设计方案.md)：独立可选RMW，保留ROS接口，分清Host/MCU、类型/CDR、Graph/GID、短绑定、Pub/Sub/Service/Action、QoS与wait/销毁；明确普通Header新增0 B与ROS专属费用分账，按原型/默认应用兼容/安全/实机逐阶段验收。仅设计候选，尚无rmw_ucn代码包。
+- [UCN v6 无人机、机器人与其他设备详细对接方案](UCN_v6_无人机机器人与其他设备详细对接方案.md)：区分原生接入、MAVLink语义网关/完整报文隧道、ROS 2白名单桥接，详细定义业务Payload、身份/控制权、时效/坐标、完成与IN_DOUBT、资源费用、实施阶段及验收反例。普通Header新增0 B；仅方案候选，不改代码、不代表专用网关或设备接入已实现。
 - [UCN v6 低开销统一 Wire：各 Contract 字段与运行机制详细设计](UCN_v6_低开销统一Wire各Contract字段与运行机制详细设计.md)：当前唯一的下一轮线上字段候选权威，定义 3 B Common Header、C0～C5、O0～O2、H0～H3、Realm 固定地址宽度、6-bit Hop Limit、Context 和实际开销。语义与逻辑交叉已内部自审，精确 Registry/Golden 仍需外审冻结；在此之前不得替换当前 Codec。
 - [UCN v6 面向用户意图的自动传输策略与配置接口详细设计](UCN_v6_面向用户意图的自动传输策略与配置接口详细设计.md)：唯一负责用户 Intent、Policy 合并、自动选型、显式收紧覆盖、Request/Attempt/Buffer 和 Completion 用户语义；普通用户无需选择 C/H/O 组合。
 - [UCN v6 逻辑模型、伪代码与状态图](UCN_v6_逻辑模型与伪代码/README.md)：包含 00～14 完整合同/对抗附录与 15～26 简化实现主线；后者补齐了基础通信、SoftRoute、Security、Reliable/Transfer、Service/QoS、Realtime、Group、Cluster、Persistence、Capability Resolver、Advanced Flow、统一 Public API/Internal SPI，以及全局不变量/模块对接登记表。当前为 `SELF-REVIEWED / EXTERNAL REVIEW REQUIRED`，不表示源码已按此实现。
