@@ -5,6 +5,7 @@ members = [
     "crates/ucn-admission",
     "crates/ucn-capability",
     "crates/ucn-core",
+    "crates/ucn-native",
     "crates/ucn-flow",
     "crates/ucn-identity",
     "crates/ucn-owner",
@@ -13,6 +14,14 @@ members = [
     "crates/ucn-security",
     "crates/ucn-types",
     "crates/ucn-wire",
+    "crates/ucn-durable",
+    "crates/ucn-digest",
+    "crates/ucn-transport",
+    "crates/ucn-service",
+    "crates/ucn-realtime",
+    "crates/ucn-group",
+    "crates/ucn-cluster",
+    "crates/ucn-runtime",
 ]
 
 [workspace.package]

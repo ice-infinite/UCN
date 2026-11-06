@@ -109,6 +109,24 @@ ActivationKey = {
 
 每个 ACK、Abort、重试和 terminal receipt 都必须 exact-match 整个 `ActivationKey`。外层 Hop/Origin Sequence 用新值防重放，但不改变事务身份。
 
+### 4.1 逐跳可见性与认证边界
+
+Advanced Flow 建链 Control 固定使用 `C0 + O1 Auth-only`。不得使用 O2，因为 Relay 必须读取
+Path Body 并安装自己的 Label；业务数据进入 C4 后仍可独立选择 O2。最终 Target 验证 Origin
+O1，Relay 则只依据当前已认证 Hop Session 获得本跳资源写权限。
+
+因此 Relay 的记录除 `ActivationKey` 外必须绑定：
+
+```text
+ingress_link_id
+ingress_link_generation
+upstream_hop_session_generation
+```
+
+同一 Body 从另一 Link/Session 到达必须视为新冲突而不是重放成功。Relay 的资源配额归当前上游
+Peer，不能按未经本节点端到端验证的逻辑 Origin 计费；Relay 也只能修改本地 Flow/Label 资源，
+不能据此触发 Endpoint、Service、Operation 或 Authority 副作用。
+
 ## 5. 状态机
 
 ```mermaid

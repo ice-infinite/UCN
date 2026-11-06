@@ -152,7 +152,7 @@ static bool key_equal(const ucn_i_route_discovery_key_t *left,
 
 static bool rreq_payload_valid(const ucn_i_route_rreq_payload_t *value)
 {
-    return value != NULL && value->minimum_payload_budget != 0U &&
+    return value != NULL && value->minimum_frame_mtu != 0U &&
            (value->flags & UINT8_C(0xFC)) == 0U &&
            bytes_zero(value->reserved_zero, sizeof(value->reserved_zero));
 }
@@ -209,8 +209,8 @@ static bool request_equal(const ucn_i_route_rreq_message_t *left,
            left->remaining_hops == right->remaining_hops &&
            left->payload.accumulated_cost ==
                right->payload.accumulated_cost &&
-           left->payload.minimum_payload_budget ==
-               right->payload.minimum_payload_budget &&
+           left->payload.minimum_frame_mtu ==
+               right->payload.minimum_frame_mtu &&
            left->payload.required_capability_bits ==
                right->payload.required_capability_bits &&
            left->payload.flags == right->payload.flags;
@@ -280,6 +280,204 @@ static uint64_t get64(const uint8_t *bytes, size_t offset)
     return value;
 }
 
+static bool control_key_valid(const ucn_i_route_discovery_key_t *key,
+                              uint8_t width)
+{
+    size_t index;
+    bool not_ff = false;
+    for (index = 0U; index < sizeof(key->origin.principal); ++index) {
+        not_ff = not_ff || key->origin.principal[index] != UINT8_MAX;
+    }
+    return key->realm != 0U && key->realm != UINT32_MAX &&
+           binding_valid(&key->origin, width) &&
+           not_ff && key->origin_session_generation != 0U &&
+           address_valid(key->target_address, width) &&
+           key->transaction_id != 0U;
+}
+
+static void control_key_encode(const ucn_i_route_discovery_key_t *key,
+                               uint8_t bytes[44])
+{
+    put32(bytes, 0U, key->realm);
+    put32(bytes, 4U, key->origin.address);
+    put32(bytes, 8U, key->origin.generation);
+    memcpy(&bytes[12], key->origin.principal, 16U);
+    put32(bytes, 28U, key->origin_session_generation);
+    put32(bytes, 32U, key->target_address);
+    put64(bytes, 36U, key->transaction_id);
+}
+
+static void control_key_decode(const uint8_t bytes[44],
+                               ucn_i_route_discovery_key_t *key)
+{
+    key->realm = get32(bytes, 0U);
+    key->origin.address = get32(bytes, 4U);
+    key->origin.generation = get32(bytes, 8U);
+    memcpy(key->origin.principal, &bytes[12], 16U);
+    key->origin_session_generation = get32(bytes, 28U);
+    key->target_address = get32(bytes, 32U);
+    key->transaction_id = get64(bytes, 36U);
+}
+
+ucn_result_t ucn_i_route_control_request_encode(
+    const ucn_i_route_rreq_message_t *message, uint8_t address_width,
+    uint8_t output[UCN_I_ROUTE_CONTROL_REQUEST_BYTES])
+{
+    uint8_t bytes[UCN_I_ROUTE_CONTROL_REQUEST_BYTES];
+    if (message == NULL || output == NULL ||
+        ucn_i_ranges_overlap(message, sizeof(*message), output, sizeof(bytes)) ||
+        !control_key_valid(&message->key, address_width) ||
+        message->remaining_hops == 0U || message->remaining_hops > 63U ||
+        !bytes_zero(message->reserved_zero, sizeof(message->reserved_zero)) ||
+        !rreq_payload_valid(&message->payload)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    control_key_encode(&message->key, bytes);
+    bytes[44] = message->remaining_hops;
+    (void)ucn_i_route_rreq_encode(&message->payload, &bytes[45]);
+    memcpy(output, bytes, sizeof(bytes));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_route_control_request_decode(
+    const uint8_t *input, size_t length, uint8_t address_width,
+    ucn_i_route_rreq_message_t *message_out)
+{
+    ucn_i_route_rreq_message_t message;
+    if (input == NULL || message_out == NULL ||
+        ucn_i_ranges_overlap(input, length, message_out, sizeof(*message_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (length != UCN_I_ROUTE_CONTROL_REQUEST_BYTES) {
+        return UCN_ERR_MALFORMED;
+    }
+    memset(&message, 0, sizeof(message));
+    control_key_decode(input, &message.key);
+    message.remaining_hops = input[44];
+    if (!control_key_valid(&message.key, address_width) ||
+        message.remaining_hops == 0U || message.remaining_hops > 63U ||
+        ucn_i_route_rreq_decode(&input[45], &message.payload) != UCN_OK) {
+        return UCN_ERR_MALFORMED;
+    }
+    *message_out = message;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_route_control_reply_encode(
+    const ucn_i_route_rrep_message_t *message, uint32_t reporter_generation,
+    uint8_t address_width, uint8_t output[UCN_I_ROUTE_CONTROL_REPLY_BYTES])
+{
+    uint8_t bytes[UCN_I_ROUTE_CONTROL_REPLY_BYTES];
+    if (message == NULL || output == NULL ||
+        ucn_i_ranges_overlap(message, sizeof(*message), output, sizeof(bytes)) ||
+        !control_key_valid(&message->key, address_width) ||
+        !rrep_payload_valid(&message->payload) ||
+        ((message->payload.hop_count == 0U) != (reporter_generation == 0U))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    control_key_encode(&message->key, bytes);
+    (void)ucn_i_route_rrep_encode(&message->payload, &bytes[44]);
+    put32(bytes, 73U, reporter_generation);
+    memcpy(output, bytes, sizeof(bytes));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_route_control_reply_decode(
+    const uint8_t *input, size_t length, uint8_t address_width,
+    ucn_i_route_rrep_message_t *message_out, uint32_t *reporter_generation_out)
+{
+    ucn_i_route_rrep_message_t message;
+    uint32_t generation;
+    if (input == NULL || message_out == NULL || reporter_generation_out == NULL ||
+        ucn_i_ranges_overlap(input, length, message_out, sizeof(*message_out)) ||
+        ucn_i_ranges_overlap(input, length, reporter_generation_out,
+                             sizeof(*reporter_generation_out)) ||
+        ucn_i_ranges_overlap(message_out, sizeof(*message_out),
+                             reporter_generation_out, sizeof(*reporter_generation_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (length != UCN_I_ROUTE_CONTROL_REPLY_BYTES) {
+        return UCN_ERR_MALFORMED;
+    }
+    memset(&message, 0, sizeof(message));
+    control_key_decode(input, &message.key);
+    generation = get32(input, 73U);
+    if (!control_key_valid(&message.key, address_width) ||
+        ucn_i_route_rrep_decode(&input[44], &message.payload) != UCN_OK ||
+        ((message.payload.hop_count == 0U) != (generation == 0U))) {
+        return UCN_ERR_MALFORMED;
+    }
+    *message_out = message;
+    *reporter_generation_out = generation;
+    return UCN_OK;
+}
+
+static bool route_fragment_valid(const ucn_i_route_fragment_t *v)
+{
+    size_t piece;
+    size_t offset;
+    size_t length;
+    if (v == NULL || v->bundle == 0U || v->reserved_zero != 0U ||
+        v->count < 2U || v->count > 4U || v->index >= v->count ||
+        !((v->opcode == UINT16_C(0x0202) && v->total == 77U) ||
+          (v->opcode == UINT16_C(0x0203) && v->total == 99U))) {
+        return false;
+    }
+    piece = ((size_t)v->total + v->count - 1U) / v->count;
+    offset = v->index * piece;
+    length = (size_t)v->total - offset;
+    if (length > piece) { length = piece; }
+    return length == v->length &&
+           bytes_zero(&v->chunk[length], sizeof(v->chunk) - length);
+}
+
+ucn_result_t ucn_i_route_fragment_encode(
+    const ucn_i_route_fragment_t *fragment, uint8_t *output,
+    size_t capacity, size_t *length_out)
+{
+    size_t length;
+    uint8_t bytes[64];
+    if (output == NULL || length_out == NULL || !route_fragment_valid(fragment) ||
+        ucn_i_ranges_overlap(fragment, sizeof(*fragment), output, capacity) ||
+        ucn_i_ranges_overlap(fragment, sizeof(*fragment), length_out, sizeof(*length_out)) ||
+        ucn_i_ranges_overlap(output, capacity, length_out, sizeof(*length_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    length = UCN_I_ROUTE_FRAGMENT_PREFIX_BYTES + fragment->length;
+    if (capacity < length) { return UCN_ERR_NO_SPACE; }
+    put16(bytes, 0U, fragment->opcode);
+    put16(bytes, 2U, fragment->total);
+    bytes[4] = fragment->index;
+    bytes[5] = fragment->count;
+    put64(bytes, 6U, fragment->bundle);
+    memcpy(&bytes[14], fragment->chunk, fragment->length);
+    memcpy(output, bytes, length);
+    *length_out = length;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_route_fragment_decode(
+    const uint8_t *input, size_t length, ucn_i_route_fragment_t *fragment_out)
+{
+    ucn_i_route_fragment_t v;
+    if (input == NULL || fragment_out == NULL ||
+        ucn_i_ranges_overlap(input, length, fragment_out, sizeof(*fragment_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (length < 15U || length > 64U) { return UCN_ERR_MALFORMED; }
+    memset(&v, 0, sizeof(v));
+    v.opcode = get16(input, 0U);
+    v.total = get16(input, 2U);
+    v.index = input[4];
+    v.count = input[5];
+    v.bundle = get64(input, 6U);
+    v.length = (uint8_t)(length - UCN_I_ROUTE_FRAGMENT_PREFIX_BYTES);
+    memcpy(v.chunk, &input[14], v.length);
+    if (!route_fragment_valid(&v)) { return UCN_ERR_MALFORMED; }
+    *fragment_out = v;
+    return UCN_OK;
+}
+
 ucn_result_t ucn_i_route_rreq_encode(const ucn_i_route_rreq_payload_t *value,
                                      uint8_t output[UCN_I_ROUTE_RREQ_BYTES])
 {
@@ -290,7 +488,7 @@ ucn_result_t ucn_i_route_rreq_encode(const ucn_i_route_rreq_payload_t *value,
         return UCN_ERR_ARGUMENT;
     }
     put32(bytes, 0U, value->accumulated_cost);
-    put16(bytes, 4U, value->minimum_payload_budget);
+    put16(bytes, 4U, value->minimum_frame_mtu);
     put16(bytes, 6U, value->required_capability_bits);
     bytes[8] = value->flags;
     memcpy(output, bytes, sizeof(bytes));
@@ -309,7 +507,7 @@ ucn_result_t ucn_i_route_rreq_decode(const uint8_t input[UCN_I_ROUTE_RREQ_BYTES]
     }
     memset(&value, 0, sizeof(value));
     value.accumulated_cost = get32(input, 0U);
-    value.minimum_payload_budget = get16(input, 4U);
+    value.minimum_frame_mtu = get16(input, 4U);
     value.required_capability_bits = get16(input, 6U);
     value.flags = input[8];
     if (!rreq_payload_valid(&value)) {
@@ -585,7 +783,7 @@ static bool route_handle_matches(const ucn_handle_t *handle,
 ucn_result_t ucn_i_route_ensure_discovery(ucn_i_route_owner_t *owner,
                                           uint32_t target_address,
                                           uint16_t required_capability_bits,
-                                          uint16_t minimum_payload_budget,
+                                          uint16_t minimum_frame_mtu,
                                           uint8_t flags,
                                           uint64_t now_us,
                                           ucn_handle_t *handle_out,
@@ -622,7 +820,7 @@ ucn_result_t ucn_i_route_ensure_discovery(ucn_i_route_owner_t *owner,
         return result;
     }
     if (!address_valid(target_address, owner->address_width) ||
-        target_address == owner->local.address || minimum_payload_budget == 0U ||
+        target_address == owner->local.address || minimum_frame_mtu == 0U ||
         (flags & UINT8_C(0xFC)) != 0U) {
         result = UCN_ERR_ARGUMENT;
         goto done;
@@ -638,8 +836,8 @@ ucn_result_t ucn_i_route_ensure_discovery(ucn_i_route_owner_t *owner,
             }
             if (record.request.payload.required_capability_bits !=
                     required_capability_bits ||
-                record.request.payload.minimum_payload_budget !=
-                    minimum_payload_budget ||
+                record.request.payload.minimum_frame_mtu !=
+                    minimum_frame_mtu ||
                 record.request.payload.flags != flags) {
                 result = UCN_ERR_STATE;
                 goto done;
@@ -686,7 +884,7 @@ ucn_result_t ucn_i_route_ensure_discovery(ucn_i_route_owner_t *owner,
     record.request.key.origin_session_generation =
         owner->local_session_generation;
     record.request.key.target_address = target_address;
-    record.request.payload.minimum_payload_budget = minimum_payload_budget;
+    record.request.payload.minimum_frame_mtu = minimum_frame_mtu;
     record.request.payload.required_capability_bits =
         required_capability_bits;
     record.request.payload.flags = flags;
@@ -822,6 +1020,8 @@ static void commit_route(ucn_i_route_owner_t *owner,
     value.capability_bits = capabilities;
     value.hop_count = hop_count;
     owner->routes[index].value = value;
+    owner->routes[index].reporter_generation = 0U;
+    owner->routes[index].reporter_bound = 0U;
     owner->routes[index].occupied = 1U;
 }
 
@@ -862,8 +1062,9 @@ ucn_result_t ucn_i_route_on_rreq(ucn_i_route_owner_t *owner,
     }
     if (!rreq_message_valid(owner, request) ||
         !link_valid(ingress, owner->address_width) ||
+        binding_equal(&request->key.origin, &owner->local) ||
         binding_equal(&ingress->peer, &owner->local) ||
-        request->payload.minimum_payload_budget > ingress->frame_mtu ||
+        request->payload.minimum_frame_mtu > ingress->frame_mtu ||
         (request->payload.required_capability_bits &
          (uint16_t)~ingress->capability_bits) != 0U) {
         result = UCN_ERR_ACCESS;
@@ -1016,7 +1217,7 @@ ucn_result_t ucn_i_route_make_rrep(ucn_i_route_owner_t *owner,
     if (!rreq_message_valid(owner, request) ||
         request->key.target_address != owner->local.address ||
         local_frame_mtu == 0U ||
-        local_frame_mtu < request->payload.minimum_payload_budget ||
+        local_frame_mtu < request->payload.minimum_frame_mtu ||
         (request->payload.required_capability_bits &
          (uint16_t)~local_capability_bits) != 0U) {
         result = UCN_ERR_ACCESS;
@@ -1069,11 +1270,13 @@ static int discovery_find(const ucn_i_route_owner_t *owner,
     return -1;
 }
 
-ucn_result_t ucn_i_route_on_rrep(ucn_i_route_owner_t *owner,
+static ucn_result_t route_on_rrep(ucn_i_route_owner_t *owner,
                                  const ucn_i_route_rrep_message_t *reply,
                                  const ucn_i_route_link_ref_t *ingress,
                                  uint64_t now_us,
-                                 ucn_i_route_reply_action_t *action_out)
+                                 ucn_i_route_reply_action_t *action_out,
+                                 bool bind_reporter,
+                                 uint32_t reporter_generation)
 {
     ucn_i_route_reply_action_t action;
     ucn_i_route_domain_t domain;
@@ -1092,6 +1295,8 @@ ucn_result_t ucn_i_route_on_rrep(ucn_i_route_owner_t *owner,
     ucn_result_t result;
 
     if (reply == NULL || ingress == NULL || action_out == NULL ||
+        (bind_reporter &&
+         ((reply->payload.hop_count == 0U) != (reporter_generation == 0U))) ||
         ucn_i_ranges_overlap(owner, sizeof(*owner), reply,
                              sizeof(*reply)) ||
         ucn_i_ranges_overlap(owner, sizeof(*owner), ingress,
@@ -1172,7 +1377,7 @@ ucn_result_t ucn_i_route_on_rrep(ucn_i_route_owner_t *owner,
                    reply->payload.path_frame_mtu : ingress->frame_mtu;
     capability_bits =
         (uint16_t)(reply->payload.capability_bits & ingress->capability_bits);
-    if (path_mtu < accepted.payload.minimum_payload_budget ||
+    if (path_mtu < accepted.payload.minimum_frame_mtu ||
         (accepted.payload.required_capability_bits &
          (uint16_t)~capability_bits) != 0U) {
         result = UCN_ERR_ACCESS;
@@ -1189,6 +1394,8 @@ ucn_result_t ucn_i_route_on_rrep(ucn_i_route_owner_t *owner,
     commit_route(owner, (size_t)route_index, &domain, ingress,
                  route_generation, reply->key.transaction_id, hop_count,
                  cost, path_mtu, capability_bits, route_deadline);
+    owner->routes[route_index].reporter_bound = bind_reporter ? 1U : 0U;
+    owner->routes[route_index].reporter_generation = reporter_generation;
     owner->next_route_generation =
         route_generation == UINT32_MAX ? 0U : route_generation + 1U;
     action.installed = owner->routes[route_index].value;
@@ -1214,6 +1421,23 @@ ucn_result_t ucn_i_route_on_rrep(ucn_i_route_owner_t *owner,
 done:
     owner_unlock(owner);
     return result;
+}
+
+ucn_result_t ucn_i_route_on_rrep(ucn_i_route_owner_t *owner,
+    const ucn_i_route_rrep_message_t *reply,
+    const ucn_i_route_link_ref_t *ingress, uint64_t now_us,
+    ucn_i_route_reply_action_t *action_out)
+{
+    return route_on_rrep(owner, reply, ingress, now_us, action_out, false, 0U);
+}
+
+ucn_result_t ucn_i_route_on_control_rrep(ucn_i_route_owner_t *owner,
+    const ucn_i_route_rrep_message_t *reply, uint32_t reporter_generation,
+    const ucn_i_route_link_ref_t *ingress, uint64_t now_us,
+    ucn_i_route_reply_action_t *action_out)
+{
+    return route_on_rrep(owner, reply, ingress, now_us, action_out,
+                         true, reporter_generation);
 }
 
 ucn_result_t ucn_i_route_complete_rrep_forward(ucn_i_route_owner_t *owner,
@@ -1322,6 +1546,98 @@ done:
     return result;
 }
 
+ucn_result_t ucn_i_route_forward_resolve(
+    ucn_i_route_owner_t *owner,
+    const ucn_i_route_forward_key_t *key,
+    ucn_i_route_resolved_t *resolved_out)
+{
+    ucn_i_route_resolved_t resolved;
+    size_t index;
+    size_t match_index = SIZE_MAX;
+    ucn_result_t result;
+
+    if (owner == NULL || key == NULL || resolved_out == NULL ||
+        key->now_us == 0U || key->realm == 0U ||
+        key->source_address == 0U ||
+        key->source_binding_generation == 0U ||
+        key->destination_address == 0U ||
+        key->destination_binding_generation == 0U ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), key, sizeof(*key)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), resolved_out,
+                             sizeof(*resolved_out)) ||
+        ucn_i_ranges_overlap(key, sizeof(*key), resolved_out,
+                             sizeof(*resolved_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = owner_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (key->realm != owner->realm ||
+        !address_valid(key->source_address, owner->address_width) ||
+        !address_valid(key->destination_address, owner->address_width)) {
+        result = UCN_ERR_ARGUMENT;
+        goto done;
+    }
+    for (index = 0U; index < UCN_I_ROUTE_DYNAMIC_COUNT; ++index) {
+        const ucn_i_route_soft_view_t *route = &owner->routes[index].value;
+
+        if (owner->routes[index].occupied == 0U ||
+            ucn_i_deadline_expired_us(key->now_us, route->expires_at_us) ||
+            route->domain.realm != key->realm ||
+            route->domain.origin.address != key->source_address ||
+            route->domain.origin.generation !=
+                key->source_binding_generation ||
+            route->domain.destination.address !=
+                key->destination_address ||
+            route->domain.destination.generation !=
+                key->destination_binding_generation) {
+            continue;
+        }
+        if (match_index != SIZE_MAX) {
+            result = UCN_ERR_STATE;
+            goto done;
+        }
+        match_index = index;
+    }
+    memset(&resolved, 0, sizeof(resolved));
+    if (match_index != SIZE_MAX) {
+        resolved.kind = UCN_I_ROUTE_RESOLVED_DYNAMIC;
+        resolved.dynamic = owner->routes[match_index].value;
+        *resolved_out = resolved;
+        result = UCN_OK;
+        goto done;
+    }
+    match_index = SIZE_MAX;
+    for (index = 0U; index < UCN_I_ROUTE_STATIC_COUNT; ++index) {
+        const ucn_i_route_static_entry_t *route =
+            &owner->static_routes[index].value;
+
+        if (owner->static_routes[index].occupied == 0U ||
+            route->destination.address != key->destination_address ||
+            route->destination.generation !=
+                key->destination_binding_generation) {
+            continue;
+        }
+        if (match_index != SIZE_MAX) {
+            result = UCN_ERR_STATE;
+            goto done;
+        }
+        match_index = index;
+    }
+    if (match_index == SIZE_MAX) {
+        result = UCN_ERR_NOT_FOUND;
+        goto done;
+    }
+    resolved.kind = UCN_I_ROUTE_RESOLVED_STATIC;
+    resolved.static_route = owner->static_routes[match_index].value;
+    *resolved_out = resolved;
+    result = UCN_OK;
+done:
+    owner_unlock(owner);
+    return result;
+}
+
 ucn_result_t ucn_i_route_invalidate_link(ucn_i_route_owner_t *owner,
                                          uint16_t link_id,
                                          uint32_t link_generation,
@@ -1355,6 +1671,46 @@ ucn_result_t ucn_i_route_invalidate_link(ucn_i_route_owner_t *owner,
     *invalidated_out = invalidated;
     owner_unlock(owner);
     return UCN_OK;
+}
+
+ucn_result_t ucn_i_route_retire_peer_history(
+    ucn_i_route_owner_t *owner,
+    const ucn_i_route_link_ref_t *peer,
+    uint16_t *retired_out)
+{
+    size_t i;
+    uint16_t count = 0U;
+    ucn_result_t result;
+    if (owner == NULL || peer == NULL || retired_out == NULL ||
+        ucn_i_ranges_overlap(owner,sizeof(*owner),peer,sizeof(*peer)) ||
+        ucn_i_ranges_overlap(owner,sizeof(*owner),retired_out,sizeof(*retired_out)) ||
+        ucn_i_ranges_overlap(peer,sizeof(*peer),retired_out,sizeof(*retired_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result=owner_lock(owner); if (result != UCN_OK) { return result; }
+    if (!link_valid(peer,owner->address_width)) {
+        owner_unlock(owner); return UCN_ERR_ARGUMENT;
+    }
+    for (i=0U;i<UCN_I_ROUTE_REVERSE_COUNT;++i) {
+        if (owner->reverse[i].occupied != 0U &&
+            link_equal(&owner->reverse[i].upstream,peer) &&
+            owner->reverse[i].reply_pending != 0U) {
+            owner_unlock(owner); return UCN_ERR_STATE;
+        }
+    }
+    for (i=0U;i<UCN_I_ROUTE_DYNAMIC_COUNT;++i) {
+        if (owner->routes[i].occupied != 0U &&
+            link_equal(&owner->routes[i].value.next_hop,peer)) {
+            memset(&owner->routes[i],0,sizeof(owner->routes[i])); ++count;
+        }
+    }
+    for (i=0U;i<UCN_I_ROUTE_REVERSE_COUNT;++i) {
+        if (owner->reverse[i].occupied != 0U &&
+            link_equal(&owner->reverse[i].upstream,peer)) {
+            clear_reverse_value(&owner->reverse[i]); ++count;
+        }
+    }
+    *retired_out=count; owner_unlock(owner); return UCN_OK;
 }
 
 ucn_result_t ucn_i_route_make_rerr(ucn_i_route_owner_t *owner,
@@ -1414,9 +1770,9 @@ done:
     return result;
 }
 
-ucn_result_t ucn_i_route_on_rerr(ucn_i_route_owner_t *owner,
+static ucn_result_t route_on_rerr(ucn_i_route_owner_t *owner,
                                  const ucn_i_route_rerr_payload_t *payload,
-                                 uint8_t *invalidated_out)
+                                 uint8_t *invalidated_out, bool from_wire)
 {
     ucn_i_route_domain_t domain;
     size_t index;
@@ -1457,11 +1813,15 @@ ucn_result_t ucn_i_route_on_rerr(ucn_i_route_owner_t *owner,
 
         if (owner->routes[index].occupied != 0U &&
             domain_equal(&route->domain, &domain) &&
-            route->route_generation == payload->route_generation &&
+            (from_wire ?
+                (owner->routes[index].reporter_bound != 0U &&
+                 owner->routes[index].reporter_generation != 0U &&
+                 owner->routes[index].reporter_generation == payload->route_generation) :
+                route->route_generation == payload->route_generation) &&
             route->route_causal_id == payload->route_causal_id &&
-            route->next_hop.link_id == payload->failed_link_id &&
-            route->next_hop.link_generation ==
-                payload->failed_link_generation &&
+            (from_wire ||
+             (route->next_hop.link_id == payload->failed_link_id &&
+              route->next_hop.link_generation == payload->failed_link_generation)) &&
             route->next_hop.peer.address == payload->reporter_address &&
             route->next_hop.peer.generation ==
                 payload->reporter_binding_generation &&
@@ -1478,6 +1838,18 @@ ucn_result_t ucn_i_route_on_rerr(ucn_i_route_owner_t *owner,
 done:
     owner_unlock(owner);
     return result;
+}
+
+ucn_result_t ucn_i_route_on_rerr(ucn_i_route_owner_t *owner,
+    const ucn_i_route_rerr_payload_t *payload, uint8_t *invalidated_out)
+{
+    return route_on_rerr(owner, payload, invalidated_out, false);
+}
+
+ucn_result_t ucn_i_route_on_wire_rerr(ucn_i_route_owner_t *owner,
+    const ucn_i_route_rerr_payload_t *payload, uint8_t *invalidated_out)
+{
+    return route_on_rerr(owner, payload, invalidated_out, true);
 }
 
 ucn_result_t ucn_i_route_maintain(ucn_i_route_owner_t *owner,
@@ -1522,6 +1894,7 @@ ucn_result_t ucn_i_route_maintain(ucn_i_route_owner_t *owner,
             uint16_t index =
                 (uint16_t)(cursor - UCN_I_ROUTE_DISCOVERY_COUNT);
             if (owner->reverse[index].occupied != 0U &&
+                owner->reverse[index].reply_pending == 0U &&
                 ucn_i_deadline_expired_us(
                     now_us, owner->reverse[index].expires_at_us)) {
                 clear_reverse_value(&owner->reverse[index]);

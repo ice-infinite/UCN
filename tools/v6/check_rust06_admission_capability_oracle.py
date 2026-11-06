@@ -39,7 +39,8 @@ def main() -> None:
         bytes((1, 1, 4, 0))
         + struct.pack(">QI", transaction_id, 0x01020304)
         + bytes((1, 2, 3, 4))
-        + bytes(20)
+        + bytes(12)
+        + struct.pack(">HIH",7,9,0)
     )
     hello_cookie = (
         bytes((1, 1, 4, 0))

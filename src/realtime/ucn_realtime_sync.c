@@ -224,6 +224,126 @@ ucn_result_t ucn_i_realtime_sync_bind_t3(
     unlock_owner(owner); return UCN_OK;
 }
 
+static bool time_key_matches_slot(const ucn_i_realtime_time_key_t *key,
+                                  const ucn_i_realtime_sync_slot_t *slot)
+{
+    return key->clock_domain_id == slot->clock_domain_id &&
+           key->domain_generation == slot->domain_generation &&
+           key->sync_sequence == slot->sync_sequence &&
+           key->reserved_zero == 0U;
+}
+
+ucn_result_t ucn_i_realtime_sync_accept_follow_up(
+    ucn_i_realtime_owner_t *owner, ucn_handle_t sync,
+    const ucn_i_realtime_time_follow_up_t *follow_up,
+    uint64_t member_receive_local_us)
+{
+    ucn_i_realtime_sync_slot_t *slot;
+    ucn_result_t result;
+    if (owner == NULL || follow_up == NULL ||
+        member_receive_local_us == 0U ||
+        follow_up->t1_master_tx_us == 0U ||
+        follow_up->t1_uncertainty_us == 0U ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), follow_up,
+                             sizeof(*follow_up))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = lock_owner(owner);
+    if (result != UCN_OK) return result;
+    slot = sync_slot(owner, sync);
+    if (slot == NULL || !time_key_matches_slot(&follow_up->key, slot) ||
+        member_receive_local_us < slot->t2_us ||
+        member_receive_local_us >= slot->deadline_us) {
+        unlock_owner(owner);
+        return UCN_ERR_STATE;
+    }
+    if (slot->t1_bound != 0U) {
+        result = slot->t1_us == follow_up->t1_master_tx_us &&
+                         slot->t1_uncertainty_us ==
+                             follow_up->t1_uncertainty_us ?
+                     UCN_OK : UCN_ERR_REPLAY;
+        unlock_owner(owner);
+        return result;
+    }
+    slot->t1_us = follow_up->t1_master_tx_us;
+    slot->t1_uncertainty_us = follow_up->t1_uncertainty_us;
+    slot->t1_bound = 1U;
+    unlock_owner(owner);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_realtime_sync_complete_delay_response(
+    ucn_i_realtime_owner_t *owner, ucn_handle_t sync,
+    const ucn_i_realtime_time_delay_response_t *response,
+    uint64_t member_receive_local_us)
+{
+    ucn_i_realtime_sync_response_t complete;
+    ucn_i_realtime_sync_slot_t *slot;
+    ucn_result_t result;
+    if (owner == NULL || response == NULL ||
+        member_receive_local_us == 0U ||
+        response->t4_master_rx_us == 0U ||
+        response->t4_uncertainty_us == 0U ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), response,
+                             sizeof(*response))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = lock_owner(owner);
+    if (result != UCN_OK) return result;
+    slot = sync_slot(owner, sync);
+    if (slot == NULL || slot->t1_bound != 1U ||
+        !time_key_matches_slot(&response->key, slot)) {
+        unlock_owner(owner);
+        return UCN_ERR_STATE;
+    }
+    memset(&complete, 0, sizeof(complete));
+    complete.path = slot->path;
+    complete.t1_master_tx_us = slot->t1_us;
+    complete.t4_master_rx_us = response->t4_master_rx_us;
+    complete.domain_generation = slot->domain_generation;
+    complete.sync_sequence = slot->sync_sequence;
+    complete.t1_uncertainty_us = slot->t1_uncertainty_us;
+    complete.t4_uncertainty_us = response->t4_uncertainty_us;
+    complete.clock_domain_id = slot->clock_domain_id;
+    unlock_owner(owner);
+    return ucn_i_realtime_sync_complete(owner, sync, &complete,
+                                        member_receive_local_us);
+}
+
+ucn_result_t ucn_i_realtime_sync_abort(
+    ucn_i_realtime_owner_t *owner, ucn_handle_t sync,
+    const ucn_i_realtime_time_abort_t *abort, uint64_t now_us)
+{
+    ucn_i_realtime_sync_slot_t *slot;
+    uint16_t needed;
+    ucn_result_t result;
+    if (owner == NULL || abort == NULL || now_us == 0U ||
+        abort->reason < UCN_I_REALTIME_ABORT_POLICY ||
+        abort->reason > UCN_I_REALTIME_ABORT_CONFLICT ||
+        abort->reserved_zero[0] != 0U ||
+        abort->reserved_zero[1] != 0U ||
+        abort->reserved_zero[2] != 0U ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), abort,
+                             sizeof(*abort))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = lock_owner(owner);
+    if (result != UCN_OK) return result;
+    slot = sync_slot(owner, sync);
+    if (slot == NULL || !time_key_matches_slot(&abort->key, slot)) {
+        unlock_owner(owner);
+        return UCN_ERR_STATE;
+    }
+    needed = (uint16_t)(1U + (slot->t3_bound != 0U ? 1U : 0U));
+    if (free_releases(owner) < needed) {
+        unlock_owner(owner);
+        return UCN_ERR_NO_SPACE;
+    }
+    result = clear_sync_with_releases(owner, slot);
+    unlock_owner(owner);
+    return result;
+}
+
 static bool offset_compute(uint64_t t1, uint64_t t2, uint64_t t3, uint64_t t4,
                            int64_t *offset_out)
 {

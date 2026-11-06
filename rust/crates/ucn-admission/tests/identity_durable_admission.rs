@@ -247,7 +247,12 @@ impl CookieProvider for Oracle {
         Ok(4)
     }
 
-    fn verify_cookie(&mut self, hello_cookie: &HelloCookie, _key: &AdmissionKey) -> Result<()> {
+    fn verify_cookie(
+        &mut self,
+        hello_cookie: &HelloCookie,
+        _key: &AdmissionKey,
+        _now_us: u64,
+    ) -> Result<()> {
         if hello_cookie.cookie_evidence.bytes() == [1, 2, 3, 4] {
             Ok(())
         } else {
@@ -637,7 +642,7 @@ fn final_admission_requires_identity_reload_proof() {
         selected_link_instance_id: 7,
         selected_link_instance_generation: 9,
         prior_messages_hash: [0x31; 32],
-        cookie_evidence: Evidence::new(&[1, 2, 3, 4]).expect("cookie evidence"),
+        cookie_evidence: ucn_admission::Cookie::new(&[1, 2, 3, 4]).expect("cookie evidence"),
     };
     let handle = admission
         .open_after_cookie(

@@ -98,7 +98,8 @@ bool ucn_i_service_p_key_valid(const ucn_i_service_key_t *key)
     return key != NULL && binding_valid(&key->client) &&
            binding_valid(&key->server) && security_valid(&key->security) &&
            key->operation_id != 0U && key->realm != 0U &&
-           key->service_id != 0U && key->opcode != 0U;
+           key->service_id != 0U && key->service_id != UINT16_MAX &&
+           key->opcode != UINT16_MAX; /* Data's canonical business opcode is zero. */
 }
 
 bool ucn_i_service_p_key_equal(const ucn_i_service_key_t *left,

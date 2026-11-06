@@ -79,7 +79,7 @@ static ucn_i_transport_transfer_setup_t setup_for(
     setup.fragment_budget = 4U;
     setup.fragment_count = (uint16_t)((bytes + 3U) / 4U);
     setup.lifetime_ms = 1000U;
-    (void)ucn_i_sha256_128(message, bytes, setup.message_digest, &workspace);
+    (void)UCN_I_DIGEST_CANONICAL("UCN6-TRANSFER-MESSAGE-V1", message, bytes, setup.message_digest, &workspace);
     return setup;
 }
 
@@ -229,7 +229,8 @@ static int test_transfer_roundtrip(void)
     CHECK(view.deadline_us == UINT64_C(1100));
     CHECK(ucn_i_transport_transfer_rx_setup(
               &owner, &setup, &facts, 499U, &duplicate,
-              &exact) == UCN_ERR_REPLAY);
+              &exact) == UCN_OK);
+    CHECK(exact && memcmp(&rx, &duplicate, sizeof(rx)) == 0);
     CHECK(ucn_i_transport_transfer_rx_setup(
               &owner, &setup, &wrong_facts, 499U, &duplicate,
               &exact) == UCN_ERR_REPLAY);

@@ -215,6 +215,29 @@ static void test_intrinsic_closure_and_independence(void)
     }
 }
 
+static void test_nondurable_transport_service_without_persistence(void)
+{
+    const ucn_i_composition_module_mask_t modules =
+        UCN_I_COMPOSE_FOUNDATION | UCN_I_COMPOSE_TRANSPORT |
+        UCN_I_COMPOSE_SERVICE;
+    ucn_i_composition_request_t request = request_make(
+        modules, UCN_I_CAP_STATIC_C1 | UCN_I_CAP_RELIABLE |
+                     UCN_I_CAP_SERVICE);
+    ucn_i_composition_plan_t plan;
+    ucn_i_composition_plan_t before;
+
+    memset(&plan, 0, sizeof(plan));
+    CHECK(ucn_i_composition_plan_build(&request, &plan) == UCN_OK);
+    CHECK(plan.selected_module_mask == modules);
+    CHECK(plan.durable_module_mask == 0U);
+    CHECK((plan.selected_module_mask & UCN_I_COMPOSE_PERSISTENCE) == 0U);
+
+    before = plan;
+    request.capability_mask |= UCN_I_CAP_DURABLE_OPERATION;
+    CHECK(ucn_i_composition_plan_build(&request, &plan) == UCN_ERR_CONFIG);
+    CHECK(memcmp(&plan, &before, sizeof(plan)) == 0);
+}
+
 static void test_deterministic_order_digest_and_tamper(void)
 {
     ucn_i_composition_capability_mask_t compiled_capabilities =
@@ -299,8 +322,22 @@ static void test_deterministic_order_digest_and_tamper(void)
     second.composition_digest ^= UINT64_C(1);
     CHECK(!ucn_i_composition_plan_valid(&second));
     second = first;
+    second.compiled_module_mask ^= UCN_I_COMPOSE_FOUNDATION;
+    CHECK(!ucn_i_composition_plan_valid(&second));
+    second = first;
+    second.selected_module_mask ^= UCN_I_COMPOSE_FOUNDATION;
+    CHECK(!ucn_i_composition_plan_valid(&second));
+    second = first;
+    second.durable_module_mask ^= UCN_I_COMPOSE_PERSISTENCE;
+    CHECK(!ucn_i_composition_plan_valid(&second));
+    second = first;
     second.init_order[2] = second.init_order[1];
     CHECK(!ucn_i_composition_plan_valid(&second));
+    if (first.init_count < UCN_I_COMPOSITION_INIT_ORDER_CAPACITY) {
+        second = first;
+        second.init_order[first.init_count] = UINT8_C(1);
+        CHECK(!ucn_i_composition_plan_valid(&second));
+    }
     second = first;
     second.private_owner_bytes += 1U;
     CHECK(!ucn_i_composition_plan_valid(&second));
@@ -326,6 +363,7 @@ int main(void)
         test_minimal_and_zero_write();
         test_capability_closure();
         test_intrinsic_closure_and_independence();
+        test_nondurable_transport_service_without_persistence();
         test_deterministic_order_digest_and_tamper();
     }
     if (failures != 0) {

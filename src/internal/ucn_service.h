@@ -58,6 +58,19 @@ UCN_STATIC_ASSERT(UCN_I_SERVICE_QOS_COUNT <= UINT16_MAX,
 #define UCN_I_SERVICE_OPERATION_BODY_BYTES (110U + UCN_I_SERVICE_RESULT_BYTES)
 #define UCN_I_SERVICE_OPERATION_ID_BODY_BYTES 20U
 
+/* EN: Canonical C0 Service/Operation control bodies.  The C0 header already
+ * binds Realm, endpoint addresses/binding generations, the control
+ * transaction and Protocol Opcode.  These bodies bind the durable business
+ * operation without repeating endpoint identity.
+ * 中文：规范 C0 Service/Operation 控制正文。C0 Header 已绑定 Realm、端点
+ * 地址/Binding Generation、控制事务与 Protocol Opcode；这些正文只绑定 durable
+ * 业务 Operation，不重复端点身份。 */
+#define UCN_I_SERVICE_OPERATION_WIRE_KEY_BYTES 28U
+#define UCN_I_SERVICE_OPERATION_QUERY_BYTES \
+    UCN_I_SERVICE_OPERATION_WIRE_KEY_BYTES
+#define UCN_I_SERVICE_OPERATION_RECEIPT_BYTES 48U
+#define UCN_I_SERVICE_OPERATION_CANCEL_BYTES 32U
+
 typedef struct ucn_i_service_binding {
     uint32_t address;
     uint32_t generation;
@@ -150,6 +163,34 @@ typedef struct ucn_i_service_operation_key {
     ucn_i_service_key_t service;
     uint8_t request_digest[UCN_I_SERVICE_DIGEST_BYTES];
 } ucn_i_service_operation_key_t;
+
+typedef struct ucn_i_service_operation_wire_key {
+    uint64_t operation_id;
+    uint16_t service_id;
+    uint16_t service_opcode;
+    uint8_t request_digest[UCN_I_SERVICE_DIGEST_BYTES];
+} ucn_i_service_operation_wire_key_t;
+
+typedef struct ucn_i_service_operation_receipt_body {
+    ucn_i_service_operation_wire_key_t key;
+    uint8_t result_digest[UCN_I_SERVICE_DIGEST_BYTES];
+    uint8_t terminal_phase;
+    uint8_t reserved_zero[3];
+} ucn_i_service_operation_receipt_body_t;
+
+typedef struct ucn_i_service_operation_cancel_body {
+    ucn_i_service_operation_wire_key_t key;
+    uint8_t reason;
+    uint8_t reserved_zero[3];
+} ucn_i_service_operation_cancel_body_t;
+
+typedef uint8_t ucn_i_service_cancel_reason_t;
+enum {
+    UCN_I_SERVICE_CANCEL_CALLER = 1,
+    UCN_I_SERVICE_CANCEL_DEADLINE = 2,
+    UCN_I_SERVICE_CANCEL_POLICY = 3,
+    UCN_I_SERVICE_CANCEL_SHUTDOWN = 4
+};
 
 typedef struct ucn_i_service_operation_durability {
     uint64_t domain_id;
@@ -450,6 +491,25 @@ ucn_result_t ucn_i_service_operation_retire(
     bool authenticated_result_ack,
     bool retention_elapsed,
     uint64_t retired_operation_floor);
+
+ucn_result_t ucn_i_service_operation_wire_key_encode(
+    const ucn_i_service_operation_wire_key_t *value,
+    uint8_t output[UCN_I_SERVICE_OPERATION_WIRE_KEY_BYTES]);
+ucn_result_t ucn_i_service_operation_wire_key_decode(
+    const uint8_t input[UCN_I_SERVICE_OPERATION_WIRE_KEY_BYTES],
+    ucn_i_service_operation_wire_key_t *value_out);
+ucn_result_t ucn_i_service_operation_receipt_encode(
+    const ucn_i_service_operation_receipt_body_t *value,
+    uint8_t output[UCN_I_SERVICE_OPERATION_RECEIPT_BYTES]);
+ucn_result_t ucn_i_service_operation_receipt_decode(
+    const uint8_t input[UCN_I_SERVICE_OPERATION_RECEIPT_BYTES],
+    ucn_i_service_operation_receipt_body_t *value_out);
+ucn_result_t ucn_i_service_operation_cancel_encode(
+    const ucn_i_service_operation_cancel_body_t *value,
+    uint8_t output[UCN_I_SERVICE_OPERATION_CANCEL_BYTES]);
+ucn_result_t ucn_i_service_operation_cancel_decode(
+    const uint8_t input[UCN_I_SERVICE_OPERATION_CANCEL_BYTES],
+    ucn_i_service_operation_cancel_body_t *value_out);
 
 ucn_result_t ucn_i_service_operation_id_import(
     ucn_i_service_owner_t *owner,

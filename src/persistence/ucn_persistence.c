@@ -295,8 +295,7 @@ static bool digest_workspace_is_valid(
                            config->shared_callback_gate->lock.context, 1U);
 }
 
-static bool owner_config_is_valid(const ucn_persistence_config_t *config,
-                                  uint8_t digest[UCN_PERSIST_DIGEST_BYTES])
+static bool owner_config_is_valid(const ucn_persistence_config_t *config)
 {
     uint16_t index;
     if (config == NULL || config->struct_size != sizeof(*config) ||
@@ -311,17 +310,35 @@ static bool owner_config_is_valid(const ucn_persistence_config_t *config,
                        &config->shared_callback_gate->lock) ||
         !provider_is_valid(config->provider) ||
         !digest_workspace_is_valid(config) ||
-        ucn_persistence_manifest_digest(config->manifest,
-                                        config->digest_workspace,
-                                        digest) != UCN_OK ||
-        memcmp(digest, config->manifest->expected_digest,
-               UCN_PERSIST_DIGEST_BYTES) != 0 ||
         config->domain_binding_count != config->manifest->entry_count ||
         (config->manifest->entry_count < 32U &&
          (config->required_domain_mask >> config->manifest->entry_count) !=
              0U)) {
         return false;
     }
+    /* EN: Initialization reuses the caller-owned digest workspace tail for
+     * the computed Manifest digest. The compile-time codec assertion proves
+     * that this staging range cannot overlap the BLAKE2s state at the front
+     * of the workspace. 中文：初始化复用调用方摘要工作区尾部保存 Manifest
+     * 计算结果；Codec 编译期断言保证它不与前部 BLAKE2s 状态重叠。 */
+    memset(UCN_I_PERSIST_MANIFEST_DIGEST_STAGING(config->digest_workspace),
+           0, UCN_PERSIST_DIGEST_BYTES);
+    if (ucn_persistence_manifest_digest(config->manifest,
+                                        config->digest_workspace,
+                                        UCN_I_PERSIST_MANIFEST_DIGEST_STAGING(
+                                            config->digest_workspace)) !=
+            UCN_OK ||
+        memcmp(UCN_I_PERSIST_MANIFEST_DIGEST_STAGING(
+                   config->digest_workspace),
+               config->manifest->expected_digest,
+               UCN_PERSIST_DIGEST_BYTES) != 0) {
+        memset(UCN_I_PERSIST_MANIFEST_DIGEST_STAGING(
+                   config->digest_workspace),
+               0, UCN_PERSIST_DIGEST_BYTES);
+        return false;
+    }
+    memset(UCN_I_PERSIST_MANIFEST_DIGEST_STAGING(config->digest_workspace),
+           0, UCN_PERSIST_DIGEST_BYTES);
     for (index = 0U; index < config->manifest->entry_count; ++index) {
         const ucn_persist_domain_binding_t *binding =
             &config->domain_bindings[index];
@@ -411,8 +428,6 @@ ucn_result_t ucn_persistence_init_in_place(
     const ucn_persistence_config_t *config,
     ucn_persistence_owner_t **owner_out)
 {
-    ucn_persistence_owner_t *owner;
-    uint8_t digest[UCN_PERSIST_DIGEST_BYTES];
     uint16_t index;
     if (storage == NULL || owner_out == NULL || config == NULL ||
         config->digest_workspace == NULL ||
@@ -425,7 +440,7 @@ ucn_result_t ucn_persistence_init_in_place(
         ranges_overlap(config->digest_workspace,
                        sizeof(*config->digest_workspace), owner_out,
                        sizeof(*owner_out)) ||
-        !owner_config_is_valid(config, digest) ||
+        !owner_config_is_valid(config) ||
         callback_gate_require_idle(config->shared_callback_gate) != UCN_OK ||
         ranges_overlap(storage, UCN_PERSIST_STORAGE_BYTES, config,
                        sizeof(*config)) ||
@@ -494,21 +509,30 @@ ucn_result_t ucn_persistence_init_in_place(
     if (callback_gate_attach_owner(config->shared_callback_gate) != UCN_OK) {
         return UCN_ERR_CONFIG;
     }
-    owner = (ucn_persistence_owner_t *)storage;
-    memset(owner, 0, sizeof(*owner));
-    owner->magic = UCN_I_PERSIST_OWNER_MAGIC;
-    owner->schema = UCN_I_PERSIST_OWNER_SCHEMA;
-    owner->owner_instance = config->owner_instance;
-    owner->runtime_instance = config->runtime_instance;
-    owner->owner_phase = UCN_I_PERSIST_OWNER_INITIALIZED;
-    owner->domain_count = (uint8_t)config->manifest->entry_count;
-    owner->active_domain = UCN_I_PERSIST_INVALID_INDEX;
-    owner->lock = config->state_lock;
-    owner->callback_gate = config->shared_callback_gate;
-    owner->provider = *config->provider;
-    memcpy(owner->durable_manifest_digest, digest, sizeof(digest));
+    memset(storage, 0, sizeof(ucn_persistence_owner_t));
+    ((ucn_persistence_owner_t *)storage)->magic = UCN_I_PERSIST_OWNER_MAGIC;
+    ((ucn_persistence_owner_t *)storage)->schema = UCN_I_PERSIST_OWNER_SCHEMA;
+    ((ucn_persistence_owner_t *)storage)->owner_instance =
+        config->owner_instance;
+    ((ucn_persistence_owner_t *)storage)->runtime_instance =
+        config->runtime_instance;
+    ((ucn_persistence_owner_t *)storage)->owner_phase =
+        UCN_I_PERSIST_OWNER_INITIALIZED;
+    ((ucn_persistence_owner_t *)storage)->domain_count =
+        (uint8_t)config->manifest->entry_count;
+    ((ucn_persistence_owner_t *)storage)->active_domain =
+        UCN_I_PERSIST_INVALID_INDEX;
+    ((ucn_persistence_owner_t *)storage)->lock = config->state_lock;
+    ((ucn_persistence_owner_t *)storage)->callback_gate =
+        config->shared_callback_gate;
+    ((ucn_persistence_owner_t *)storage)->provider = *config->provider;
+    memcpy(((ucn_persistence_owner_t *)storage)->durable_manifest_digest,
+           config->manifest->expected_digest,
+           sizeof(((ucn_persistence_owner_t *)storage)
+                      ->durable_manifest_digest));
     for (index = 0U; index < config->manifest->entry_count; ++index) {
-        ucn_i_persist_domain_t *domain = &owner->domains[index];
+        ucn_i_persist_domain_t *domain =
+            &((ucn_persistence_owner_t *)storage)->domains[index];
         domain->manifest = config->manifest->entries[index];
         domain->business_owner_instance =
             config->domain_bindings[index].business_owner_instance;
@@ -520,7 +544,7 @@ ucn_result_t ucn_persistence_init_in_place(
         domain->required =
             (uint8_t)((config->required_domain_mask >> index) & 1U);
     }
-    *owner_out = owner;
+    *owner_out = (ucn_persistence_owner_t *)storage;
     return UCN_OK;
 }
 
@@ -807,40 +831,6 @@ static void fault_domain_locked(ucn_persistence_owner_t *owner,
     }
 }
 
-static ucn_result_t decode_loaded_slot_locked(
-    ucn_persistence_owner_t *owner,
-    uint8_t domain_index,
-    uint8_t slot_index,
-    ucn_i_persist_record_meta_t *meta_out,
-    uint8_t *body_out)
-{
-    const ucn_i_persist_domain_t *domain = &owner->domains[domain_index];
-    const size_t marker_offset =
-        domain->manifest.slot_capacity_bytes - UCN_PERSIST_COMMIT_MARKER_BYTES;
-    if (owner->slot_state[slot_index] != UCN_PERSIST_BLOB_PRESENT) {
-        return UCN_ERR_MALFORMED;
-    }
-    if (ucn_i_persist_bytes_are_value(
-            &owner->slot_buffer[slot_index][marker_offset],
-            UCN_PERSIST_COMMIT_MARKER_BYTES, owner->provider.erased_value)) {
-        /* An erased marker is the only uncommitted representation.  The body
-         * may be empty, partial, or complete; none of it is published. */
-        return UCN_ERR_NOT_FOUND;
-    }
-    owner->codec_decode_request.slot = owner->slot_buffer[slot_index];
-    owner->codec_decode_request.manifest = &domain->manifest;
-    owner->codec_decode_request.durable_manifest_digest =
-        owner->durable_manifest_digest;
-    owner->codec_decode_request.meta_out = meta_out;
-    owner->codec_decode_request.body_out = body_out;
-    owner->codec_decode_request.slot_bytes =
-        domain->manifest.slot_capacity_bytes;
-    owner->codec_decode_request.body_capacity =
-        domain->manifest.body_capacity_bytes;
-    owner->codec_decode_request.erased_value = owner->provider.erased_value;
-    return ucn_i_persist_record_decode(&owner->codec_decode_request,
-                                       &owner->codec_workspace);
-}
 
 static bool recovered_history_is_valid(
     const ucn_i_persist_record_meta_t *left,
@@ -866,26 +856,39 @@ static bool recovered_history_is_valid(
 /* Selects only a state proven by the witness. It never falls back below it. */
 static ucn_result_t decode_recovered_slot_locked(
     ucn_persistence_owner_t *owner,
-    uint8_t domain_index,
     uint8_t slot_index)
 {
+    const ucn_persist_manifest_entry_t *manifest;
     ucn_result_t decoded;
-    uint8_t *body_out;
 
     if (slot_index >= UCN_PERSIST_SLOT_COUNT ||
+        owner->active_domain >= owner->domain_count ||
         owner->slot_state[slot_index] != UCN_PERSIST_BLOB_PRESENT) {
         return UCN_ERR_MALFORMED;
     }
     if (slot_index == 0U) {
         memset(owner->recovered_meta, 0, sizeof(owner->recovered_meta));
         memset(owner->recovered_decode, 0, sizeof(owner->recovered_decode));
-        body_out = owner->readback_buffer;
-    } else {
-        body_out = owner->write_buffer;
     }
-    decoded = decode_loaded_slot_locked(
-        owner, domain_index, slot_index,
-        &owner->recovered_meta[slot_index], body_out);
+    manifest = &owner->domains[owner->active_domain].manifest;
+    if (ucn_i_persist_bytes_are_value(
+            &owner->slot_buffer[slot_index][manifest->slot_capacity_bytes -
+                                             UCN_PERSIST_COMMIT_MARKER_BYTES],
+            UCN_PERSIST_COMMIT_MARKER_BYTES, owner->provider.erased_value)) {
+        owner->recovered_decode[slot_index] = UCN_ERR_NOT_FOUND;
+        return UCN_OK;
+    }
+    owner->codec_request.decode.slot = owner->slot_buffer[slot_index];
+    owner->codec_request.decode.manifest = manifest;
+    owner->codec_request.decode.durable_manifest_digest = owner->durable_manifest_digest;
+    owner->codec_request.decode.meta_out = &owner->recovered_meta[slot_index];
+    owner->codec_request.decode.body_out = slot_index == 0U
+        ? owner->readback_buffer : owner->write_buffer;
+    owner->codec_request.decode.slot_bytes = manifest->slot_capacity_bytes;
+    owner->codec_request.decode.body_capacity = manifest->body_capacity_bytes;
+    owner->codec_request.decode.erased_value = owner->provider.erased_value;
+    decoded = ucn_i_persist_record_decode(&owner->codec_request.decode,
+                                         &owner->codec_workspace);
     if (decoded != UCN_OK && decoded != UCN_ERR_NOT_FOUND) {
         return UCN_ERR_MALFORMED;
     }
@@ -1447,11 +1450,15 @@ static ucn_result_t prepare_submit_locked(ucn_persistence_owner_t *owner,
     meta->schema_id = domain->manifest.schema_id;
     meta->schema_version = domain->manifest.schema_version;
     meta->operation_kind = pending->operation_kind;
+    owner->codec_request.encode.meta = meta;
+    owner->codec_request.encode.manifest_digest = owner->durable_manifest_digest;
+    owner->codec_request.encode.body = pending->body;
+    owner->codec_request.encode.body_capacity = domain->manifest.body_capacity_bytes;
+    owner->codec_request.encode.slot_bytes = domain->manifest.slot_capacity_bytes;
+    owner->codec_request.encode.erased_value = owner->provider.erased_value;
+    owner->codec_request.encode.slot_out = owner->write_buffer;
     if (ucn_i_persist_record_encode(
-            meta, owner->durable_manifest_digest, pending->body,
-            domain->manifest.body_capacity_bytes,
-            domain->manifest.slot_capacity_bytes,
-            owner->provider.erased_value, owner->write_buffer,
+            &owner->codec_request.encode,
             &owner->codec_workspace) != UCN_OK ||
         ucn_i_persist_marker_encode(meta->record_generation,
                                     owner->marker_buffer) != UCN_OK) {
@@ -1619,7 +1626,6 @@ ucn_result_t ucn_i_persistence_step(
     ucn_persistence_step_result_t *result;
     ucn_result_t lock_result;
     ucn_result_t step_result = UCN_OK;
-    uint16_t operation;
     if (owner == NULL || result_out == NULL || operation_budget == 0U ||
         operation_budget > UCN_PERSIST_MAX_STEP_OPERATIONS ||
         ranges_overlap(owner, UCN_PERSIST_STORAGE_BYTES, result_out,
@@ -1641,7 +1647,7 @@ ucn_result_t ucn_i_persistence_step(
     memset(result, 0, sizeof(*result));
     result->struct_size = sizeof(*result);
     result->api_version = UCN_PERSIST_API_VERSION;
-    for (operation = 0U; operation < operation_budget; ++operation) {
+    for (; result->operations_performed < operation_budget;) {
         bool progressed = false;
         bool owner_lock_held = true;
         if (owner->owner_phase == UCN_I_PERSIST_OWNER_RECOVERING) {
@@ -1653,7 +1659,7 @@ ucn_result_t ucn_i_persistence_step(
                         : 1U;
                 const uint8_t index = owner->active_domain;
                 step_result = decode_recovered_slot_locked(
-                    owner, index, slot);
+                    owner, slot);
                 if (step_result != UCN_OK) {
                     step_result = fail_recovery_domain_locked(
                         owner, index, UCN_ERR_MALFORMED, &progressed);
@@ -1712,7 +1718,7 @@ ucn_result_t ucn_i_persistence_step(
                         : 1U;
                 const uint8_t index = owner->active_domain;
                 step_result = decode_recovered_slot_locked(
-                    owner, index, slot);
+                    owner, slot);
                 if (step_result != UCN_OK) {
                     fault_domain_locked(owner, index);
                     step_result = UCN_ERR_MALFORMED;

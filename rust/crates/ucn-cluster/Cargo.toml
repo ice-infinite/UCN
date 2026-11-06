@@ -1,0 +1,15 @@
+[package]
+name = "ucn-cluster"
+description = "Optional independent Cluster Config, live Vote evidence and durable fences"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+[dependencies]
+ucn-types = { path = "../ucn-types" }
+ucn-digest = { path = "../ucn-digest" }
+ucn-durable = { path = "../ucn-durable" }
+ucn-persistence = { path = "../ucn-persistence" }
+[lints]
+workspace = true

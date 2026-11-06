@@ -161,7 +161,28 @@ static void test_submit_lifecycle(void)
     fixture.publish_synchronously = 1U;
     make_ports(&ports, &link, &fixture);
     CHECK(ucn_i_adapter_init(&adapter, 9U, 7U, &ports) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_submit_ref(&adapter,
+        (const ucn_driver_token_t *)&adapter,frame,sizeof(frame),&view)==UCN_ERR_ARGUMENT);
+    CHECK(ucn_i_adapter_tx_submit_ref(&adapter,NULL,frame,sizeof(frame),&view)==UCN_ERR_ARGUMENT);
+    {
+        static ucn_i_adapter_t before;
+        before=adapter; memset(&view,0xA5,sizeof(view));
+        CHECK(ucn_i_adapter_tx_view(&adapter,NULL,&view)==UCN_ERR_ARGUMENT);
+        CHECK(view.state==0xA5U && view.terminal_latched==0xA5U);
+        CHECK(ucn_i_adapter_tx_cancel(&adapter,NULL)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_adapter_tx_retire(&adapter,NULL)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_adapter_rx_retire(&adapter,NULL)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_adapter_tx_cancel(&adapter,(const ucn_driver_token_t *)&adapter)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_adapter_tx_retire(&adapter,(const ucn_driver_token_t *)&adapter)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_adapter_rx_retire(&adapter,(const ucn_driver_token_t *)&adapter)==UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&adapter,&before,sizeof(adapter))==0);
+    }
     CHECK(ucn_i_adapter_tx_reserve(&adapter, 0U, 10U, 4U, &token) == UCN_OK);
+    {
+        ucn_driver_token_t before=token;
+        CHECK(ucn_i_adapter_tx_view(&adapter,&token,(ucn_i_adapter_tx_view_t *)&token)==UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&token,&before,sizeof(token))==0);
+    }
     CHECK(ucn_i_adapter_tx_submit(&adapter, token, frame, sizeof(frame),
                                   &view) == UCN_OK);
     CHECK(fixture.submit_calls == 1U);
@@ -170,9 +191,9 @@ static void test_submit_lifecycle(void)
     CHECK(ucn_i_adapter_tx_complete(&adapter, token, UCN_OK, NULL) == UCN_OK);
     CHECK(ucn_i_adapter_tx_complete(&adapter, token, UCN_ERR_STATE, NULL) ==
           UCN_ERR_IN_DOUBT);
-    CHECK(ucn_i_adapter_tx_view(&adapter, token, &view) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_view(&adapter, &(token), &view) == UCN_OK);
     CHECK(view.state == UCN_I_ADAPTER_TX_IN_DOUBT);
-    CHECK(ucn_i_adapter_tx_retire(&adapter, token) == UCN_ERR_STATE);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_ERR_STATE);
 
     memset(&adapter, 0, sizeof(adapter));
     memset(&fixture, 0, sizeof(fixture));
@@ -188,9 +209,9 @@ static void test_submit_lifecycle(void)
                                   &view) == UCN_OK);
     CHECK(ucn_i_adapter_tx_submit(&adapter, token, frame, sizeof(frame),
                                   &view) == UCN_ERR_STATE);
-    CHECK(ucn_i_adapter_tx_cancel(&adapter, token) == UCN_ERR_STATE);
-    CHECK(ucn_i_adapter_tx_retire(&adapter, token) == UCN_OK);
-    CHECK(ucn_i_adapter_tx_retire(&adapter, token) == UCN_ERR_NOT_FOUND);
+    CHECK(ucn_i_adapter_tx_cancel(&adapter, &(token)) == UCN_ERR_STATE);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_ERR_NOT_FOUND);
     CHECK(ucn_i_adapter_destroy(&adapter) == UCN_ERR_STATE);
     while (ucn_i_owner_mailbox_take(&adapter.mailbox,
                                     &(ucn_i_owner_work_hint_t){0}) == UCN_OK) {
@@ -224,7 +245,7 @@ static void test_submit_outcomes_and_link_fence(void)
     CHECK(ucn_i_adapter_tx_submit(&adapter, token, &frame, 1U, &view) == UCN_OK);
     CHECK(view.state == UCN_I_ADAPTER_TX_NOT_SUBMITTED);
     CHECK(view.terminal_latched == 0U);
-    CHECK(ucn_i_adapter_tx_retire(&adapter, token) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_OK);
 
     fixture.submit_result = UCN_DRIVER_SUBMITTED;
     CHECK(ucn_i_adapter_tx_reserve(&adapter, 0U, 10U, 2U, &token) == UCN_OK);
@@ -233,10 +254,10 @@ static void test_submit_outcomes_and_link_fence(void)
     CHECK(ucn_i_adapter_tx_reserve(&adapter, 0U, 10U, 3U, &reserved) == UCN_OK);
     CHECK(ucn_i_adapter_link_event(&adapter, link_handle,
                                    UCN_DRIVER_LINK_DOWN, NULL) == UCN_OK);
-    CHECK(ucn_i_adapter_tx_view(&adapter, token, &view) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_view(&adapter, &(token), &view) == UCN_OK);
     CHECK(view.state == UCN_I_ADAPTER_TX_IN_DOUBT);
-    CHECK(ucn_i_adapter_tx_retire(&adapter, token) == UCN_ERR_STATE);
-    CHECK(ucn_i_adapter_tx_view(&adapter, reserved, &view) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_ERR_STATE);
+    CHECK(ucn_i_adapter_tx_view(&adapter, &(reserved), &view) == UCN_OK);
     CHECK(view.state == UCN_I_ADAPTER_TX_NOT_SUBMITTED);
     CHECK(ucn_i_adapter_link_event(&adapter, link_handle,
                                    UCN_DRIVER_LINK_UP, NULL) == UCN_OK);
@@ -249,11 +270,11 @@ static void test_submit_outcomes_and_link_fence(void)
     CHECK(ucn_i_adapter_link_event(&adapter, link_handle,
                                    UCN_DRIVER_LINK_REOPENED, &reopen) ==
           UCN_OK);
-    CHECK(ucn_i_adapter_tx_view(&adapter, token, &view) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_view(&adapter, &(token), &view) == UCN_OK);
     CHECK(view.state == UCN_I_ADAPTER_TX_COMPLETED);
     CHECK(view.terminal_result == UCN_ERR_IN_DOUBT);
-    CHECK(ucn_i_adapter_tx_retire(&adapter, token) == UCN_OK);
-    CHECK(ucn_i_adapter_tx_retire(&adapter, reserved) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(reserved)) == UCN_OK);
 }
 
 static void test_cancel_does_not_overwrite_synchronous_completion(void)
@@ -279,8 +300,8 @@ static void test_cancel_does_not_overwrite_synchronous_completion(void)
     CHECK(ucn_i_adapter_tx_submit(&adapter, token, &frame, 1U, &view) ==
           UCN_OK);
     CHECK(view.state == UCN_I_ADAPTER_TX_SUBMITTED);
-    CHECK(ucn_i_adapter_tx_cancel(&adapter, token) == UCN_ERR_STATE);
-    CHECK(ucn_i_adapter_tx_view(&adapter, token, &view) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_cancel(&adapter, &(token)) == UCN_ERR_STATE);
+    CHECK(ucn_i_adapter_tx_view(&adapter, &(token), &view) == UCN_OK);
     CHECK(view.state == UCN_I_ADAPTER_TX_COMPLETED);
     CHECK(view.terminal_result == UCN_OK);
 }
@@ -362,10 +383,10 @@ static void test_link_invalidation_during_submit_is_not_adapter_fault(void)
     CHECK(ucn_i_adapter_link_event(&adapter, old_link,
                                    UCN_DRIVER_LINK_REOPENED, &reopen) ==
           UCN_OK);
-    CHECK(ucn_i_adapter_tx_view(&adapter, token, &view) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_view(&adapter, &(token), &view) == UCN_OK);
     CHECK(view.state == UCN_I_ADAPTER_TX_COMPLETED);
     CHECK(view.terminal_result == UCN_ERR_IN_DOUBT);
-    CHECK(ucn_i_adapter_tx_retire(&adapter, token) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_OK);
 }
 
 static void test_explicit_submit_unknown_fences_link(void)
@@ -432,8 +453,8 @@ static void test_rx_atomic_record(void)
         CHECK(view.frame[0] == (uint8_t)index);
         CHECK(view.meta.timestamp_us == 123U);
         CHECK(view.meta.sender_discriminator == 77U);
-        CHECK(ucn_i_adapter_rx_retire(&adapter, view.token) == UCN_OK);
-        CHECK(ucn_i_adapter_rx_retire(&adapter, view.token) ==
+        CHECK(ucn_i_adapter_rx_retire(&adapter, &(view.token)) == UCN_OK);
+        CHECK(ucn_i_adapter_rx_retire(&adapter, &(view.token)) ==
               UCN_ERR_NOT_FOUND);
     }
     CHECK(ucn_i_adapter_rx_claim(&adapter, &view) == UCN_ERR_NOT_FOUND);
@@ -456,10 +477,96 @@ static void test_tx_reservations_rotate_and_cancel_is_idempotent(void)
     for (index = 0U; index < UCN_ADAPTER_TX_SLOT_COUNT; ++index) {
         CHECK(ucn_i_adapter_tx_reserve(&adapter, 0U, 10U, index, &token) == UCN_OK);
         CHECK(token.slot == (uint16_t)(index + 1U));
-        CHECK(ucn_i_adapter_tx_cancel(&adapter, token) == UCN_OK);
-        CHECK(ucn_i_adapter_tx_cancel(&adapter, token) == UCN_OK);
-        CHECK(ucn_i_adapter_tx_retire(&adapter, token) == UCN_OK);
+        CHECK(ucn_i_adapter_tx_cancel(&adapter, &(token)) == UCN_OK);
+        CHECK(ucn_i_adapter_tx_cancel(&adapter, &(token)) == UCN_OK);
+        CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_OK);
     }
+}
+
+static void test_rx_contract_claim_does_not_consume_other_contract(void)
+{
+    ucn_i_adapter_t adapter;
+    ucn_ports_t ports;
+    ucn_link_port_t link;
+    fixture_t fixture;
+    ucn_link_handle_t link_handle;
+    ucn_i_adapter_rx_view_t view;
+    ucn_rx_meta_t meta;
+    uint8_t c1_frame[] = {0x61U, 0x11U};
+    uint8_t c0_frame[] = {0x60U, 0x22U};
+
+    memset(&adapter, 0, sizeof(adapter));
+    memset(&fixture, 0, sizeof(fixture));
+    make_ports(&ports, &link, &fixture);
+    CHECK(ucn_i_adapter_init(&adapter, 26U, 15U, &ports) == UCN_OK);
+    CHECK(ucn_i_adapter_link_handle(&adapter, 0U, &link_handle) == UCN_OK);
+    CHECK(ucn_i_adapter_set_rx_enabled(&adapter, true) == UCN_OK);
+    memset(&meta, 0, sizeof(meta));
+    meta.struct_size = (uint16_t)sizeof(meta);
+    meta.api_version = UCN_API_VERSION;
+    CHECK(ucn_i_adapter_rx_publish(&adapter, link_handle, c1_frame,
+                                   sizeof(c1_frame), &meta) == UCN_OK);
+    CHECK(ucn_i_adapter_rx_publish(&adapter, link_handle, c0_frame,
+                                   sizeof(c0_frame), &meta) == UCN_OK);
+    CHECK(ucn_i_adapter_rx_claim_contract(&adapter, 6U, 0U,
+                                          &view) == UCN_OK);
+    CHECK(view.frame_bytes == sizeof(c0_frame));
+    CHECK(memcmp(view.frame, c0_frame, sizeof(c0_frame)) == 0);
+    CHECK(ucn_i_adapter_rx_retire(&adapter, &(view.token)) == UCN_OK);
+    CHECK(ucn_i_adapter_rx_claim_contract(&adapter, 6U, 0U,
+                                          &view) == UCN_ERR_NOT_FOUND);
+    CHECK(ucn_i_adapter_rx_claim(&adapter, &view) == UCN_OK);
+    CHECK(view.frame_bytes == sizeof(c1_frame));
+    CHECK(memcmp(view.frame, c1_frame, sizeof(c1_frame)) == 0);
+    CHECK(ucn_i_adapter_rx_retire(&adapter, &(view.token)) == UCN_OK);
+}
+
+static void test_rx_origin_claim_does_not_consume_other_origin(void)
+{
+    ucn_i_adapter_t adapter;
+    ucn_ports_t ports;
+    ucn_link_port_t link;
+    fixture_t fixture;
+    ucn_link_handle_t link_handle;
+    ucn_i_adapter_rx_view_t view;
+    ucn_i_adapter_rx_view_t view_before;
+    ucn_rx_meta_t meta;
+    uint8_t o0_frame[] = {0x60U, 0x01U, 0x01U};
+    uint8_t o1_frame[] = {0x60U, 0x01U, 0x41U};
+
+    memset(&adapter, 0, sizeof(adapter));
+    memset(&fixture, 0, sizeof(fixture));
+    make_ports(&ports, &link, &fixture);
+    CHECK(ucn_i_adapter_init(&adapter, 27U, 16U, &ports) == UCN_OK);
+    CHECK(ucn_i_adapter_link_handle(&adapter, 0U, &link_handle) == UCN_OK);
+    CHECK(ucn_i_adapter_set_rx_enabled(&adapter, true) == UCN_OK);
+    memset(&meta, 0, sizeof(meta));
+    meta.struct_size = (uint16_t)sizeof(meta);
+    meta.api_version = UCN_API_VERSION;
+    CHECK(ucn_i_adapter_rx_publish(&adapter, link_handle, o0_frame,
+                                   sizeof(o0_frame), &meta) == UCN_OK);
+    CHECK(ucn_i_adapter_rx_publish(&adapter, link_handle, o1_frame,
+                                   sizeof(o1_frame), &meta) == UCN_OK);
+
+    memset(&view, 0xA5, sizeof(view));
+    view_before = view;
+    CHECK(ucn_i_adapter_rx_claim_contract_origin_range(
+              &adapter, 6U, 0U, 2U, 1U, &view) == UCN_ERR_ARGUMENT);
+    CHECK(memcmp(&view, &view_before, sizeof(view)) == 0);
+
+    CHECK(ucn_i_adapter_rx_claim_contract_origin_range(
+              &adapter, 6U, 0U, 1U, 2U, &view) == UCN_OK);
+    CHECK(view.frame_bytes == sizeof(o1_frame));
+    CHECK(memcmp(view.frame, o1_frame, sizeof(o1_frame)) == 0);
+    CHECK(ucn_i_adapter_rx_retire(&adapter, &(view.token)) == UCN_OK);
+    CHECK(ucn_i_adapter_rx_claim_contract_origin_range(
+              &adapter, 6U, 0U, 1U, 2U, &view) == UCN_ERR_NOT_FOUND);
+
+    CHECK(ucn_i_adapter_rx_claim_contract_origin_range(
+              &adapter, 6U, 0U, 0U, 0U, &view) == UCN_OK);
+    CHECK(view.frame_bytes == sizeof(o0_frame));
+    CHECK(memcmp(view.frame, o0_frame, sizeof(o0_frame)) == 0);
+    CHECK(ucn_i_adapter_rx_retire(&adapter, &(view.token)) == UCN_OK);
 }
 
 static void test_exhausted_slots_do_not_hide_reusable_capacity(void)
@@ -485,8 +592,8 @@ static void test_exhausted_slots_do_not_hide_reusable_capacity(void)
     adapter.tx_allocate_cursor = 0U;
     CHECK(ucn_i_adapter_tx_reserve(&adapter, 0U, 10U, 7U, &token) == UCN_OK);
     CHECK(token.slot == 2U);
-    CHECK(ucn_i_adapter_tx_cancel(&adapter, token) == UCN_OK);
-    CHECK(ucn_i_adapter_tx_retire(&adapter, token) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_cancel(&adapter, &(token)) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_OK);
 
     memset(&meta, 0, sizeof(meta));
     meta.struct_size = sizeof(meta);
@@ -498,7 +605,7 @@ static void test_exhausted_slots_do_not_hide_reusable_capacity(void)
                                    sizeof(frame), &meta) == UCN_OK);
     CHECK(ucn_i_adapter_rx_claim(&adapter, &rx_view) == UCN_OK);
     CHECK(rx_view.token.slot == 2U);
-    CHECK(ucn_i_adapter_rx_retire(&adapter, rx_view.token) == UCN_OK);
+    CHECK(ucn_i_adapter_rx_retire(&adapter, &(rx_view.token)) == UCN_OK);
 }
 
 static void test_link_generation_exhaustion_faults_closed(void)
@@ -643,7 +750,7 @@ static void test_alias_rejection_is_atomic(void)
               &tx_view) == UCN_ERR_ARGUMENT);
     CHECK(memcmp(&tx_view, &tx_before, sizeof(tx_view)) == 0);
     CHECK(fixture.submit_calls == 0U);
-    CHECK(ucn_i_adapter_tx_view(&adapter, token, &reserved_view) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_view(&adapter, &(token), &reserved_view) == UCN_OK);
     CHECK(reserved_view.state == UCN_I_ADAPTER_TX_RESERVED);
 
     CHECK(ucn_i_adapter_link_snapshot(
@@ -670,8 +777,8 @@ static void test_alias_rejection_is_atomic(void)
           UCN_ERR_ARGUMENT);
     CHECK(memcmp(&adapter, &adapter_before, sizeof(adapter)) == 0);
 
-    CHECK(ucn_i_adapter_tx_cancel(&adapter, token) == UCN_OK);
-    CHECK(ucn_i_adapter_tx_retire(&adapter, token) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_cancel(&adapter, &(token)) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_OK);
 }
 
 static void test_driver_callback_gate_blocks_recursive_control(void)
@@ -705,13 +812,13 @@ static void test_driver_callback_gate_blocks_recursive_control(void)
     CHECK(fixture.nested_result == UCN_ERR_STATE);
     CHECK(memcmp(&fixture.nested_view, &nested_before,
                  sizeof(nested_before)) == 0);
-    CHECK(ucn_i_adapter_tx_view(&adapter, nested, &view) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_view(&adapter, &(nested), &view) == UCN_OK);
     CHECK(view.state == UCN_I_ADAPTER_TX_RESERVED);
 
     CHECK(ucn_i_adapter_tx_complete(&adapter, outer, UCN_OK, NULL) ==
           UCN_OK);
-    CHECK(ucn_i_adapter_tx_view(&adapter, outer, &view) == UCN_OK);
-    CHECK(ucn_i_adapter_tx_retire(&adapter, outer) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_view(&adapter, &(outer), &view) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(outer)) == UCN_OK);
 
     CHECK(ucn_i_adapter_tx_submit(&adapter, nested, &frame, 1U, &view) ==
           UCN_OK);
@@ -721,15 +828,15 @@ static void test_driver_callback_gate_blocks_recursive_control(void)
     memset(&fixture.nested_view, 0x5A, sizeof(fixture.nested_view));
     nested_before = fixture.nested_view;
     fixture.nested_submit_during_cancel = 1U;
-    CHECK(ucn_i_adapter_tx_cancel(&adapter, nested) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_cancel(&adapter, &(nested)) == UCN_OK);
     CHECK(fixture.nested_result == UCN_ERR_STATE);
     CHECK(memcmp(&fixture.nested_view, &nested_before,
                  sizeof(nested_before)) == 0);
-    CHECK(ucn_i_adapter_tx_view(&adapter, outer, &view) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_view(&adapter, &(outer), &view) == UCN_OK);
     CHECK(view.state == UCN_I_ADAPTER_TX_RESERVED);
-    CHECK(ucn_i_adapter_tx_retire(&adapter, nested) == UCN_OK);
-    CHECK(ucn_i_adapter_tx_cancel(&adapter, outer) == UCN_OK);
-    CHECK(ucn_i_adapter_tx_retire(&adapter, outer) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(nested)) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_cancel(&adapter, &(outer)) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(outer)) == UCN_OK);
 }
 
 static void test_failure_no_write(void)
@@ -763,6 +870,8 @@ int main(void)
     test_link_invalidation_during_submit_is_not_adapter_fault();
     test_explicit_submit_unknown_fences_link();
     test_rx_atomic_record();
+    test_rx_contract_claim_does_not_consume_other_contract();
+    test_rx_origin_claim_does_not_consume_other_origin();
     test_tx_reservations_rotate_and_cancel_is_idempotent();
     test_exhausted_slots_do_not_hide_reusable_capacity();
     test_link_generation_exhaustion_faults_closed();

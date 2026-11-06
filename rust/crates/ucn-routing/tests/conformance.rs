@@ -42,7 +42,7 @@ fn fixture(name: &str) -> Vec<u8> {
 fn rreq() -> RreqPayload {
     RreqPayload {
         accumulated_cost: 0x0102_0304,
-        minimum_payload_budget: 0x1122,
+        minimum_frame_mtu: 0x1122,
         required_capability_bits: 0x3344,
         flags: 0x03,
     }

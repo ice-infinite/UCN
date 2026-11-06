@@ -1772,7 +1772,10 @@ fn frozen_c2_o1_h2_and_replay_are_exact() {
             expired: 0,
         }
     );
-    assert_eq!(owner.maintain_replay_reservations(210, 16).expired, 1);
+    // 2 Sessions * (4 Origin + 4 Hop + 1 independent C0 reservation).
+    let maintenance = owner.maintain_replay_reservations(210, 18);
+    assert_eq!(maintenance.inspected, 18);
+    assert_eq!(maintenance.expired, 1);
     let maintenance_facts = CurrentFacts {
         now_us: 210,
         ..facts
@@ -1924,6 +1927,39 @@ fn frozen_c0_aes_c2_chacha_and_c3_hop_vectors_match() {
     let mut transaction = TransactionCounter(0x0102_0304_0506_0708);
     let mut workspace = SecurityPacketWorkspace::<160>::new();
     let mut output = [0_u8; 80];
+    let wrong_context = OriginContext::C0 {
+        fingerprint: Fingerprint::new(c0_fp).unwrap(),
+        transaction_id: C0TransactionId::new(0x0102_0304_0506_0708).unwrap(),
+        opcode: ProtocolOpcode::PeerSessionPrepare,
+        direction: ucn_security::SenderDirection::DescendingPrincipal,
+    };
+    assert_eq!(
+        owner.protect_packet(
+            &mut crypto,
+            OriginCounterOwner::Transaction(&mut transaction),
+            handle,
+            facts,
+            access(
+                handle,
+                AccessDirection::Outbound,
+                u16::from(ProtocolOpcode::PeerSessionPrepare),
+                Fingerprint::new(c0_fp).unwrap()
+            ),
+            PacketPlan {
+                prefix: &prefix,
+                payload: &payload,
+                canonical_identity: &prefix[3..],
+                origin_context: wrong_context,
+                hop_profile: HopProfile::H0
+            },
+            None,
+            &mut workspace,
+            &mut output
+        ),
+        Err(Error::Security)
+    );
+    assert_eq!(transaction.0, 0x0102_0304_0506_0708);
+    assert_eq!(output, [0; 80]);
     let count = owner
         .protect_packet(
             &mut crypto,
@@ -1944,7 +1980,7 @@ fn frozen_c0_aes_c2_chacha_and_c3_hop_vectors_match() {
                     fingerprint: Fingerprint::new(c0_fp).unwrap(),
                     transaction_id: C0TransactionId::new(0x0102_0304_0506_0708).unwrap(),
                     opcode: ProtocolOpcode::PeerSessionPrepare,
-                    direction: ucn_security::SenderDirection::InitiatorToResponder,
+                    direction: ucn_security::SenderDirection::AscendingPrincipal,
                 },
                 hop_profile: HopProfile::H0,
             },
@@ -2083,6 +2119,89 @@ fn frozen_c0_aes_c2_chacha_and_c3_hop_vectors_match() {
     assert_eq!(hop_evidence.session_generation, 1);
     assert_eq!(hop_evidence.key_generation, 1);
     assert_eq!(hop_evidence.context_fingerprint, hop_fp);
+}
+
+#[test]
+fn c0_counter_reset_is_rejected_even_after_a_provider_failure() {
+    for provider_fails in [false, true] {
+        let fp: [u8; 16] = bytes("505152535455565758595A5B5C5D5E5F")
+            .try_into()
+            .unwrap();
+        let c = candidate(
+            SecurityLevel::Confidential,
+            HopProfile::H0,
+            SuiteId::OriginAes128Gcm,
+            fp,
+            [0x30; 16],
+        );
+        let (mut owner, h, f, mut crypto, _, _) =
+            activate_candidate(c, u16::from(ProtocolOpcode::PeerSessionPrepare));
+        let prefix = bytes("6025810102030412345678000000010000000201020304050607080013");
+        let tx = 0x0102_0304_0506_0708;
+        let plan = PacketPlan {
+            prefix: &prefix,
+            payload: if provider_fails {
+                &[0, 0, 0, 0]
+            } else {
+                &[0xDE, 0xAD, 0xBE, 0xEF]
+            },
+            canonical_identity: &prefix[3..],
+            origin_context: OriginContext::C0 {
+                fingerprint: Fingerprint::new(fp).unwrap(),
+                transaction_id: C0TransactionId::new(tx).unwrap(),
+                opcode: ProtocolOpcode::PeerSessionPrepare,
+                direction: ucn_security::SenderDirection::AscendingPrincipal,
+            },
+            hop_profile: HopProfile::H0,
+        };
+        let mut work = SecurityPacketWorkspace::<160>::new();
+        let mut out = [0xA5; 80];
+        let mut counter = TransactionCounter(tx);
+        let first = owner.protect_packet(
+            &mut crypto,
+            OriginCounterOwner::Transaction(&mut counter),
+            h,
+            f,
+            access(
+                h,
+                AccessDirection::Outbound,
+                u16::from(ProtocolOpcode::PeerSessionPrepare),
+                Fingerprint::new(fp).unwrap(),
+            ),
+            plan,
+            None,
+            &mut work,
+            &mut out,
+        );
+        assert_eq!(first.is_err(), provider_fails);
+        assert_eq!(counter.0, tx + 1);
+        if provider_fails {
+            assert_eq!(out, [0xA5; 80]);
+        }
+        let sentinel = out;
+        let mut reset = TransactionCounter(tx);
+        assert_eq!(
+            owner.protect_packet(
+                &mut crypto,
+                OriginCounterOwner::Transaction(&mut reset),
+                h,
+                f,
+                access(
+                    h,
+                    AccessDirection::Outbound,
+                    u16::from(ProtocolOpcode::PeerSessionPrepare),
+                    Fingerprint::new(fp).unwrap()
+                ),
+                plan,
+                None,
+                &mut work,
+                &mut out
+            ),
+            Err(Error::Replay)
+        );
+        assert_eq!(reset.0, tx);
+        assert_eq!(out, sentinel);
+    }
 }
 
 #[test]

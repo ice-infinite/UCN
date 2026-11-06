@@ -71,6 +71,10 @@ typedef struct ucn_endpoint_message {
     size_t payload_bytes;
     uint64_t receive_timestamp_us;
     ucn_callback_scope_t callback_scope;
+    /* EN: Actual C1 order and configured static identity, not cryptographic proof.
+     * 中文：实际C1序号及配置静态身份，不是密码认证凭证。 */
+    uint32_t origin_sequence;
+    uint64_t configured_principal_digest;
 } ucn_endpoint_message_t;
 
 typedef ucn_endpoint_disposition_t (*ucn_endpoint_receive_fn)(
@@ -199,6 +203,13 @@ ucn_result_t ucn_endpoint_add(ucn_node_t *node,
                               ucn_endpoint_handle_t *out_endpoint);
 ucn_result_t ucn_endpoint_remove(ucn_node_t *node,
                                  ucn_endpoint_handle_t endpoint);
+/* EN: Exclusive pristine-init batch; all checks precede writes. If platform
+ * lock release fails, Core remains Fault and every unexposed Endpoint is removed.
+ * 中文：独占首次初始化批次，全部检查先于写入；平台退锁失败保持Core Fault，
+ * 同时清除所有未发布Endpoint，不能保留指向失败初始化对象的回调。 */
+ucn_result_t ucn_endpoint_install(ucn_node_t *node, const uint16_t *services,
+                                  size_t count, ucn_endpoint_receive_fn receive,
+                                  void *context, ucn_endpoint_handle_t *out_endpoints);
 ucn_result_t ucn_static_path_add(ucn_node_t *node,
                                 const ucn_static_path_t *path,
                                 ucn_path_handle_t *out_path);
@@ -208,7 +219,7 @@ ucn_result_t ucn_link_get(const ucn_node_t *node,
                           uint16_t link_index,
                           ucn_link_handle_t *out_link);
 
-ucn_result_t ucn_publish(ucn_node_t *node,
+ucn_result_t ucn_send(ucn_node_t *node,
                          const ucn_target_t *target,
                          const void *payload,
                          size_t payload_bytes,
@@ -220,6 +231,27 @@ ucn_result_t ucn_send_query(const ucn_node_t *node,
 ucn_result_t ucn_send_cancel(ucn_node_t *node, ucn_send_handle_t handle);
 ucn_result_t ucn_send_forget(ucn_node_t *node, ucn_send_handle_t handle);
 ucn_result_t ucn_get_stats(const ucn_node_t *node, ucn_stats_t *out_stats);
+
+/* EN: Immutable foundation facts for optional application facades.
+ * 中文：可选业务接口层使用的不可变Foundation事实。 */
+typedef struct ucn_node_view {
+    uint16_t struct_size;
+    uint16_t api_version;
+    uint32_t runtime_instance;
+    uint32_t realm_id;
+    uint32_t local_address;
+    uint32_t local_binding_generation;
+    uint64_t last_now_us;
+    uint16_t endpoint_count;
+    uint16_t endpoint_generation_high_water;
+    uint16_t pending_tx;
+    uint8_t lifecycle;
+    uint8_t trusted_o0_network;
+} ucn_node_view_t;
+
+ucn_result_t ucn_get_node_view(const ucn_node_t *node, ucn_node_view_t *out_view);
+ucn_result_t ucn_get_static_binding(const ucn_node_t *node, uint32_t address,
+                                    ucn_static_binding_t *out_binding);
 
 /* EN: Read-only callback APIs. Ordinary query APIs remain gated while a
  * callback is active; only the exact capability carried by this callback's

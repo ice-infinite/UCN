@@ -101,6 +101,12 @@ static int test_prepare_preflight(void)
     CHECK(memcmp(&handle,&handle_before,sizeof(handle))==0);
     CHECK(memcmp(&requirement,&requirement_before,sizeof(requirement))==0);
     d=durability(1U);
+    c.base_uncertainty.path_asymmetry_bound_us=4U;
+    CHECK(ucn_i_realtime_domain_prepare(
+              &owner,&c,&d,&handle,&requirement)==UCN_ERR_ARGUMENT);
+    CHECK(memcmp(&handle,&handle_before,sizeof(handle))==0);
+    CHECK(memcmp(&requirement,&requirement_before,sizeof(requirement))==0);
+    c=domain_config(1U);
     CHECK(ucn_i_realtime_domain_prepare(
               &owner,&c,&d,(ucn_handle_t *)&owner,
               &requirement)==UCN_ERR_ARGUMENT);

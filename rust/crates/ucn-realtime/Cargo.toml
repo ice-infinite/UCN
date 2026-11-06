@@ -1,0 +1,20 @@
+[package]
+name = "ucn-realtime"
+description = "Optional bounded time domains, Deadline envelopes and Timed Link"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+[features]
+default = ["local", "envelope", "network"]
+local = []
+envelope = []
+network = ["dep:ucn-durable", "dep:ucn-persistence"]
+[dependencies]
+ucn-types = { path = "../ucn-types" }
+ucn-owner = { path = "../ucn-owner" }
+ucn-durable = { path = "../ucn-durable", optional = true }
+ucn-persistence = { path = "../ucn-persistence", optional = true }
+[lints]
+workspace = true

@@ -9,6 +9,16 @@ UCN v6 是面向 MCU 的 C99 有界通信协议实现。它把身份、Wire、�
 可靠传输和物理接口分层；Realtime 与 Cluster 是互不依赖的可选模块。运行时不用堆分配，
 Nano/Lite/Full 只改变容量和可发送上限，不改变解析同一 v6 Wire 的能力。
 
+## 原生简化接口首轮
+
+面向MCU业务的接口从[可运行原生示例](examples/native/README.md)开始：保留最小`ucn_send`，
+默认不构建的`UCN::native`提供静态发布订阅，C++/Rust提供typed薄外观。示例三节点真实软件
+回环，16 B健康正文+11 B普通头，头新增0 B；没有操作真实硬件。
+
+首轮Native仅接显式可信的静态网络，认证/加密/可靠/RPC要求明确拒绝，不静默降级。
+高级协议Owner的存在不等于已经接入这个外观。[本轮实现与回归报告](docs/08-实现与验证/版本演进/UCN_V6S_原生API首轮四项实施与整体自审报告.md)
+保留所有通过项及Release/Nano遗留栈/分析器失败；不是全配置或生产放行。
+
 ## 当前实现
 
 - 单一 v6 Wire：A0～A3 地址档、CRC32C、Hop/Group/E2E 安全选择器与 canonical AAD；

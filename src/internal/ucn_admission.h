@@ -3,6 +3,7 @@
 
 #include "internal/ucn_owner.h"
 #include "internal/ucn_identity.h"
+#include "internal/ucn_digest.h"
 #include "ucn/ucn_config.h"
 
 #define UCN_I_ADMISSION_SCHEMA UINT16_C(1)
@@ -15,6 +16,24 @@
 #define UCN_I_ADMISSION_HELLO_COOKIE_FIXED_BYTES 82U
 #define UCN_I_ADMISSION_HELLO_COOKIE_MAX_BYTES \
     (UCN_I_ADMISSION_HELLO_COOKIE_FIXED_BYTES + UCN_I_ADMISSION_COOKIE_BYTES)
+#define UCN_I_ADMISSION_TRANSCRIPT_BYTES 379U
+#define UCN_I_ADMISSION_LOGICAL_MAX_BYTES 508U
+#define UCN_I_ADMISSION_FRAGMENT_HEADER_BYTES 36U
+
+/* EN: One canonical MTU-bounded event fragment, never an authenticated identity.
+ * 中文：一个受MTU约束的事件分片，不代表已认证身份。 */
+typedef struct ucn_i_admission_fragment {
+    uint64_t transaction_id;
+    uint8_t identity_digest[16];
+    uint16_t total_length;
+    uint16_t fragment_offset;
+    uint16_t fragment_length;
+    uint8_t phase;
+    uint8_t fragment_index;
+    uint8_t fragment_count;
+    uint8_t chunk_bytes;
+    uint8_t data[128];
+} ucn_i_admission_fragment_t;
 
 #if UCN_PROFILE == UCN_PROFILE_NANO
 #define UCN_I_ADMISSION_PENDING_COUNT 2U
@@ -73,6 +92,9 @@ typedef struct ucn_i_admission_hello {
 typedef struct ucn_i_admission_cookie_challenge {
     uint64_t transaction_id;
     uint32_t cookie_time_bucket;
+    /* EN: Issuer-local Link scope echoed by the client, not its own Adapter ID.
+     * 中文：由客户端回显的签发方本地Link域，不是客户端自己的Adapter编号。 */
+    ucn_i_admission_link_t issuer_link;
     uint8_t cookie[UCN_I_ADMISSION_COOKIE_BYTES];
     uint8_t cookie_bytes;
     uint8_t reserved_zero[3];
@@ -142,6 +164,71 @@ typedef struct ucn_i_admission_transcript {
     uint8_t selected_e2e_suite;
     uint8_t reserved_zero[3];
 } ucn_i_admission_transcript_t;
+
+/* EN: Caller-owned static decode scratch; never allocate this on an MCU task stack.
+ * 中文：调用方静态解码工作区，不得放在MCU任务栈上。 */
+typedef struct ucn_i_admission_wire_workspace {
+    ucn_i_admission_transcript_t transcript;
+    ucn_i_admission_evidence_t evidence;
+} ucn_i_admission_wire_workspace_t;
+
+/* EN: Validate exact phase fields without any Owner side effect.
+ * 中文：校验精确阶段字段，不产生Owner副作用。 */
+bool ucn_i_admission_transcript_valid(const ucn_i_admission_transcript_t *value,
+                                     ucn_i_admission_phase_t phase);
+/* EN: Canonical BE logical event; failure preserves output and length sentinel.
+ * 中文：规范大端逻辑事件；失败保持输出及长度哨兵不变。 */
+ucn_result_t ucn_i_admission_logical_encode(
+    uint16_t opcode, ucn_i_admission_phase_t phase,
+    const ucn_i_admission_transcript_t *value,
+    const ucn_i_admission_evidence_t *evidence,
+    uint8_t *output, size_t capacity, size_t *written);
+/* EN: Structural decode only, not authorization; reject every overlapping range.
+ * 中文：仅结构解码，不授予权限；拒绝所有输入输出别名。 */
+ucn_result_t ucn_i_admission_logical_decode(
+    uint16_t opcode, ucn_i_admission_phase_t phase,
+    const uint8_t *input, size_t length,
+    ucn_i_admission_transcript_t *value_out,
+    ucn_i_admission_evidence_t *evidence_out,
+    ucn_i_admission_wire_workspace_t *workspace);
+/* EN: Fixed 36 B prefix and canonical 32..128 B chunk geometry.
+ * 中文：固定36字节前缀及规范32..128字节分块几何。 */
+ucn_result_t ucn_i_admission_fragment_encode(
+    const ucn_i_admission_fragment_t *value,
+    uint8_t *output, size_t capacity, size_t *written);
+/* EN: Decode a fragment without changing any output on failure.
+ * 中文：解码分片，失败不改变任何输出。 */
+ucn_result_t ucn_i_admission_fragment_decode(
+    const uint8_t *input, size_t length, ucn_i_admission_fragment_t *value_out);
+
+/* EN: Pure immutable Session seed; it grants no authorization and cannot replace
+ * Identity/Foundation/Security reload proofs. Directional IDs are fixed slots:
+ * base = Device->Authority, base+1 = Authority->Device.
+ * 中文：纯不可变Session种子，不授予权限，不替代Identity/Foundation/Security
+ * 回读证明。方向ID固定为：基址=设备到Authority，基址+1=Authority到设备。 */
+typedef struct ucn_i_admission_session_seed {
+    uint64_t expires_at_us;
+    uint16_t origin_forward_key_id;
+    uint16_t origin_reverse_key_id;
+    uint16_t hop_forward_key_id;
+    uint16_t hop_reverse_key_id;
+    uint8_t transcript_digest[32];
+} ucn_i_admission_session_seed_t;
+typedef struct ucn_i_admission_seed_workspace {
+    uint8_t logical[UCN_I_ADMISSION_LOGICAL_MAX_BYTES];
+    uint8_t digest_input[403];
+    ucn_i_admission_evidence_t evidence;
+    ucn_i_admission_session_seed_t seed;
+    ucn_i_sha256_workspace_t digest;
+} ucn_i_admission_seed_workspace_t;
+/* EN: Exact canonical Final -> directional slots and domain-separated SHA256.
+ * All failures preserve output; scratch is caller-owned static memory.
+ * 中文：精确Final映射到方向槽及域隔离SHA256；失败不写输出，工作区由调用方静态持有。 */
+ucn_result_t ucn_i_admission_session_seed(
+    const ucn_i_admission_transcript_t *transcript,
+    uint64_t original_started_us, uint64_t maximum_lifetime_us,
+    uint64_t dependency_deadline_us, ucn_i_admission_session_seed_t *seed_out,
+    ucn_i_admission_seed_workspace_t *workspace);
 
 /* EN: Identity/Persistence produce this immutable proof-backed view. Admission
  * validates it but never calls either Owner directly.
@@ -213,7 +300,8 @@ typedef ucn_result_t (*ucn_i_admission_issue_cookie_fn)(
     uint8_t *output_bytes);
 typedef ucn_result_t (*ucn_i_admission_verify_cookie_fn)(
     void *context,
-    const ucn_i_admission_hello_cookie_t *hello_cookie);
+    const ucn_i_admission_hello_cookie_t *hello_cookie,
+    uint64_t now_us);
 typedef ucn_result_t (*ucn_i_admission_authorize_event_fn)(
     void *context,
     ucn_i_admission_event_t event,

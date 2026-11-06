@@ -2,14 +2,34 @@
 #define UCN_INTERNAL_CAPABILITY_H
 
 #include "internal/ucn_owner.h"
+#include "internal/ucn_digest.h"
 #include "ucn/ucn_config.h"
 
 #define UCN_I_CAPABILITY_SCHEMA UINT16_C(1)
 #define UCN_I_CAPABILITY_RECORD_BYTES 68U
 #define UCN_I_CAPABILITY_SUMMARY_BYTES 24U
 #define UCN_I_CAPABILITY_QUERY_BYTES 20U
+#define UCN_I_PROFILE_SELECT_BYTES 59U
+#define UCN_I_PROFILE_ACK_BYTES 75U
 #define UCN_I_CAPABILITY_DIGEST_BYTES 16U
 #define UCN_I_CAPABILITY_PRINCIPAL_BYTES 16U
+#define UCN_I_CAPABILITY_FRAGMENT_PREFIX 6U
+#define UCN_I_CAPABILITY_FRAGMENT_MAX_CHUNK 38U
+/* EN: Structural fragment only; two authenticated packets are required by Runtime.
+ * 中文：仅结构分片，Runtime必须分别认证两帧后才发布逻辑命令。 */
+typedef struct ucn_i_capability_fragment {
+    uint16_t opcode;
+    uint16_t total_bytes;
+    uint8_t index;
+    uint8_t count;
+    uint8_t chunk_bytes;
+    uint8_t chunk[UCN_I_CAPABILITY_FRAGMENT_MAX_CHUNK];
+} ucn_i_capability_fragment_t;
+ucn_result_t ucn_i_capability_fragment_encode(
+    const ucn_i_capability_fragment_t *value, uint8_t *output,
+    size_t capacity, size_t *length_out);
+ucn_result_t ucn_i_capability_fragment_decode(
+    const uint8_t *input, size_t length, ucn_i_capability_fragment_t *value_out);
 #define UCN_I_CAPABILITY_REQUIRED_BASE_FEATURES UINT32_C(0x0000010B)
 #define UCN_I_CAPABILITY_KNOWN_FEATURES UINT32_C(0x000007FF)
 #define UCN_I_CAPABILITY_KNOWN_HOP_SUITES UINT32_C(0x00000002)
@@ -145,7 +165,9 @@ typedef struct ucn_i_capability_owner {
     struct {
         ucn_i_cached_capability_t value;
         uint8_t occupied;
-        uint8_t reserved_zero[7];
+        uint8_t revoked;
+        uint8_t expired_notified;
+        uint8_t reserved_zero[5];
     } peers[UCN_I_CAPABILITY_PEER_COUNT];
 } ucn_i_capability_owner_t;
 
@@ -179,6 +201,24 @@ typedef struct ucn_i_profile_ack {
     ucn_i_profile_select_t selected;
     uint8_t transcript_digest[16];
 } ucn_i_profile_ack_t;
+/* EN: Canonical source-oriented SELECT context, not an authentication claim.
+ * 中文：规范源视角SELECT上下文，本身不代表认证。 */
+typedef struct ucn_i_capability_select_context {
+    uint32_t realm;
+    uint32_t source_address, source_generation;
+    uint8_t source_principal[16];
+    uint32_t destination_address, destination_generation;
+    uint8_t destination_principal[16];
+    uint32_t session, key, policy;
+    uint8_t origin;
+    uint8_t fingerprint[16];
+    uint64_t transaction;
+    uint16_t service;
+} ucn_i_capability_select_context_t;
+ucn_result_t ucn_i_capability_select_transcript(
+    const ucn_i_capability_select_context_t *context,
+    const ucn_i_profile_select_t *selected,
+    uint8_t digest_out[16], ucn_i_sha256_workspace_t *work);
 
 /* EN: Resolver dependency choices are not Coordinator routing kinds.  Keep
  * the namespaces distinct so a production composition may include both
@@ -267,6 +307,18 @@ ucn_result_t ucn_i_capability_query_encode(
 ucn_result_t ucn_i_capability_query_decode(
     const uint8_t input[UCN_I_CAPABILITY_QUERY_BYTES],
     ucn_i_capability_query_t *query_out);
+ucn_result_t ucn_i_profile_select_encode(
+    const ucn_i_profile_select_t *select,
+    uint8_t output[UCN_I_PROFILE_SELECT_BYTES]);
+ucn_result_t ucn_i_profile_select_decode(
+    const uint8_t input[UCN_I_PROFILE_SELECT_BYTES],
+    ucn_i_profile_select_t *select_out);
+ucn_result_t ucn_i_profile_ack_encode(
+    const ucn_i_profile_ack_t *ack,
+    uint8_t output[UCN_I_PROFILE_ACK_BYTES]);
+ucn_result_t ucn_i_profile_ack_decode(
+    const uint8_t input[UCN_I_PROFILE_ACK_BYTES],
+    ucn_i_profile_ack_t *ack_out);
 ucn_result_t ucn_i_capability_owner_init(
     ucn_i_capability_owner_t *owner,
     uint32_t runtime_instance,
@@ -293,9 +345,23 @@ ucn_result_t ucn_i_capability_get(
     const ucn_i_capability_ref_t *reference,
     uint64_t now_us,
     ucn_i_cached_capability_t *value_out);
+/* EN: Coordinator supplies a freshly verified successor Advertise; no raw Driver
+ * facts, old Profile inheritance or delete/reinsert window is permitted.
+ * ZH: 协调器传入刚验证的后继Advertise，不接受原始Driver事实，不继承旧Profile或先删槽。 */
+ucn_result_t ucn_i_capability_replace_session(
+    ucn_i_capability_owner_t *owner,
+    const ucn_i_capability_ref_t *predecessor,
+    const ucn_i_authenticated_peer_view_t *authenticated,
+    const ucn_i_capability_record_t *record,
+    uint64_t now_us,
+    ucn_i_capability_ref_t *reference_out);
 ucn_result_t ucn_i_capability_invalidate_session(
     ucn_i_capability_owner_t *owner,
     const ucn_i_capability_ref_t *reference);
+ucn_result_t ucn_i_capability_revoke(
+    ucn_i_capability_owner_t *owner,
+    const ucn_i_capability_ref_t *reference,
+    const ucn_i_capability_query_t *exact);
 ucn_result_t ucn_i_capability_maintain(
     ucn_i_capability_owner_t *owner,
     uint64_t now_us,

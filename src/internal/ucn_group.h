@@ -7,12 +7,23 @@
 
 #define UCN_I_GROUP_MAGIC UINT32_C(0x47525036)
 #define UCN_I_GROUP_SCHEMA UINT16_C(1)
-#define UCN_I_GROUP_RECORD_SCHEMA UINT16_C(1)
+#define UCN_I_GROUP_RECORD_SCHEMA UINT16_C(2)
 #define UCN_I_GROUP_RECORD_SCHEMA_ID UINT16_C(0x0802)
+#define UCN_I_GROUP_ALLOCATOR_SCHEMA_ID UINT16_C(0x0804)
+#define UCN_I_GROUP_ALLOCATOR_RECORD_BYTES 16U
+typedef struct ucn_i_group_allocator_record {
+    uint32_t realm_id;
+    uint32_t high_water;
+    uint32_t authority_generation;
+} ucn_i_group_allocator_record_t;
+ucn_result_t ucn_i_group_allocator_record_encode(
+    const ucn_i_group_allocator_record_t *record, uint8_t output[16]);
+ucn_result_t ucn_i_group_allocator_record_decode(
+    const uint8_t input[16], ucn_i_group_allocator_record_t *record_out);
 #define UCN_I_GROUP_PERSIST_KIND UINT16_C(0x0802)
 #define UCN_I_GROUP_PRINCIPAL_BYTES 16U
 #define UCN_I_GROUP_DIGEST_BYTES 16U
-#define UCN_I_GROUP_RECORD_HEADER_BYTES 112U
+#define UCN_I_GROUP_RECORD_HEADER_BYTES 64U
 #define UCN_I_GROUP_RECORD_MEMBER_BYTES 28U
 #define UCN_I_GROUP_STEP_BUDGET_DEFAULT 4U
 

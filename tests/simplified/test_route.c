@@ -112,7 +112,7 @@ static int test_codec_golden_and_zero_write(void)
 
     memset(&rreq, 0, sizeof(rreq));
     rreq.accumulated_cost = UINT32_C(0x01020304);
-    rreq.minimum_payload_budget = UINT16_C(0x1122);
+    rreq.minimum_frame_mtu = UINT16_C(0x1122);
     rreq.required_capability_bits = UINT16_C(0x3344);
     rreq.flags = 3U;
     CHECK(ucn_i_route_rreq_encode(&rreq, bytes) == UCN_OK);
@@ -194,7 +194,9 @@ static int test_three_node_route_and_exact_rerr(void)
     ucn_i_route_reply_action_t reply_action;
     ucn_i_route_domain_t domain;
     ucn_i_route_use_facts_t facts;
+    ucn_i_route_forward_key_t forward_key;
     ucn_i_route_resolved_t resolved;
+    ucn_i_route_resolved_t resolved_before;
     ucn_i_route_rerr_payload_t rerr;
     ucn_i_route_static_entry_t static_route;
     ucn_handle_t discovery;
@@ -212,6 +214,8 @@ static int test_three_node_route_and_exact_rerr(void)
                                        0U, 10U, &discovery, &request,
                                        &created) == UCN_OK);
     CHECK(created == 1U);
+    CHECK(ucn_i_route_on_rreq(&a, &request, &a_from_b, 11U,
+                              &request_action) == UCN_ERR_ACCESS);
     CHECK(ucn_i_route_on_rreq(&b, &request, &b_from_a, 20U,
                               &request_action) == UCN_OK);
     CHECK(request_action.kind == UCN_I_ROUTE_REQUEST_FORWARD);
@@ -252,6 +256,33 @@ static int test_three_node_route_and_exact_rerr(void)
     CHECK(resolved.kind == UCN_I_ROUTE_RESOLVED_DYNAMIC);
     CHECK(resolved.dynamic.next_hop.link_id == 1U);
 
+    memset(&forward_key, 0, sizeof(forward_key));
+    forward_key.now_us = 100U;
+    forward_key.realm = domain.realm;
+    forward_key.source_address = domain.origin.address;
+    forward_key.source_binding_generation = domain.origin.generation;
+    forward_key.destination_address = domain.destination.address;
+    forward_key.destination_binding_generation =
+        domain.destination.generation;
+    CHECK(ucn_i_route_forward_resolve(&a, &forward_key,
+                                      &resolved) == UCN_OK);
+    CHECK(resolved.kind == UCN_I_ROUTE_RESOLVED_DYNAMIC);
+    CHECK(resolved.dynamic.next_hop.link_id == 1U);
+
+    /* A compact relay key cannot choose between two canonical route domains
+     * that differ only in an Origin Session generation hidden from C0. */
+    a.routes[1] = a.routes[0];
+    a.routes[1].value.domain.origin_session_generation++;
+    memset(&resolved, 0xA5, sizeof(resolved));
+    resolved_before = resolved;
+    CHECK(ucn_i_route_forward_resolve(&a, &forward_key,
+                                      &resolved) == UCN_ERR_STATE);
+    CHECK(memcmp(&resolved, &resolved_before, sizeof(resolved)) == 0);
+    memset(&a.routes[1], 0, sizeof(a.routes[1]));
+    CHECK(ucn_i_route_forward_resolve(&a, &forward_key,
+                                      &resolved) == UCN_OK);
+    CHECK(resolved.kind == UCN_I_ROUTE_RESOLVED_DYNAMIC);
+
     CHECK(ucn_i_route_make_rerr(&a, &resolved.dynamic,
                                 UCN_I_ROUTE_RERR_LINK_INVALID,
                                 &rerr) == UCN_OK);
@@ -268,6 +299,13 @@ static int test_three_node_route_and_exact_rerr(void)
     static_route.path_frame_mtu = 256U;
     CHECK(ucn_i_route_install_static(&a, &static_route) == UCN_OK);
     CHECK(ucn_i_route_resolve(&a, &domain, &facts, &resolved) == UCN_OK);
+    CHECK(resolved.kind == UCN_I_ROUTE_RESOLVED_STATIC);
+    CHECK(ucn_i_route_forward_resolve(&a, &forward_key,
+                                      &resolved) == UCN_OK);
+    CHECK(resolved.kind == UCN_I_ROUTE_RESOLVED_STATIC);
+    forward_key.now_us = UINT64_C(100000);
+    CHECK(ucn_i_route_forward_resolve(&a, &forward_key,
+                                      &resolved) == UCN_OK);
     CHECK(resolved.kind == UCN_I_ROUTE_RESOLVED_STATIC);
     CHECK(ucn_i_route_invalidate_link(&a, a_from_b.link_id,
                                       a_from_b.link_generation,
@@ -351,11 +389,135 @@ static int test_capacity_and_deadline_are_fail_closed(void)
     return 0;
 }
 
+static int test_reverse_expiry_preserves_accepted_forward_obligation(void)
+{
+    static ucn_i_route_owner_t relay;
+    test_lock_t lock = {0};
+    ucn_i_lock_ops_t ops = lock_ops(&lock);
+    ucn_i_route_config_t cfg = config(20U, 21U, binding(2U, 0xb2U));
+    ucn_i_route_rreq_message_t request;
+    ucn_i_route_rrep_message_t reply;
+    ucn_i_route_request_action_t request_action;
+    ucn_i_route_reply_action_t reply_action;
+    ucn_i_route_link_ref_t from_a = link_ref(1U, 3U, binding(1U, 0xa1U), 10U);
+    ucn_i_route_link_ref_t from_c = link_ref(2U, 9U, binding(3U, 0xc3U), 10U);
+    uint16_t inspected;
+    uint16_t expired;
+    uint16_t count;
+    uint16_t reverse;
+    uint16_t routes;
+    uint16_t statics;
+    memset(&relay, 0, sizeof(relay));
+    CHECK(ucn_i_route_owner_init(&relay, &cfg, &ops) == UCN_OK);
+    memset(&request, 0, sizeof(request));
+    request.key.origin = from_a.peer;
+    request.key.realm = 7U;
+    request.key.origin_session_generation = 3U;
+    request.key.target_address = 3U;
+    request.key.transaction_id = 123U;
+    request.remaining_hops = 8U;
+    request.payload.minimum_frame_mtu = 100U;
+    CHECK(ucn_i_route_on_rreq(&relay, &request, &from_a, 10U, &request_action) == UCN_OK);
+    memset(&reply, 0, sizeof(reply));
+    reply.key = request.key;
+    memcpy(reply.payload.destination_principal, from_c.peer.principal, 16U);
+    reply.payload.destination_binding_generation = 1U;
+    reply.payload.path_frame_mtu = 512U;
+    CHECK(ucn_i_route_on_rrep(&relay, &reply, &from_c, 20U, &reply_action) == UCN_OK);
+    CHECK(ucn_i_route_maintain(&relay, 3000U, 512U, &inspected, &expired) == UCN_OK);
+    CHECK(ucn_i_route_counts(&relay, &count, &reverse, &routes, &statics) == UCN_OK);
+    CHECK(reverse == 1U);
+    count = UINT16_MAX;
+    CHECK(ucn_i_route_retire_peer_history(&relay,&from_a,&count) == UCN_ERR_STATE);
+    CHECK(count == UINT16_MAX);
+    CHECK(ucn_i_route_complete_rrep_forward(&relay, reply_action.completion, 0U) == UCN_OK);
+    CHECK(ucn_i_route_retire_peer_history(&relay,&from_a,&count) == UCN_OK);
+    CHECK(count == 1U);
+    CHECK(ucn_i_route_maintain(&relay, 3000U, 512U, &inspected, &expired) == UCN_OK);
+    CHECK(ucn_i_route_counts(&relay, &count, &reverse, &routes, &statics) == UCN_OK);
+    CHECK(reverse == 0U);
+    return 0;
+}
+
+static int test_full_control_codecs_and_fragments(void)
+{
+    ucn_i_route_rreq_message_t request;
+    ucn_i_route_rreq_message_t decoded;
+    ucn_i_route_rreq_message_t before;
+    ucn_i_route_rrep_message_t reply;
+    ucn_i_route_rrep_message_t reply_out;
+    ucn_i_route_fragment_t fragment;
+    ucn_i_route_fragment_t fragment_out;
+    uint8_t raw[99];
+    uint8_t sentinel[99];
+    uint32_t generation = UINT32_C(0xcccccccc);
+    size_t length = SIZE_MAX;
+    size_t index;
+    union { uint64_t alignment; uint8_t bytes[128]; } alias;
+    memset(&request, 0, sizeof(request));
+    request.key.realm = 7U;
+    request.key.origin = binding(1U, 0xa1U);
+    request.key.origin.generation = 2U;
+    request.key.origin_session_generation = 3U;
+    request.key.target_address = 9U;
+    request.key.transaction_id = UINT64_C(0x0102030405060708);
+    request.remaining_hops = 8U;
+    request.payload.minimum_frame_mtu = 100U;
+    request.payload.required_capability_bits = 3U;
+    memset(raw, 0xcc, sizeof(raw));
+    CHECK(ucn_i_route_control_request_encode(&request, 2U, raw) == UCN_OK);
+    CHECK(raw[3] == 7U && raw[7] == 1U && raw[11] == 2U && raw[31] == 3U);
+    CHECK(raw[35] == 9U && raw[36] == 1U && raw[43] == 8U && raw[44] == 8U);
+    CHECK(ucn_i_route_control_request_decode(raw, 54U, 2U, &decoded) == UCN_OK);
+    CHECK(decoded.key.transaction_id == request.key.transaction_id &&
+          decoded.key.origin.generation == 2U &&
+          decoded.payload.minimum_frame_mtu == 100U);
+    memcpy(&before, &decoded, sizeof(before));
+    CHECK(ucn_i_route_control_request_decode(raw, 53U, 2U, &decoded) == UCN_ERR_MALFORMED);
+    CHECK(memcmp(&decoded, &before, sizeof(before)) == 0);
+    memcpy(alias.bytes, raw, sizeof(raw));
+    CHECK(ucn_i_route_control_request_decode(alias.bytes, 54U, 2U,
+              (ucn_i_route_rreq_message_t *)(void *)alias.bytes) == UCN_ERR_ARGUMENT);
+    CHECK(memcmp(raw, alias.bytes, sizeof(raw)) == 0);
+    memset(&reply, 0, sizeof(reply));
+    reply.key = request.key;
+    memset(reply.payload.destination_principal, 0xc3, 16U);
+    reply.payload.destination_binding_generation = 4U;
+    reply.payload.path_frame_mtu = 127U;
+    reply.payload.capability_bits = 3U;
+    reply.payload.hop_count = 1U;
+    CHECK(ucn_i_route_control_reply_encode(&reply, UINT32_MAX, 2U, raw) == UCN_OK);
+    CHECK(ucn_i_route_control_reply_decode(raw, 77U, 2U, &reply_out, &generation) == UCN_OK);
+    CHECK(generation == UINT32_MAX && reply_out.key.transaction_id == request.key.transaction_id);
+    generation = UINT32_C(0xcccccccc);
+    CHECK(ucn_i_route_control_reply_decode(raw, 76U, 2U, &reply_out, &generation) == UCN_ERR_MALFORMED);
+    CHECK(generation == UINT32_C(0xcccccccc));
+    memset(&fragment, 0, sizeof(fragment));
+    fragment.opcode = UINT16_C(0x0203);
+    fragment.total = 99U;
+    fragment.count = 2U;
+    fragment.bundle = UINT64_MAX;
+    fragment.length = 50U;
+    for (index = 0U; index < 50U; ++index) { fragment.chunk[index] = (uint8_t)index; }
+    CHECK(ucn_i_route_fragment_encode(&fragment, raw, sizeof(raw), &length) == UCN_OK);
+    CHECK(length == 64U && raw[0] == 2U && raw[1] == 3U && raw[3] == 99U);
+    CHECK(ucn_i_route_fragment_decode(raw, length, &fragment_out) == UCN_OK);
+    CHECK(fragment_out.bundle == UINT64_MAX && fragment_out.length == 50U);
+    fragment.count = 1U;
+    length = SIZE_MAX;
+    memcpy(sentinel, raw, sizeof(raw));
+    CHECK(ucn_i_route_fragment_encode(&fragment, raw, sizeof(raw), &length) == UCN_ERR_ARGUMENT);
+    CHECK(length == SIZE_MAX && memcmp(raw, sentinel, sizeof(raw)) == 0);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_codec_golden_and_zero_write() == 0);
     CHECK(test_three_node_route_and_exact_rerr() == 0);
     CHECK(test_capacity_and_deadline_are_fail_closed() == 0);
+    CHECK(test_full_control_codecs_and_fragments() == 0);
+    CHECK(test_reverse_expiry_preserves_accepted_forward_obligation() == 0);
     puts("ucn_v6s_route_tests: PASS");
     return 0;
 }

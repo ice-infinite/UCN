@@ -499,12 +499,12 @@ impl<const DISCOVERIES: usize, const REVERSE: usize, const ROUTES: usize, const 
         &mut self,
         target_address: NodeAddress,
         required_capability_bits: u16,
-        minimum_payload_budget: u16,
+        minimum_frame_mtu: u16,
         flags: u8,
         now_us: u64,
     ) -> Result<DiscoveryStart> {
         NodeAddress::new(target_address.get(), self.config.address_width)?;
-        if target_address == self.config.local.address || minimum_payload_budget == 0 {
+        if target_address == self.config.local.address || minimum_frame_mtu == 0 {
             return Err(Error::Argument);
         }
         if let Some((index, record)) =
@@ -521,7 +521,7 @@ impl<const DISCOVERIES: usize, const REVERSE: usize, const ROUTES: usize, const 
                 return Err(Error::Timeout);
             }
             if record.request.payload.required_capability_bits != required_capability_bits
-                || record.request.payload.minimum_payload_budget != minimum_payload_budget
+                || record.request.payload.minimum_frame_mtu != minimum_frame_mtu
                 || record.request.payload.flags != flags
             {
                 return Err(Error::State);
@@ -534,7 +534,7 @@ impl<const DISCOVERIES: usize, const REVERSE: usize, const ROUTES: usize, const 
         }
         let payload = RreqPayload {
             accumulated_cost: 0,
-            minimum_payload_budget,
+            minimum_frame_mtu,
             required_capability_bits,
             flags,
         };
@@ -630,9 +630,10 @@ impl<const DISCOVERIES: usize, const REVERSE: usize, const ROUTES: usize, const 
         now_us: u64,
     ) -> Result<RequestAction> {
         self.validate_discovery_key(request.key)?;
-        if ingress.peer() == self.config.local
-            || request.payload.minimum_payload_budget == 0
-            || request.payload.minimum_payload_budget > ingress.frame_mtu()
+        if request.key.origin == self.config.local
+            || ingress.peer() == self.config.local
+            || request.payload.minimum_frame_mtu == 0
+            || request.payload.minimum_frame_mtu > ingress.frame_mtu()
             || request.payload.required_capability_bits & !ingress.capability_bits() != 0
         {
             return Err(Error::Access);
@@ -738,7 +739,7 @@ impl<const DISCOVERIES: usize, const REVERSE: usize, const ROUTES: usize, const 
     ) -> Result<RrepMessage> {
         if request.key.target_address != self.config.local.address
             || local_frame_mtu == 0
-            || local_frame_mtu < request.payload.minimum_payload_budget
+            || local_frame_mtu < request.payload.minimum_frame_mtu
             || request.payload.required_capability_bits & !local_capability_bits != 0
         {
             return Err(Error::Access);
@@ -856,7 +857,7 @@ impl<const DISCOVERIES: usize, const REVERSE: usize, const ROUTES: usize, const 
         let path_frame_mtu = reply.payload.path_frame_mtu.min(ingress.frame_mtu());
         let capability_bits = reply.payload.capability_bits & ingress.capability_bits();
         if hop_count > self.config.maximum_hops.get()
-            || path_frame_mtu < accepted_request.payload.minimum_payload_budget
+            || path_frame_mtu < accepted_request.payload.minimum_frame_mtu
             || accepted_request.payload.required_capability_bits & !capability_bits != 0
         {
             return Err(Error::Access);
@@ -990,6 +991,40 @@ impl<const DISCOVERIES: usize, const REVERSE: usize, const ROUTES: usize, const 
         }
         invalidated
     }
+    /// Invalidate one logical peer on a shared physical Link, not unrelated peers.
+    /// 共享物理Link上只失效一个逻辑邻居，不误删其他邻居。
+    #[must_use]
+    pub fn invalidate_peer(&mut self, link: LinkRef) -> usize {
+        let mut count = 0;
+        for slot in &mut self.routes {
+            if slot.value.is_some_and(|r| r.next_hop == link) {
+                slot.value = None;
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Retire exact-peer route/reverse history only after accepted forwarding drains.
+    /// 已接纳转发排空后退休精确邻居的路由/反向历史，保留槽代际并隔离共享Link其他Peer。
+    /// # Errors
+    /// A pending RREP forwarding proof rejects before any mutation.
+    pub fn retire_peer_history(&mut self, link: LinkRef) -> Result<usize> {
+        if self.reverse.iter().any(|s| {
+            s.value
+                .is_some_and(|r| r.upstream == link && r.reply_pending)
+        }) {
+            return Err(Error::State);
+        }
+        let mut count = self.invalidate_peer(link);
+        for slot in &mut self.reverse {
+            if slot.value.is_some_and(|r| r.upstream == link) {
+                slot.value = None;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
 
     /// 构造与一个已签发 `SoftRoute` 精确绑定的 RERR Payload。
     ///
@@ -1087,7 +1122,9 @@ impl<const DISCOVERIES: usize, const REVERSE: usize, const ROUTES: usize, const 
             let reverse_index = index - DISCOVERIES;
             let expired = self.reverse[reverse_index]
                 .value
-                .is_some_and(|record| now_us >= record.expires_at_us);
+                // A timer revokes semantic usability, not an accepted physical
+                // forwarding obligation. 精确完成回执前，不能按时间抹除物理义务。
+                .is_some_and(|record| now_us >= record.expires_at_us && !record.reply_pending);
             if expired {
                 self.reverse[reverse_index].value = None;
             }
@@ -1124,6 +1161,30 @@ impl<const DISCOVERIES: usize, const REVERSE: usize, const ROUTES: usize, const 
                 .filter(|slot| slot.value.is_some())
                 .count(),
         )
+    }
+    /// Current immutable local routing domain. 当前不可变本地路由域。
+    #[must_use]
+    pub const fn config(&self) -> RouteConfig {
+        self.config
+    }
+    /// Read-only upstream preflight before authenticated dispatch mutates a route.
+    /// 认证分派修改路由前的只读上游预检。
+    /// # Errors
+    /// No live exact reverse slot rejects.
+    pub fn reply_upstream(&self, key: DiscoveryKey, now: u64) -> Result<Option<LinkRef>> {
+        if key.origin == self.config.local
+            && key.origin_session_generation == self.config.local_session_generation
+        {
+            return Ok(None);
+        }
+        self.reverse
+            .iter()
+            .filter_map(|s| s.value)
+            .find(|r| {
+                r.key == key && now < r.expires_at_us && !r.reply_pending && !r.reply_completed
+            })
+            .map(|r| Some(r.upstream))
+            .ok_or(Error::NotFound)
     }
 
     fn validate_binding(&self, binding: Binding) -> Result<()> {

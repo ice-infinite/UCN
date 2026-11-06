@@ -227,8 +227,8 @@ static ucn_i_transport_transfer_setup_t c1_setup_for(
     setup.fragment_budget = 4U;
     setup.fragment_count = (uint16_t)((message_bytes + 3U) / 4U);
     setup.lifetime_ms = 1000U;
-    (void)ucn_i_sha256_128(message, message_bytes, setup.message_digest,
-                           &workspace);
+    (void)UCN_I_DIGEST_CANONICAL("UCN6-TRANSFER-MESSAGE-V1",
+        message, message_bytes, setup.message_digest, &workspace);
     return setup;
 }
 
@@ -503,6 +503,19 @@ static int test_decode_alias_and_generation_exhaustion(void)
 
 int main(void)
 {
+    {
+        uint8_t next=0xA5U,reply=0x5AU;
+        CHECK(ucn_i_parent_phase_transition(true,1U,0x0411U,1U,0U,&next,&reply)==UCN_ERR_STATE);
+        CHECK(next==0xA5U && reply==0x5AU);
+        CHECK(ucn_i_parent_phase_transition(true,1U,0x0411U,1U,1U,&next,&reply)==UCN_OK);
+        CHECK(next==3U && reply==0U);
+        CHECK(ucn_i_parent_phase_transition(true,3U,0x0411U,2U,1U,&next,&reply)==UCN_ERR_STATE);
+        CHECK(next==3U && reply==0U);
+        CHECK(ucn_i_parent_phase_transition(true,3U,0x0411U,2U,2U,&next,&reply)==UCN_OK);
+        CHECK(next==4U && reply==0U);
+        CHECK(ucn_i_parent_phase_transition(false,2U,0x0412U,0U,0U,&next,&next)==UCN_ERR_ARGUMENT);
+        CHECK(next==4U);
+    }
     CHECK(start_owner(31U) == 0);
     CHECK(test_parent_high_water() == 0);
     CHECK(test_restart_rejects_old_proof() == 0);

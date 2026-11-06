@@ -133,6 +133,101 @@ static int test_frozen_codecs(void)
     return 0;
 }
 
+static int test_advanced_flow_control_codecs(void)
+{
+    static const uint8_t key_golden[UCN_I_FLOW_PATH_KEY_BYTES] = {
+        0x00U, 0x01U, 0x02U, 0x03U, 0x04U, 0x05U, 0x06U, 0x07U,
+        0x08U, 0x09U, 0x0AU, 0x0BU, 0x0CU, 0x0DU, 0x0EU, 0x0FU,
+        0x12U, 0x34U, 0x01U, 0x02U, 0x03U, 0x04U, 0x11U, 0x22U,
+        0x33U, 0x44U, 0x55U, 0x66U
+    };
+    uint8_t bytes[UCN_I_FLOW_PATH_PROBE_BYTES];
+    uint8_t sentinel[UCN_I_FLOW_PATH_PROBE_BYTES];
+    ucn_i_flow_path_key_body_t key;
+    ucn_i_flow_path_key_body_t decoded_key;
+    ucn_i_flow_path_probe_body_t probe;
+    ucn_i_flow_path_probe_body_t decoded_probe;
+    ucn_i_flow_probe_ack_t ack;
+    ucn_i_flow_probe_ack_t decoded_ack;
+    ucn_i_flow_path_outcome_body_t outcome;
+    ucn_i_flow_path_outcome_body_t decoded_outcome;
+    size_t index;
+
+    memset(&key, 0, sizeof(key));
+    for (index = 0U; index < sizeof(key.proposal_digest); ++index) {
+        key.proposal_digest[index] = (uint8_t)index;
+    }
+    key.candidate_id = UINT16_C(0x1234);
+    key.route_generation = UINT32_C(0x01020304);
+    key.reverse_label = UINT16_C(0x1122);
+    key.forward_label = UINT16_C(0x3344);
+    key.path_profile_id = UINT16_C(0x5566);
+    CHECK(ucn_i_flow_path_key_encode(&key, bytes) == UCN_OK);
+    CHECK(memcmp(bytes, key_golden, sizeof(key_golden)) == 0);
+    memset(&decoded_key, 0, sizeof(decoded_key));
+    CHECK(ucn_i_flow_path_key_decode(key_golden, &decoded_key) == UCN_OK);
+    CHECK(memcmp(&decoded_key, &key, sizeof(key)) == 0);
+
+    memset(&probe, 0, sizeof(probe));
+    probe.key = key;
+    probe.context_id = UINT16_C(0x7788);
+    probe.payload_budget = 256U;
+    probe.path_frame_mtu = 512U;
+    probe.capability_bits = UINT16_C(0xA55A);
+    probe.flow_expires_at_us = UINT64_C(0x0102030405060708);
+    CHECK(ucn_i_flow_path_probe_encode(&probe, bytes) == UCN_OK);
+    CHECK(memcmp(bytes, key_golden, sizeof(key_golden)) == 0);
+    CHECK(bytes[28] == 0x77U && bytes[29] == 0x88U);
+    CHECK(bytes[30] == 0x01U && bytes[31] == 0x00U);
+    CHECK(bytes[32] == 0x02U && bytes[33] == 0x00U);
+    CHECK(bytes[34] == 0xA5U && bytes[35] == 0x5AU);
+    CHECK(bytes[36] == 0x01U && bytes[43] == 0x08U);
+    memset(&decoded_probe, 0, sizeof(decoded_probe));
+    CHECK(ucn_i_flow_path_probe_decode(bytes, &decoded_probe) == UCN_OK);
+    CHECK(memcmp(&decoded_probe, &probe, sizeof(probe)) == 0);
+
+    memset(&ack, 0, sizeof(ack));
+    memcpy(ack.proposal_digest, key.proposal_digest, 16U);
+    ack.candidate_id = key.candidate_id;
+    ack.route_generation = key.route_generation;
+    ack.measured_rtt_us = UINT32_C(0x10203040);
+    ack.path_frame_mtu = probe.path_frame_mtu;
+    ack.capability_bits = probe.capability_bits;
+    CHECK(ucn_i_flow_path_probe_ack_encode(&ack, bytes) == UCN_OK);
+    memset(&decoded_ack, 0, sizeof(decoded_ack));
+    CHECK(ucn_i_flow_path_probe_ack_decode(bytes, &decoded_ack) == UCN_OK);
+    CHECK(memcmp(&decoded_ack, &ack, sizeof(ack)) == 0);
+
+    memset(&outcome, 0, sizeof(outcome));
+    outcome.key = key;
+    outcome.phase_or_reason = UCN_I_FLOW_ABORT_TIMEOUT;
+    CHECK(ucn_i_flow_path_outcome_encode(&outcome, false, bytes) == UCN_OK);
+    CHECK(bytes[28] == UCN_I_FLOW_ABORT_TIMEOUT && bytes[29] == 0U);
+    memset(&decoded_outcome, 0, sizeof(decoded_outcome));
+    CHECK(ucn_i_flow_path_outcome_decode(bytes, false,
+                                         &decoded_outcome) == UCN_OK);
+    CHECK(memcmp(&decoded_outcome, &outcome, sizeof(outcome)) == 0);
+    outcome.phase_or_reason = UCN_I_FLOW_TERMINAL_ACTIVE;
+    CHECK(ucn_i_flow_path_outcome_encode(&outcome, true, bytes) == UCN_OK);
+    CHECK(ucn_i_flow_path_outcome_decode(bytes, true,
+                                         &decoded_outcome) == UCN_OK);
+
+    memset(sentinel, 0xA5, sizeof(sentinel));
+    memcpy(bytes, sentinel, sizeof(bytes));
+    key.forward_label = key.reverse_label;
+    CHECK(ucn_i_flow_path_key_encode(&key, bytes) == UCN_ERR_ARGUMENT);
+    CHECK(memcmp(bytes, sentinel, sizeof(bytes)) == 0);
+    memcpy(bytes, key_golden, sizeof(key_golden));
+    memset(bytes, 0, 16U);
+    memset(&decoded_key, 0xA5, sizeof(decoded_key));
+    CHECK(ucn_i_flow_path_key_decode(bytes, &decoded_key) ==
+          UCN_ERR_MALFORMED);
+    for (index = 0U; index < sizeof(decoded_key); ++index) {
+        CHECK(((const uint8_t *)&decoded_key)[index] == 0xA5U);
+    }
+    return 0;
+}
+
 static void make_fixture(ucn_i_flow_config_t *config,
                          ucn_i_route_soft_view_t *route,
                          ucn_i_flow_capability_facts_t *capability,
@@ -247,6 +342,7 @@ static int test_origin_activation_and_use(void)
     uint16_t flows;
     uint16_t receipts;
     uint16_t cursor_before;
+    uint32_t reservation_generation;
 
     make_fixture(&config, &route, &capability, &requirements, &facts);
     memset(&owner, 0, sizeof(owner));
@@ -317,6 +413,7 @@ static int test_origin_activation_and_use(void)
     CHECK(receipts == 1U);
 
     memset(&request, 0, sizeof(request));
+    request.service_id = requirements.service_id;
     request.contract = requirements.contract;
     request.traffic_class = 1U;
     request.delivery = requirements.delivery;
@@ -327,21 +424,31 @@ static int test_origin_activation_and_use(void)
     facts.now_us = 70U;
     CHECK(ucn_i_flow_use_preflight(&owner, flow, &facts, &request,
                                    &plan) == UCN_OK);
+    CHECK(plan.flow_generation == 30U);
     CHECK(plan.sequence == 1U);
+    CHECK(plan.reservation_generation == 1U);
+    reservation_generation = plan.reservation_generation;
     memset(&sentinel, 0xA5, sizeof(sentinel));
     plan = sentinel;
     CHECK(ucn_i_flow_use_preflight(&owner, flow, &facts, &request,
                                    &plan) == UCN_ERR_EXHAUSTED);
     CHECK(memcmp(&plan, &sentinel, sizeof(plan)) == 0);
-    CHECK(ucn_i_flow_sequence_abort(&owner, flow, 1U) == UCN_OK);
+    CHECK(ucn_i_flow_sequence_abort(&owner, flow, 1U,
+                                    reservation_generation) == UCN_OK);
     CHECK(ucn_i_flow_use_preflight(&owner, flow, &facts, &request,
                                    &plan) == UCN_OK);
     CHECK(plan.sequence == 1U);
-    CHECK(ucn_i_flow_sequence_commit(&owner, flow, 1U) == UCN_OK);
+    CHECK(plan.reservation_generation == 2U);
+    CHECK(ucn_i_flow_sequence_commit(&owner, flow, 1U,
+                                     reservation_generation) ==
+          UCN_ERR_STATE);
+    CHECK(ucn_i_flow_sequence_commit(&owner, flow, 1U,
+                                     plan.reservation_generation) == UCN_OK);
     CHECK(ucn_i_flow_use_preflight(&owner, flow, &facts, &request,
                                    &plan) == UCN_OK);
     CHECK(plan.sequence == 2U);
-    CHECK(ucn_i_flow_sequence_abort(&owner, flow, 2U) == UCN_OK);
+    CHECK(ucn_i_flow_sequence_abort(&owner, flow, 2U,
+                                    plan.reservation_generation) == UCN_OK);
 
     facts.capability_generation++;
     plan = sentinel;
@@ -467,6 +574,7 @@ static int test_late_stage_submit_is_terminal(void)
 int main(void)
 {
     CHECK(test_frozen_codecs() == 0);
+    CHECK(test_advanced_flow_control_codecs() == 0);
     CHECK(test_origin_activation_and_use() == 0);
     CHECK(test_commit_timeout_is_in_doubt() == 0);
     CHECK(test_late_stage_submit_is_terminal() == 0);

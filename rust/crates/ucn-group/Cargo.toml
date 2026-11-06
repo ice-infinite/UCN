@@ -1,0 +1,22 @@
+[package]
+name = "ucn-group"
+description = "Independent optional Group snapshots, bounded fanout and receipts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+[features]
+default = ["static", "dynamic"]
+static = []
+dynamic = ["dep:ucn-durable", "dep:ucn-persistence", "dep:ucn-identity"]
+[dependencies]
+ucn-types = { path = "../ucn-types" }
+ucn-digest = { path = "../ucn-digest" }
+ucn-durable = { path = "../ucn-durable", optional = true }
+ucn-persistence = { path = "../ucn-persistence", optional = true }
+ucn-identity = { path = "../ucn-identity", optional = true }
+[dev-dependencies]
+ucn-owner = { path = "../ucn-owner" }
+[lints]
+workspace = true

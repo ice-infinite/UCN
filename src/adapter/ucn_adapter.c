@@ -8,6 +8,14 @@
 #define UCN_I_ADAPTER_MAGIC UINT32_C(0x55434144)
 #define UCN_I_ADAPTER_OWNER_KIND UINT16_C(0x0101)
 
+#if defined(_MSC_VER)
+#define UCN_I_ADAPTER_ALWAYS_INLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+#define UCN_I_ADAPTER_ALWAYS_INLINE inline __attribute__((always_inline))
+#else
+#define UCN_I_ADAPTER_ALWAYS_INLINE inline
+#endif
+
 static bool bytes_are_zero(const void *object, size_t bytes)
 {
     const uint8_t *cursor = (const uint8_t *)object;
@@ -58,15 +66,6 @@ static bool adapter_header_is_valid(const ucn_i_adapter_t *adapter)
            adapter->driver_callback_gate.leave != NULL;
 }
 
-static bool adapter_owned_state_is_valid_locked(
-    const ucn_i_adapter_t *adapter)
-{
-    return adapter->tx_allocate_cursor < UCN_ADAPTER_TX_SLOT_COUNT &&
-           adapter->rx_allocate_cursor < UCN_ADAPTER_RX_SLOT_COUNT &&
-           adapter->rx_claim_cursor < UCN_ADAPTER_RX_SLOT_COUNT &&
-           adapter->faulted <= 1U && adapter->rx_enabled <= 1U;
-}
-
 static bool terminal_result_is_valid(ucn_result_t result)
 {
     return result <= UCN_OK && result >= UCN_ERR_UNSUPPORTED;
@@ -76,14 +75,23 @@ static ucn_result_t lock_enter(ucn_i_adapter_t *adapter)
 {
     ucn_result_t result;
 
-    if (!adapter_header_is_valid(adapter)) {
+    if (adapter == NULL || adapter->magic != UCN_I_ADAPTER_MAGIC ||
+        adapter->runtime_instance == 0U || adapter->owner_instance == 0U ||
+        adapter->schema != UCN_I_ADAPTER_SCHEMA ||
+        adapter->link_count == 0U || adapter->link_count > UCN_LINK_COUNT ||
+        adapter->lock.enter == NULL || adapter->lock.leave == NULL ||
+        adapter->driver_callback_gate.enter == NULL ||
+        adapter->driver_callback_gate.leave == NULL) {
         return UCN_ERR_ARGUMENT;
     }
     result = adapter->lock.enter(adapter->lock.context);
     if (result != UCN_OK) {
         return UCN_ERR_STATE;
     }
-    if (!adapter_owned_state_is_valid_locked(adapter)) {
+    if (adapter->tx_allocate_cursor >= UCN_ADAPTER_TX_SLOT_COUNT ||
+        adapter->rx_allocate_cursor >= UCN_ADAPTER_RX_SLOT_COUNT ||
+        adapter->rx_claim_cursor >= UCN_ADAPTER_RX_SLOT_COUNT ||
+        adapter->faulted > 1U || adapter->rx_enabled > 1U) {
         adapter->lock.leave(adapter->lock.context);
         return UCN_ERR_STATE;
     }
@@ -109,10 +117,11 @@ static void driver_gate_leave(ucn_i_adapter_t *adapter)
         adapter->driver_callback_gate.context);
 }
 
-static ucn_handle_t make_handle(const ucn_i_adapter_t *adapter,
-                                uint16_t slot,
-                                uint16_t generation,
-                                uint8_t kind)
+static UCN_I_ADAPTER_ALWAYS_INLINE ucn_handle_t make_handle(
+    const ucn_i_adapter_t *adapter,
+    uint16_t slot,
+    uint16_t generation,
+    uint8_t kind)
 {
     ucn_handle_t handle;
 
@@ -148,22 +157,23 @@ static bool link_handle_matches_locked(const ucn_i_adapter_t *adapter,
     return true;
 }
 
-static bool tx_handle_matches_locked(const ucn_i_adapter_t *adapter,
-                                     ucn_driver_token_t token,
-                                     uint16_t *slot_out)
+static bool tx_handle_matches_locked(
+    const ucn_i_adapter_t *adapter,
+    const ucn_driver_token_t *token,
+    uint16_t *slot_out)
 {
     uint16_t slot;
 
-    if (token.runtime_instance != adapter->runtime_instance ||
-        token.owner_instance != adapter->owner_instance ||
-        token.object_kind != UCN_OBJECT_KIND_ADAPTER_TX ||
-        token.reserved_zero != 0U || token.slot == 0U) {
+    if (token->runtime_instance != adapter->runtime_instance ||
+        token->owner_instance != adapter->owner_instance ||
+        token->object_kind != UCN_OBJECT_KIND_ADAPTER_TX ||
+        token->reserved_zero != 0U || token->slot == 0U) {
         return false;
     }
-    slot = (uint16_t)(token.slot - 1U);
+    slot = (uint16_t)(token->slot - 1U);
     if (slot >= UCN_ADAPTER_TX_SLOT_COUNT ||
         adapter->tx_tokens[slot].state == UCN_I_ADAPTER_TX_FREE ||
-        adapter->tx_tokens[slot].generation != token.generation) {
+        adapter->tx_tokens[slot].generation != token->generation) {
         return false;
     }
     if (slot_out != NULL) {
@@ -173,21 +183,21 @@ static bool tx_handle_matches_locked(const ucn_i_adapter_t *adapter,
 }
 
 static bool rx_handle_matches_locked(const ucn_i_adapter_t *adapter,
-                                     ucn_driver_token_t token,
+                                     const ucn_driver_token_t *token,
                                      uint16_t *slot_out)
 {
     uint16_t slot;
 
-    if (token.runtime_instance != adapter->runtime_instance ||
-        token.owner_instance != adapter->owner_instance ||
-        token.object_kind != UCN_OBJECT_KIND_ADAPTER_RX ||
-        token.reserved_zero != 0U || token.slot == 0U) {
+    if (token->runtime_instance != adapter->runtime_instance ||
+        token->owner_instance != adapter->owner_instance ||
+        token->object_kind != UCN_OBJECT_KIND_ADAPTER_RX ||
+        token->reserved_zero != 0U || token->slot == 0U) {
         return false;
     }
-    slot = (uint16_t)(token.slot - 1U);
+    slot = (uint16_t)(token->slot - 1U);
     if (slot >= UCN_ADAPTER_RX_SLOT_COUNT ||
         adapter->rx_slots[slot].state == 0U ||
-        adapter->rx_slots[slot].generation != token.generation) {
+        adapter->rx_slots[slot].generation != token->generation) {
         return false;
     }
     if (slot_out != NULL) {
@@ -286,9 +296,12 @@ ucn_result_t ucn_i_adapter_link_handle(const ucn_i_adapter_t *adapter,
         lock_leave(mutable_adapter);
         return UCN_ERR_NOT_FOUND;
     }
-    handle = make_handle(adapter, (uint16_t)(link_index + 1U),
-                         adapter->links[link_index].handle_generation,
-                         UCN_OBJECT_KIND_LINK);
+    memset(&handle, 0, sizeof(handle));
+    handle.runtime_instance = adapter->runtime_instance;
+    handle.owner_instance = adapter->owner_instance;
+    handle.slot = (uint16_t)(link_index + 1U);
+    handle.generation = adapter->links[link_index].handle_generation;
+    handle.object_kind = UCN_OBJECT_KIND_LINK;
     lock_leave(mutable_adapter);
     *handle_out = handle;
     return UCN_OK;
@@ -301,9 +314,6 @@ ucn_result_t ucn_i_adapter_link_snapshot(const ucn_i_adapter_t *adapter,
                                          bool *ready_out)
 {
     ucn_i_adapter_t *mutable_adapter = (ucn_i_adapter_t *)adapter;
-    uint32_t instance;
-    uint16_t mtu;
-    bool ready;
     ucn_result_t result;
 
     if (!adapter_header_is_valid(adapter) || instance_out == NULL ||
@@ -326,14 +336,11 @@ ucn_result_t ucn_i_adapter_link_snapshot(const ucn_i_adapter_t *adapter,
     if (result != UCN_OK) {
         return result;
     }
-    instance = adapter->links[link_index].instance_generation;
-    mtu = adapter->links[link_index].frame_mtu;
-    ready = adapter->links[link_index].valid && adapter->links[link_index].up &&
+    *instance_out = adapter->links[link_index].instance_generation;
+    *mtu_out = adapter->links[link_index].frame_mtu;
+    *ready_out = adapter->links[link_index].valid && adapter->links[link_index].up &&
             !adapter->links[link_index].fenced && !adapter->faulted;
     lock_leave(mutable_adapter);
-    *instance_out = instance;
-    *mtu_out = mtu;
-    *ready_out = ready;
     return UCN_OK;
 }
 
@@ -426,35 +433,112 @@ ucn_result_t ucn_i_adapter_tx_reserve(ucn_i_adapter_t *adapter,
     return UCN_ERR_NO_SPACE;
 }
 
-static ucn_i_adapter_tx_view_t tx_view_from_entry(
-    const ucn_i_adapter_tx_token_t *entry)
+static UCN_I_ADAPTER_ALWAYS_INLINE void tx_view_fill(
+    const ucn_i_adapter_tx_token_t *entry,
+    ucn_i_adapter_tx_view_t *view)
 {
-    ucn_i_adapter_tx_view_t view;
-
-    memset(&view, 0, sizeof(view));
-    view.terminal_result = entry->terminal_result;
-    view.core_tx_slot = entry->core_tx_slot;
-    view.state = entry->state;
-    view.terminal_latched = entry->terminal_latched;
-    return view;
+    memset(view, 0, sizeof(*view));
+    view->terminal_result = entry->terminal_result;
+    view->core_tx_slot = entry->core_tx_slot;
+    view->state = entry->state;
+    view->terminal_latched = entry->terminal_latched;
 }
 
-ucn_result_t ucn_i_adapter_tx_submit(ucn_i_adapter_t *adapter,
-                                     ucn_driver_token_t token,
-                                     const uint8_t *frame,
-                                     size_t frame_bytes,
-                                     ucn_i_adapter_tx_view_t *view_out)
+static ucn_result_t adapter_tx_submit_finish(
+    ucn_i_adapter_t *adapter,
+    const ucn_driver_token_t *token,
+    ucn_i_adapter_tx_view_t *view_out)
 {
-    ucn_tx_submit_fn submit;
-    void *context;
-    ucn_link_handle_t link_handle;
-    ucn_driver_submit_result_t driver_result;
-    ucn_i_adapter_tx_view_t view;
-    uint16_t token_slot;
-    uint16_t link_slot;
+    ucn_i_adapter_driver_staging_t *staging =
+        &adapter->driver_staging;
+    ucn_result_t result = lock_enter(adapter);
+
+    if (result != UCN_OK) {
+        memset(staging, 0, sizeof(*staging));
+        return result;
+    }
+    if (staging->active_kind != 1U ||
+        !tx_handle_matches_locked(adapter, token,
+                                  &staging->token_slot)) {
+        adapter->faulted = 1U;
+        memset(staging, 0, sizeof(*staging));
+        lock_leave(adapter);
+        return UCN_ERR_STATE;
+    }
+    if (adapter->tx_tokens[staging->token_slot].state ==
+            UCN_I_ADAPTER_TX_IN_DOUBT ||
+        adapter->tx_tokens[staging->token_slot].state ==
+            UCN_I_ADAPTER_TX_COMPLETED) {
+        tx_view_fill(&adapter->tx_tokens[staging->token_slot], view_out);
+        memset(staging, 0, sizeof(*staging));
+        lock_leave(adapter);
+        return UCN_OK;
+    }
+    if (adapter->tx_tokens[staging->token_slot].state !=
+        UCN_I_ADAPTER_TX_SUBMITTING) {
+        adapter->faulted = 1U;
+        memset(staging, 0, sizeof(*staging));
+        lock_leave(adapter);
+        return UCN_ERR_STATE;
+    }
+    if (adapter->tx_tokens[staging->token_slot].terminal_latched) {
+        adapter->tx_tokens[staging->token_slot].state =
+            UCN_I_ADAPTER_TX_COMPLETED;
+        if (staging->submit_result != UCN_DRIVER_COMPLETE &&
+            staging->submit_result != UCN_DRIVER_SUBMITTED) {
+            adapter->links[staging->link_slot].fenced = 1U;
+        }
+    } else if (staging->submit_result == UCN_DRIVER_SUBMITTED) {
+        adapter->tx_tokens[staging->token_slot].state =
+            UCN_I_ADAPTER_TX_SUBMITTED;
+    } else if (staging->submit_result == UCN_DRIVER_COMPLETE) {
+        adapter->tx_tokens[staging->token_slot].terminal_latched = 1U;
+        adapter->tx_tokens[staging->token_slot].terminal_result = UCN_OK;
+        adapter->tx_tokens[staging->token_slot].state =
+            UCN_I_ADAPTER_TX_COMPLETED;
+    } else if (staging->submit_result == UCN_ERR_IN_DOUBT ||
+               staging->submit_result == UCN_DRIVER_SUBMIT_UNKNOWN) {
+        adapter->tx_tokens[staging->token_slot].state =
+            UCN_I_ADAPTER_TX_IN_DOUBT;
+        adapter->links[staging->link_slot].fenced = 1U;
+    } else if (staging->submit_result == UCN_DRIVER_NOT_SUBMITTED) {
+        adapter->tx_tokens[staging->token_slot].state =
+            UCN_I_ADAPTER_TX_NOT_SUBMITTED;
+    } else if (staging->submit_result < 0 &&
+               terminal_result_is_valid(
+                   (ucn_result_t)staging->submit_result)) {
+        adapter->tx_tokens[staging->token_slot].terminal_latched = 1U;
+        adapter->tx_tokens[staging->token_slot].terminal_result =
+            (ucn_result_t)staging->submit_result;
+        adapter->tx_tokens[staging->token_slot].state =
+            UCN_I_ADAPTER_TX_NOT_SUBMITTED;
+    } else {
+        adapter->tx_tokens[staging->token_slot].state =
+            UCN_I_ADAPTER_TX_IN_DOUBT;
+        adapter->links[staging->link_slot].fenced = 1U;
+    }
+    tx_view_fill(&adapter->tx_tokens[staging->token_slot], view_out);
+    (void)ucn_i_owner_mailbox_publish_locked(
+        &adapter->mailbox, UCN_I_OWNER_WORK_COMPLETION);
+    memset(staging, 0, sizeof(*staging));
+    lock_leave(adapter);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_adapter_tx_submit_ref(
+    ucn_i_adapter_t *adapter,
+    const ucn_driver_token_t *token,
+    const uint8_t *frame,
+    size_t frame_bytes,
+    ucn_i_adapter_tx_view_t *view_out)
+{
+    ucn_i_adapter_driver_staging_t *staging;
     ucn_result_t result;
 
-    if (!adapter_header_is_valid(adapter) || frame == NULL || frame_bytes == 0U ||
+    if (!adapter_header_is_valid(adapter) || token == NULL ||
+        ucn_i_ranges_overlap(adapter,sizeof(*adapter),token,sizeof(*token)) ||
+        (view_out != NULL && ucn_i_ranges_overlap(token,sizeof(*token),view_out,sizeof(*view_out))) ||
+        frame == NULL || frame_bytes == 0U ||
         view_out == NULL ||
         ucn_i_ranges_overlap(adapter, sizeof(*adapter), frame, frame_bytes) ||
         ucn_i_ranges_overlap(adapter, sizeof(*adapter), view_out,
@@ -467,100 +551,61 @@ ucn_result_t ucn_i_adapter_tx_submit(ucn_i_adapter_t *adapter,
     if (result != UCN_OK) {
         return result;
     }
+    staging = &adapter->driver_staging;
     result = lock_enter(adapter);
     if (result != UCN_OK) {
         driver_gate_leave(adapter);
         return result;
     }
-    if (!tx_handle_matches_locked(adapter, token, &token_slot) ||
-        adapter->tx_tokens[token_slot].state != UCN_I_ADAPTER_TX_RESERVED) {
+    if (!bytes_are_zero(staging, sizeof(*staging)) ||
+        !tx_handle_matches_locked(adapter, token,
+                                  &staging->token_slot) ||
+        adapter->tx_tokens[staging->token_slot].state !=
+            UCN_I_ADAPTER_TX_RESERVED) {
         lock_leave(adapter);
         driver_gate_leave(adapter);
         return UCN_ERR_STATE;
     }
-    link_slot = adapter->tx_tokens[token_slot].link_slot;
-    if (link_slot >= adapter->link_count || frame_bytes > adapter->links[link_slot].frame_mtu ||
-        !adapter->links[link_slot].up || adapter->links[link_slot].fenced ||
-        adapter->tx_tokens[token_slot].link_instance_generation !=
-            adapter->links[link_slot].instance_generation) {
+    staging->link_slot =
+        adapter->tx_tokens[staging->token_slot].link_slot;
+    if (staging->link_slot >= adapter->link_count ||
+        frame_bytes > adapter->links[staging->link_slot].frame_mtu ||
+        !adapter->links[staging->link_slot].up ||
+        adapter->links[staging->link_slot].fenced ||
+        adapter->tx_tokens[staging->token_slot].link_instance_generation !=
+            adapter->links[staging->link_slot].instance_generation) {
+        memset(staging, 0, sizeof(*staging));
         lock_leave(adapter);
         driver_gate_leave(adapter);
         return UCN_ERR_STATE;
     }
-    adapter->tx_tokens[token_slot].state = UCN_I_ADAPTER_TX_SUBMITTING;
-    submit = adapter->links[link_slot].tx.submit;
-    context = adapter->links[link_slot].driver_context;
-    link_handle = make_handle(adapter, (uint16_t)(link_slot + 1U),
-                              adapter->links[link_slot].handle_generation,
-                              UCN_OBJECT_KIND_LINK);
+    adapter->tx_tokens[staging->token_slot].state =
+        UCN_I_ADAPTER_TX_SUBMITTING;
+    staging->submit = adapter->links[staging->link_slot].tx.submit;
+    staging->context =
+        adapter->links[staging->link_slot].driver_context;
+    staging->link_handle = make_handle(
+        adapter, (uint16_t)(staging->link_slot + 1U),
+        adapter->links[staging->link_slot].handle_generation,
+        UCN_OBJECT_KIND_LINK);
+    staging->active_kind = 1U;
     lock_leave(adapter);
 
-    driver_result = submit(context, link_handle, frame, frame_bytes, token);
-
-    result = lock_enter(adapter);
-    if (result != UCN_OK) {
-        driver_gate_leave(adapter);
-        return result;
-    }
-    if (!tx_handle_matches_locked(adapter, token, &token_slot)) {
-        adapter->faulted = 1U;
-        lock_leave(adapter);
-        driver_gate_leave(adapter);
-        return UCN_ERR_STATE;
-    }
-    if (adapter->tx_tokens[token_slot].state == UCN_I_ADAPTER_TX_IN_DOUBT ||
-        adapter->tx_tokens[token_slot].state == UCN_I_ADAPTER_TX_COMPLETED) {
-        view = tx_view_from_entry(&adapter->tx_tokens[token_slot]);
-        lock_leave(adapter);
-        driver_gate_leave(adapter);
-        *view_out = view;
-        return UCN_OK;
-    }
-    if (adapter->tx_tokens[token_slot].state != UCN_I_ADAPTER_TX_SUBMITTING) {
-        adapter->faulted = 1U;
-        lock_leave(adapter);
-        driver_gate_leave(adapter);
-        return UCN_ERR_STATE;
-    }
-    if (adapter->tx_tokens[token_slot].terminal_latched) {
-        adapter->tx_tokens[token_slot].state = UCN_I_ADAPTER_TX_COMPLETED;
-        if (driver_result != UCN_DRIVER_COMPLETE &&
-            driver_result != UCN_DRIVER_SUBMITTED) {
-            adapter->links[link_slot].fenced = 1U;
-        }
-    } else if (driver_result == UCN_DRIVER_SUBMITTED) {
-        adapter->tx_tokens[token_slot].state = UCN_I_ADAPTER_TX_SUBMITTED;
-    } else if (driver_result == UCN_DRIVER_COMPLETE) {
-        adapter->tx_tokens[token_slot].terminal_latched = 1U;
-        adapter->tx_tokens[token_slot].terminal_result = UCN_OK;
-        adapter->tx_tokens[token_slot].state = UCN_I_ADAPTER_TX_COMPLETED;
-    } else if (driver_result == UCN_ERR_IN_DOUBT ||
-               driver_result == UCN_DRIVER_SUBMIT_UNKNOWN) {
-        adapter->tx_tokens[token_slot].state = UCN_I_ADAPTER_TX_IN_DOUBT;
-        adapter->links[link_slot].fenced = 1U;
-    } else if (driver_result == UCN_DRIVER_NOT_SUBMITTED) {
-        /* A definitive NOT_SUBMITTED result proves that the Driver produced
-         * no physical side effect and no longer owns this token.  It is a
-         * retryable Adapter outcome, not a Core completion. */
-        adapter->tx_tokens[token_slot].state =
-            UCN_I_ADAPTER_TX_NOT_SUBMITTED;
-    } else if (driver_result < 0 &&
-               terminal_result_is_valid((ucn_result_t)driver_result)) {
-        adapter->tx_tokens[token_slot].terminal_latched = 1U;
-        adapter->tx_tokens[token_slot].terminal_result =
-            (ucn_result_t)driver_result;
-        adapter->tx_tokens[token_slot].state = UCN_I_ADAPTER_TX_NOT_SUBMITTED;
-    } else {
-        adapter->tx_tokens[token_slot].state = UCN_I_ADAPTER_TX_IN_DOUBT;
-        adapter->links[link_slot].fenced = 1U;
-    }
-    view = tx_view_from_entry(&adapter->tx_tokens[token_slot]);
-    lock_leave(adapter);
+    staging->submit_result = staging->submit(
+        staging->context, staging->link_handle, frame, frame_bytes, *token);
+    result = adapter_tx_submit_finish(adapter, token, view_out);
     driver_gate_leave(adapter);
-    *view_out = view;
-    (void)ucn_i_owner_mailbox_publish(&adapter->mailbox,
-                                      UCN_I_OWNER_WORK_COMPLETION);
-    return UCN_OK;
+    return result;
+}
+
+ucn_result_t ucn_i_adapter_tx_submit(ucn_i_adapter_t *adapter,
+                                     ucn_driver_token_t token,
+                                     const uint8_t *frame,
+                                     size_t frame_bytes,
+                                     ucn_i_adapter_tx_view_t *view_out)
+{
+    return ucn_i_adapter_tx_submit_ref(
+        adapter, &token, frame, frame_bytes, view_out);
 }
 
 ucn_result_t ucn_i_adapter_tx_complete(ucn_i_adapter_t *adapter,
@@ -584,7 +629,7 @@ ucn_result_t ucn_i_adapter_tx_complete(ucn_i_adapter_t *adapter,
     if (lock_result != UCN_OK) {
         return lock_result;
     }
-    if (!tx_handle_matches_locked(adapter, token, &slot)) {
+    if (!tx_handle_matches_locked(adapter, &(token), &slot)) {
         lock_leave(adapter);
         return UCN_ERR_STATE;
     }
@@ -633,14 +678,15 @@ ucn_result_t ucn_i_adapter_tx_complete(ucn_i_adapter_t *adapter,
 }
 
 ucn_result_t ucn_i_adapter_tx_view(ucn_i_adapter_t *adapter,
-                                   ucn_driver_token_t token,
+                                   const ucn_driver_token_t *token,
                                    ucn_i_adapter_tx_view_t *view_out)
 {
-    ucn_i_adapter_tx_view_t view;
     uint16_t slot;
     ucn_result_t result;
 
-    if (!adapter_header_is_valid(adapter) || view_out == NULL ||
+    if (!adapter_header_is_valid(adapter) || view_out == NULL || token == NULL ||
+        ucn_i_ranges_overlap(adapter,sizeof(*adapter),token,sizeof(*token)) ||
+        ucn_i_ranges_overlap(token,sizeof(*token),view_out,sizeof(*view_out)) ||
         ucn_i_ranges_overlap(adapter, sizeof(*adapter), view_out,
                              sizeof(*view_out))) {
         return UCN_ERR_ARGUMENT;
@@ -657,23 +703,23 @@ ucn_result_t ucn_i_adapter_tx_view(ucn_i_adapter_t *adapter,
         adapter->tx_tokens[slot].terminal_latched) {
         adapter->tx_tokens[slot].state = UCN_I_ADAPTER_TX_COMPLETED;
     }
-    view = tx_view_from_entry(&adapter->tx_tokens[slot]);
+    tx_view_fill(&adapter->tx_tokens[slot], view_out);
     lock_leave(adapter);
-    *view_out = view;
     return UCN_OK;
 }
 
-ucn_result_t ucn_i_adapter_tx_cancel(ucn_i_adapter_t *adapter,
-                                     ucn_driver_token_t token)
+ucn_result_t ucn_i_adapter_tx_cancel(
+    ucn_i_adapter_t *adapter,
+    const ucn_driver_token_t *token)
 {
-    ucn_tx_cancel_fn cancel;
-    void *context;
+    ucn_i_adapter_driver_staging_t *staging;
     uint16_t slot;
     uint16_t link_slot;
     uint8_t state;
     ucn_result_t result;
 
-    if (!adapter_header_is_valid(adapter)) {
+    if (!adapter_header_is_valid(adapter) || token == NULL ||
+        ucn_i_ranges_overlap(adapter,sizeof(*adapter),token,sizeof(*token))) {
         return UCN_ERR_ARGUMENT;
     }
     result = lock_enter(adapter);
@@ -708,8 +754,7 @@ ucn_result_t ucn_i_adapter_tx_cancel(ucn_i_adapter_t *adapter,
         lock_leave(adapter);
         return UCN_ERR_STATE;
     }
-    cancel = adapter->links[link_slot].tx.cancel;
-    if (cancel == NULL) {
+    if (adapter->links[link_slot].tx.cancel == NULL) {
         adapter->tx_tokens[slot].state = UCN_I_ADAPTER_TX_IN_DOUBT;
         adapter->links[link_slot].fenced = 1U;
         lock_leave(adapter);
@@ -721,74 +766,101 @@ ucn_result_t ucn_i_adapter_tx_cancel(ucn_i_adapter_t *adapter,
     if (result != UCN_OK) {
         return result;
     }
+    staging = &adapter->driver_staging;
     result = lock_enter(adapter);
     if (result != UCN_OK) {
         driver_gate_leave(adapter);
         return result;
     }
-    if (!tx_handle_matches_locked(adapter, token, &slot) ||
-        adapter->tx_tokens[slot].state != UCN_I_ADAPTER_TX_SUBMITTED ||
-        adapter->tx_tokens[slot].link_slot >= adapter->link_count) {
+    if (!bytes_are_zero(staging, sizeof(*staging)) ||
+        !tx_handle_matches_locked(adapter, token,
+                                  &staging->token_slot) ||
+        adapter->tx_tokens[staging->token_slot].state !=
+            UCN_I_ADAPTER_TX_SUBMITTED ||
+        adapter->tx_tokens[staging->token_slot].link_slot >=
+            adapter->link_count) {
         lock_leave(adapter);
         driver_gate_leave(adapter);
         return UCN_ERR_STATE;
     }
-    link_slot = adapter->tx_tokens[slot].link_slot;
-    cancel = adapter->links[link_slot].tx.cancel;
-    context = adapter->links[link_slot].driver_context;
-    if (cancel == NULL) {
-        adapter->tx_tokens[slot].state = UCN_I_ADAPTER_TX_IN_DOUBT;
-        adapter->links[link_slot].fenced = 1U;
+    staging->link_slot =
+        adapter->tx_tokens[staging->token_slot].link_slot;
+    staging->cancel = adapter->links[staging->link_slot].tx.cancel;
+    staging->context =
+        adapter->links[staging->link_slot].driver_context;
+    if (staging->cancel == NULL) {
+        adapter->tx_tokens[staging->token_slot].state =
+            UCN_I_ADAPTER_TX_IN_DOUBT;
+        adapter->links[staging->link_slot].fenced = 1U;
+        memset(staging, 0, sizeof(*staging));
         lock_leave(adapter);
         driver_gate_leave(adapter);
         return UCN_ERR_IN_DOUBT;
     }
+    staging->active_kind = 2U;
     lock_leave(adapter);
-    result = cancel(context, token);
+    staging->cancel_result = staging->cancel(staging->context, *token);
     if (lock_enter(adapter) != UCN_OK) {
+        memset(staging, 0, sizeof(*staging));
         driver_gate_leave(adapter);
         return UCN_ERR_STATE;
     }
-    if (!tx_handle_matches_locked(adapter, token, &slot)) {
+    if (staging->active_kind != 2U ||
+        !tx_handle_matches_locked(adapter, token,
+                                  &staging->token_slot)) {
+        memset(staging, 0, sizeof(*staging));
         lock_leave(adapter);
         driver_gate_leave(adapter);
         return UCN_ERR_STATE;
     }
-    if (adapter->tx_tokens[slot].state == UCN_I_ADAPTER_TX_COMPLETED &&
-        adapter->tx_tokens[slot].terminal_latched) {
-        ucn_result_t terminal = adapter->tx_tokens[slot].terminal_result;
+    if (adapter->tx_tokens[staging->token_slot].state ==
+            UCN_I_ADAPTER_TX_COMPLETED &&
+        adapter->tx_tokens[staging->token_slot].terminal_latched) {
+        const ucn_result_t terminal =
+            adapter->tx_tokens[staging->token_slot].terminal_result;
+        result = staging->cancel_result == UCN_OK &&
+                         terminal == UCN_ERR_CANCELLED ?
+                     UCN_OK : UCN_ERR_STATE;
+        memset(staging, 0, sizeof(*staging));
         lock_leave(adapter);
         driver_gate_leave(adapter);
-        return result == UCN_OK && terminal == UCN_ERR_CANCELLED
-                   ? UCN_OK
-                   : UCN_ERR_STATE;
+        return result;
     }
-    if (adapter->tx_tokens[slot].state != UCN_I_ADAPTER_TX_SUBMITTED) {
+    if (adapter->tx_tokens[staging->token_slot].state !=
+        UCN_I_ADAPTER_TX_SUBMITTED) {
+        memset(staging, 0, sizeof(*staging));
         lock_leave(adapter);
         driver_gate_leave(adapter);
         return UCN_ERR_IN_DOUBT;
     }
+    result = staging->cancel_result;
     if (result == UCN_OK) {
-        adapter->tx_tokens[slot].state = UCN_I_ADAPTER_TX_CANCELLED;
-        adapter->tx_tokens[slot].terminal_latched = 1U;
-        adapter->tx_tokens[slot].terminal_result = UCN_ERR_CANCELLED;
+        adapter->tx_tokens[staging->token_slot].state =
+            UCN_I_ADAPTER_TX_CANCELLED;
+        adapter->tx_tokens[staging->token_slot].terminal_latched = 1U;
+        adapter->tx_tokens[staging->token_slot].terminal_result =
+            UCN_ERR_CANCELLED;
     } else {
-        adapter->tx_tokens[slot].state = UCN_I_ADAPTER_TX_IN_DOUBT;
-        adapter->links[adapter->tx_tokens[slot].link_slot].fenced = 1U;
+        adapter->tx_tokens[staging->token_slot].state =
+            UCN_I_ADAPTER_TX_IN_DOUBT;
+        adapter->links[staging->link_slot].fenced = 1U;
     }
+    memset(staging, 0, sizeof(*staging));
     lock_leave(adapter);
     driver_gate_leave(adapter);
     return result == UCN_OK ? UCN_OK : UCN_ERR_IN_DOUBT;
 }
 
+
 ucn_result_t ucn_i_adapter_tx_retire(ucn_i_adapter_t *adapter,
-                                     ucn_driver_token_t token)
+                                     const ucn_driver_token_t *token)
 {
     uint16_t slot;
     uint16_t generation;
     ucn_result_t result;
 
-    if (!adapter_header_is_valid(adapter)) {
+    if (!adapter_header_is_valid(adapter) || token == NULL ||
+        ucn_i_ranges_overlap(adapter,sizeof(*adapter),token,sizeof(*token))) {
         return UCN_ERR_ARGUMENT;
     }
     result = lock_enter(adapter);
@@ -883,14 +955,25 @@ ucn_result_t ucn_i_adapter_rx_publish(ucn_i_adapter_t *adapter,
     return UCN_ERR_NO_SPACE;
 }
 
-ucn_result_t ucn_i_adapter_rx_claim(ucn_i_adapter_t *adapter,
-                                    ucn_i_adapter_rx_view_t *view_out)
+ucn_result_t ucn_i_adapter_rx_claim_filtered(
+    ucn_i_adapter_t *adapter,
+    bool filter_contract,
+    uint8_t protocol_version,
+    uint8_t contract,
+    bool filter_origin,
+    uint8_t origin_min,
+    uint8_t origin_max,
+    ucn_i_adapter_rx_view_t *view_out)
 {
-    ucn_i_adapter_rx_view_t view;
     uint16_t index;
     ucn_result_t result;
 
     if (!adapter_header_is_valid(adapter) || view_out == NULL ||
+        (filter_contract &&
+         (protocol_version > 15U || contract > 15U)) ||
+        (filter_origin &&
+         (!filter_contract || origin_min > 2U || origin_max > 2U ||
+          origin_min > origin_max)) ||
         ucn_i_ranges_overlap(adapter, sizeof(*adapter), view_out,
                              sizeof(*view_out))) {
         return UCN_ERR_ARGUMENT;
@@ -903,37 +986,85 @@ ucn_result_t ucn_i_adapter_rx_claim(ucn_i_adapter_t *adapter,
         uint16_t slot_index = (uint16_t)(
             (adapter->rx_claim_cursor + index) % UCN_ADAPTER_RX_SLOT_COUNT);
         ucn_i_adapter_rx_slot_t *slot = &adapter->rx_slots[slot_index];
-        if (slot->state != 1U) {
+        if (slot->state != 1U ||
+            (filter_contract &&
+             (slot->frame_bytes == 0U ||
+              (slot->frame[0] >> 4U) != protocol_version ||
+              (slot->frame[0] & UINT8_C(0x0F)) != contract)) ||
+            (filter_origin &&
+             (slot->frame_bytes < 3U ||
+              (slot->frame[2] >> 6U) < origin_min ||
+              (slot->frame[2] >> 6U) > origin_max))) {
             continue;
         }
-        memset(&view, 0, sizeof(view));
+        memset(view_out, 0, sizeof(*view_out));
         slot->state = 2U;
-        view.frame = slot->frame;
-        view.frame_bytes = slot->frame_bytes;
-        view.meta = slot->meta;
-        view.link_slot = slot->link_slot;
-        view.link_instance_generation = slot->link_instance_generation;
-        view.token = make_handle(adapter, (uint16_t)(slot_index + 1U),
-                                  slot->generation,
-                                  UCN_OBJECT_KIND_ADAPTER_RX);
+        view_out->frame = slot->frame;
+        view_out->frame_bytes = slot->frame_bytes;
+        view_out->meta = slot->meta;
+        view_out->link_slot = slot->link_slot;
+        view_out->link_instance_generation = slot->link_instance_generation;
+        view_out->token.runtime_instance = adapter->runtime_instance;
+        view_out->token.owner_instance = adapter->owner_instance;
+        view_out->token.slot = (uint16_t)(slot_index + 1U);
+        view_out->token.generation = slot->generation;
+        view_out->token.object_kind = UCN_OBJECT_KIND_ADAPTER_RX;
         adapter->rx_claim_cursor = (uint16_t)(
             (slot_index + 1U) % UCN_ADAPTER_RX_SLOT_COUNT);
         lock_leave(adapter);
-        *view_out = view;
         return UCN_OK;
     }
     lock_leave(adapter);
     return UCN_ERR_NOT_FOUND;
 }
 
+ucn_result_t ucn_i_adapter_rx_claim(ucn_i_adapter_t *adapter,
+                                    ucn_i_adapter_rx_view_t *view_out)
+{
+    return ucn_i_adapter_rx_claim_filtered(
+        adapter, false, 0U, 0U, false, 0U, 0U, view_out);
+}
+
+ucn_result_t ucn_i_adapter_rx_claim_contract(
+    ucn_i_adapter_t *adapter,
+    uint8_t protocol_version,
+    uint8_t contract,
+    ucn_i_adapter_rx_view_t *view_out)
+{
+    if (protocol_version > 15U || contract > 15U) {
+        return UCN_ERR_ARGUMENT;
+    }
+    return ucn_i_adapter_rx_claim_filtered(
+        adapter, true, protocol_version, contract,
+        false, 0U, 0U, view_out);
+}
+
+ucn_result_t ucn_i_adapter_rx_claim_contract_origin_range(
+    ucn_i_adapter_t *adapter,
+    uint8_t protocol_version,
+    uint8_t contract,
+    uint8_t origin_min,
+    uint8_t origin_max,
+    ucn_i_adapter_rx_view_t *view_out)
+{
+    if (protocol_version > 15U || contract > 15U || origin_min > 2U ||
+        origin_max > 2U || origin_min > origin_max) {
+        return UCN_ERR_ARGUMENT;
+    }
+    return ucn_i_adapter_rx_claim_filtered(
+        adapter, true, protocol_version, contract,
+        true, origin_min, origin_max, view_out);
+}
+
 ucn_result_t ucn_i_adapter_rx_retire(ucn_i_adapter_t *adapter,
-                                     ucn_driver_token_t token)
+                                     const ucn_driver_token_t *token)
 {
     uint16_t slot;
     uint16_t generation;
     ucn_result_t result;
 
-    if (!adapter_header_is_valid(adapter)) {
+    if (!adapter_header_is_valid(adapter) || token == NULL ||
+        ucn_i_ranges_overlap(adapter,sizeof(*adapter),token,sizeof(*token))) {
         return UCN_ERR_ARGUMENT;
     }
     result = lock_enter(adapter);

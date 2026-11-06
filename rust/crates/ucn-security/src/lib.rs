@@ -7,17 +7,21 @@
 //! 密钥材料和密码算法由产品 [`CryptoProvider`] 持有；协议状态只保存精确 selector、代际和
 //! 不可变上下文摘要。Dynamic Admission 不属于 RUST-05。
 
+mod c1_hop;
 mod crypto;
 mod packet;
+mod reauth;
 mod replay;
 mod session;
+pub use reauth::*;
 
+pub use c1_hop::C1HopOpened;
 pub use crypto::{CryptoProvider, KeySelector, OpenOriginRequest, SealOriginRequest};
 pub use packet::{
     Fingerprint, FlowReplayClaim, FlowSecurityBinding, FlowSecurityRequest, HOP_TAG_BYTES,
     HOP_TRAILER_BYTES, NONCE_BYTES, ORIGIN_TAG_BYTES, OpenDisposition, OpenPacketPlan,
-    OpenedPacket, OriginContext, PacketPlan, ReplayCommitEvidence, SecurityPacketWorkspace,
-    SecurityReplayHandle, SenderDirection,
+    OpenedPacket, OriginContext, PacketEvidence, PacketPlan, ReplayCommitEvidence,
+    SecurityPacketWorkspace, SecurityReplayHandle, SenderDirection,
 };
 pub use replay::{ReplayClassification, ReplayEvidence};
 pub use session::{

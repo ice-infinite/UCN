@@ -142,12 +142,24 @@ buffer/capacity；返回更大长度、在外部保存未绑定结果或要求�
 Endpoint/执行器，不能把它伪装成普通 `NO_SPACE` 或重新执行。未来若支持更大结果，必须先定义
 独立的原子 Provider Blob、持久 ref+digest 和恢复顺序；它不属于当前基础合同。
 
-`IN_DOUBT` 是重启恢复结论，不是在执行器返回普通错误时随意选择的成功终态。Owner 加载到
+`IN_DOUBT` 表示无法证明外部执行结果，包括重启恢复、未知完成以及执行器容量/状态合同
+故障；不是在执行器返回已知普通业务失败时随意选择的成功终态。Owner 加载到
 `EXECUTING` 后，只有同一原子事务或经认证、绑定 Operation Key 的执行器查询能够恢复确切
 结果；否则必须原子写入 `IN_DOUBT`，禁止再次调用执行器。`PREPARED`、`EXECUTING`、
 `IN_DOUBT` 均不得按时间自动 GC。`COMMITTED_RESULT` 只有在认证结果 ACK 和最小 retention
 窗口结束后才可持久化 Tombstone；槽复用还必须证明发起 Principal 的 Operation ID 高水位
 与最大 Replay 生命周期已经越过该记录。
+
+第五段共同实现明确区分Data Error的结果码：耐久模式的0xFFFD表示已证明未交接，
+0xFFFE表示结果不确定，两者不能携带未证明的业务结果正文；常规业务错误不使用这两个码。
+它们使用既有2 B结果码，不添加新的Envelope字段。见
+[C/Rust共用合同第11节](../UCN_v6_C_Rust共用合同收口/README.md)。
+
+第六段接通明确的终态恢复与结果ACK控制正文，普通业务Header不增加字段。新当前
+Session/Key/Policy只能在原稳定身份/Binding不变、当前ACL重新通过时检索确认终态，
+不恢复旧执行租约。ACK绑定完整结果Receipt，正文GC必须经保留期和真实墓碑回读；
+掉电丢失ACK水位只能延迟GC，墓碑没有耐久ID高水位/重放寿命证明就不复用槽。见
+[C/Rust共用合同第12节](../UCN_v6_C_Rust共用合同收口/README.md)。
 
 ## 5. QoS 准入和调度
 

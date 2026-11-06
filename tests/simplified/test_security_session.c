@@ -21,6 +21,10 @@ typedef struct test_provider {
     const ucn_i_security_config_t *reinit_config;
     ucn_i_security_handle_t invalid_handle;
     uint32_t calls;
+    uint32_t protect_origin_calls;
+    uint32_t open_origin_calls;
+    uint32_t protect_hop_calls;
+    uint32_t verify_hop_calls;
     uint8_t expect_proof;
     uint8_t reentry_checked;
     uint8_t reinit_checked;
@@ -105,6 +109,68 @@ static void test_tag(const ucn_i_security_key_selector_t *selector,
     }
 }
 
+static void test_write_be(uint8_t *output, uint64_t value, uint8_t bytes)
+{
+    uint8_t index;
+
+    for (index = 0U; index < bytes; ++index) {
+        const uint8_t shift = (uint8_t)((bytes - index - 1U) * 8U);
+
+        output[index] = (uint8_t)(value >> shift);
+    }
+}
+
+static void test_c0_nonce_input(
+    const ucn_i_security_candidate_t *candidate,
+    const ucn_i_c0_frame_t *frame,
+    uint8_t direction,
+    uint8_t output[UCN_I_SECURITY_SEQUENCE_NONCE_INPUT_BYTES])
+{
+    static const uint8_t domain[] = "UCN6-NONCE-C0-V1";
+    size_t offset = 0U;
+
+    memcpy(output + offset, domain, sizeof(domain) - 1U);
+    offset += sizeof(domain) - 1U;
+    memcpy(output + offset, candidate->origin_fingerprint,
+           UCN_I_SECURITY_FINGERPRINT_BYTES);
+    offset += UCN_I_SECURITY_FINGERPRINT_BYTES;
+    test_write_be(output + offset, frame->transaction_id, 8U);
+    offset += 8U;
+    test_write_be(output + offset, frame->opcode, 2U);
+    offset += 2U;
+    output[offset++] = (uint8_t)((direction == UCN_I_SECURITY_ACCESS_OUTBOUND ?
+        memcmp(candidate->local.principal, candidate->peer.principal, 16U) :
+        memcmp(candidate->peer.principal, candidate->local.principal, 16U)) < 0 ? 0U : 1U);
+    output[offset] = frame->interaction_role;
+}
+
+static size_t test_hop_aad(
+    const uint8_t *packet_before_hop,
+    size_t packet_before_hop_bytes,
+    uint32_t hop_sequence,
+    const uint8_t fingerprint[UCN_I_SECURITY_FINGERPRINT_BYTES],
+    uint8_t output[UCN_I_SECURITY_HOP_AAD_BYTES])
+{
+    static const uint8_t domain[] = "UCN6-HOP-V1";
+    size_t offset = 0U;
+
+    memcpy(output + offset, domain, sizeof(domain) - 1U);
+    offset += sizeof(domain) - 1U;
+    test_write_be(output + offset,
+                  packet_before_hop_bytes + 4U +
+                      UCN_I_SECURITY_FINGERPRINT_BYTES,
+                  4U);
+    offset += 4U;
+    memcpy(output + offset, packet_before_hop, packet_before_hop_bytes);
+    offset += packet_before_hop_bytes;
+    test_write_be(output + offset, hop_sequence, 4U);
+    offset += 4U;
+    memcpy(output + offset, fingerprint,
+           UCN_I_SECURITY_FINGERPRINT_BYTES);
+    offset += UCN_I_SECURITY_FINGERPRINT_BYTES;
+    return offset;
+}
+
 static ucn_result_t protect_origin(
     void *context,
     const ucn_i_security_origin_protect_request_t *request)
@@ -115,6 +181,7 @@ static ucn_result_t protect_origin(
     size_t index;
 
     provider->calls++;
+    provider->protect_origin_calls++;
     if (provider->owner != NULL) {
         memset(&sentinel, 0xA5, sizeof(sentinel));
         before = sentinel;
@@ -129,7 +196,9 @@ static ucn_result_t protect_origin(
     if (request == NULL || request->aad == NULL ||
         request->plaintext == NULL || request->protected_payload == NULL ||
         request->origin_tag == NULL ||
-        request->aad_bytes != UCN_I_SECURITY_C1_ORIGIN_AAD_BYTES) {
+        (request->aad_bytes != UCN_I_SECURITY_C1_ORIGIN_AAD_BYTES &&
+         (request->aad_bytes < 50U ||
+          request->aad_bytes > UCN_I_C0_ORIGIN_AAD_MAX_BYTES))) {
         return UCN_ERR_ARGUMENT;
     }
     if (request->selector.suite_id == 1U) {
@@ -176,6 +245,7 @@ static ucn_result_t open_origin(
     size_t index;
 
     provider->calls++;
+    provider->open_origin_calls++;
     if (provider->owner != NULL) {
         memset(&sentinel, 0xA5, sizeof(sentinel));
         before = sentinel;
@@ -190,7 +260,9 @@ static ucn_result_t open_origin(
     if (request == NULL || request->aad == NULL ||
         request->protected_payload == NULL || request->origin_tag == NULL ||
         request->plaintext == NULL ||
-        request->aad_bytes != UCN_I_SECURITY_C1_ORIGIN_AAD_BYTES) {
+        (request->aad_bytes != UCN_I_SECURITY_C1_ORIGIN_AAD_BYTES &&
+         (request->aad_bytes < 50U ||
+          request->aad_bytes > UCN_I_C0_ORIGIN_AAD_MAX_BYTES))) {
         return UCN_ERR_ARGUMENT;
     }
     test_tag(&request->selector, request->aad, request->aad_bytes,
@@ -233,6 +305,7 @@ static ucn_result_t protect_hop(
     ucn_i_security_session_view_t before;
 
     provider->calls++;
+    provider->protect_hop_calls++;
     if (provider->owner != NULL) {
         memset(&sentinel, 0xA5, sizeof(sentinel));
         before = sentinel;
@@ -264,6 +337,7 @@ static ucn_result_t verify_hop(
     ucn_i_security_session_view_t before;
 
     provider->calls++;
+    provider->verify_hop_calls++;
     if (provider->owner != NULL) {
         memset(&sentinel, 0xA5, sizeof(sentinel));
         before = sentinel;
@@ -431,11 +505,14 @@ typedef struct session_fixture {
     ucn_i_security_current_facts_t facts;
 } session_fixture_t;
 
-static int fixture_activate(session_fixture_t *fixture,
+static int fixture_activate_profile(session_fixture_t *fixture,
                             const ucn_i_security_candidate_t *candidate,
                             uint8_t direction,
                             uint32_t runtime_instance,
-                            uint16_t gate_owner)
+                            uint16_t gate_owner,
+                            uint16_t service_id,
+                            uint16_t protocol_opcode,
+                            uint32_t realm_id, uint8_t address_width)
 {
     ucn_i_security_durability_base_t durability =
         durability_make(0x8001U, candidate->session_generation);
@@ -453,6 +530,8 @@ static int fixture_activate(session_fixture_t *fixture,
     memcpy(fixture->rule.peer_principal, candidate->peer.principal,
            sizeof(fixture->rule.peer_principal));
     fixture->acl = acl_make(candidate, direction);
+    fixture->acl.service_id = service_id;
+    fixture->acl.protocol_opcode = protocol_opcode;
     gate_ops = lock_ops(&fixture->gate_lock);
     CHECK(ucn_i_callback_gate_init(&fixture->gate, gate_owner,
                                    &gate_ops) == UCN_OK);
@@ -460,6 +539,8 @@ static int fixture_activate(session_fixture_t *fixture,
                                   &fixture->provider, &fixture->rule, 1U,
                                   &fixture->acl, 1U);
     fixture->config.runtime_instance = runtime_instance;
+    fixture->config.realm_id = realm_id;
+    fixture->config.address_width = address_width;
     CHECK(ucn_i_security_owner_init(&fixture->owner,
                                     &fixture->config) == UCN_OK);
     fixture->provider.owner = &fixture->owner;
@@ -506,11 +587,156 @@ static int fixture_activate(session_fixture_t *fixture,
     return 0;
 }
 
+static int fixture_activate(session_fixture_t *fixture,
+    const ucn_i_security_candidate_t *candidate, uint8_t direction,
+    uint32_t runtime_instance, uint16_t gate_owner, uint16_t service_id,
+    uint16_t protocol_opcode)
+{
+    return fixture_activate_profile(fixture, candidate, direction, runtime_instance,
+        gate_owner, service_id, protocol_opcode, UINT32_C(0x12345678), 1U);
+}
+
 static int fixture_destroy(session_fixture_t *fixture)
 {
     CHECK(ucn_i_security_fence(&fixture->owner, fixture->handle) == UCN_OK);
     CHECK(ucn_i_security_retire_fenced(&fixture->owner,
                                        fixture->handle) == UCN_OK);
+    CHECK(ucn_i_security_owner_destroy(&fixture->owner) == UCN_OK);
+    CHECK(ucn_i_callback_gate_destroy(&fixture->gate) == UCN_OK);
+    return 0;
+}
+
+typedef struct dual_session_fixture {
+    ucn_i_security_owner_t owner;
+    ucn_i_callback_gate_t gate;
+    test_lock_t state_lock;
+    test_lock_t gate_lock;
+    test_provider_t provider;
+    ucn_i_security_domain_rule_t rules[2];
+    ucn_i_security_acl_rule_t acl[2];
+    ucn_i_security_config_t config;
+    ucn_i_security_candidate_t candidates[2];
+    ucn_i_security_handle_t handles[2];
+    ucn_i_security_current_facts_t facts[2];
+} dual_session_fixture_t;
+
+static int dual_session_activate_one(dual_session_fixture_t *fixture,
+                                     uint16_t index,
+                                     uint64_t domain_id)
+{
+    ucn_i_security_durability_base_t durability = durability_make(
+        domain_id, fixture->candidates[index].session_generation);
+    ucn_i_security_requirement_view_t requirement;
+    ucn_i_security_durability_proof_t proof;
+    ucn_handle_t persistence_handle;
+    uint8_t published_digest[16];
+    uint8_t session_proof = 0xC3U;
+
+    CHECK(ucn_i_security_prepare_static_session(
+              &fixture->owner, &fixture->candidates[index],
+              &session_proof, 1U, &durability, 1000U,
+              &fixture->handles[index]) == UCN_OK);
+    CHECK(ucn_i_security_requirement_get(
+              &fixture->owner, fixture->handles[index],
+              &requirement) == UCN_OK);
+    memset(&persistence_handle, 0, sizeof(persistence_handle));
+    persistence_handle.runtime_instance = fixture->config.runtime_instance;
+    persistence_handle.owner_instance = 8U;
+    persistence_handle.slot = (uint16_t)(index + 1U);
+    persistence_handle.generation = (uint32_t)(index + 2U);
+    persistence_handle.object_kind = UCN_OBJECT_KIND_PERSISTENCE;
+    fill_bytes(published_digest, sizeof(published_digest),
+               (uint8_t)(0xD1U + index));
+    CHECK(ucn_i_security_bind_persistence(
+              &fixture->owner, fixture->handles[index], persistence_handle,
+              published_digest) == UCN_OK);
+    memset(&proof, 0, sizeof(proof));
+    proof.persistence_handle = persistence_handle;
+    proof.domain_id = requirement.domain_id;
+    proof.record_generation = requirement.expected_record_generation + 1U;
+    proof.foundation_transaction_id = requirement.foundation_transaction_id;
+    proof.witness_generation = proof.record_generation;
+    proof.transition_fingerprint = requirement.transition_fingerprint;
+    proof.runtime_instance = fixture->config.runtime_instance;
+    proof.body_bytes = UCN_I_SECURITY_RECORD_BYTES;
+    proof.volatile_continuation = requirement.volatile_continuation;
+    proof.persistence_owner_instance = persistence_handle.owner_instance;
+    proof.caller_owner_instance =
+        fixture->config.persistence_business_owner_instance;
+    proof.domain_generation = requirement.domain_generation;
+    proof.schema_id = requirement.schema_id;
+    proof.schema_version = requirement.schema_version;
+    proof.operation_kind = requirement.operation_kind;
+    memcpy(proof.body_digest, published_digest, sizeof(published_digest));
+    fixture->facts[index].local = fixture->candidates[index].local;
+    fixture->facts[index].peer = fixture->candidates[index].peer;
+    fixture->facts[index].now_us = 1500U;
+    fixture->facts[index].link_generation =
+        fixture->candidates[index].link_generation;
+    fixture->facts[index].policy_generation =
+        fixture->candidates[index].policy_generation;
+    CHECK(ucn_i_security_activate(
+              &fixture->owner, fixture->handles[index], &proof,
+              &fixture->facts[index]) == UCN_OK);
+    return 0;
+}
+
+static int dual_session_fixture_activate(
+    dual_session_fixture_t *fixture,
+    const ucn_i_security_candidate_t candidates[2],
+    const uint8_t directions[2],
+    uint32_t runtime_instance,
+    uint16_t gate_owner,
+    uint16_t protocol_opcode)
+{
+    ucn_i_lock_ops_t gate_ops;
+    uint16_t index;
+
+    memset(fixture, 0, sizeof(*fixture));
+    fixture->provider.expect_proof = 0xC3U;
+    for (index = 0U; index < 2U; ++index) {
+        fixture->candidates[index] = candidates[index];
+        fixture->rules[index].domain_id = UINT64_C(0x8100) + index;
+        memcpy(fixture->rules[index].peer_principal,
+               candidates[index].peer.principal,
+               sizeof(fixture->rules[index].peer_principal));
+        fixture->acl[index] = acl_make(&candidates[index],
+                                       directions[index]);
+        fixture->acl[index].service_id = 0U;
+        fixture->acl[index].protocol_opcode = protocol_opcode;
+        if (candidates[index].hop_profile == UCN_I_HOP_PROFILE_H1) {
+            memcpy(fixture->acl[index].context_fingerprint,
+                   candidates[index].hop_fingerprint,
+                   sizeof(fixture->acl[index].context_fingerprint));
+        }
+    }
+    gate_ops = lock_ops(&fixture->gate_lock);
+    CHECK(ucn_i_callback_gate_init(&fixture->gate, gate_owner,
+                                   &gate_ops) == UCN_OK);
+    fixture->config = config_make(
+        &fixture->state_lock, &fixture->gate, &fixture->provider,
+        fixture->rules, 2U, fixture->acl, 2U);
+    fixture->config.runtime_instance = runtime_instance;
+    CHECK(ucn_i_security_owner_init(&fixture->owner,
+                                    &fixture->config) == UCN_OK);
+    fixture->provider.owner = &fixture->owner;
+    CHECK(dual_session_activate_one(fixture, 0U,
+                                    fixture->rules[0].domain_id) == 0);
+    CHECK(dual_session_activate_one(fixture, 1U,
+                                    fixture->rules[1].domain_id) == 0);
+    return 0;
+}
+
+static int dual_session_fixture_destroy(dual_session_fixture_t *fixture)
+{
+    uint16_t index;
+
+    for (index = 0U; index < 2U; ++index) {
+        CHECK(ucn_i_security_fence(&fixture->owner,
+                                   fixture->handles[index]) == UCN_OK);
+        CHECK(ucn_i_security_retire_fenced(
+                  &fixture->owner, fixture->handles[index]) == UCN_OK);
+    }
     CHECK(ucn_i_security_owner_destroy(&fixture->owner) == UCN_OK);
     CHECK(ucn_i_callback_gate_destroy(&fixture->gate) == UCN_OK);
     return 0;
@@ -606,6 +832,28 @@ static int test_session_prepare_and_lifecycle(void)
     config = config_make(&state_lock, &gate, &provider, &rule, 1U,
                          &acl, 1U);
     CHECK(ucn_i_security_owner_init(&owner, &config) == UCN_OK);
+    {
+        static ucn_i_security_owner_t owner_before;
+        ucn_i_security_current_facts_t borrowed_facts;
+        const ucn_i_security_replay_handle_t *alias=(const ucn_i_security_replay_handle_t *)&owner;
+        const ucn_i_security_hop_replay_handle_t *hop_alias=(const ucn_i_security_hop_replay_handle_t *)&owner;
+        test_lock_t lock_before=state_lock;
+        owner_before=owner; memset(&borrowed_facts,0,sizeof(borrowed_facts));
+        CHECK(ucn_i_security_replay_commit(&owner,NULL,&borrowed_facts)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_control_replay_commit(&owner,NULL,&borrowed_facts)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_control_replay_complete(&owner,NULL,&borrowed_facts)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_replay_abort(&owner,NULL)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_hop_replay_commit(&owner,NULL,&borrowed_facts)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_hop_replay_abort(&owner,NULL)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_replay_commit(&owner,alias,&borrowed_facts)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_control_replay_commit(&owner,alias,&borrowed_facts)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_control_replay_complete(&owner,alias,&borrowed_facts)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_replay_abort(&owner,alias)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_hop_replay_commit(&owner,hop_alias,&borrowed_facts)==UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_hop_replay_abort(&owner,hop_alias)==UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&owner,&owner_before,sizeof(owner))==0);
+        CHECK(memcmp(&state_lock,&lock_before,sizeof(state_lock))==0);
+    }
     provider.owner = &owner;
     provider.reinit_config = &config;
     memset(&provider.invalid_handle, 0, sizeof(provider.invalid_handle));
@@ -784,17 +1032,17 @@ static int test_session_prepare_and_lifecycle(void)
                                         &replay2) == UCN_ERR_STATE);
     replay2 = replay;
     replay2.hop_sequence = 1U;
-    CHECK(ucn_i_security_replay_commit(&owner, replay2, &facts) ==
+    CHECK(ucn_i_security_replay_commit(&owner, &(replay2), &facts) ==
           UCN_ERR_STATE);
     facts.now_us = 1550U;
-    CHECK(ucn_i_security_replay_commit(&owner, replay, &facts) == UCN_OK);
+    CHECK(ucn_i_security_replay_commit(&owner, &(replay), &facts) == UCN_OK);
     CHECK(ucn_i_security_replay_reserve(&owner, handle, &facts, 10U,
                                         aad_digest, payload_digest,
                                         &replay2) == UCN_ERR_REPLAY);
     CHECK(ucn_i_security_replay_reserve(&owner, handle, &facts, 12U,
                                         aad_digest, payload_digest,
                                         &replay2) == UCN_OK);
-    CHECK(ucn_i_security_replay_abort(&owner, replay2) == UCN_OK);
+    CHECK(ucn_i_security_replay_abort(&owner, &(replay2)) == UCN_OK);
     CHECK(ucn_i_security_replay_reserve(&owner, handle, &facts, 13U,
                                         aad_digest, payload_digest,
                                         &replay2) == UCN_OK);
@@ -804,7 +1052,7 @@ static int test_session_prepare_and_lifecycle(void)
         CHECK(ucn_i_security_replay_maintain(&owner, 1650U, 1U,
                                              &inspected, &expired) == UCN_OK);
     }
-    CHECK(ucn_i_security_replay_abort(&owner, replay2) == UCN_ERR_STATE);
+    CHECK(ucn_i_security_replay_abort(&owner, &(replay2)) == UCN_ERR_STATE);
 
     CHECK(ucn_i_security_fence(&owner, handle) == UCN_OK);
     CHECK(ucn_i_security_owner_init(&owner, &config) == UCN_ERR_STATE);
@@ -933,9 +1181,11 @@ static int run_packet_roundtrip(uint8_t origin_level,
     receiver_candidate.hop_tx = receiver_candidate.hop_rx;
     receiver_candidate.hop_rx = selector_swap;
     CHECK(fixture_activate(&sender, &sender_candidate,
-                           UCN_I_SECURITY_ACCESS_OUTBOUND, 51U, 81U) == 0);
+                           UCN_I_SECURITY_ACCESS_OUTBOUND, 51U, 81U,
+                           0x1201U, 0U) == 0);
     CHECK(fixture_activate(&receiver, &receiver_candidate,
-                           UCN_I_SECURITY_ACCESS_INBOUND, 52U, 82U) == 0);
+                           UCN_I_SECURITY_ACCESS_INBOUND, 52U, 82U,
+                           0x1201U, 0U) == 0);
 
     memset(&send_access, 0, sizeof(send_access));
     send_access.session = sender.handle;
@@ -1050,7 +1300,7 @@ static int run_packet_roundtrip(uint8_t origin_level,
               opened, sizeof(opened), &opened_bytes, &replay) == UCN_OK);
     CHECK(opened_bytes == sizeof(plaintext));
     CHECK(memcmp(opened, plaintext, sizeof(plaintext)) == 0);
-    CHECK(ucn_i_security_replay_commit(&receiver.owner, replay,
+    CHECK(ucn_i_security_replay_commit(&receiver.owner, &(replay),
                                        &receiver.facts) == UCN_OK);
 
     memset(opened, 0x5A, sizeof(opened));
@@ -1139,6 +1389,143 @@ static int test_packet_roundtrip(void)
     return 0;
 }
 
+/* A single real H1 Session can project Origin without changing its Hop profile.
+ * 中文：真实H1 Session独立处理Origin，既不伪造H0 Session，也不消耗Hop序号。 */
+static int run_c1_origin_projection(uint8_t level, uint8_t suite)
+{
+    session_fixture_t sender;
+    session_fixture_t receiver;
+    ucn_i_security_candidate_t sc = candidate_make(0x20U, 1U);
+    ucn_i_security_candidate_t rc;
+    ucn_i_security_binding_t binding;
+    ucn_i_security_key_selector_t key;
+    ucn_i_security_access_request_t send_access;
+    ucn_i_security_access_request_t receive_access;
+    ucn_i_security_tx_handle_t tx;
+    ucn_i_security_c1_origin_material_t material;
+    ucn_i_security_packet_workspace_t sw;
+    ucn_i_security_packet_workspace_t rw;
+    ucn_i_security_replay_handle_t replay;
+    ucn_i_security_replay_handle_t sentinel;
+    ucn_i_security_session_view_t view;
+    const uint8_t payload[4] = {1U, 2U, 3U, 4U};
+    uint8_t packet[UCN_ADAPTER_FRAME_BYTES];
+    uint8_t output[4];
+    size_t bytes = 0U;
+    size_t opened = SIZE_MAX;
+
+    sc.origin_level = level;
+    sc.origin_tx.suite_id = suite;
+    sc.origin_rx.suite_id = suite;
+    sc.hop_profile = UCN_I_HOP_PROFILE_H1;
+    sc.hop_tx.suite_id = 16U;
+    sc.hop_tx.key_id = 5U;
+    sc.hop_tx.key_generation = 23U;
+    sc.hop_rx.suite_id = 16U;
+    sc.hop_rx.key_id = 6U;
+    sc.hop_rx.key_generation = 24U;
+    rc = sc;
+    binding = rc.local; rc.local = rc.peer; rc.peer = binding;
+    key = rc.origin_tx; rc.origin_tx = rc.origin_rx; rc.origin_rx = key;
+    key = rc.hop_tx; rc.hop_tx = rc.hop_rx; rc.hop_rx = key;
+    CHECK(fixture_activate(&sender, &sc, UCN_I_SECURITY_ACCESS_OUTBOUND,
+                           51U, 81U, 0x1201U, 0U) == 0);
+    CHECK(fixture_activate(&receiver, &rc, UCN_I_SECURITY_ACCESS_INBOUND,
+                           52U, 82U, 0x1201U, 0U) == 0);
+    memset(&send_access, 0, sizeof(send_access));
+    send_access.session = sender.handle;
+    memcpy(send_access.context_fingerprint, sc.origin_fingerprint, 16U);
+    send_access.service_id = 0x1201U;
+    send_access.direction = UCN_I_SECURITY_ACCESS_OUTBOUND;
+    CHECK(ucn_i_security_tx_reserve(&sender.owner, &send_access,
+                                    &sender.facts, &tx) == UCN_OK);
+    memset(&material, 0, sizeof(material));
+    material.session = sender.handle;
+    material.facts = sender.facts;
+    material.payload_bytes = sizeof(payload);
+    material.source_address = sc.local.address;
+    material.destination_address = sc.peer.address;
+    material.origin_sequence = tx.origin_sequence;
+    material.service_id = send_access.service_id;
+    material.common_header[0] = 0x61U;
+    material.common_header[2] = (uint8_t)((level << 6U) | 5U);
+    material.direction = UCN_I_SECURITY_ACCESS_OUTBOUND;
+    memset(packet, 0xA5, sizeof(packet));
+    bytes = SIZE_MAX;
+    CHECK(ucn_i_security_c1_origin_protect(&sender.owner, tx, &material,
+              payload, &sw, packet, 11U + sizeof(payload) + 15U,
+              &bytes) == UCN_ERR_NO_SPACE);
+    CHECK(bytes == SIZE_MAX);
+    {
+        size_t i;
+        for (i = 0U; i < sizeof(packet); ++i) { CHECK(packet[i] == 0xA5U); }
+    }
+    CHECK(ucn_i_security_c1_origin_protect(&sender.owner, tx, &material,
+              payload, &sw, packet, sizeof(packet), &bytes) == UCN_OK);
+    CHECK(bytes == 11U + sizeof(payload) + 16U);
+    CHECK(ucn_i_security_session_get(&sender.owner, sender.handle, &view) == UCN_OK);
+    CHECK(view.hop_profile == UCN_I_HOP_PROFILE_H1);
+    CHECK(sender.owner.sessions[sender.handle.slot].hop_tx_highest_reserved == 0U);
+
+    receive_access = send_access;
+    receive_access.session = receiver.handle;
+    receive_access.direction = UCN_I_SECURITY_ACCESS_INBOUND;
+    memset(output, 0xA5, sizeof(output));
+    memset(&replay, 0xA5, sizeof(replay));
+    sentinel = replay;
+    /* Complete H1 open must not silently accept a stripped Origin projection. */
+    CHECK(ucn_i_security_c1_open(&receiver.owner, receiver.handle,
+              &receiver.facts, &receive_access, packet, bytes, &rw,
+              output, sizeof(output), &opened, &replay) == UCN_ERR_MALFORMED);
+    CHECK(opened == SIZE_MAX && output[0] == 0xA5U && output[3] == 0xA5U);
+    CHECK(memcmp(&replay, &sentinel, sizeof(replay)) == 0);
+    receive_access.context_fingerprint[0] ^= 1U;
+    CHECK(ucn_i_security_c1_origin_open(&receiver.owner, receiver.handle,
+              &receiver.facts, &receive_access, packet, bytes, &rw,
+              output, sizeof(output), &opened, &replay) == UCN_ERR_STATE);
+    CHECK(opened == SIZE_MAX && memcmp(&replay, &sentinel, sizeof(replay)) == 0);
+    receive_access.context_fingerprint[0] ^= 1U;
+    packet[bytes - 1U] ^= 1U;
+    CHECK(ucn_i_security_c1_origin_open(&receiver.owner, receiver.handle,
+              &receiver.facts, &receive_access, packet, bytes, &rw,
+              output, sizeof(output), &opened, &replay) == UCN_ERR_SECURITY);
+    CHECK(opened == SIZE_MAX && memcmp(&replay, &sentinel, sizeof(replay)) == 0);
+    {
+        const uint8_t expected[4] = {0xA5U, 0xA5U, 0xA5U, 0xA5U};
+        CHECK(memcmp(output, expected, sizeof(output)) == 0);
+    }
+    packet[bytes - 1U] ^= 1U;
+    CHECK(ucn_i_security_c1_origin_open(&receiver.owner, receiver.handle,
+              &receiver.facts, &receive_access, packet, bytes, &rw,
+              output, sizeof(output), &opened, &replay) == UCN_OK);
+    CHECK(opened == sizeof(payload) && memcmp(output, payload, sizeof(payload)) == 0);
+    CHECK(ucn_i_security_replay_commit(&receiver.owner, &(replay),
+                                       &receiver.facts) == UCN_OK);
+    CHECK(ucn_i_security_c1_origin_open(&receiver.owner, receiver.handle,
+              &receiver.facts, &receive_access, packet, bytes, &rw,
+              output, sizeof(output), &opened, &replay) == UCN_ERR_REPLAY);
+    CHECK(ucn_i_security_session_get(&receiver.owner, receiver.handle, &view) == UCN_OK);
+    CHECK(view.hop_profile == UCN_I_HOP_PROFILE_H1);
+    /* Interleave the complete path: Origin continues at 2, Hop starts at 1. */
+    CHECK(ucn_i_security_tx_reserve(&sender.owner, &send_access,
+                                    &sender.facts, &tx) == UCN_OK);
+    CHECK(tx.origin_sequence == 2U);
+    material.origin_sequence = tx.origin_sequence;
+    CHECK(ucn_i_security_c1_protect(&sender.owner, tx, &material, payload,
+              &sw, packet, sizeof(packet), &bytes) == UCN_OK);
+    CHECK(bytes == 11U + sizeof(payload) + 32U);
+    CHECK(packet[bytes - 13U] == 1U);
+    CHECK(ucn_i_security_c1_open(&receiver.owner, receiver.handle,
+              &receiver.facts, &receive_access, packet, bytes, &rw,
+              output, sizeof(output), &opened, &replay) == UCN_OK);
+    CHECK(opened == sizeof(payload) && memcmp(output, payload, sizeof(payload)) == 0);
+    CHECK(ucn_i_security_replay_commit(&receiver.owner, &(replay),
+                                       &receiver.facts) == UCN_OK);
+    CHECK(fixture_destroy(&receiver) == 0);
+    CHECK(fixture_destroy(&sender) == 0);
+    return 0;
+}
+
 static int test_session_capacity(void)
 {
     ucn_i_security_owner_t owner;
@@ -1204,12 +1591,669 @@ static int test_session_capacity(void)
     return 0;
 }
 
+static int test_c0_authenticated_control_fact(void)
+{
+    session_fixture_t receiver;
+    ucn_i_security_candidate_t candidate = candidate_make(0x20U, 1U);
+    ucn_i_security_control_access_request_t access;
+    ucn_i_security_packet_workspace_t workspace;
+    ucn_i_security_authenticated_control_t fact;
+    ucn_i_security_authenticated_control_t fact_before;
+    ucn_i_security_control_validate_workspace_t validate_workspace;
+    ucn_i_c0_frame_t frame;
+    uint8_t plaintext[] = {0x11U, 0x22U, 0x33U};
+    uint8_t opened[sizeof(plaintext)];
+    uint8_t opened_before[sizeof(opened)];
+    uint8_t origin_tag[UCN_I_C0_ORIGIN_TAG_BYTES];
+    uint8_t aad[UCN_I_C0_ORIGIN_AAD_MAX_BYTES];
+    uint8_t packet[UCN_ADAPTER_FRAME_BYTES];
+    size_t aad_bytes = 0U;
+    size_t packet_bytes = 0U;
+    size_t opened_bytes = SIZE_MAX;
+    ucn_i_security_replay_handle_t origin_replay;
+    uint8_t origin_digest[16];
+
+    CHECK(fixture_activate(&receiver, &candidate,
+                           UCN_I_SECURITY_ACCESS_INBOUND, 61U, 91U,
+                           0U, UCN_I_OPCODE_DIAGNOSTIC_PING) == 0);
+    /* Same integer belongs to independent C1 Origin and C0 message domains. */
+    memset(origin_digest, 0x77, sizeof(origin_digest));
+    CHECK(ucn_i_security_replay_reserve(&receiver.owner, receiver.handle,
+        &receiver.facts, 1U, origin_digest, origin_digest,
+        &origin_replay) == UCN_OK);
+    CHECK(ucn_i_security_replay_commit(&receiver.owner, &(origin_replay),
+        &receiver.facts) == UCN_OK);
+    memset(&frame, 0, sizeof(frame));
+    frame.payload = plaintext;
+    frame.payload_bytes = sizeof(plaintext);
+    frame.origin_tag = origin_tag;
+    frame.transaction_id = 1U;
+    frame.realm_id = receiver.config.realm_id;
+    frame.source_address = candidate.peer.address;
+    frame.destination_address = candidate.local.address;
+    frame.source_binding_generation = candidate.peer.binding_generation;
+    frame.destination_binding_generation = candidate.local.binding_generation;
+    frame.opcode = UCN_I_OPCODE_DIAGNOSTIC_PING;
+    frame.traffic_class = UCN_TRAFFIC_Q0;
+    frame.delivery_guarantee = UCN_DELIVERY_BEST_EFFORT;
+    frame.interaction_role = UCN_INTERACTION_REQUEST;
+    frame.payload_kind = UCN_I_PAYLOAD_DIAGNOSTIC;
+    frame.origin_security = UCN_I_ORIGIN_O1;
+    frame.hop_limit = 1U;
+    CHECK(ucn_i_c0_origin_aad_build(&frame, candidate.address_width,
+                                     aad, &aad_bytes) == UCN_OK);
+    test_tag(&candidate.origin_rx, aad, aad_bytes, plaintext,
+             sizeof(plaintext), origin_tag);
+    CHECK(ucn_i_c0_encode(&frame, candidate.address_width,
+                           UCN_I_CONTROL_H0, packet, sizeof(packet),
+                           &packet_bytes) == UCN_OK);
+    memset(&access, 0, sizeof(access));
+    access.session = receiver.handle;
+    memcpy(access.context_fingerprint, candidate.origin_fingerprint,
+           sizeof(access.context_fingerprint));
+    access.protocol_opcode = UCN_I_OPCODE_DIAGNOSTIC_PING;
+    access.direction = UCN_I_SECURITY_ACCESS_INBOUND;
+    memset(opened, 0xA5, sizeof(opened));
+    memset(&fact, 0xA5, sizeof(fact));
+    CHECK(ucn_i_security_c0_open(
+              &receiver.owner, &access, &receiver.facts, packet,
+              packet_bytes, &workspace, opened, sizeof(opened),
+              &opened_bytes, &fact) == UCN_OK);
+    CHECK(opened_bytes == sizeof(plaintext));
+    CHECK(memcmp(opened, plaintext, sizeof(opened)) == 0);
+    CHECK(fact.body == opened && fact.body_bytes == sizeof(opened));
+    CHECK(fact.protocol_opcode == UCN_I_OPCODE_DIAGNOSTIC_PING);
+    CHECK(fact.transaction_id == frame.transaction_id);
+    CHECK(fact.replay.replay_domain == 1U);
+    CHECK(ucn_i_security_control_fact_validate(
+              &receiver.owner, &fact, &receiver.facts,
+              &validate_workspace) == UCN_OK);
+    opened[0] ^= 1U;
+    CHECK(ucn_i_security_control_fact_validate(
+              &receiver.owner, &fact, &receiver.facts,
+              &validate_workspace) == UCN_ERR_SECURITY);
+    opened[0] ^= 1U;
+    CHECK(ucn_i_security_replay_commit(&receiver.owner, &(fact.replay),
+                                       &receiver.facts) == UCN_OK);
+    CHECK(ucn_i_security_control_fact_validate(
+              &receiver.owner, &fact, &receiver.facts,
+              &validate_workspace) == UCN_ERR_STATE);
+
+    frame.origin_security = UCN_I_ORIGIN_O0;
+    frame.origin_tag = NULL;
+    CHECK(ucn_i_c0_encode(&frame, candidate.address_width,
+                           UCN_I_CONTROL_H0, packet, sizeof(packet),
+                           &packet_bytes) == UCN_OK);
+    memset(opened, 0x5A, sizeof(opened));
+    memcpy(opened_before, opened, sizeof(opened));
+    memset(&fact, 0x3C, sizeof(fact));
+    fact_before = fact;
+    opened_bytes = SIZE_MAX;
+    CHECK(ucn_i_security_c0_open(
+              &receiver.owner, &access, &receiver.facts, packet,
+              packet_bytes, &workspace, opened, sizeof(opened),
+              &opened_bytes, &fact) == UCN_ERR_STATE);
+    CHECK(memcmp(opened, opened_before, sizeof(opened)) == 0);
+    CHECK(opened_bytes == SIZE_MAX);
+    CHECK(memcmp(&fact, &fact_before, sizeof(fact)) == 0);
+    CHECK(fixture_destroy(&receiver) == 0);
+    return 0;
+}
+
+static int test_c0_confidential_hop_protected_fact(void)
+{
+    session_fixture_t receiver;
+    ucn_i_security_candidate_t candidate = candidate_make(0x28U, 2U);
+    ucn_i_security_control_access_request_t access;
+    ucn_i_security_packet_workspace_t workspace;
+    ucn_i_security_authenticated_control_t fact;
+    ucn_i_c0_frame_t frame;
+    uint8_t plaintext[] = {0x91U, 0x82U, 0x73U, 0x64U};
+    uint8_t ciphertext[sizeof(plaintext)];
+    uint8_t opened[sizeof(plaintext)];
+    uint8_t origin_tag[UCN_I_C0_ORIGIN_TAG_BYTES];
+    uint8_t hop_tag[UCN_I_SECURITY_HOP_TAG_BYTES];
+    uint8_t hop_tag_full[UCN_I_SECURITY_ORIGIN_TAG_BYTES];
+    uint8_t nonce[UCN_I_SECURITY_SEQUENCE_NONCE_INPUT_BYTES];
+    uint8_t origin_aad[UCN_I_C0_ORIGIN_AAD_MAX_BYTES];
+    uint8_t hop_aad[UCN_I_SECURITY_HOP_AAD_BYTES];
+    uint8_t packet[UCN_ADAPTER_FRAME_BYTES];
+    size_t origin_aad_bytes = 0U;
+    size_t header_bytes = 0U;
+    size_t packet_bytes = 0U;
+    size_t packet_before_hop_bytes;
+    size_t hop_aad_bytes;
+    size_t opened_bytes = 0U;
+    size_t index;
+
+    candidate.origin_level = UCN_I_SECURITY_CONFIDENTIAL;
+    candidate.origin_tx.suite_id = 2U;
+    candidate.origin_rx.suite_id = 2U;
+    candidate.hop_profile = UCN_I_HOP_PROFILE_H1;
+    candidate.hop_tx.key_generation = 30U;
+    candidate.hop_tx.key_id = 7U;
+    candidate.hop_tx.suite_id = 16U;
+    candidate.hop_rx.key_generation = 31U;
+    candidate.hop_rx.key_id = 8U;
+    candidate.hop_rx.suite_id = 16U;
+    CHECK(fixture_activate(&receiver, &candidate,
+                           UCN_I_SECURITY_ACCESS_INBOUND, 62U, 92U,
+                           0U, UCN_I_OPCODE_DIAGNOSTIC_PING) == 0);
+    memset(&frame, 0, sizeof(frame));
+    frame.payload = ciphertext;
+    frame.payload_bytes = sizeof(ciphertext);
+    frame.origin_tag = origin_tag;
+    frame.hop_tag = hop_tag;
+    frame.transaction_id = UINT64_C(0x1112131415161718);
+    frame.realm_id = receiver.config.realm_id;
+    frame.source_address = candidate.peer.address;
+    frame.destination_address = candidate.local.address;
+    frame.source_binding_generation = candidate.peer.binding_generation;
+    frame.destination_binding_generation = candidate.local.binding_generation;
+    frame.hop_sequence = 7U;
+    frame.opcode = UCN_I_OPCODE_DIAGNOSTIC_PING;
+    frame.traffic_class = UCN_TRAFFIC_Q0;
+    frame.delivery_guarantee = UCN_DELIVERY_RELIABLE;
+    frame.interaction_role = UCN_INTERACTION_REQUEST;
+    frame.payload_kind = UCN_I_PAYLOAD_DIAGNOSTIC;
+    frame.origin_security = UCN_I_ORIGIN_O2;
+    frame.hop_limit = 2U;
+    test_c0_nonce_input(&candidate, &frame,
+                        UCN_I_SECURITY_ACCESS_INBOUND, nonce);
+    for (index = 0U; index < sizeof(ciphertext); ++index) {
+        ciphertext[index] = plaintext[index] ^
+            nonce[index % sizeof(nonce)] ^
+            (uint8_t)candidate.origin_rx.key_id;
+    }
+    CHECK(ucn_i_c0_origin_aad_build(&frame, candidate.address_width,
+                                     origin_aad,
+                                     &origin_aad_bytes) == UCN_OK);
+    test_tag(&candidate.origin_rx, origin_aad, origin_aad_bytes,
+             ciphertext, sizeof(ciphertext), origin_tag);
+
+    /* Encode once with a placeholder hop tag so the exact packet prefix can
+     * be used to derive the hop-authenticated AAD. */
+    memset(hop_tag, 0, sizeof(hop_tag));
+    CHECK(ucn_i_c0_encode(&frame, candidate.address_width,
+                           UCN_I_CONTROL_H1, packet, sizeof(packet),
+                           &packet_bytes) == UCN_OK);
+    CHECK(ucn_i_c0_header_bytes(candidate.address_width,
+                                 &header_bytes) == UCN_OK);
+    packet_before_hop_bytes = header_bytes + sizeof(ciphertext) +
+                              UCN_I_C0_ORIGIN_TAG_BYTES;
+    hop_aad_bytes = test_hop_aad(packet, packet_before_hop_bytes,
+                                 frame.hop_sequence,
+                                 candidate.hop_fingerprint, hop_aad);
+    test_tag(&candidate.hop_rx, hop_aad, hop_aad_bytes, NULL, 0U,
+             hop_tag_full);
+    memcpy(hop_tag, hop_tag_full, sizeof(hop_tag));
+    CHECK(ucn_i_c0_encode(&frame, candidate.address_width,
+                           UCN_I_CONTROL_H1, packet, sizeof(packet),
+                           &packet_bytes) == UCN_OK);
+
+    memset(&access, 0, sizeof(access));
+    access.session = receiver.handle;
+    memcpy(access.context_fingerprint, candidate.origin_fingerprint,
+           sizeof(access.context_fingerprint));
+    access.protocol_opcode = UCN_I_OPCODE_DIAGNOSTIC_PING;
+    access.direction = UCN_I_SECURITY_ACCESS_INBOUND;
+    CHECK(ucn_i_security_c0_open(
+              &receiver.owner, &access, &receiver.facts, packet,
+              packet_bytes, &workspace, opened, sizeof(opened),
+              &opened_bytes, &fact) == UCN_OK);
+    CHECK(opened_bytes == sizeof(plaintext));
+    CHECK(memcmp(opened, plaintext, sizeof(opened)) == 0);
+    CHECK(fact.replay.has_hop == 1U);
+    CHECK(ucn_i_security_replay_abort(&receiver.owner,
+                                       &(fact.replay)) == UCN_OK);
+    CHECK(fixture_destroy(&receiver) == 0);
+    return 0;
+}
+
+static int run_c0_protect_roundtrip(uint8_t origin_level,
+                                    uint8_t origin_suite,
+                                    uint8_t hop_profile)
+{
+    session_fixture_t sender;
+    session_fixture_t receiver;
+    ucn_i_security_candidate_t sender_candidate = candidate_make(0x38U, 3U);
+    ucn_i_security_candidate_t receiver_candidate;
+    ucn_i_security_binding_t binding_swap;
+    ucn_i_security_key_selector_t selector_swap;
+    ucn_i_security_c0_protect_request_t request;
+    ucn_i_security_control_access_request_t access;
+    ucn_i_security_control_access_request_t access_before;
+    ucn_i_security_current_facts_t resolved_facts;
+    ucn_i_security_current_facts_t facts_before;
+    ucn_i_security_packet_workspace_t sender_workspace;
+    ucn_i_security_packet_workspace_t receiver_workspace;
+    ucn_i_security_authenticated_control_t fact;
+    uint8_t plaintext[] = {0xA1U, 0xB2U, 0xC3U};
+    uint8_t sender_nonce_snapshot[UCN_I_SECURITY_SEQUENCE_NONCE_INPUT_BYTES];
+    uint8_t packet[UCN_ADAPTER_FRAME_BYTES];
+    uint8_t packet_before[UCN_ADAPTER_FRAME_BYTES];
+    uint8_t opened[sizeof(plaintext)];
+    uint32_t provider_calls;
+    size_t packet_bytes = SIZE_MAX;
+    size_t opened_bytes = SIZE_MAX;
+
+    sender_candidate.origin_level = origin_level;
+    sender_candidate.origin_tx.suite_id = origin_suite;
+    sender_candidate.origin_rx.suite_id = origin_suite;
+    if (hop_profile == UCN_I_HOP_PROFILE_H1) {
+        sender_candidate.hop_profile = UCN_I_HOP_PROFILE_H1;
+        sender_candidate.hop_tx.suite_id = 16U;
+        sender_candidate.hop_tx.key_id = 11U;
+        sender_candidate.hop_tx.key_generation = 41U;
+        sender_candidate.hop_rx.suite_id = 16U;
+        sender_candidate.hop_rx.key_id = 12U;
+        sender_candidate.hop_rx.key_generation = 42U;
+    }
+    receiver_candidate = sender_candidate;
+    binding_swap = receiver_candidate.local;
+    receiver_candidate.local = receiver_candidate.peer;
+    receiver_candidate.peer = binding_swap;
+    selector_swap = receiver_candidate.origin_tx;
+    receiver_candidate.origin_tx = receiver_candidate.origin_rx;
+    receiver_candidate.origin_rx = selector_swap;
+    selector_swap = receiver_candidate.hop_tx;
+    receiver_candidate.hop_tx = receiver_candidate.hop_rx;
+    receiver_candidate.hop_rx = selector_swap;
+    CHECK(fixture_activate(&sender, &sender_candidate,
+                           UCN_I_SECURITY_ACCESS_OUTBOUND, 63U, 93U,
+                           0U, UCN_I_OPCODE_DIAGNOSTIC_PING) == 0);
+    CHECK(fixture_activate(&receiver, &receiver_candidate,
+                           UCN_I_SECURITY_ACCESS_INBOUND, 64U, 94U,
+                           0U, UCN_I_OPCODE_DIAGNOSTIC_PING) == 0);
+
+    memset(&request, 0, sizeof(request));
+    request.session = sender.handle;
+    request.facts = sender.facts;
+    request.transaction_id = UINT64_C(0x2122232425262728);
+    request.protocol_opcode = UCN_I_OPCODE_DIAGNOSTIC_PING;
+    memcpy(request.context_fingerprint,
+           sender_candidate.origin_fingerprint,
+           sizeof(request.context_fingerprint));
+    request.traffic_class = UCN_TRAFFIC_Q0;
+    request.delivery_guarantee = UCN_DELIVERY_RELIABLE;
+    request.interaction_role = UCN_INTERACTION_REQUEST;
+    request.payload_kind = UCN_I_PAYLOAD_DIAGNOSTIC;
+    request.hop_limit = 2U;
+    request.direction = UCN_I_SECURITY_ACCESS_OUTBOUND;
+    memset(packet, 0xA5, sizeof(packet));
+    CHECK(ucn_i_security_c0_protect(
+              &sender.owner, &request, plaintext, sizeof(plaintext),
+              &sender_workspace, packet, 1U, &packet_bytes) ==
+          UCN_ERR_NO_SPACE);
+    CHECK(packet[0] == 0xA5U && packet_bytes == SIZE_MAX);
+    CHECK(ucn_i_security_c0_protect(
+              &sender.owner, &request, plaintext, sizeof(plaintext),
+              &sender_workspace, packet, sizeof(packet),
+              &packet_bytes) == UCN_OK);
+    CHECK(packet_bytes > sizeof(plaintext));
+    memcpy(sender_nonce_snapshot, sender_workspace.nonce_input, sizeof(sender_nonce_snapshot));
+    memcpy(packet_before, packet, packet_bytes);
+    provider_calls = sender.provider.calls;
+    CHECK(ucn_i_security_c0_protect(
+              &sender.owner, &request, plaintext, sizeof(plaintext),
+              &sender_workspace, packet, sizeof(packet),
+              &packet_bytes) == UCN_ERR_REPLAY);
+    CHECK(sender.provider.calls == provider_calls);
+    CHECK(memcmp(packet, packet_before, packet_bytes) == 0);
+    --request.transaction_id;
+    CHECK(ucn_i_security_c0_protect(
+              &sender.owner, &request, plaintext, sizeof(plaintext),
+              &sender_workspace, packet, sizeof(packet),
+              &packet_bytes) == UCN_ERR_REPLAY);
+    CHECK(sender.provider.calls == provider_calls);
+    ++request.transaction_id;
+
+    memset(&access, 0xA5, sizeof(access));
+    memset(&resolved_facts, 0x5A, sizeof(resolved_facts));
+    access_before = access;
+    facts_before = resolved_facts;
+    CHECK(ucn_i_security_c0_receive_context_resolve(
+              &receiver.owner, packet, packet_bytes, receiver.facts.now_us,
+              receiver.facts.link_generation + 1U, &access,
+              &resolved_facts) == UCN_ERR_NOT_FOUND);
+    CHECK(memcmp(&access, &access_before, sizeof(access)) == 0);
+    CHECK(memcmp(&resolved_facts, &facts_before,
+                 sizeof(resolved_facts)) == 0);
+    CHECK(ucn_i_security_c0_receive_context_resolve(
+              &receiver.owner, packet, packet_bytes, receiver.facts.now_us,
+              receiver.facts.link_generation, &access,
+              &resolved_facts) == UCN_OK);
+    CHECK(memcmp(&access.session, &receiver.handle,
+                 sizeof(access.session)) == 0);
+    CHECK(access.protocol_opcode == UCN_I_OPCODE_DIAGNOSTIC_PING);
+    CHECK(access.direction == UCN_I_SECURITY_ACCESS_INBOUND);
+    CHECK(memcmp(&resolved_facts, &receiver.facts,
+                 sizeof(resolved_facts)) == 0);
+    CHECK(ucn_i_security_c0_open(
+              &receiver.owner, &access, &resolved_facts, packet,
+              packet_bytes, &receiver_workspace, opened, sizeof(opened),
+              &opened_bytes, &fact) == UCN_OK);
+    CHECK(opened_bytes == sizeof(plaintext));
+    CHECK(memcmp(opened, plaintext, sizeof(opened)) == 0);
+    CHECK(fact.origin_security == origin_level);
+    if (origin_level == UCN_I_ORIGIN_O2) {
+        CHECK(memcmp(sender_nonce_snapshot, receiver_workspace.nonce_input,
+                     UCN_I_SECURITY_SEQUENCE_NONCE_INPUT_BYTES) == 0);
+    }
+    CHECK(fact.replay.has_hop ==
+          (hop_profile == UCN_I_HOP_PROFILE_H1 ? 1U : 0U));
+    CHECK(ucn_i_security_replay_commit(&receiver.owner, &(fact.replay),
+                                        &receiver.facts) == UCN_OK);
+    CHECK(fixture_destroy(&receiver) == 0);
+    CHECK(fixture_destroy(&sender) == 0);
+    return 0;
+}
+
+static int test_c0_protect_roundtrips(void)
+{
+    CHECK(run_c0_protect_roundtrip(UCN_I_SECURITY_AUTHENTICATED, 1U,
+                                   UCN_I_HOP_PROFILE_H0) == 0);
+    CHECK(run_c0_protect_roundtrip(UCN_I_SECURITY_CONFIDENTIAL, 2U,
+                                   UCN_I_HOP_PROFILE_H1) == 0);
+    return 0;
+}
+
+static void binding_set(ucn_i_security_binding_t *binding,
+                        uint32_t address,
+                        uint32_t generation,
+                        uint8_t principal_seed)
+{
+    memset(binding, 0, sizeof(*binding));
+    binding->address = address;
+    binding->binding_generation = generation;
+    fill_bytes(binding->principal, sizeof(binding->principal),
+               principal_seed);
+}
+
+static void make_h1_candidate(ucn_i_security_candidate_t *candidate,
+                              const ucn_i_security_binding_t *local,
+                              const ucn_i_security_binding_t *peer,
+                              uint32_t session_generation,
+                              uint32_t link_generation,
+                              uint16_t tx_key,
+                              uint16_t rx_key,
+                              uint8_t fingerprint_seed)
+{
+    *candidate = candidate_make(peer->principal[0], session_generation);
+    candidate->local = *local;
+    candidate->peer = *peer;
+    candidate->link_generation = link_generation;
+    candidate->origin_level = UCN_I_SECURITY_AUTHENTICATED;
+    candidate->hop_profile = UCN_I_HOP_PROFILE_H1;
+    candidate->hop_tx.suite_id = 16U;
+    candidate->hop_tx.key_id = tx_key;
+    candidate->hop_tx.key_generation = 51U;
+    candidate->hop_rx.suite_id = 16U;
+    candidate->hop_rx.key_id = rx_key;
+    candidate->hop_rx.key_generation = 51U;
+    fill_bytes(candidate->hop_fingerprint,
+               sizeof(candidate->hop_fingerprint), fingerprint_seed);
+}
+
+static int test_c0_multihop_split_origin_and_hop_contexts(void)
+{
+    dual_session_fixture_t source;
+    dual_session_fixture_t relay;
+    dual_session_fixture_t destination;
+    ucn_i_security_binding_t binding_a;
+    ucn_i_security_binding_t binding_b;
+    ucn_i_security_binding_t binding_d;
+    ucn_i_security_candidate_t source_candidates[2];
+    ucn_i_security_candidate_t relay_candidates[2];
+    ucn_i_security_candidate_t destination_candidates[2];
+    const uint8_t outbound[2] = {
+        UCN_I_SECURITY_ACCESS_OUTBOUND,
+        UCN_I_SECURITY_ACCESS_OUTBOUND
+    };
+    const uint8_t relay_directions[2] = {
+        UCN_I_SECURITY_ACCESS_INBOUND,
+        UCN_I_SECURITY_ACCESS_OUTBOUND
+    };
+    const uint8_t inbound[2] = {
+        UCN_I_SECURITY_ACCESS_INBOUND,
+        UCN_I_SECURITY_ACCESS_INBOUND
+    };
+    ucn_i_security_c0_protect_request_t request;
+    ucn_i_security_c0_path_workspace_t source_workspace;
+    ucn_i_security_c0_path_workspace_t destination_workspace;
+    ucn_i_security_c0_path_workspace_t relay_open_workspace;
+    ucn_i_security_c0_origin_resolve_workspace_t origin_resolve_workspace;
+    ucn_i_security_packet_workspace_t relay_seal_workspace;
+    ucn_i_security_c0_relay_fact_t relay_fact;
+    ucn_i_security_handle_t resolved_hop;
+    ucn_i_security_current_facts_t resolved_hop_facts;
+    ucn_i_security_control_access_request_t resolved_origin;
+    ucn_i_security_current_facts_t resolved_origin_facts;
+    ucn_i_security_authenticated_control_t authenticated;
+    ucn_i_security_hop_replay_handle_t destination_hop_replay;
+    ucn_i_c0_frame_t source_frame;
+    ucn_i_c0_frame_t relay_frame;
+    uint8_t plaintext[] = {0x91U, 0x82U, 0x73U, 0x64U};
+    uint8_t source_packet[UCN_ADAPTER_FRAME_BYTES];
+    uint8_t relay_packet[UCN_ADAPTER_FRAME_BYTES];
+    uint8_t opened[sizeof(plaintext)];
+    size_t source_packet_bytes = 0U;
+    size_t relay_packet_bytes = 0U;
+    size_t opened_bytes = 0U;
+    uint32_t provider_calls;
+    uint32_t origin_open_calls;
+    ucn_result_t path_result;
+
+    binding_set(&binding_a, 1U, 101U, 0x10U);
+    binding_set(&binding_b, 2U, 102U, 0x30U);
+    binding_set(&binding_d, 4U, 104U, 0x50U);
+
+    source_candidates[0] = candidate_make(0x50U, 1U);
+    source_candidates[0].local = binding_a;
+    source_candidates[0].peer = binding_d;
+    source_candidates[0].origin_level = UCN_I_SECURITY_CONFIDENTIAL;
+    source_candidates[0].origin_tx.suite_id = 2U;
+    source_candidates[0].origin_tx.key_id = 21U;
+    source_candidates[0].origin_tx.key_generation = 61U;
+    source_candidates[0].origin_rx.suite_id = 2U;
+    source_candidates[0].origin_rx.key_id = 22U;
+    source_candidates[0].origin_rx.key_generation = 62U;
+    source_candidates[0].hop_profile = UCN_I_HOP_PROFILE_H0;
+    fill_bytes(source_candidates[0].origin_fingerprint,
+               sizeof(source_candidates[0].origin_fingerprint), 0x81U);
+    make_h1_candidate(&source_candidates[1], &binding_a, &binding_b,
+                      2U, 111U, 31U, 32U, 0x91U);
+
+    make_h1_candidate(&relay_candidates[0], &binding_b, &binding_a,
+                      3U, 111U, 32U, 31U, 0x91U);
+    make_h1_candidate(&relay_candidates[1], &binding_b, &binding_d,
+                      4U, 222U, 41U, 42U, 0xA1U);
+
+    destination_candidates[0] = source_candidates[0];
+    destination_candidates[0].local = binding_d;
+    destination_candidates[0].peer = binding_a;
+    destination_candidates[0].session_generation = 5U;
+    destination_candidates[0].origin_tx = source_candidates[0].origin_rx;
+    destination_candidates[0].origin_rx = source_candidates[0].origin_tx;
+    make_h1_candidate(&destination_candidates[1], &binding_d, &binding_b,
+                      6U, 222U, 42U, 41U, 0xA1U);
+
+    CHECK(dual_session_fixture_activate(
+              &source, source_candidates, outbound, 81U, 181U,
+              UCN_I_OPCODE_DIAGNOSTIC_PING) == 0);
+    CHECK(dual_session_fixture_activate(
+              &relay, relay_candidates, relay_directions, 82U, 182U,
+              UCN_I_OPCODE_DIAGNOSTIC_PING) == 0);
+    CHECK(dual_session_fixture_activate(
+              &destination, destination_candidates, inbound, 83U, 183U,
+              UCN_I_OPCODE_DIAGNOSTIC_PING) == 0);
+
+    memset(&request, 0, sizeof(request));
+    request.session = source.handles[0];
+    request.facts = source.facts[0];
+    request.transaction_id = UINT64_C(0x3132333435363738);
+    request.protocol_opcode = UCN_I_OPCODE_DIAGNOSTIC_PING;
+    memcpy(request.context_fingerprint,
+           source_candidates[0].origin_fingerprint,
+           sizeof(request.context_fingerprint));
+    request.traffic_class = UCN_TRAFFIC_Q0;
+    request.delivery_guarantee = UCN_DELIVERY_RELIABLE;
+    request.interaction_role = UCN_INTERACTION_REQUEST;
+    request.payload_kind = UCN_I_PAYLOAD_DIAGNOSTIC;
+    request.hop_limit = 3U;
+    request.direction = UCN_I_SECURITY_ACCESS_OUTBOUND;
+    CHECK(ucn_i_security_c0_path_protect(
+              &source.owner, &request, source.handles[1], &source.facts[1],
+              plaintext, sizeof(plaintext), &source_workspace,
+              source_packet, sizeof(source_packet),
+              &source_packet_bytes) == UCN_OK);
+    CHECK(ucn_i_c0_decode(source_packet, source_packet_bytes, 1U,
+                          UCN_I_CONTROL_H1, &source_frame) == UCN_OK);
+    CHECK(source_frame.hop_limit == 3U);
+
+    CHECK(ucn_i_security_c0_hop_receive_context_resolve(
+              &relay.owner, source_packet, source_packet_bytes, 1500U,
+              relay.facts[0].link_generation, &resolved_hop,
+              &resolved_hop_facts) == UCN_OK);
+    CHECK(memcmp(&resolved_hop, &relay.handles[0],
+                 sizeof(resolved_hop)) == 0);
+    provider_calls = relay.provider.calls;
+    origin_open_calls = relay.provider.open_origin_calls;
+    CHECK(ucn_i_security_c0_hop_open(
+              &relay.owner, resolved_hop, &resolved_hop_facts,
+              source_packet, source_packet_bytes,
+              &relay_open_workspace) == UCN_OK);
+    relay_fact = relay_open_workspace.relay;
+    CHECK(relay.provider.calls == provider_calls + 1U);
+    CHECK(relay.provider.open_origin_calls == origin_open_calls);
+    source_packet[0] ^= 1U;
+    memset(relay_packet, 0xA5, sizeof(relay_packet));
+    relay_packet_bytes = SIZE_MAX;
+    CHECK(ucn_i_security_c0_hop_seal(
+              &relay.owner, relay.handles[1], &relay.facts[1], &relay_fact,
+              &relay_seal_workspace, relay_packet, sizeof(relay_packet),
+              &relay_packet_bytes) != UCN_OK);
+    CHECK(relay_packet[0] == 0xA5U && relay_packet_bytes == SIZE_MAX);
+    source_packet[0] ^= 1U;
+    CHECK(ucn_i_security_c0_hop_seal(
+              &relay.owner, relay.handles[1], &relay.facts[1], &relay_fact,
+              &relay_seal_workspace, relay_packet, sizeof(relay_packet),
+              &relay_packet_bytes) == UCN_OK);
+    CHECK(ucn_i_c0_decode(relay_packet, relay_packet_bytes, 1U,
+                          UCN_I_CONTROL_H1, &relay_frame) == UCN_OK);
+    CHECK(relay_frame.hop_limit == 2U);
+    CHECK(relay_frame.payload_bytes == source_frame.payload_bytes);
+    CHECK(memcmp(relay_frame.payload, source_frame.payload,
+                 source_frame.payload_bytes) == 0);
+    CHECK(memcmp(relay_frame.origin_tag, source_frame.origin_tag,
+                 UCN_I_SECURITY_ORIGIN_TAG_BYTES) == 0);
+    CHECK(ucn_i_security_hop_replay_commit(
+              &relay.owner, &(relay_fact.replay),
+              &relay.facts[0]) == UCN_OK);
+    CHECK(ucn_i_security_c0_hop_open(
+              &relay.owner, relay.handles[0], &relay.facts[0],
+              source_packet, source_packet_bytes,
+              &relay_open_workspace) == UCN_ERR_REPLAY);
+
+    CHECK(ucn_i_security_c0_hop_receive_context_resolve(
+              &destination.owner, relay_packet, relay_packet_bytes, 1500U,
+              destination.facts[1].link_generation, &resolved_hop,
+              &resolved_hop_facts) == UCN_OK);
+    CHECK(ucn_i_security_c0_origin_receive_context_resolve(
+              &destination.owner, relay_packet, relay_packet_bytes, 1500U,
+              &origin_resolve_workspace,
+              &resolved_origin, &resolved_origin_facts) == UCN_OK);
+    CHECK(memcmp(&resolved_hop, &destination.handles[1],
+                 sizeof(resolved_hop)) == 0);
+    CHECK(memcmp(&resolved_origin.session, &destination.handles[0],
+                 sizeof(resolved_origin.session)) == 0);
+    path_result = ucn_i_security_c0_path_open(
+        &destination.owner, &resolved_origin, &resolved_origin_facts,
+        resolved_hop, &resolved_hop_facts, relay_packet,
+        relay_packet_bytes, &destination_workspace, opened,
+        sizeof(opened), &opened_bytes, &authenticated,
+        &destination_hop_replay);
+    CHECK(path_result == UCN_OK);
+    CHECK(opened_bytes == sizeof(plaintext));
+    CHECK(memcmp(opened, plaintext, sizeof(plaintext)) == 0);
+    CHECK(authenticated.hop_limit == 2U);
+    CHECK(ucn_i_security_replay_commit(
+              &destination.owner, &(authenticated.replay),
+              &resolved_origin_facts) == UCN_OK);
+    CHECK(ucn_i_security_hop_replay_commit(
+              &destination.owner, &(destination_hop_replay),
+              &resolved_hop_facts) == UCN_OK);
+    CHECK(ucn_i_security_c0_path_open(
+              &destination.owner, &resolved_origin, &resolved_origin_facts,
+              resolved_hop, &resolved_hop_facts, relay_packet,
+              relay_packet_bytes, &destination_workspace, opened,
+              sizeof(opened), &opened_bytes, &authenticated,
+              &destination_hop_replay) == UCN_ERR_REPLAY);
+
+    CHECK(dual_session_fixture_destroy(&destination) == 0);
+    CHECK(dual_session_fixture_destroy(&relay) == 0);
+    CHECK(dual_session_fixture_destroy(&source) == 0);
+    return 0;
+}
+
+static int test_peer_reauth_codec(void)
+{
+    uint8_t raw[208]={0},out[208],old[208];size_t offsets[]={0U,1U,2U,3U,65U,70U,71U};size_t i;
+    ucn_i_peer_reauth_record_t value,old_value;
+    raw[0]=2U;raw[2]=2U;raw[7]=1U;raw[11]=1U;raw[15]=1U;memset(raw+16U,0x11,16U);raw[159]=1U;raw[163]=1U;
+    raw[35]=2U;raw[39]=1U;memset(raw+40U,0x22,16U);raw[59]=1U;raw[63]=2U;
+    raw[64]=1U;raw[65]=16U;raw[67]=1U;raw[69]=3U;raw[75]=2U;raw[79]=2U;
+    raw[81]=7U;raw[87]=9U;raw[99]=3U;raw[107]=4U;raw[123]=1U;memset(raw+124U,0x77,32U);
+    CHECK(ucn_i_peer_reauth_decode(raw,sizeof(raw),&value)==UCN_OK);
+    CHECK(ucn_i_peer_reauth_encode(&value,out,sizeof(out))==UCN_OK);CHECK(memcmp(raw,out,sizeof(raw))==0);
+    memset(&value,0xcc,sizeof(value));old_value=value;
+    CHECK(ucn_i_peer_reauth_decode(raw,sizeof(raw)-1U,&value)==UCN_ERR_MALFORMED);
+    CHECK(memcmp(&value,&old_value,sizeof(value))==0);
+    for(i=0U;i<sizeof(offsets)/sizeof(offsets[0]);++i){
+        uint8_t saved=raw[offsets[i]];raw[offsets[i]]=255U;
+        CHECK(ucn_i_peer_reauth_decode(raw,sizeof(raw),&value)==UCN_ERR_MALFORMED);
+        CHECK(memcmp(&value,&old_value,sizeof(value))==0);raw[offsets[i]]=saved;
+    }
+    CHECK(ucn_i_peer_reauth_decode(raw,sizeof(raw),&value)==UCN_OK);memset(out,0xcc,sizeof(out));memcpy(old,out,sizeof(old));
+    CHECK(ucn_i_peer_reauth_encode(&value,out,sizeof(out)-1U)==UCN_ERR_NO_SPACE);CHECK(memcmp(old,out,sizeof(out))==0);
+    CHECK(ucn_i_peer_reauth_encode(&value,value.canonical,sizeof(value.canonical))==UCN_ERR_ARGUMENT);
+    raw[1]=2U;raw[83]=8U;raw[91]=10U;raw[115]=5U;
+    raw[63]=3U;raw[75]=3U;raw[79]=3U;raw[167]=2U;raw[171]=2U;raw[175]=2U;memset(raw+176U,0x88,32U);
+    CHECK(ucn_i_peer_reauth_decode(raw,sizeof(raw),&value)==UCN_OK);
+    old_value=value;raw[171]=1U;
+    CHECK(ucn_i_peer_reauth_decode(raw,sizeof(raw),&value)==UCN_ERR_MALFORMED);CHECK(memcmp(&value,&old_value,sizeof(value))==0);
+    raw[171]=2U;raw[167]=1U;
+    CHECK(ucn_i_peer_reauth_decode(raw,sizeof(raw),&value)==UCN_ERR_MALFORMED);CHECK(memcmp(&value,&old_value,sizeof(value))==0);
+    {
+        ucn_i_peer_reauth_fragment_t v={0},decoded;
+        uint8_t before[sizeof(decoded)];
+        uint8_t fragment[98],sentinel[98];size_t n=999U;
+        v.stage=2U;v.index=3U;v.total_bytes=241U;v.transaction=3U;v.data_bytes=1U;v.data[0]=0x44;
+        CHECK(ucn_i_peer_reauth_fragment_encode(&v,fragment,sizeof(fragment),&n)==UCN_OK);CHECK(n==19U);
+        CHECK(ucn_i_peer_reauth_fragment_decode(fragment,n,&decoded)==UCN_OK);CHECK(decoded.transaction==3U&&decoded.index==3U);
+        memcpy(before,&decoded,sizeof(decoded));fragment[8]=79U;
+        CHECK(ucn_i_peer_reauth_fragment_decode(fragment,n,&decoded)==UCN_ERR_MALFORMED);CHECK(memcmp(&decoded,before,sizeof(decoded))==0);
+        memset(fragment,0xcc,sizeof(fragment));memcpy(sentinel,fragment,sizeof(fragment));n=999U;
+        CHECK(ucn_i_peer_reauth_fragment_encode(&v,fragment,18U,&n)==UCN_ERR_NO_SPACE);CHECK(n==999U);CHECK(memcmp(fragment,sentinel,sizeof(fragment))==0);
+        v.index=4U;CHECK(ucn_i_peer_reauth_fragment_encode(&v,fragment,sizeof(fragment),&n)==UCN_ERR_ARGUMENT);CHECK(n==999U);CHECK(memcmp(fragment,sentinel,sizeof(fragment))==0);
+    }
+    return 0;
+}
+
 int main(void)
 {
+    CHECK(test_peer_reauth_codec() == 0);
     CHECK(test_record_codec() == 0);
     CHECK(test_session_prepare_and_lifecycle() == 0);
     CHECK(test_preflight_fail_closed() == 0);
     CHECK(test_packet_roundtrip() == 0);
+    CHECK(run_c1_origin_projection(UCN_I_SECURITY_AUTHENTICATED, 1U) == 0);
+    CHECK(run_c1_origin_projection(UCN_I_SECURITY_CONFIDENTIAL, 2U) == 0);
+    CHECK(run_c1_origin_projection(UCN_I_SECURITY_CONFIDENTIAL, 3U) == 0);
+    CHECK(test_c0_authenticated_control_fact() == 0);
+    CHECK(test_c0_confidential_hop_protected_fact() == 0);
+    CHECK(test_c0_protect_roundtrips() == 0);
+    CHECK(test_c0_multihop_split_origin_and_hop_contexts() == 0);
     CHECK(test_session_capacity() == 0);
     puts("ucn simplified security session tests: PASS");
     return 0;

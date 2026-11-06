@@ -17,6 +17,8 @@ typedef struct fake_link {
     uint8_t last_frame[UCN_ADAPTER_FRAME_BYTES];
     size_t last_frame_bytes;
     uint8_t driver_gate_active;
+    uint64_t receive_time_override;
+    ucn_result_t cancel_result;
 } fake_link_t;
 
 typedef struct receive_fixture {
@@ -58,6 +60,7 @@ typedef struct completion_fixture {
 static UCN_DECLARE_STORAGE(storage_a);
 static UCN_DECLARE_STORAGE(storage_b);
 static UCN_DECLARE_STORAGE(storage_bad);
+static unsigned lock_failure_at, lock_enter_count;
 static UCN_DECLARE_STORAGE(storage_snapshot);
 static int failures;
 
@@ -85,6 +88,7 @@ static bool bytes_are_value(const void *object, size_t bytes, uint8_t value)
 static ucn_result_t lock_enter(void *context)
 {
     (void)context;
+    if (lock_failure_at != 0U && ++lock_enter_count == lock_failure_at) { return UCN_ERR_STATE; }
     return UCN_OK;
 }
 
@@ -135,7 +139,7 @@ static ucn_driver_submit_result_t fake_submit(void *context,
         memset(&meta, 0, sizeof(meta));
         meta.struct_size = sizeof(meta);
         meta.api_version = UCN_API_VERSION;
-        meta.timestamp_us = 12345U;
+        meta.timestamp_us = fake->receive_time_override != 0U ? fake->receive_time_override : 12345U;
         CHECK(ucn_driver_rx_publish(fake->peer, fake->peer_link, bytes, length,
                                     &meta) == UCN_OK);
     }
@@ -152,7 +156,7 @@ static ucn_result_t fake_cancel(void *context, ucn_driver_token_t token)
 
     (void)token;
     ++fake->cancel_calls;
-    return UCN_OK;
+    return fake->cancel_result;
 }
 
 static void make_binding(ucn_static_binding_t *binding,
@@ -286,7 +290,7 @@ static void completion(void *context,
     fixture->view = *view;
     memset(&unexpected, 0xA5, sizeof(unexpected));
     fixture->reentry_result =
-        ucn_publish(fixture->node, &fixture->target, &fixture->byte, 1U,
+        ucn_send(fixture->node, &fixture->target, &fixture->byte, 1U,
                     &fixture->options, &unexpected);
 }
 
@@ -626,24 +630,27 @@ static void test_static_end_to_end(void)
     completed.options.completion_context = &completed;
     options = completed.options;
     memset(&send_handle, 0xA5, sizeof(send_handle));
-    CHECK(ucn_publish(node_a, &target, payload, sizeof(payload), &options,
+    CHECK(ucn_send(node_a, &target, payload, sizeof(payload), &options,
                       &send_handle) == UCN_ERR_NOT_FOUND);
     CHECK(send_handle.runtime_instance == UINT32_C(0xA5A5A5A5));
     options.delivery_guarantee = UCN_DELIVERY_RELIABLE;
-    CHECK(ucn_publish(node_a, &target, payload, sizeof(payload), &options,
+    CHECK(ucn_send(node_a, &target, payload, sizeof(payload), &options,
                       &send_handle) == UCN_ERR_UNSUPPORTED);
     CHECK(send_handle.runtime_instance == UINT32_C(0xA5A5A5A5));
     options = completed.options;
     path = path_config();
     CHECK(ucn_static_path_add(node_a, &path, &path_handle) == UCN_OK);
-    CHECK(ucn_publish(node_a, &target, payload, sizeof(payload), &options,
+    CHECK(ucn_send(node_a, &target, payload, sizeof(payload), &options,
                       &send_handle) == UCN_OK);
     CHECK(ucn_send_query(node_a, send_handle, &view) == UCN_OK);
     CHECK(view.origin_sequence == 1U);
     CHECK(view.link_outcome == UCN_LINK_OUTCOME_PENDING);
     CHECK(ucn_static_path_remove(node_a, path_handle) == UCN_ERR_STATE);
+    budget.max_work=1U;
     CHECK(ucn_step(node_a, 10U, &budget, &step) == UCN_OK);
+    CHECK(step.work_done==1U);
     CHECK(completed.calls == 1U);
+    budget.max_work=8U;
     CHECK(completed.reentry_result == UCN_ERR_STATE);
     CHECK(memcmp(&completed.handle, &send_handle, sizeof(send_handle)) == 0);
     CHECK(completed.view.terminal_result == UCN_OK);
@@ -663,7 +670,7 @@ static void test_static_end_to_end(void)
     completed.calls = 0U;
     memset(&completed.handle, 0, sizeof(completed.handle));
     link_a.deliver_on_submit = 0U;
-    CHECK(ucn_publish(node_a, &target, payload, sizeof(payload),
+    CHECK(ucn_send(node_a, &target, payload, sizeof(payload),
                       &completed.options, NULL) == UCN_OK);
     CHECK(ucn_step(node_a, 10U, &budget, &step) == UCN_OK);
     link_a.deliver_on_submit = 1U;
@@ -699,7 +706,7 @@ static void test_static_end_to_end(void)
 
     options = send_options(UCN_TRAFFIC_Q3);
     options.absolute_deadline_us = 100U;
-    CHECK(ucn_publish(node_a, &target, payload, sizeof(payload), &options,
+    CHECK(ucn_send(node_a, &target, payload, sizeof(payload), &options,
                       &send_handle) == UCN_OK);
     CHECK(ucn_send_query(node_a, send_handle, &view) == UCN_OK);
     CHECK(view.origin_sequence == 3U);
@@ -720,7 +727,7 @@ static void test_static_end_to_end(void)
     options = send_options(UCN_TRAFFIC_Q1);
     options.pinned_path = path_handle;
     memset(&send_handle, 0xA5, sizeof(send_handle));
-    CHECK(ucn_publish(node_a, &target, payload, sizeof(payload), &options,
+    CHECK(ucn_send(node_a, &target, payload, sizeof(payload), &options,
                       &send_handle) == UCN_ERR_NOT_FOUND);
     CHECK(send_handle.runtime_instance == UINT32_C(0xA5A5A5A5));
     CHECK(node_a->last_origin_sequence == 3U);
@@ -798,10 +805,10 @@ static void test_endpoint_callback_allows_snapshot_queries_only(void)
     CHECK(ucn_static_path_add(node_b, &path_b, &path_b_handle) == UCN_OK);
     CHECK(ucn_start(node_a, 0U) == UCN_OK);
     CHECK(ucn_start(node_b, 0U) == UCN_OK);
-    CHECK(ucn_publish(node_b, &target_b, &byte, 1U, &options, &send_b) ==
+    CHECK(ucn_send(node_b, &target_b, &byte, 1U, &options, &send_b) ==
           UCN_OK);
     receiver.query_send = send_b;
-    CHECK(ucn_publish(node_a, &target_a, &byte, 1U, &options, &send_a) ==
+    CHECK(ucn_send(node_a, &target_a, &byte, 1U, &options, &send_a) ==
           UCN_OK);
     CHECK(ucn_step(node_a, 1U, &all, &step) == UCN_OK);
     CHECK(ucn_step(node_b, 1U, &one, &step) == UCN_OK);
@@ -861,7 +868,7 @@ static void test_all_traffic_classes_get_service(void)
     for (traffic_class = 0U; traffic_class < UCN_TRAFFIC_CLASS_COUNT;
          ++traffic_class) {
         options = send_options(traffic_class);
-        CHECK(ucn_publish(node, &target, &byte, 1U, &options, NULL) == UCN_OK);
+        CHECK(ucn_send(node, &target, &byte, 1U, &options, NULL) == UCN_OK);
     }
     CHECK(ucn_step(node, 1U, &budget, &step) == UCN_OK);
     CHECK(step.work_done == UCN_TRAFFIC_CLASS_COUNT);
@@ -902,24 +909,24 @@ static void test_queue_partition_and_hot_q0_fairness(void)
     CHECK(ucn_start(node, 0U) == UCN_OK);
 
     for (index = 0U; index < UCN_Q0_DEPTH; ++index) {
-        CHECK(ucn_publish(node, &target, &byte, 1U, &q0, NULL) == UCN_OK);
+        CHECK(ucn_send(node, &target, &byte, 1U, &q0, NULL) == UCN_OK);
     }
     sequence_before = node->last_origin_sequence;
-    CHECK(ucn_publish(node, &target, &byte, 1U, &q0, NULL) ==
+    CHECK(ucn_send(node, &target, &byte, 1U, &q0, NULL) ==
           UCN_ERR_NO_SPACE);
     CHECK(node->last_origin_sequence == sequence_before);
-    CHECK(ucn_publish(node, &target, &byte, 1U, &q1, NULL) == UCN_OK);
+    CHECK(ucn_send(node, &target, &byte, 1U, &q1, NULL) == UCN_OK);
     CHECK(node->last_origin_sequence == sequence_before + 1U);
     CHECK(ucn_step(node, 1U, &drain, &step) == UCN_OK);
     CHECK(link.sent_by_class[UCN_TRAFFIC_Q0] == UCN_Q0_DEPTH);
     CHECK(link.sent_by_class[UCN_TRAFFIC_Q1] == 1U);
 
     memset(link.sent_by_class, 0, sizeof(link.sent_by_class));
-    CHECK(ucn_publish(node, &target, &byte, 1U, &q3, NULL) == UCN_OK);
+    CHECK(ucn_send(node, &target, &byte, 1U, &q3, NULL) == UCN_OK);
     for (index = 0U; index < 12U &&
                      link.sent_by_class[UCN_TRAFFIC_Q3] == 0U;
          ++index) {
-        CHECK(ucn_publish(node, &target, &byte, 1U, &q0, NULL) == UCN_OK);
+        CHECK(ucn_send(node, &target, &byte, 1U, &q0, NULL) == UCN_OK);
         CHECK(ucn_step(node, (uint64_t)(2U + index), &one, &step) == UCN_OK);
     }
     CHECK(link.sent_by_class[UCN_TRAFFIC_Q3] == 1U);
@@ -954,7 +961,7 @@ static void test_in_doubt_requires_link_generation_fence(void)
     CHECK(ucn_link_get(node, 0U, &old_link) == UCN_OK);
     CHECK(ucn_static_path_add(node, &path, &path_handle) == UCN_OK);
     CHECK(ucn_start(node, 0U) == UCN_OK);
-    CHECK(ucn_publish(node, &target, &byte, 1U, &options, &send) == UCN_OK);
+    CHECK(ucn_send(node, &target, &byte, 1U, &options, &send) == UCN_OK);
     CHECK(ucn_step(node, 1U, &budget, &step) == UCN_OK);
     CHECK(ucn_send_query(node, send, &view) == UCN_OK);
     CHECK(view.link_outcome == UCN_LINK_OUTCOME_IN_DOUBT);
@@ -1009,11 +1016,11 @@ static void test_tracked_capacity_is_atomic(void)
     CHECK(ucn_start(node, 0U) == UCN_OK);
     for (index = 0U; index < UCN_REQUEST_COUNT; ++index) {
         options.traffic_class = (uint8_t)(index % UCN_TRAFFIC_CLASS_COUNT);
-        CHECK(ucn_publish(node, &target, &byte, 1U, &options,
+        CHECK(ucn_send(node, &target, &byte, 1U, &options,
                           &handles[index]) == UCN_OK);
     }
     memset(&extra, 0xA5, sizeof(extra));
-    CHECK(ucn_publish(node, &target, &byte, 1U, &options, &extra) ==
+    CHECK(ucn_send(node, &target, &byte, 1U, &options, &extra) ==
           UCN_ERR_NO_SPACE);
     CHECK(extra.runtime_instance == UINT32_C(0xA5A5A5A5));
     CHECK(ucn_step(node, 1U, &budget, &step) == UCN_OK);
@@ -1024,7 +1031,7 @@ static void test_tracked_capacity_is_atomic(void)
         CHECK(view.terminal_result == UCN_OK);
         CHECK(ucn_send_forget(node, handles[index]) == UCN_OK);
     }
-    CHECK(ucn_publish(node, &target, &byte, 1U, &options, &extra) == UCN_OK);
+    CHECK(ucn_send(node, &target, &byte, 1U, &options, &extra) == UCN_OK);
     CHECK(ucn_send_query(node, extra, &view) == UCN_OK);
     CHECK(view.origin_sequence == (uint32_t)UCN_REQUEST_COUNT + 1U);
     CHECK(ucn_step(node, 2U, &budget, &step) == UCN_OK);
@@ -1057,7 +1064,7 @@ static void test_submitted_deadline_reports_timeout(void)
     CHECK(make_node(&storage_a, 606U, 1U, &link, &node) == UCN_OK);
     CHECK(ucn_static_path_add(node, &path, &path_handle) == UCN_OK);
     CHECK(ucn_start(node, 0U) == UCN_OK);
-    CHECK(ucn_publish(node, &target, &byte, 1U, &options, &send) == UCN_OK);
+    CHECK(ucn_send(node, &target, &byte, 1U, &options, &send) == UCN_OK);
     CHECK(ucn_step(node, 99U, &budget, &step) == UCN_OK);
     CHECK(ucn_send_query(node, send, &view) == UCN_OK);
     CHECK(view.link_outcome == UCN_LINK_OUTCOME_SUBMITTED);
@@ -1097,7 +1104,7 @@ static void test_temporary_driver_backpressure_retries_same_request(void)
     CHECK(make_node(&storage_a, 608U, 1U, &link, &node) == UCN_OK);
     CHECK(ucn_static_path_add(node, &path, &path_handle) == UCN_OK);
     CHECK(ucn_start(node, 0U) == UCN_OK);
-    CHECK(ucn_publish(node, &target, &byte, 1U, &options, &send) == UCN_OK);
+    CHECK(ucn_send(node, &target, &byte, 1U, &options, &send) == UCN_OK);
     CHECK(ucn_send_query(node, send, &view) == UCN_OK);
     original_sequence = view.origin_sequence;
 
@@ -1143,7 +1150,7 @@ static void test_temporary_driver_backpressure_expires_at_deadline(void)
     CHECK(make_node(&storage_a, 609U, 1U, &link, &node) == UCN_OK);
     CHECK(ucn_static_path_add(node, &path, &path_handle) == UCN_OK);
     CHECK(ucn_start(node, 0U) == UCN_OK);
-    CHECK(ucn_publish(node, &target, &byte, 1U, &options, &send) == UCN_OK);
+    CHECK(ucn_send(node, &target, &byte, 1U, &options, &send) == UCN_OK);
     CHECK(ucn_step(node, 1U, &one, &step) == UCN_OK);
     CHECK(ucn_step(node, 2U, &one, &step) == UCN_OK);
     CHECK(link.submit_calls == 2U);
@@ -1187,11 +1194,11 @@ static void test_expired_deadline_is_rejected_before_admission(void)
     aliased_options = send_options(UCN_TRAFFIC_Q0);
     aliased_options.completion = completion;
     aliased_options.completion_context = &send;
-    CHECK(ucn_publish(node, &target, &byte, 1U, &aliased_options, &send) ==
+    CHECK(ucn_send(node, &target, &byte, 1U, &aliased_options, &send) ==
           UCN_ERR_ARGUMENT);
     CHECK(memcmp(&send, &before, sizeof(send)) == 0);
     CHECK(node->last_origin_sequence == 0U);
-    CHECK(ucn_publish(node, &target, &byte, 1U, &options, &send) ==
+    CHECK(ucn_send(node, &target, &byte, 1U, &options, &send) ==
           UCN_ERR_TIMEOUT);
     CHECK(memcmp(&send, &before, sizeof(send)) == 0);
     CHECK(node->last_origin_sequence == 0U);
@@ -1224,7 +1231,7 @@ static void test_completion_latched_before_deadline_beats_late_timer_scan(void)
     CHECK(make_node(&storage_a, 611U, 1U, &link, &node) == UCN_OK);
     CHECK(ucn_static_path_add(node, &path, &path_handle) == UCN_OK);
     CHECK(ucn_start(node, 0U) == UCN_OK);
-    CHECK(ucn_publish(node, &target, &byte, 1U, &options, &send) == UCN_OK);
+    CHECK(ucn_send(node, &target, &byte, 1U, &options, &send) == UCN_OK);
     CHECK(ucn_step(node, 1U, &one, &step) == UCN_OK);
     CHECK(ucn_driver_tx_complete(node, link.last_token, UCN_OK, NULL) ==
           UCN_OK);
@@ -1265,7 +1272,7 @@ static void test_driver_gate_contention_keeps_cancel_retryable(void)
     target = target_config();
     options = send_options(UCN_TRAFFIC_Q1);
 
-    CHECK(ucn_publish(node, &target, &payload, 1U, &options, &send) ==
+    CHECK(ucn_send(node, &target, &payload, 1U, &options, &send) ==
           UCN_OK);
     link.driver_gate_active = 1U;
     CHECK(ucn_step(node, 2U, &budget, &step) == UCN_OK);
@@ -1295,7 +1302,7 @@ static void test_driver_gate_contention_keeps_cancel_retryable(void)
     CHECK(view.terminal_result == UCN_ERR_CANCELLED);
     CHECK(ucn_send_forget(node, send) == UCN_OK);
 
-    CHECK(ucn_publish(node, &target, &payload, 1U, &options, &send) ==
+    CHECK(ucn_send(node, &target, &payload, 1U, &options, &send) ==
           UCN_OK);
     CHECK(ucn_send_cancel(node, send) == UCN_OK);
     CHECK(link.submit_calls == 1U);
@@ -1307,7 +1314,7 @@ static void test_driver_gate_contention_keeps_cancel_retryable(void)
     CHECK(view.terminal_result == UCN_ERR_CANCELLED);
     CHECK(ucn_send_forget(node, send) == UCN_OK);
 
-    CHECK(ucn_publish(node, &target, &payload, 1U, &options, &send) ==
+    CHECK(ucn_send(node, &target, &payload, 1U, &options, &send) ==
           UCN_OK);
     CHECK(ucn_step(node, 5U, &budget, &step) == UCN_OK);
     CHECK(link.cancel_calls == 1U);
@@ -1375,14 +1382,14 @@ static void test_rx_hot_slot_cannot_starve_older_frame(void)
     CHECK(ucn_start(node_a, 0U) == UCN_OK);
     CHECK(ucn_start(node_b, 0U) == UCN_OK);
 
-    CHECK(ucn_publish(node_a, &target, &first, 1U, &options, NULL) == UCN_OK);
-    CHECK(ucn_publish(node_a, &target, &older, 1U, &options, NULL) == UCN_OK);
+    CHECK(ucn_send(node_a, &target, &first, 1U, &options, NULL) == UCN_OK);
+    CHECK(ucn_send(node_a, &target, &older, 1U, &options, NULL) == UCN_OK);
     CHECK(ucn_step(node_a, 1U, &two, &step) == UCN_OK);
     CHECK(ucn_step(node_b, 1U, &one, &step) == UCN_OK);
     CHECK(receiver.marker_calls[1] == 1U);
     CHECK(receiver.marker_calls[2] == 0U);
 
-    CHECK(ucn_publish(node_a, &target, &hot, 1U, &options, NULL) == UCN_OK);
+    CHECK(ucn_send(node_a, &target, &hot, 1U, &options, NULL) == UCN_OK);
     CHECK(ucn_step(node_a, 2U, &one, &step) == UCN_OK);
     CHECK(ucn_step(node_b, 2U, &one, &step) == UCN_OK);
     CHECK(receiver.marker_calls[2] == 1U);
@@ -1437,13 +1444,13 @@ static void test_rx_flood_cannot_starve_completion_or_cancel_cleanup(void)
     CHECK(ucn_static_path_add(node, &path, &path_handle) == UCN_OK);
     CHECK(ucn_start(node, 0U) == UCN_OK);
 
-    CHECK(ucn_publish(node, &target, &payload, 1U, &options,
+    CHECK(ucn_send(node, &target, &payload, 1U, &options,
                       &completed_send) == UCN_OK);
     CHECK(ucn_step(node, 1U, &one, &step) == UCN_OK);
     CHECK(link.submit_calls == 1U);
     CHECK(ucn_driver_tx_complete(node, link.last_token, UCN_OK, NULL) ==
           UCN_OK);
-    CHECK(ucn_publish(node, &target, &payload, 1U, &options,
+    CHECK(ucn_send(node, &target, &payload, 1U, &options,
                       &cancelled_send) == UCN_OK);
     CHECK(ucn_send_cancel(node, cancelled_send) == UCN_OK);
 
@@ -1526,7 +1533,7 @@ static void test_exhausted_handles_do_not_hide_reusable_capacity(void)
     node->attempt_allocate_cursor = 0U;
     node->buffer_allocate_cursor = 0U;
     CHECK(ucn_start(node, 0U) == UCN_OK);
-    CHECK(ucn_publish(node, &target, &byte, sizeof(byte), &options, &send) ==
+    CHECK(ucn_send(node, &target, &byte, sizeof(byte), &options, &send) ==
           UCN_OK);
     CHECK(send.slot == 2U);
     CHECK(ucn_step(node, 1U, &budget, &step) == UCN_OK);
@@ -1675,7 +1682,7 @@ static void test_request_generation_exhaustion_faults_owner(void)
     }
     memset(&output, 0xA5, sizeof(output));
     before = output;
-    CHECK(ucn_publish(node, &target, &byte, 1U, &options, &output) ==
+    CHECK(ucn_send(node, &target, &byte, 1U, &options, &output) ==
           UCN_ERR_EXHAUSTED);
     CHECK(memcmp(&output, &before, sizeof(output)) == 0);
     CHECK(node->last_origin_sequence == 0U);
@@ -1710,7 +1717,7 @@ static void test_origin_sequence_exhaustion_is_irreversible(void)
     CHECK(ucn_static_path_add(node, &path, &path_handle) == UCN_OK);
     CHECK(ucn_start(node, 0U) == UCN_OK);
     node->last_origin_sequence = UINT32_MAX - 1U;
-    CHECK(ucn_publish(node, &target, &byte, 1U, &options, &first) == UCN_OK);
+    CHECK(ucn_send(node, &target, &byte, 1U, &options, &first) == UCN_OK);
     CHECK(ucn_send_query(node, first, &view) == UCN_OK);
     CHECK(view.origin_sequence == UINT32_MAX);
     CHECK(ucn_step(node, 1U, &budget, &step) == UCN_OK);
@@ -1719,7 +1726,7 @@ static void test_origin_sequence_exhaustion_is_irreversible(void)
 
     memset(&output, 0xA5, sizeof(output));
     before = output;
-    CHECK(ucn_publish(node, &target, &byte, 1U, &options, &output) ==
+    CHECK(ucn_send(node, &target, &byte, 1U, &options, &output) ==
           UCN_ERR_EXHAUSTED);
     CHECK(memcmp(&output, &before, sizeof(output)) == 0);
     CHECK(node->last_origin_sequence == UINT32_MAX);
@@ -1809,8 +1816,60 @@ static void test_trusted_o0_replay_window(void)
     CHECK(ucn_deinit(node) == UCN_OK);
 }
 
+static void test_minimal_send_name_and_default_policy(void)
+{
+    /* API-01 RED: no target-style publish alias; send must be a real symbol. */
+    extern ucn_result_t ucn_send(ucn_node_t *, const ucn_target_t *,
+                                const void *, size_t,
+                                const ucn_send_options_t *,
+                                ucn_send_handle_t *);
+    fake_link_t link;
+    ucn_node_t *node = NULL;
+    ucn_static_path_t path = path_config();
+    ucn_path_handle_t path_handle;
+    ucn_target_t target = target_config();
+    ucn_send_handle_t receipt;
+    ucn_step_budget_t budget = step_budget(8U);
+    ucn_step_result_t step;
+    uint8_t payload = 0x9aU;
+
+    memset(&storage_bad, 0, sizeof(storage_bad));
+    memset(&link, 0, sizeof(link));
+    link.submit_result = UCN_DRIVER_COMPLETE;
+    CHECK(make_node(&storage_bad, 1234U, 1U, &link, &node) == UCN_OK);
+    {
+        ucn_node_view_t view;
+        ucn_static_binding_t binding;
+        CHECK(ucn_get_node_view(node, &view) == UCN_OK);
+        CHECK(view.lifecycle == UCN_LIFECYCLE_INITIALIZED);
+        CHECK(view.local_address == 1U && view.endpoint_count == 0U);
+        CHECK(view.endpoint_generation_high_water == 0U);
+        CHECK(ucn_get_static_binding(node, 2U, &binding) == UCN_OK);
+        CHECK(binding.binding_generation == 20U);
+        memset(&binding, 0xa5, sizeof(binding));
+        CHECK(ucn_get_static_binding(node, 99U, &binding) != UCN_OK);
+        CHECK(bytes_are_value(&binding, sizeof(binding), 0xa5U));
+    }
+    CHECK(ucn_static_path_add(node, &path, &path_handle) == UCN_OK);
+    CHECK(ucn_start(node, 1U) == UCN_OK);
+    memset(&receipt, 0xa5, sizeof(receipt));
+    CHECK(ucn_send(node, &target, NULL, 1U, NULL, &receipt) == UCN_ERR_ARGUMENT);
+    CHECK(bytes_are_value(&receipt, sizeof(receipt), 0xa5U));
+    CHECK(node->last_origin_sequence == 0U);
+    CHECK(ucn_send(node, &target, &payload, 1U, NULL, &receipt) == UCN_OK);
+    CHECK(ucn_step(node, 2U, &budget, &step) == UCN_OK);
+    CHECK(link.submit_calls == 1U);
+    CHECK((link.last_frame[1] >> 6U) == UCN_TRAFFIC_Q2);
+    CHECK((link.last_frame[2] & 0x3fU) == 1U);
+    CHECK(link.last_frame[link.last_frame_bytes - 1U] == 0x9aU);
+    CHECK(ucn_send_forget(node, receipt) == UCN_OK);
+    CHECK(ucn_stop(node) == UCN_OK);
+    CHECK(ucn_deinit(node) == UCN_OK);
+}
+
 int main(void)
 {
+    test_minimal_send_name_and_default_policy();
     test_invalid_init_is_atomic();
     test_driver_facts_cannot_alias_node_storage();
     test_initialized_node_uses_stop_fence_before_deinit();

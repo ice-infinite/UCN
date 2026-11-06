@@ -1,4 +1,5 @@
 #include "internal/ucn_transport.h"
+#include "internal/ucn_operation_wire.h"
 
 #include "internal/ucn_checked.h"
 
@@ -52,6 +53,18 @@ static uint64_t get64(const uint8_t *bytes, size_t offset)
     return value;
 }
 
+static bool bytes_nonzero(const uint8_t *bytes, size_t length)
+{
+    size_t index;
+
+    for (index = 0U; index < length; ++index) {
+        if (bytes[index] != 0U) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static size_t setup_size(uint8_t interaction)
 {
     if (interaction == UCN_INTERACTION_ONE_WAY) {
@@ -76,12 +89,16 @@ static bool setup_valid(const ucn_i_transport_transfer_setup_t *value)
         (value->parent_kind != UCN_I_TRANSPORT_PARENT_KIND_C1 &&
          value->parent_kind != UCN_I_TRANSPORT_PARENT_KIND_FLOW) ||
         value->parent_generation == 0U || value->transfer_id == 0U ||
-        value->service_id == 0U || value->total_length == 0U ||
+        value->service_id == 0U || value->service_id == UINT16_MAX ||
+        value->total_length == 0U ||
+        !bytes_nonzero(value->message_digest, sizeof(value->message_digest)) ||
         value->delivery > UCN_DELIVERY_RELIABLE ||
         value->interaction > UCN_INTERACTION_ERROR ||
         value->fragment_count == 0U ||
-        value->fragment_count > UCN_I_TRANSPORT_MAX_FRAGMENT_COUNT ||
-        value->fragment_budget == 0U || value->lifetime_ms == 0U) {
+        value->fragment_count > UCN_I_WIRE_FRAGMENT_MAX ||
+        value->fragment_budget == 0U || value->lifetime_ms == 0U ||
+        value->lifetime_ms > UCN_I_WIRE_DURATION_MS_MAX ||
+        !ucn_i_operation_flags_valid(value->interaction, value->operation_flags)) {
         return false;
     }
     if ((value->parent_kind == UCN_I_TRANSPORT_PARENT_KIND_C1 &&
@@ -107,6 +124,51 @@ static bool setup_valid(const ucn_i_transport_transfer_setup_t *value)
            described_bytes - value->fragment_budget < value->total_length;
 }
 
+static bool key_valid(const ucn_i_transport_transfer_key_t *key)
+{
+    return key != NULL &&
+           (key->parent_kind == UCN_I_TRANSPORT_PARENT_KIND_C1 ||
+            key->parent_kind == UCN_I_TRANSPORT_PARENT_KIND_FLOW) &&
+           key->parent_generation != 0U && key->transfer_id != 0U &&
+           key->service_id != 0U && key->service_id != UINT16_MAX &&
+           ((key->parent_kind == UCN_I_TRANSPORT_PARENT_KIND_C1 &&
+             key->parent_id == 0U) ||
+            (key->parent_kind == UCN_I_TRANSPORT_PARENT_KIND_FLOW &&
+             key->parent_id != 0U)) &&
+           bytes_nonzero(key->setup_digest, sizeof(key->setup_digest));
+}
+
+static void key_encode_unchecked(const ucn_i_transport_transfer_key_t *key,
+                                 uint8_t *output)
+{
+    output[0] = key->parent_kind;
+    put16(output, 1U, key->parent_id);
+    put32(output, 3U, key->parent_generation);
+    put32(output, 7U, key->transfer_id);
+    put16(output, 11U, key->service_id);
+    memcpy(&output[13], key->setup_digest, sizeof(key->setup_digest));
+}
+
+static ucn_result_t key_decode_unchecked(
+    const uint8_t *input,
+    ucn_i_transport_transfer_key_t *key_out)
+{
+    ucn_i_transport_transfer_key_t key;
+
+    memset(&key, 0, sizeof(key));
+    key.parent_kind = input[0];
+    key.parent_id = get16(input, 1U);
+    key.parent_generation = get32(input, 3U);
+    key.transfer_id = get32(input, 7U);
+    key.service_id = get16(input, 11U);
+    memcpy(key.setup_digest, &input[13], sizeof(key.setup_digest));
+    if (!key_valid(&key)) {
+        return UCN_ERR_MALFORMED;
+    }
+    *key_out = key;
+    return UCN_OK;
+}
+
 ucn_result_t ucn_i_transport_delivery_ack_encode(
     const ucn_i_transport_delivery_ack_t *value,
     uint8_t output[UCN_I_TRANSPORT_DELIVERY_ACK_BYTES])
@@ -114,6 +176,7 @@ ucn_result_t ucn_i_transport_delivery_ack_encode(
     uint8_t bytes[UCN_I_TRANSPORT_DELIVERY_ACK_BYTES];
 
     if (value == NULL || output == NULL || value->service_id == 0U ||
+        value->service_id == UINT16_MAX ||
         value->origin_sequence == 0U ||
         ucn_i_ranges_overlap(value, sizeof(*value), output, sizeof(bytes))) {
         return UCN_ERR_ARGUMENT;
@@ -144,7 +207,7 @@ ucn_result_t ucn_i_transport_delivery_ack_decode(
     value.origin_sequence = get32(input, 3U);
     value.status = input[7];
     value.receive_credit = input[8];
-    if (value.service_id == 0U || value.origin_sequence == 0U) {
+    if (value.service_id == 0U || value.service_id == UINT16_MAX || value.origin_sequence == 0U) {
         return UCN_ERR_MALFORMED;
     }
     *value_out = value;
@@ -241,6 +304,165 @@ ucn_result_t ucn_i_transport_transfer_setup_decode(
     return UCN_OK;
 }
 
+ucn_result_t ucn_i_transport_transfer_key_from_setup(
+    const ucn_i_transport_transfer_setup_t *setup,
+    ucn_i_transport_transfer_key_t *key_out)
+{
+    ucn_i_transport_transfer_key_t key;
+    uint8_t encoded[UCN_I_TRANSPORT_TRANSFER_SETUP_RESULT_BYTES];
+    size_t encoded_bytes = 0U;
+    ucn_i_sha256_workspace_t workspace;
+    ucn_result_t result;
+
+    if (!setup_valid(setup) || key_out == NULL ||
+        ucn_i_ranges_overlap(setup, sizeof(*setup), key_out,
+                             sizeof(*key_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = ucn_i_transport_transfer_setup_encode(
+        setup, encoded, sizeof(encoded), &encoded_bytes);
+    if (result != UCN_OK) {
+        return result;
+    }
+    memset(&key, 0, sizeof(key));
+    memset(&workspace, 0, sizeof(workspace));
+    result = UCN_I_DIGEST_CANONICAL("UCN6-TRANSFER-SETUP-V1", encoded, encoded_bytes, key.setup_digest,
+                              &workspace);
+    if (result != UCN_OK) {
+        return result;
+    }
+    key.parent_kind = setup->parent_kind;
+    key.parent_id = setup->parent_id;
+    key.parent_generation = setup->parent_generation;
+    key.transfer_id = setup->transfer_id;
+    key.service_id = setup->service_id;
+    *key_out = key;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_transport_transfer_setup_ack_encode(
+    const ucn_i_transport_transfer_setup_ack_t *value,
+    uint8_t output[UCN_I_TRANSPORT_TRANSFER_SETUP_ACK_BYTES])
+{
+    uint8_t bytes[UCN_I_TRANSPORT_TRANSFER_SETUP_ACK_BYTES];
+
+    if (value == NULL || output == NULL || !key_valid(&value->key) ||
+        value->accepted_fragment_budget == 0U ||
+        ucn_i_ranges_overlap(value, sizeof(*value), output, sizeof(bytes))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    key_encode_unchecked(&value->key, bytes);
+    put16(bytes, 29U, value->accepted_fragment_budget);
+    put16(bytes, 31U, value->receive_credit);
+    memcpy(output, bytes, sizeof(bytes));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_transport_transfer_setup_ack_decode(
+    const uint8_t input[UCN_I_TRANSPORT_TRANSFER_SETUP_ACK_BYTES],
+    ucn_i_transport_transfer_setup_ack_t *value_out)
+{
+    ucn_i_transport_transfer_setup_ack_t value;
+    ucn_result_t result;
+
+    if (input == NULL || value_out == NULL ||
+        ucn_i_ranges_overlap(input, UCN_I_TRANSPORT_TRANSFER_SETUP_ACK_BYTES,
+                             value_out, sizeof(*value_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(&value, 0, sizeof(value));
+    result = key_decode_unchecked(input, &value.key);
+    value.accepted_fragment_budget = get16(input, 29U);
+    value.receive_credit = get16(input, 31U);
+    if (result != UCN_OK || value.accepted_fragment_budget == 0U) {
+        return result != UCN_OK ? result : UCN_ERR_MALFORMED;
+    }
+    *value_out = value;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_transport_transfer_abort_body_encode(
+    const ucn_i_transport_transfer_abort_body_t *value,
+    uint8_t output[UCN_I_TRANSPORT_TRANSFER_ABORT_BYTES])
+{
+    uint8_t bytes[UCN_I_TRANSPORT_TRANSFER_ABORT_BYTES] = {0};
+
+    if (value == NULL || output == NULL || !key_valid(&value->key) ||
+        value->reason == 0U || value->reserved_zero[0] != 0U ||
+        value->reserved_zero[1] != 0U || value->reserved_zero[2] != 0U ||
+        ucn_i_ranges_overlap(value, sizeof(*value), output, sizeof(bytes))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    key_encode_unchecked(&value->key, bytes);
+    bytes[29] = value->reason;
+    memcpy(output, bytes, sizeof(bytes));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_transport_transfer_abort_body_decode(
+    const uint8_t input[UCN_I_TRANSPORT_TRANSFER_ABORT_BYTES],
+    ucn_i_transport_transfer_abort_body_t *value_out)
+{
+    ucn_i_transport_transfer_abort_body_t value;
+    ucn_result_t result;
+
+    if (input == NULL || value_out == NULL ||
+        ucn_i_ranges_overlap(input, UCN_I_TRANSPORT_TRANSFER_ABORT_BYTES,
+                             value_out, sizeof(*value_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(&value, 0, sizeof(value));
+    result = key_decode_unchecked(input, &value.key);
+    value.reason = input[29];
+    if (result != UCN_OK || value.reason == 0U || input[30] != 0U ||
+        input[31] != 0U || input[32] != 0U) {
+        return result != UCN_OK ? result : UCN_ERR_MALFORMED;
+    }
+    *value_out = value;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_transport_transfer_terminal_body_encode(
+    const ucn_i_transport_transfer_terminal_body_t *value,
+    uint8_t output[UCN_I_TRANSPORT_TRANSFER_TERMINAL_BYTES])
+{
+    uint8_t bytes[UCN_I_TRANSPORT_TRANSFER_TERMINAL_BYTES];
+
+    if (value == NULL || output == NULL || !key_valid(&value->key) ||
+        value->terminal_state == 0U || value->terminal_state > 3U ||
+        ucn_i_ranges_overlap(value, sizeof(*value), output, sizeof(bytes))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    key_encode_unchecked(&value->key, bytes);
+    bytes[29] = value->terminal_state;
+    put16(bytes, 30U, value->result_code);
+    memcpy(output, bytes, sizeof(bytes));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_transport_transfer_terminal_body_decode(
+    const uint8_t input[UCN_I_TRANSPORT_TRANSFER_TERMINAL_BYTES],
+    ucn_i_transport_transfer_terminal_body_t *value_out)
+{
+    ucn_i_transport_transfer_terminal_body_t value;
+    ucn_result_t result;
+
+    if (input == NULL || value_out == NULL ||
+        ucn_i_ranges_overlap(input, UCN_I_TRANSPORT_TRANSFER_TERMINAL_BYTES,
+                             value_out, sizeof(*value_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(&value, 0, sizeof(value));
+    result = key_decode_unchecked(input, &value.key);
+    value.terminal_state = input[29];
+    value.result_code = get16(input, 30U);
+    if (result != UCN_OK || value.terminal_state == 0U || value.terminal_state > 3U) {
+        return result != UCN_OK ? result : UCN_ERR_MALFORMED;
+    }
+    *value_out = value;
+    return UCN_OK;
+}
+
 ucn_result_t ucn_i_transport_fragment_prefix_encode(
     const ucn_i_transport_fragment_prefix_t *value,
     uint8_t *output,
@@ -251,7 +473,7 @@ ucn_result_t ucn_i_transport_fragment_prefix_encode(
 
     if (value == NULL || output == NULL || output_bytes == NULL ||
         value->transfer_id == 0U || value->fragment_count == 0U ||
-        value->fragment_count > UCN_I_TRANSPORT_MAX_FRAGMENT_COUNT ||
+        value->fragment_count > UCN_I_WIRE_FRAGMENT_MAX ||
         value->fragment_index >= value->fragment_count ||
         (value->fragment_index & UCN_I_TRANSPORT_FRAGMENT_KIND_MASK) != 0U ||
         (value->parent_kind != UCN_I_TRANSPORT_PARENT_KIND_C1 &&
@@ -324,7 +546,7 @@ ucn_result_t ucn_i_transport_fragment_prefix_decode(
         value.fragment_count = get16(input, 6U);
     }
     if (value.transfer_id == 0U || value.fragment_count == 0U ||
-        value.fragment_count > UCN_I_TRANSPORT_MAX_FRAGMENT_COUNT ||
+        value.fragment_count > UCN_I_WIRE_FRAGMENT_MAX ||
         value.fragment_index >= value.fragment_count ||
         (value.fragment_index & UCN_I_TRANSPORT_FRAGMENT_KIND_MASK) != 0U ||
         (parent_kind == UCN_I_TRANSPORT_PARENT_KIND_C1 &&

@@ -98,8 +98,9 @@ static ucn_result_t blocking_issue_cookie(
 
 static ucn_result_t unused_verify(
     void *context,
-    const ucn_i_admission_hello_cookie_t *hello_cookie)
+    const ucn_i_admission_hello_cookie_t *hello_cookie, uint64_t now_us)
 {
+    (void)now_us;
     (void)context;
     (void)hello_cookie;
     return UCN_ERR_UNSUPPORTED;

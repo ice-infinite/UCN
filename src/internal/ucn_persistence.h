@@ -157,6 +157,11 @@ typedef struct ucn_i_persist_hash_workspace {
     size_t buffered;
 } ucn_i_persist_hash_workspace_t;
 
+#define UCN_I_PERSIST_MANIFEST_DIGEST_OFFSET                            \
+    (UCN_PERSIST_DIGEST_WORKSPACE_BYTES - UCN_PERSIST_DIGEST_BYTES)
+#define UCN_I_PERSIST_MANIFEST_DIGEST_STAGING(workspace_)                \
+    (&(workspace_)->bytes[UCN_I_PERSIST_MANIFEST_DIGEST_OFFSET])
+
 /* EN: All codec scratch is caller-owned and bounded. Production keeps one
  * instance inside the Persistence Owner, so hashing and record validation do
  * not consume the MCU task stack. 中文：Codec 临时量全部由调用方以固定容量持有；
@@ -178,6 +183,16 @@ typedef struct ucn_i_persist_record_decode_request {
     size_t body_capacity;
     uint8_t erased_value;
 } ucn_i_persist_record_decode_request_t;
+
+typedef struct ucn_i_persist_record_encode_request {
+    const ucn_i_persist_record_meta_t *meta;
+    const uint8_t *manifest_digest;
+    const uint8_t *body;
+    size_t body_capacity;
+    size_t slot_bytes;
+    uint8_t erased_value;
+    uint8_t *slot_out;
+} ucn_i_persist_record_encode_request_t;
 
 typedef struct ucn_i_persist_pending {
     uint8_t valid;
@@ -277,7 +292,10 @@ struct ucn_persistence_owner {
     uint8_t readback_buffer[UCN_PERSIST_SLOT_BYTES];
     uint8_t marker_buffer[UCN_PERSIST_COMMIT_MARKER_BYTES];
     ucn_i_persist_codec_workspace_t codec_workspace;
-    ucn_i_persist_record_decode_request_t codec_decode_request;
+    union {
+        ucn_i_persist_record_decode_request_t decode;
+        ucn_i_persist_record_encode_request_t encode;
+    } codec_request;
     ucn_persistence_step_result_t step_result_staging;
 };
 
@@ -352,15 +370,12 @@ ucn_result_t ucn_i_persist_body_digest(
     uint8_t digest_out[UCN_PERSIST_DIGEST_BYTES],
     ucn_i_persist_codec_workspace_t *workspace);
 ucn_result_t ucn_i_persist_record_encode(
-    const ucn_i_persist_record_meta_t *meta,
-    const uint8_t manifest_digest[UCN_PERSIST_DIGEST_BYTES],
-    const uint8_t *body,
-    size_t body_capacity,
-    size_t slot_bytes,
-    uint8_t erased_value,
-    uint8_t *slot_out,
+    const ucn_i_persist_record_encode_request_t *request,
     ucn_i_persist_codec_workspace_t *workspace);
 ucn_result_t ucn_i_persist_record_decode(
+    const ucn_i_persist_record_decode_request_t *request,
+    ucn_i_persist_codec_workspace_t *workspace);
+ucn_result_t ucn_i_persist_record_header_decode(
     const ucn_i_persist_record_decode_request_t *request,
     ucn_i_persist_codec_workspace_t *workspace);
 ucn_result_t ucn_i_persist_marker_encode(

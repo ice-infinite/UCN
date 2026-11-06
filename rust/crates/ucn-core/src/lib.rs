@@ -103,6 +103,8 @@ pub struct NodeConfig {
     pub local_address: NodeAddress,
     /// 本机静态 Binding 代际。
     pub local_binding_generation: BindingGeneration,
+    /// Product-configured identity label, not cryptographic authentication.
+    pub local_principal_digest: u64,
     /// O0 只允许在产品显式声明的可信隔离网络中运行。
     pub trusted_o0_network: bool,
 }
@@ -120,7 +122,7 @@ pub struct Target {
 
 /// 最小单帧发送选项。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PublishOptions {
+pub struct SendOptions {
     /// Q0～Q3 业务类别。
     pub traffic_class: TrafficClass,
     /// 当前帧的跳数上限。
@@ -129,9 +131,19 @@ pub struct PublishOptions {
     pub absolute_deadline_us: u64,
 }
 
+impl Default for SendOptions {
+    fn default() -> Self {
+        Self {
+            traffic_class: TrafficClass::Q2,
+            hop_limit: HopLimit::new(1).expect("constant"),
+            absolute_deadline_us: 0,
+        }
+    }
+}
+
 /// 本地接纳成功后返回的最小回执。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PublishReceipt {
+pub struct SendReceipt {
     /// 已经分配且不会回绕的 Origin Sequence。
     pub origin_sequence: OriginSequence,
 }
@@ -162,6 +174,10 @@ pub struct EndpointMessage<'a> {
     pub payload: &'a [u8],
     /// Driver 捕获的本地接收时间。
     pub receive_timestamp_us: u64,
+    /// Actual decoded C1 order, not an authentication assertion.
+    pub origin_sequence: OriginSequence,
+    /// Exact configured binding identity, not an authentication proof.
+    pub configured_principal_digest: u64,
 }
 
 /// 固定 Endpoint 的同步、不可持有 Payload 回调。
@@ -276,6 +292,7 @@ struct BindingSlot {
     generation: Option<BindingGeneration>,
     replay_high: u32,
     replay_bits: u64,
+    principal_digest: u64,
 }
 
 impl BindingSlot {
@@ -284,6 +301,7 @@ impl BindingSlot {
         generation: None,
         replay_high: 0,
         replay_bits: 0,
+        principal_digest: 0,
     };
 }
 
@@ -373,6 +391,7 @@ pub struct CoreNode<
 > {
     config: NodeConfig,
     lifecycle: Lifecycle,
+    fault_latched: bool,
     queues: QueueCapacities,
     bindings: [BindingSlot; BINDINGS],
     endpoints: [EndpointSlot<'a>; ENDPOINTS],
@@ -409,6 +428,7 @@ impl<
             || config.adapter_instance == 0
             || !config.trusted_o0_network
             || config.local_binding_generation.is_unbound()
+            || config.local_principal_digest == 0
             || BINDINGS == 0
             || ENDPOINTS == 0
             || PATHS == 0
@@ -428,12 +448,14 @@ impl<
         bindings[0] = BindingSlot {
             address: Some(config.local_address),
             generation: Some(config.local_binding_generation),
+            principal_digest: config.local_principal_digest,
             replay_high: 0,
             replay_bits: 0,
         };
         Ok(Self {
             config,
             lifecycle: Lifecycle::Initialized,
+            fault_latched: false,
             queues,
             bindings,
             endpoints: [EndpointSlot::EMPTY; ENDPOINTS],
@@ -464,6 +486,71 @@ impl<
         self.stats
     }
 
+    /// Read immutable configuration; no Owner state is exposed.
+    #[must_use]
+    pub const fn config(&self) -> NodeConfig {
+        self.config
+    }
+
+    /// Read the configured static binding, never a cryptographic proof.
+    #[must_use]
+    pub fn binding(&self, address: NodeAddress) -> Option<BindingGeneration> {
+        self.bindings
+            .iter()
+            .find(|s| s.address == Some(address))
+            .and_then(|s| s.generation)
+    }
+
+    /// Return a configured identity label, never a cryptographic assertion.
+    #[must_use]
+    pub fn principal(&self, address: NodeAddress) -> Option<u64> {
+        self.bindings
+            .iter()
+            .find(|s| s.address == Some(address))
+            .map(|s| s.principal_digest)
+    }
+
+    /// Check a pristine static Endpoint batch before any registration writes.
+    ///
+    /// # Errors
+    /// Returns State for a previously used Core; Config for duplicate/oversized services.
+    pub fn endpoint_preflight(&self, services: &[ServiceId]) -> Result<()> {
+        if self.lifecycle != Lifecycle::Initialized
+            || self.endpoints.iter().any(|s| s.generation != 0)
+        {
+            return Err(Error::State);
+        }
+        if services.len() > ENDPOINTS
+            || services
+                .iter()
+                .enumerate()
+                .any(|(i, s)| services[..i].contains(s))
+        {
+            return Err(Error::Config);
+        }
+        Ok(())
+    }
+
+    /// Atomically install a preflighted static Endpoint batch.
+    ///
+    /// # Errors
+    /// Same as `endpoint_preflight`; failure writes no slot or generation.
+    pub fn endpoint_install(
+        &mut self,
+        services: &[ServiceId],
+        handler: &'a dyn EndpointHandler,
+    ) -> Result<()> {
+        self.endpoint_preflight(services)?;
+        for (slot, service) in self.endpoints.iter_mut().zip(services) {
+            *slot = EndpointSlot {
+                generation: 1,
+                service_id: Some(*service),
+                handler: Some(handler),
+            };
+        }
+        Ok(())
+    }
+
     /// 增加一个不可在运行期变化的静态 Peer Binding。
     ///
     /// # Errors
@@ -473,10 +560,12 @@ impl<
         &mut self,
         address: NodeAddress,
         generation: BindingGeneration,
+        principal_digest: u64,
     ) -> Result<()> {
         self.require_configurable()?;
         NodeAddress::new(address.get(), self.config.address_width)?;
         if generation.is_unbound()
+            || principal_digest == 0
             || self
                 .bindings
                 .iter()
@@ -492,6 +581,7 @@ impl<
         *slot = BindingSlot {
             address: Some(address),
             generation: Some(generation),
+            principal_digest,
             replay_high: 0,
             replay_bits: 0,
         };
@@ -653,10 +743,12 @@ impl<
         now_us: u64,
         adapter: &mut AdapterOwner<'_, LINKS, ADAPTER_TX, ADAPTER_RX, FRAME_BYTES>,
     ) -> Result<()> {
-        if !matches!(
-            self.lifecycle,
-            Lifecycle::Initialized | Lifecycle::Quiescent
-        ) || adapter.adapter_instance() != self.config.adapter_instance
+        if self.fault_latched
+            || !matches!(
+                self.lifecycle,
+                Lifecycle::Initialized | Lifecycle::Quiescent
+            )
+            || adapter.adapter_instance() != self.config.adapter_instance
         {
             return Err(Error::State);
         }
@@ -678,8 +770,10 @@ impl<
         &mut self,
         adapter: &mut AdapterOwner<'_, LINKS, ADAPTER_TX, ADAPTER_RX, FRAME_BYTES>,
     ) -> Result<()> {
-        if self.lifecycle != Lifecycle::Running
-            || adapter.adapter_instance() != self.config.adapter_instance
+        if !matches!(
+            self.lifecycle,
+            Lifecycle::Initialized | Lifecycle::Running | Lifecycle::Fault
+        ) || adapter.adapter_instance() != self.config.adapter_instance
         {
             return Err(Error::State);
         }
@@ -695,13 +789,13 @@ impl<
     /// # Errors
     ///
     /// 生命周期、静态 Binding/Path、MTU、Deadline、容量或 Sequence 非法时返回错误。
-    pub fn publish<const LINKS: usize, const ADAPTER_TX: usize, const ADAPTER_RX: usize>(
+    pub fn send<const LINKS: usize, const ADAPTER_TX: usize, const ADAPTER_RX: usize>(
         &mut self,
         target: Target,
         payload: &[u8],
-        options: PublishOptions,
+        options: SendOptions,
         adapter: &AdapterOwner<'_, LINKS, ADAPTER_TX, ADAPTER_RX, FRAME_BYTES>,
-    ) -> Result<PublishReceipt> {
+    ) -> Result<SendReceipt> {
         if self.lifecycle != Lifecycle::Running
             || self.callback_gate.is_active()
             || adapter.adapter_instance() != self.config.adapter_instance
@@ -769,7 +863,7 @@ impl<
             % self.queues.depths[class];
         self.last_origin_sequence = sequence;
         self.stats.tx_admitted = self.stats.tx_admitted.saturating_add(1);
-        Ok(PublishReceipt { origin_sequence })
+        Ok(SendReceipt { origin_sequence })
     }
 
     /// 有界推进 RX、completion/cancel 和按 `6:3:2:1` 调度的普通 TX。
@@ -833,10 +927,12 @@ impl<
     }
 
     fn require_configurable(&self) -> Result<()> {
-        if !matches!(
-            self.lifecycle,
-            Lifecycle::Initialized | Lifecycle::Quiescent
-        ) || self.callback_gate.is_active()
+        if self.fault_latched
+            || !matches!(
+                self.lifecycle,
+                Lifecycle::Initialized | Lifecycle::Quiescent
+            )
+            || self.callback_gate.is_active()
         {
             return Err(Error::State);
         }
@@ -1049,21 +1145,36 @@ impl<
             let token = self.tx[index].adapter_token.ok_or(Error::State)?;
             let view = match adapter.tx_view(token) {
                 Ok(view) => view,
+                Err(Error::InDoubt) if stopping => {
+                    self.fault_latched = true;
+                    continue;
+                }
                 Err(Error::InDoubt) => return self.enter_fault(Error::InDoubt),
                 Err(error) => return self.enter_fault(error),
             };
             if matches!(view.state, TxState::Completed | TxState::Cancelled) {
+                if view.terminal == Some(TerminalOutcome::Failure(Error::InDoubt)) && stopping {
+                    continue;
+                }
                 self.completion_cursor = (index + 1) % TX_SLOTS;
                 self.finish_tx(index, view, adapter)?;
                 return Ok(true);
             }
             if view.state == TxState::InDoubt {
+                if stopping {
+                    self.fault_latched = true;
+                    continue;
+                }
                 return self.enter_fault(Error::InDoubt);
             }
             let expired = self.tx[index].deadline_us != 0 && now_us >= self.tx[index].deadline_us;
             if (stopping || expired) && self.tx[index].state != CoreTxState::WaitingCancel {
                 let cancelled = match adapter.tx_cancel(token, driver) {
                     Ok(view) => view,
+                    Err(Error::InDoubt) if stopping => {
+                        self.fault_latched = true;
+                        continue;
+                    }
                     Err(Error::InDoubt) => return self.enter_fault(Error::InDoubt),
                     Err(error) => return self.enter_fault(error),
                 };
@@ -1097,8 +1208,30 @@ impl<
             self.tx[index].clear();
             return Ok(());
         };
+        let current = adapter.tx_view(token);
+        if let Ok(view) = current {
+            if matches!(view.state, TxState::Completed | TxState::Cancelled) {
+                if view.terminal == Some(TerminalOutcome::Failure(Error::InDoubt))
+                    && self.lifecycle == Lifecycle::Stopping
+                {
+                    return Ok(());
+                }
+                return self.finish_tx(index, view, adapter);
+            }
+            if view.state == TxState::InDoubt && self.lifecycle == Lifecycle::Stopping {
+                self.fault_latched = true;
+                return Ok(());
+            }
+        } else if current == Err(Error::InDoubt) && self.lifecycle == Lifecycle::Stopping {
+            self.fault_latched = true;
+            return Ok(());
+        }
         let view = match adapter.tx_cancel(token, driver) {
             Ok(view) => view,
+            Err(Error::InDoubt) if self.lifecycle == Lifecycle::Stopping => {
+                self.fault_latched = true;
+                return Ok(());
+            }
             Err(Error::InDoubt) => return self.enter_fault(Error::InDoubt),
             Err(error) => return self.enter_fault(error),
         };
@@ -1206,9 +1339,11 @@ impl<
             CALLBACK_KIND_ENDPOINT,
         )
         .inspect_err(|_error| {
+            self.fault_latched = true;
             self.lifecycle = Lifecycle::Fault;
         })?;
         let lease = self.callback_gate.try_enter(claim).inspect_err(|_error| {
+            self.fault_latched = true;
             self.lifecycle = Lifecycle::Fault;
         })?;
         let Some(handler) = self.endpoints[endpoint_index].handler else {
@@ -1218,6 +1353,7 @@ impl<
             .generation
             .ok_or(Error::State)
             .inspect_err(|_error| {
+                self.fault_latched = true;
                 self.lifecycle = Lifecycle::Fault;
             })?;
         let disposition = handler.receive(EndpointMessage {
@@ -1228,8 +1364,11 @@ impl<
             hop_limit: frame.common.hop_limit,
             payload: frame.payload,
             receive_timestamp_us: view.meta.timestamp_us,
+            origin_sequence: frame.origin_sequence,
+            configured_principal_digest: self.bindings[binding_index].principal_digest,
         });
         self.callback_gate.leave(lease).inspect_err(|_error| {
+            self.fault_latched = true;
             self.lifecycle = Lifecycle::Fault;
         })?;
         match disposition {
@@ -1312,6 +1451,7 @@ impl<
     }
 
     fn enter_fault<T>(&mut self, error: Error) -> Result<T> {
+        self.fault_latched = true;
         self.lifecycle = Lifecycle::Fault;
         Err(error)
     }

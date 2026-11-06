@@ -6,6 +6,10 @@
 
 #define UCN_I_FLOW_SCHEMA UINT16_C(1)
 #define UCN_I_FLOW_LABEL_SETUP_BYTES 16U
+#define UCN_I_FLOW_PATH_KEY_BYTES 28U
+#define UCN_I_FLOW_PATH_PROBE_BYTES 44U
+#define UCN_I_FLOW_PATH_PROBE_ACK_BYTES 30U
+#define UCN_I_FLOW_PATH_OUTCOME_BYTES 30U
 #define UCN_I_FLOW_C2_PREFIX_BYTES 9U
 #define UCN_I_FLOW_C3_PREFIX_BYTES 7U
 #define UCN_I_FLOW_C4_PREFIX_BYTES 11U
@@ -142,6 +146,51 @@ typedef struct ucn_i_flow_probe_ack {
     uint16_t capability_bits;
 } ucn_i_flow_probe_ack_t;
 
+/* EN: Canonical C0 Advanced-Flow bodies.  Realm, addresses, binding
+ * generations and transaction ID remain in the authenticated C0 header;
+ * these bodies carry only the proposal-specific immutable key.
+ * 中文：规范 C0 Advanced-Flow Body。Realm、地址、Binding Generation 与
+ * Transaction ID 已由认证 C0 Header 承载，Body 只携带 Proposal 专属不变键。 */
+typedef struct ucn_i_flow_path_key_body {
+    uint8_t proposal_digest[16];
+    uint32_t route_generation;
+    uint16_t candidate_id;
+    uint16_t reverse_label;
+    uint16_t forward_label;
+    uint16_t path_profile_id;
+} ucn_i_flow_path_key_body_t;
+
+typedef struct ucn_i_flow_path_probe_body {
+    ucn_i_flow_path_key_body_t key;
+    uint64_t flow_expires_at_us;
+    uint16_t context_id;
+    uint16_t payload_budget;
+    uint16_t path_frame_mtu;
+    uint16_t capability_bits;
+} ucn_i_flow_path_probe_body_t;
+
+typedef struct ucn_i_flow_path_outcome_body {
+    ucn_i_flow_path_key_body_t key;
+    uint8_t phase_or_reason;
+    uint8_t reserved_zero;
+} ucn_i_flow_path_outcome_body_t;
+
+typedef uint8_t ucn_i_flow_abort_reason_t;
+enum {
+    UCN_I_FLOW_ABORT_POLICY = 1,
+    UCN_I_FLOW_ABORT_CAPACITY = 2,
+    UCN_I_FLOW_ABORT_TIMEOUT = 3,
+    UCN_I_FLOW_ABORT_CONFLICT = 4
+};
+
+typedef uint8_t ucn_i_flow_terminal_phase_t;
+enum {
+    UCN_I_FLOW_TERMINAL_STAGED = 1,
+    UCN_I_FLOW_TERMINAL_ACTIVE = 2,
+    UCN_I_FLOW_TERMINAL_ABORTED = 3,
+    UCN_I_FLOW_TERMINAL_IN_DOUBT = 4
+};
+
 typedef struct ucn_i_flow_current_facts {
     ucn_i_route_binding_t local;
     ucn_i_route_binding_t destination;
@@ -163,6 +212,7 @@ typedef struct ucn_i_flow_current_facts {
 } ucn_i_flow_current_facts_t;
 
 typedef struct ucn_i_flow_tx_request {
+    uint16_t service_id;
     uint16_t protocol_opcode;
     uint16_t payload_bytes;
     uint8_t contract;
@@ -177,8 +227,11 @@ typedef struct ucn_i_flow_tx_request {
 typedef struct ucn_i_flow_tx_plan {
     ucn_i_route_link_ref_t next_hop;
     uint8_t flow_fingerprint[16];
+    uint64_t expires_at_us;
     uint32_t route_generation;
+    uint32_t flow_generation;
     uint32_t sequence;
+    uint32_t reservation_generation;
     uint16_t context_id;
     uint16_t forward_label;
     uint16_t payload_budget;
@@ -232,6 +285,7 @@ typedef struct ucn_i_flow_active_record {
     uint32_t flow_generation;
     uint32_t next_sequence;
     uint32_t reserved_sequence;
+    uint32_t reservation_generation;
     uint16_t generation;
     uint8_t phase;
     uint8_t occupied;
@@ -282,6 +336,32 @@ ucn_result_t ucn_i_flow_label_setup_encode(
 ucn_result_t ucn_i_flow_label_setup_decode(
     const uint8_t input[UCN_I_FLOW_LABEL_SETUP_BYTES],
     ucn_i_flow_label_setup_t *value_out);
+ucn_result_t ucn_i_flow_path_key_encode(
+    const ucn_i_flow_path_key_body_t *value,
+    uint8_t output[UCN_I_FLOW_PATH_KEY_BYTES]);
+ucn_result_t ucn_i_flow_path_key_decode(
+    const uint8_t input[UCN_I_FLOW_PATH_KEY_BYTES],
+    ucn_i_flow_path_key_body_t *value_out);
+ucn_result_t ucn_i_flow_path_probe_encode(
+    const ucn_i_flow_path_probe_body_t *value,
+    uint8_t output[UCN_I_FLOW_PATH_PROBE_BYTES]);
+ucn_result_t ucn_i_flow_path_probe_decode(
+    const uint8_t input[UCN_I_FLOW_PATH_PROBE_BYTES],
+    ucn_i_flow_path_probe_body_t *value_out);
+ucn_result_t ucn_i_flow_path_probe_ack_encode(
+    const ucn_i_flow_probe_ack_t *value,
+    uint8_t output[UCN_I_FLOW_PATH_PROBE_ACK_BYTES]);
+ucn_result_t ucn_i_flow_path_probe_ack_decode(
+    const uint8_t input[UCN_I_FLOW_PATH_PROBE_ACK_BYTES],
+    ucn_i_flow_probe_ack_t *value_out);
+ucn_result_t ucn_i_flow_path_outcome_encode(
+    const ucn_i_flow_path_outcome_body_t *value,
+    bool terminal_receipt,
+    uint8_t output[UCN_I_FLOW_PATH_OUTCOME_BYTES]);
+ucn_result_t ucn_i_flow_path_outcome_decode(
+    const uint8_t input[UCN_I_FLOW_PATH_OUTCOME_BYTES],
+    bool terminal_receipt,
+    ucn_i_flow_path_outcome_body_t *value_out);
 ucn_result_t ucn_i_flow_prefix_encode(const ucn_i_flow_prefix_t *value,
                                       uint8_t *output,
                                       size_t output_capacity,
@@ -351,10 +431,12 @@ ucn_result_t ucn_i_flow_use_preflight(
     ucn_i_flow_tx_plan_t *plan_out);
 ucn_result_t ucn_i_flow_sequence_commit(ucn_i_flow_owner_t *owner,
                                         ucn_handle_t flow,
-                                        uint32_t sequence);
+                                        uint32_t sequence,
+                                        uint32_t reservation_generation);
 ucn_result_t ucn_i_flow_sequence_abort(ucn_i_flow_owner_t *owner,
                                        ucn_handle_t flow,
-                                       uint32_t sequence);
+                                       uint32_t sequence,
+                                       uint32_t reservation_generation);
 ucn_result_t ucn_i_flow_fence(ucn_i_flow_owner_t *owner,
                               ucn_handle_t flow);
 ucn_result_t ucn_i_flow_phase(ucn_i_flow_owner_t *owner,

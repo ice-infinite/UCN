@@ -3,8 +3,8 @@
 use std::boxed::Box;
 
 use ucn_capability::{
-    CapabilityConfig, CapabilityRecord, CapabilitySummary, HelloDisposition, LinkCapability,
-    MessageClass, NanoCapabilityOwner, PeerCapability, capability_digest,
+    CapabilityConfig, CapabilityQuery, CapabilityRecord, CapabilitySummary, HelloDisposition,
+    LinkCapability, MessageClass, NanoCapabilityOwner, PeerCapability, capability_digest,
 };
 use ucn_owner::CallbackGate;
 use ucn_persistence::{
@@ -434,11 +434,11 @@ fn capability_cache_requires_live_authenticated_session_and_exact_generation() {
         discovery_lease_us: 80,
     })
     .expect("capability owner");
-    let peer = record(1, 3);
+    let peer = record(1, 9);
     let digest = capability_digest(peer).expect("digest");
     let summary = CapabilitySummary {
         capability_generation: 1,
-        link_instance_generation: 3,
+        link_instance_generation: 9,
         digest,
     };
     let wrong_provenance = NanoCapabilityOwner::new(CapabilityConfig {
@@ -470,6 +470,7 @@ fn capability_cache_requires_live_authenticated_session_and_exact_generation() {
     let reference = owner
         .ingest_advertise(authenticated, peer, 20)
         .expect("advertise");
+    assert_link_domains(&owner, reference, authenticated, summary);
     let moved_parent = security
         .authenticated_peer_view(handle, facts, 8)
         .expect("moved parent view");
@@ -510,6 +511,35 @@ fn capability_cache_requires_live_authenticated_session_and_exact_generation() {
         .invalidate_session(reference)
         .expect("invalidate parent session");
     assert_eq!(owner.counts(40), (0, 0));
+}
+
+fn assert_link_domains(
+    owner: &NanoCapabilityOwner,
+    reference: ucn_capability::PeerCapabilityRef,
+    authenticated: ucn_security::AuthenticatedPeerView,
+    summary: CapabilitySummary,
+) {
+    assert_eq!(reference.ingress_link_generation, 3);
+    assert_eq!(
+        owner
+            .peer_get(reference, 20)
+            .unwrap()
+            .record
+            .link
+            .link_instance_generation,
+        9
+    );
+    assert_eq!(
+        owner.ingest_summary(
+            authenticated,
+            CapabilitySummary {
+                link_instance_generation: 3,
+                ..summary
+            },
+            20
+        ),
+        Ok(HelloDisposition::QueryRequired)
+    );
 }
 
 #[test]
@@ -566,4 +596,62 @@ fn expired_capability_slots_require_explicit_parent_retirement_before_reuse() {
         owner.peer_get(reference_c, 122).map(|value| value.peer_ref),
         Ok(reference_c)
     );
+}
+#[test]
+fn revoke_retains_same_session_highwater_and_exact_next_record_only() {
+    let (s, h, f) = authenticated_peer(0xB2, 0x5678);
+    let a = s.authenticated_peer_view(h, f, 7).unwrap();
+    let old = record(1, 3);
+    let mut owner = NanoCapabilityOwner::new(CapabilityConfig {
+        runtime_instance: 11,
+        security_owner_instance: 41,
+        realm: RealmId::new(1).unwrap(),
+        local_record: old,
+        capability_lease_us: 100,
+        discovery_lease_us: 80,
+    })
+    .unwrap();
+    let reference = owner.ingest_advertise(a, old, 20).unwrap();
+    assert_eq!(
+        owner.revoke(
+            reference,
+            CapabilityQuery {
+                requested_generation: 2,
+                known_digest: capability_digest(old).unwrap()
+            }
+        ),
+        Err(Error::Security)
+    );
+    assert!(owner.peer_get(reference, 21).is_ok());
+    owner
+        .revoke(
+            reference,
+            CapabilityQuery {
+                requested_generation: 1,
+                known_digest: capability_digest(old).unwrap(),
+            },
+        )
+        .unwrap();
+    assert_eq!(owner.peer_get(reference, 21), Err(Error::State));
+    assert_eq!(owner.ingest_advertise(a, old, 21), Err(Error::Replay));
+    assert_eq!(owner.counts(21), (1, 0));
+    assert_eq!(
+        owner.ingest_advertise(a, record(3, 3), 22),
+        Err(Error::Replay)
+    );
+    owner.ingest_advertise(a, record(2, 3), 23).unwrap();
+    assert_eq!(
+        owner
+            .peer_get(reference, 23)
+            .unwrap()
+            .record
+            .capability_generation,
+        2
+    );
+    assert_eq!(owner.ingest_advertise(a, old, 24), Err(Error::Replay));
+    let before = owner.peer_get(reference, 24).unwrap();
+    let mut changed = record(2, 3);
+    changed.peer.max_rx_window += 1;
+    assert_eq!(owner.ingest_advertise(a, changed, 25), Err(Error::Security));
+    assert_eq!(owner.peer_get(reference, 25).unwrap(), before);
 }

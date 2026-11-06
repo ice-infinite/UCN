@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 ucn-security = { path = "../ucn-security" }
 ucn-types = { path = "../ucn-types" }
+ucn-digest = { path = "../ucn-digest" }
 
 [dev-dependencies]
 ucn-owner = { path = "../ucn-owner" }

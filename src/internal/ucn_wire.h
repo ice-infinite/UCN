@@ -3,6 +3,10 @@
 
 #include "ucn/ucn_core.h"
 
+#define UCN_I_WIRE_PROTOCOL_VERSION UINT8_C(6)
+#define UCN_I_WIRE_CONTRACT_C0 UINT8_C(0)
+#define UCN_I_WIRE_CONTRACT_C1 UINT8_C(1)
+
 #define UCN_I_C1_COMMON_BYTES 3U
 #define UCN_I_C1_FIXED_AFTER_ADDRESSES 6U
 

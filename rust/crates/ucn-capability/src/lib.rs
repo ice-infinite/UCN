@@ -6,8 +6,12 @@
 //! Capability 只描述“能做什么”，不等于 ACL、Authority、资源 reservation 或执行许可。
 
 mod codec;
+mod fragment;
+pub use fragment::*;
 mod owner;
+mod profile_wire;
 mod resolver;
+pub use profile_wire::*;
 
 pub use codec::{
     CAPABILITY_DIGEST_BYTES, CAPABILITY_QUERY_BYTES, CAPABILITY_RECORD_BYTES,

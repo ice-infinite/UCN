@@ -421,7 +421,7 @@ int main(void)
     options.interaction_role = UCN_INTERACTION_ONE_WAY;
     options.hop_limit = 1U;
     options.copy_payload = 1U;
-    CHECK(ucn_publish(fixture.node, &target, &payload, sizeof(payload),
+    CHECK(ucn_send(fixture.node, &target, &payload, sizeof(payload),
                       &options, &send) == UCN_OK);
     CHECK(pthread_create(&driver, NULL, driver_thread, &fixture) == 0);
     CHECK(pthread_create(&owner, NULL, step_thread, &fixture) == 0);

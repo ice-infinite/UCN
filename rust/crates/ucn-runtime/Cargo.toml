@@ -1,0 +1,56 @@
+[package]
+name = "ucn-runtime"
+description = "Coordinator-owned advanced software bridges, independent from optional Owners"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+[features]
+default = ["transfer", "parent-control", "transfer-sender", "capability-control", "bootstrap-runtime", "bootstrap-join", "peer-reauth", "service-control", "service-rpc", "durable-rpc", "operation-control", "realtime-control", "time-runtime", "journal-runtime", "source-runtime", "duplex-runtime", "route-runtime", "route-data-runtime"]
+transfer = ["ucn-transport/transfer"]
+parent-control = ["transfer", "dep:ucn-persistence", "dep:ucn-durable"]
+transfer-sender = ["parent-control"]
+service-control = ["dep:ucn-service"]
+service-rpc = ["service-control", "ucn-service/rpc"]
+durable-rpc = ["service-rpc", "ucn-service/operation", "dep:ucn-durable", "dep:ucn-persistence"]
+operation-control = ["service-control", "ucn-service/operation", "dep:ucn-durable", "dep:ucn-persistence"]
+journal-runtime = ["durable-rpc", "operation-control"]
+source-runtime = ["durable-rpc", "operation-control"]
+duplex-runtime = ["source-runtime", "journal-runtime"]
+realtime-control = ["dep:ucn-realtime"]
+time-runtime = ["realtime-control", "dep:ucn-persistence", "dep:ucn-durable"]
+capability-control = ["dep:ucn-capability"]
+bootstrap-runtime = ["dep:ucn-admission"]
+bootstrap-join = ["bootstrap-runtime", "dep:ucn-identity", "dep:ucn-persistence"]
+peer-reauth = ["bootstrap-join"]
+route-runtime = ["capability-control", "dep:ucn-identity", "dep:ucn-routing"]
+route-data-runtime = ["route-runtime"]
+[dependencies]
+ucn-types = { path = "../ucn-types" }
+ucn-wire = { path = "../ucn-wire" }
+ucn-owner = { path = "../ucn-owner" }
+ucn-adapter = { path = "../ucn-adapter" }
+ucn-security = { path = "../ucn-security" }
+ucn-digest = { path = "../ucn-digest" }
+ucn-capability = { path = "../ucn-capability", optional = true }
+ucn-routing = { path = "../ucn-routing", optional = true }
+ucn-admission = { path = "../ucn-admission", optional = true }
+ucn-identity = { path = "../ucn-identity", optional = true }
+ucn-transport = { path = "../ucn-transport", default-features = false, features = ["reliable"] }
+ucn-service = { path = "../ucn-service", optional = true, default-features = false }
+ucn-durable = { path = "../ucn-durable", optional = true }
+ucn-persistence = { path = "../ucn-persistence", optional = true }
+ucn-realtime = { path = "../ucn-realtime", optional = true, default-features = false, features = ["network"] }
+[dev-dependencies]
+ucn-identity = { path = "../ucn-identity" }
+ucn-transport = { path = "../ucn-transport", default-features = false, features = ["reliable", "transfer"] }
+ucn-persistence = { path = "../ucn-persistence" }
+ucn-durable = { path = "../ucn-durable" }
+ucn-digest = { path = "../ucn-digest" }
+ucn-realtime = { path = "../ucn-realtime" }
+ucn-group = { path = "../ucn-group" }
+ucn-cluster = { path = "../ucn-cluster" }
+ucn-service = { path = "../ucn-service" }
+[lints]
+workspace = true

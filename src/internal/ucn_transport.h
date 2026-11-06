@@ -7,12 +7,23 @@
 #include "ucn/ucn_core.h"
 
 #define UCN_I_TRANSPORT_SCHEMA UINT16_C(1)
+
+/* EN: Pure Transport policy; current authentication/Driver proofs remain Coordinator obligations.
+ * 中文：纯Transport规则；当前认证/Driver证明仍由Coordinator负责。phase=0..5,
+ * sent=0/1/2 (none/Prepare/Commit); no failure writes. */
+ucn_result_t ucn_i_parent_phase_transition(
+    bool source, uint8_t phase, uint16_t opcode, uint8_t disposition,
+    uint8_t sent, uint8_t *phase_out, uint8_t *reply_disposition_out);
 #define UCN_I_TRANSPORT_PRINCIPAL_BYTES 16U
 #define UCN_I_TRANSPORT_DIGEST_BYTES 16U
 #define UCN_I_TRANSPORT_DELIVERY_ACK_BYTES 9U
 #define UCN_I_TRANSPORT_TRANSFER_SETUP_ONE_WAY_BYTES 43U
 #define UCN_I_TRANSPORT_TRANSFER_SETUP_OPERATION_BYTES 52U
 #define UCN_I_TRANSPORT_TRANSFER_SETUP_RESULT_BYTES 54U
+#define UCN_I_TRANSPORT_TRANSFER_KEY_BYTES 29U
+#define UCN_I_TRANSPORT_TRANSFER_SETUP_ACK_BYTES 33U
+#define UCN_I_TRANSPORT_TRANSFER_ABORT_BYTES 33U
+#define UCN_I_TRANSPORT_TRANSFER_TERMINAL_BYTES 32U
 #define UCN_I_TRANSPORT_C1_FRAGMENT_PREFIX_BYTES 12U
 #define UCN_I_TRANSPORT_FLOW_FRAGMENT_PREFIX_BYTES 8U
 #define UCN_I_TRANSPORT_C1_SACK_BYTES 20U
@@ -165,6 +176,37 @@ typedef struct ucn_i_transport_transfer_setup {
     uint8_t operation_flags;
 } ucn_i_transport_transfer_setup_t;
 
+/* EN: Every C0 Transfer response carries the complete immutable setup key;
+ * no receiver is allowed to locate mutable state by Transfer ID alone.
+ * 中文：每个 C0 Transfer 响应都携带完整不可变 Setup 键；接收端不得只凭
+ * Transfer ID 定位可变状态。 */
+typedef struct ucn_i_transport_transfer_key {
+    uint8_t setup_digest[UCN_I_TRANSPORT_DIGEST_BYTES];
+    uint32_t parent_generation;
+    uint32_t transfer_id;
+    uint16_t parent_id;
+    uint16_t service_id;
+    uint8_t parent_kind;
+} ucn_i_transport_transfer_key_t;
+
+typedef struct ucn_i_transport_transfer_setup_ack {
+    ucn_i_transport_transfer_key_t key;
+    uint16_t accepted_fragment_budget;
+    uint16_t receive_credit;
+} ucn_i_transport_transfer_setup_ack_t;
+
+typedef struct ucn_i_transport_transfer_abort_body {
+    ucn_i_transport_transfer_key_t key;
+    uint8_t reason;
+    uint8_t reserved_zero[3];
+} ucn_i_transport_transfer_abort_body_t;
+
+typedef struct ucn_i_transport_transfer_terminal_body {
+    ucn_i_transport_transfer_key_t key;
+    uint16_t result_code;
+    uint8_t terminal_state;
+} ucn_i_transport_transfer_terminal_body_t;
+
 typedef struct ucn_i_transport_transfer_facts {
     ucn_i_transport_binding_t source;
     ucn_i_transport_binding_t destination;
@@ -212,7 +254,10 @@ typedef struct ucn_i_transport_transfer_view {
     uint64_t deadline_us;
     uint32_t completed_bytes;
     uint16_t completed_fragments;
+    uint16_t terminal_result_code;
     uint8_t phase;
+    uint8_t terminal_received;
+    uint8_t terminal_state;
     uint8_t reserved_zero;
 } ucn_i_transport_transfer_view_t;
 
@@ -367,10 +412,13 @@ typedef struct ucn_i_transport_transfer_tx_record {
     uint32_t message_bytes;
     uint16_t generation;
     uint16_t acknowledged_count;
+    uint16_t terminal_result_code;
     uint8_t phase;
     uint8_t occupied;
     uint8_t setup_accepted;
-    uint8_t reserved_zero;
+    uint8_t terminal_received;
+    uint8_t terminal_state;
+    uint8_t reserved_zero[3];
 } ucn_i_transport_transfer_tx_record_t;
 
 typedef struct ucn_i_transport_transfer_rx_record {
@@ -467,6 +515,27 @@ ucn_result_t ucn_i_transport_transfer_setup_decode(
     const uint8_t *input,
     size_t input_bytes,
     ucn_i_transport_transfer_setup_t *value_out);
+ucn_result_t ucn_i_transport_transfer_key_from_setup(
+    const ucn_i_transport_transfer_setup_t *setup,
+    ucn_i_transport_transfer_key_t *key_out);
+ucn_result_t ucn_i_transport_transfer_setup_ack_encode(
+    const ucn_i_transport_transfer_setup_ack_t *value,
+    uint8_t output[UCN_I_TRANSPORT_TRANSFER_SETUP_ACK_BYTES]);
+ucn_result_t ucn_i_transport_transfer_setup_ack_decode(
+    const uint8_t input[UCN_I_TRANSPORT_TRANSFER_SETUP_ACK_BYTES],
+    ucn_i_transport_transfer_setup_ack_t *value_out);
+ucn_result_t ucn_i_transport_transfer_abort_body_encode(
+    const ucn_i_transport_transfer_abort_body_t *value,
+    uint8_t output[UCN_I_TRANSPORT_TRANSFER_ABORT_BYTES]);
+ucn_result_t ucn_i_transport_transfer_abort_body_decode(
+    const uint8_t input[UCN_I_TRANSPORT_TRANSFER_ABORT_BYTES],
+    ucn_i_transport_transfer_abort_body_t *value_out);
+ucn_result_t ucn_i_transport_transfer_terminal_body_encode(
+    const ucn_i_transport_transfer_terminal_body_t *value,
+    uint8_t output[UCN_I_TRANSPORT_TRANSFER_TERMINAL_BYTES]);
+ucn_result_t ucn_i_transport_transfer_terminal_body_decode(
+    const uint8_t input[UCN_I_TRANSPORT_TRANSFER_TERMINAL_BYTES],
+    ucn_i_transport_transfer_terminal_body_t *value_out);
 ucn_result_t ucn_i_transport_fragment_prefix_encode(
     const ucn_i_transport_fragment_prefix_t *value,
     uint8_t *output,
@@ -637,6 +706,20 @@ ucn_result_t ucn_i_transport_transfer_retire(
 ucn_result_t ucn_i_transport_transfer_abort(
     ucn_i_transport_owner_t *owner,
     ucn_handle_t handle);
+ucn_result_t ucn_i_transport_transfer_accept_abort(
+    ucn_i_transport_owner_t *owner,
+    ucn_handle_t handle,
+    const ucn_i_transport_transfer_key_t *key,
+    const ucn_i_transport_transfer_facts_t *response_facts,
+    uint64_t now_us);
+ucn_result_t ucn_i_transport_transfer_tx_accept_terminal(
+    ucn_i_transport_owner_t *owner,
+    ucn_handle_t handle,
+    const ucn_i_transport_transfer_key_t *key,
+    const ucn_i_transport_transfer_facts_t *response_facts,
+    uint8_t terminal_state,
+    uint16_t result_code,
+    uint64_t now_us);
 ucn_result_t ucn_i_transport_terminal_receipt_view(
     ucn_i_transport_owner_t *owner,
     ucn_handle_t handle,
@@ -648,6 +731,12 @@ ucn_result_t ucn_i_transport_parent_record_encode(
     uint32_t transfer_high_water,
     uint64_t foundation_transaction_id,
     uint8_t output[UCN_I_TRANSPORT_PARENT_RECORD_BYTES]);
+
+/* EN: Canonical publication identity excludes ID allocation progress.
+ * 中文：规范发布身份不包含ID分配进度；不是认证结果。 */
+ucn_result_t ucn_i_transport_parent_context_digest(
+    const ucn_i_transport_parent_context_t *context,
+    uint8_t digest_out[16], ucn_i_sha256_workspace_t *workspace);
 ucn_result_t ucn_i_transport_parent_record_decode(
     const uint8_t input[UCN_I_TRANSPORT_PARENT_RECORD_BYTES],
     ucn_i_transport_parent_context_t *context_out,

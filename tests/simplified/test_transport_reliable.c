@@ -276,6 +276,7 @@ static int test_operation_setup_lengths_and_failure_atomicity(void)
           decoded.operation_flags == setup.operation_flags);
 
     setup.interaction = UCN_INTERACTION_RESULT;
+    setup.operation_flags = 5U;
     setup.result_code = UINT16_C(0x1234);
     CHECK(ucn_i_transport_transfer_setup_encode(
               &setup, bytes, sizeof(bytes), &output_bytes) == UCN_OK);
@@ -305,6 +306,77 @@ static int test_operation_setup_lengths_and_failure_atomicity(void)
         memset(&unchanged, 0xA5, sizeof(unchanged));
         CHECK(memcmp(&decoded, &unchanged, sizeof(decoded)) == 0);
     }
+    return 0;
+}
+
+static int test_transfer_control_codecs(void)
+{
+    static const uint8_t key_golden[UCN_I_TRANSPORT_TRANSFER_KEY_BYTES] = {
+        0x01U, 0x00U, 0x00U, 0x01U, 0x02U, 0x03U, 0x04U,
+        0x05U, 0x06U, 0x07U, 0x08U, 0x12U, 0x34U,
+        0x00U, 0x01U, 0x02U, 0x03U, 0x04U, 0x05U, 0x06U, 0x07U,
+        0x08U, 0x09U, 0x0AU, 0x0BU, 0x0CU, 0x0DU, 0x0EU, 0x0FU
+    };
+    ucn_i_transport_transfer_setup_ack_t ack;
+    ucn_i_transport_transfer_abort_body_t abort_body;
+    ucn_i_transport_transfer_terminal_body_t terminal;
+    uint8_t bytes[UCN_I_TRANSPORT_TRANSFER_SETUP_ACK_BYTES];
+    uint8_t sentinel[sizeof(bytes)];
+    size_t index;
+
+    memset(&ack, 0, sizeof(ack));
+    ack.key.parent_kind = UCN_I_TRANSPORT_PARENT_KIND_C1;
+    ack.key.parent_generation = UINT32_C(0x01020304);
+    ack.key.transfer_id = UINT32_C(0x05060708);
+    ack.key.service_id = UINT16_C(0x1234);
+    for (index = 0U; index < sizeof(ack.key.setup_digest); ++index) {
+        ack.key.setup_digest[index] = (uint8_t)index;
+    }
+    ack.accepted_fragment_budget = UINT16_C(0x0102);
+    ack.receive_credit = UINT16_C(0x0304);
+    CHECK(ucn_i_transport_transfer_setup_ack_encode(&ack, bytes) == UCN_OK);
+    CHECK(memcmp(bytes, key_golden, sizeof(key_golden)) == 0);
+    CHECK(bytes[29] == 0x01U && bytes[30] == 0x02U &&
+          bytes[31] == 0x03U && bytes[32] == 0x04U);
+    memset(&ack, 0, sizeof(ack));
+    CHECK(ucn_i_transport_transfer_setup_ack_decode(bytes, &ack) == UCN_OK);
+    CHECK(ack.key.transfer_id == UINT32_C(0x05060708) &&
+          ack.accepted_fragment_budget == UINT16_C(0x0102) &&
+          ack.receive_credit == UINT16_C(0x0304));
+
+    memset(&abort_body, 0, sizeof(abort_body));
+    abort_body.key = ack.key;
+    abort_body.reason = 7U;
+    CHECK(ucn_i_transport_transfer_abort_body_encode(
+              &abort_body, bytes) == UCN_OK);
+    CHECK(memcmp(bytes, key_golden, sizeof(key_golden)) == 0 &&
+          bytes[29] == 7U && bytes[30] == 0U && bytes[31] == 0U &&
+          bytes[32] == 0U);
+    memset(&abort_body, 0, sizeof(abort_body));
+    CHECK(ucn_i_transport_transfer_abort_body_decode(
+              bytes, &abort_body) == UCN_OK);
+    CHECK(abort_body.reason == 7U);
+
+    memset(&terminal, 0, sizeof(terminal));
+    terminal.key = ack.key;
+    terminal.terminal_state = 2U;
+    terminal.result_code = UINT16_C(0x5678);
+    CHECK(ucn_i_transport_transfer_terminal_body_encode(
+              &terminal, bytes) == UCN_OK);
+    CHECK(memcmp(bytes, key_golden, sizeof(key_golden)) == 0 &&
+          bytes[29] == 2U && bytes[30] == 0x56U && bytes[31] == 0x78U);
+    memset(&terminal, 0, sizeof(terminal));
+    CHECK(ucn_i_transport_transfer_terminal_body_decode(
+              bytes, &terminal) == UCN_OK);
+    CHECK(terminal.terminal_state == 2U &&
+          terminal.result_code == UINT16_C(0x5678));
+
+    memset(sentinel, 0xA5, sizeof(sentinel));
+    memcpy(bytes, sentinel, sizeof(bytes));
+    memset(&ack.key.setup_digest, 0, sizeof(ack.key.setup_digest));
+    CHECK(ucn_i_transport_transfer_setup_ack_encode(&ack, bytes) ==
+          UCN_ERR_ARGUMENT);
+    CHECK(memcmp(bytes, sentinel, sizeof(bytes)) == 0);
     return 0;
 }
 
@@ -496,6 +568,7 @@ int main(void)
     CHECK(test_ack_codec() == 0);
     CHECK(test_setup_and_fragment_codecs() == 0);
     CHECK(test_operation_setup_lengths_and_failure_atomicity() == 0);
+    CHECK(test_transfer_control_codecs() == 0);
     CHECK(start_owner() == 0);
     CHECK(test_reliable_retry_and_ack() == 0);
     CHECK(test_reliable_receive_replay() == 0);

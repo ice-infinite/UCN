@@ -89,6 +89,8 @@ static bool config_valid(const ucn_i_realtime_domain_config_t *config)
            config->oscillator_uncertainty_ppb != 0U &&
            config->max_offset_jump_us != 0U && config->reserved_zero == 0U &&
            path_valid(&config->path) && config->path.asymmetry_known == 1U &&
+           config->base_uncertainty.path_asymmetry_bound_us >=
+               config->path.max_asymmetry_us &&
            ucn_i_realtime_uncertainty_aggregate(&config->base_uncertainty,
                                                 &uncertainty) == UCN_OK;
 }
@@ -252,13 +254,6 @@ static ucn_result_t record_decode(const uint8_t *body, size_t bytes,
     return UCN_OK;
 }
 
-static ucn_result_t body_digest(const uint8_t *body, uint8_t digest[16])
-{
-    ucn_i_sha256_workspace_t workspace;
-    memset(&workspace, 0, sizeof(workspace));
-    return ucn_i_sha256_128(body, UCN_I_REALTIME_DOMAIN_RECORD_BYTES,
-                            digest, &workspace);
-}
 
 static bool durability_valid(const ucn_i_realtime_durability_t *value)
 {
@@ -346,7 +341,7 @@ ucn_result_t ucn_i_realtime_domain_prepare(
     requirement.caller_owner_instance = owner->owner_instance;
     requirement.operation_kind = UCN_I_REALTIME_DOMAIN_PERSIST_KIND;
     result = ucn_i_realtime_domain_record_encode(config, requirement.body);
-    if (result == UCN_OK) result = body_digest(requirement.body,
+    if (result == UCN_OK) result = ucn_i_realtime_domain_body_digest(requirement.body,
                                                requirement.canonical_body_digest);
     if (result != UCN_OK) { owner_unlock(owner); return result; }
     memcpy(requirement.expected_body_digest, slot->current_body_digest, 16U);
@@ -462,7 +457,7 @@ ucn_result_t ucn_i_realtime_domain_import(
     ucn_result_t result;
     if (!durability_valid(durability) || published_body_digest == NULL ||
         domain_out == NULL || record_decode(body, body_bytes, &config) != UCN_OK ||
-        body_digest(body, digest) != UCN_OK ||
+        ucn_i_realtime_domain_body_digest(body, digest) != UCN_OK ||
         memcmp(digest, published_body_digest, 16U) != 0) return UCN_ERR_MALFORMED;
     result = owner_lock(owner); if (result != UCN_OK) return result;
     if (find_domain(owner, config.clock_domain_id, NULL) != NULL) {

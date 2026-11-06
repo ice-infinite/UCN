@@ -1,4 +1,4 @@
-use ucn_persistence::{CodecWorkspace, blake2s128};
+use ucn_digest::{DigestWorkspace, canonical_digest};
 use ucn_types::{
     C0TransactionId, ContextId, DeliveryGuarantee, Error, ForwardingLabel, HeaderContract,
     HopProfile, InteractionRole, OriginSecurity, OriginSequence, PayloadKind, ProtocolOpcode,
@@ -33,6 +33,109 @@ const HOP_DOMAIN: &[u8] = b"UCN6-HOP-V1";
 const SEQUENCE_NONCE_DOMAIN: &[u8] = b"UCN6-NONCE-SEQ-V1";
 const C0_NONCE_DOMAIN: &[u8] = b"UCN6-NONCE-C0-V1";
 
+// A private layer choice, never a caller-provided "skip authentication" flag.
+// 私有分层选择，不提供调用方可滥用的“跳过认证”布尔开关。
+#[derive(Clone, Copy)]
+enum PacketLayer {
+    Complete,
+    C1Origin,
+}
+
+fn validate_layer(
+    layer: PacketLayer,
+    header: CommonHeader,
+    requested: HopProfile,
+    negotiated: HopProfile,
+) -> Result<()> {
+    match layer {
+        PacketLayer::Complete if requested == negotiated => Ok(()),
+        PacketLayer::C1Origin
+            if header.contract == HeaderContract::C1
+                && header.payload_kind == PayloadKind::Data
+                && header.origin_security != OriginSecurity::O0
+                && requested == HopProfile::H0
+                && matches!(negotiated, HopProfile::H0 | HopProfile::H1) =>
+        {
+            Ok(())
+        }
+        _ => Err(Error::Security),
+    }
+}
+
+#[cfg(test)]
+mod layer_tests {
+    use super::*;
+
+    #[test]
+    fn projection_is_c1_data_only_and_complete_profile_matching_stays_strict() {
+        for contract in [
+            HeaderContract::C0,
+            HeaderContract::C1,
+            HeaderContract::C2,
+            HeaderContract::C3,
+            HeaderContract::C4,
+            HeaderContract::C5,
+        ] {
+            for kind in [
+                PayloadKind::Data,
+                PayloadKind::Control,
+                PayloadKind::Diagnostic,
+            ] {
+                for origin in [OriginSecurity::O0, OriginSecurity::O1, OriginSecurity::O2] {
+                    for negotiated in [
+                        HopProfile::H0,
+                        HopProfile::H1,
+                        HopProfile::H2,
+                        HopProfile::H3,
+                    ] {
+                        for requested in [
+                            HopProfile::H0,
+                            HopProfile::H1,
+                            HopProfile::H2,
+                            HopProfile::H3,
+                        ] {
+                            let header = CommonHeader {
+                                contract,
+                                payload_kind: kind,
+                                origin_security: origin,
+                                traffic_class: TrafficClass::Q2,
+                                delivery: DeliveryGuarantee::BestEffort,
+                                interaction: InteractionRole::OneWay,
+                                hop_limit: ucn_types::HopLimit::new(1).unwrap(),
+                            };
+                            let expected = contract == HeaderContract::C1
+                                && kind == PayloadKind::Data
+                                && origin != OriginSecurity::O0
+                                && requested == HopProfile::H0
+                                && matches!(negotiated, HopProfile::H0 | HopProfile::H1);
+                            assert_eq!(
+                                validate_layer(
+                                    PacketLayer::C1Origin,
+                                    header,
+                                    requested,
+                                    negotiated
+                                )
+                                .is_ok(),
+                                expected
+                            );
+                            assert_eq!(
+                                validate_layer(
+                                    PacketLayer::Complete,
+                                    header,
+                                    requested,
+                                    negotiated
+                                )
+                                .is_ok(),
+                                requested == negotiated
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// 128-bit canonical context fingerprint。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Fingerprint([u8; 16]);
@@ -61,14 +164,15 @@ impl Fingerprint {
     }
 }
 
-/// C0 事务的发送方向。
+/// Canonical nonce direction determined by exact Principal ordering, not local IN/OUT.
+/// 按精确Principal字节顺序确定nonce方向，不使用本地IN/OUT。
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SenderDirection {
-    /// Initiator 到 Responder。
-    InitiatorToResponder = 0,
-    /// Responder 到 Initiator。
-    ResponderToInitiator = 1,
+    /// Lower Principal to higher; 较小身份到较大身份。
+    AscendingPrincipal = 0,
+    /// Higher Principal to lower; 较大身份到较小身份。
+    DescendingPrincipal = 1,
 }
 
 /// 端到端保护所需的不可变 Context 事实。
@@ -254,10 +358,10 @@ pub struct OpenPacketPlan<'a> {
 
 /// 调用方静态持有的受保护 Packet scratch。
 pub struct SecurityPacketWorkspace<const BYTES: usize> {
-    packet: [u8; BYTES],
-    aad: [u8; BYTES],
+    pub(crate) packet: [u8; BYTES],
+    pub(crate) aad: [u8; BYTES],
     plaintext: [u8; BYTES],
-    codec: CodecWorkspace,
+    pub(crate) codec: DigestWorkspace,
 }
 
 impl<const BYTES: usize> SecurityPacketWorkspace<BYTES> {
@@ -268,7 +372,7 @@ impl<const BYTES: usize> SecurityPacketWorkspace<BYTES> {
             packet: [0; BYTES],
             aad: [0; BYTES],
             plaintext: [0; BYTES],
-            codec: CodecWorkspace::new(),
+            codec: DigestWorkspace::new(),
         }
     }
 }
@@ -299,8 +403,53 @@ pub struct SecurityReplayHandle {
 }
 
 /// 接收路径认证、ACL 与 Replay reservation 成功后的结果。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PacketEvidence {
+    realm: u32,
+    source: crate::Binding,
+    destination: crate::Binding,
+    session: u32,
+    key: u32,
+    policy: u32,
+    origin: OriginSecurity,
+    fingerprint: [u8; 16],
+    sequence: u64,
+    aad: [u8; 16],
+    payload: [u8; 16],
+}
+impl PacketEvidence {
+    /// Verified bindings and Realm; 已验证绑定及Realm。
+    #[must_use]
+    pub const fn identities(self) -> (u32, crate::Binding, crate::Binding) {
+        (self.realm, self.source, self.destination)
+    }
+    /// Exact current security selector; 精确当前安全selector。
+    #[must_use]
+    pub const fn security(self) -> (u32, u32, u32, OriginSecurity, [u8; 16]) {
+        (
+            self.session,
+            self.key,
+            self.policy,
+            self.origin,
+            self.fingerprint,
+        )
+    }
+    /// Authenticated Origin sequence; 已认证Origin序号。
+    #[must_use]
+    pub const fn sequence(self) -> u64 {
+        self.sequence
+    }
+    /// Authenticated equality evidence, not an authorization substitute.
+    /// 认证后的相等证据，不替代授权。
+    #[must_use]
+    pub const fn digests(self) -> ([u8; 16], [u8; 16]) {
+        (self.aad, self.payload)
+    }
+}
+/// Authenticated result and pending Replay reservation; 已认证结果及Replay预留。
 #[derive(Debug, Eq, PartialEq)]
 pub struct OpenedPacket {
+    evidence: PacketEvidence,
     /// Fresh 时复制到调用方预检缓冲的明文长度；Replay candidate 固定为零。
     pub payload_bytes: usize,
     /// 本次认证结果的语义分类。
@@ -311,6 +460,13 @@ pub struct OpenedPacket {
     pub flow_replay_claim: Option<FlowReplayClaim>,
     /// 必须由 Coordinator 在业务预检后精确 commit/abort 的组合 Handle。
     pub replay: SecurityReplayHandle,
+}
+impl OpenedPacket {
+    /// Sealed exact evidence from the actual verify/ACL path; 实际verify/ACL路径的封闭证据。
+    #[must_use]
+    pub const fn evidence(&self) -> PacketEvidence {
+        self.evidence
+    }
 }
 
 /// 组合 Replay mutation 成功提交后的不可变证据。
@@ -441,6 +597,39 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
             plan,
             hop_sequence_owner,
             None,
+            PacketLayer::Complete,
+            workspace,
+            output,
+        )
+    }
+
+    /// Protect only C1 Data Origin using the actual H0/H1 Session; no Hop proof is emitted.
+    /// 使用真实 H0/H1 Session 只保护 C1 Data 的 Origin；输出不含 Hop 证明，必须另行封装。
+    /// # Errors
+    /// Exact Session/Origin/ACL/counter checks remain mandatory. C0/Flow/Control/O0,
+    /// a non-H0 projection or H2/H3 Session rejects before consuming counters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn protect_c1_origin<P: CryptoProvider, const BYTES: usize>(
+        &mut self,
+        provider: &mut P,
+        counter: &mut dyn OriginSequenceOwner,
+        session: SessionHandle,
+        facts: CurrentFacts,
+        access: AccessRequest,
+        plan: PacketPlan<'_>,
+        workspace: &mut SecurityPacketWorkspace<BYTES>,
+        output: &mut [u8],
+    ) -> Result<usize> {
+        self.protect_packet_inner(
+            provider,
+            OriginCounterOwner::Sequence(counter),
+            session,
+            facts,
+            access,
+            plan,
+            None,
+            None,
+            PacketLayer::C1Origin,
             workspace,
             output,
         )
@@ -474,6 +663,7 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
             plan,
             hop_sequence_owner,
             Some(binding),
+            PacketLayer::Complete,
             workspace,
             output,
         )
@@ -490,6 +680,7 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
         plan: PacketPlan<'_>,
         hop_sequence_owner: Option<&mut dyn HopSequenceOwner>,
         flow_binding: Option<FlowSecurityBinding>,
+        layer: PacketLayer,
         workspace: &mut SecurityPacketWorkspace<BYTES>,
         output: &mut [u8],
     ) -> Result<usize> {
@@ -524,6 +715,7 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
                 plan.prefix,
                 plan.canonical_identity,
                 AccessDirection::Outbound,
+                plan.origin_context,
             )?;
             candidate.origin_fingerprint
         };
@@ -536,9 +728,7 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
         if header.origin_security == OriginSecurity::O0 && plan.hop_profile == HopProfile::H0 {
             return Err(Error::Security);
         }
-        if plan.hop_profile != candidate.hop_profile {
-            return Err(Error::Security);
-        }
+        validate_layer(layer, header, plan.hop_profile, candidate.hop_profile)?;
         if flow_binding.is_none() {
             validate_access_context(
                 access,
@@ -596,12 +786,16 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
                 if owner.preview()? != sequence {
                     return Err(Error::State);
                 }
+                if flow_binding.is_none() {
+                    self.preflight_transmit(session, facts, None, Some(sequence.get()), None)?;
+                }
                 PreparedOriginCounter::Sequence(owner, sequence)
             }
             (OriginContext::C0 { transaction_id, .. }, OriginCounterOwner::Transaction(owner)) => {
                 if owner.preview()? != transaction_id {
                     return Err(Error::State);
                 }
+                self.preflight_transmit(session, facts, Some(transaction_id.get()), None, None)?;
                 PreparedOriginCounter::Transaction(owner, transaction_id)
             }
             (OriginContext::None { .. }, OriginCounterOwner::None) => PreparedOriginCounter::None,
@@ -610,6 +804,7 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
         let prepared_hop = match (plan.hop_profile, hop_sequence_owner) {
             (HopProfile::H1 | HopProfile::H3, Some(owner)) => {
                 let sequence = owner.preview()?;
+                self.preflight_transmit(session, facts, None, None, Some(sequence.get()))?;
                 Some((owner, sequence))
             }
             (HopProfile::H0 | HopProfile::H2, None) => None,
@@ -624,11 +819,18 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
                 PreparedOriginCounter::None => {}
                 PreparedOriginCounter::Transaction(owner, transaction) => {
                     owner.burn(transaction)?;
+                    self.consume_transmit(session, Some(transaction.get()), None, None)?;
                 }
-                PreparedOriginCounter::Sequence(owner, sequence) => owner.burn(sequence)?,
+                PreparedOriginCounter::Sequence(owner, sequence) => {
+                    owner.burn(sequence)?;
+                    if flow_binding.is_none() {
+                        self.consume_transmit(session, None, Some(sequence.get()), None)?;
+                    }
+                }
             }
             if let Some((owner, sequence)) = prepared_hop {
                 owner.burn(sequence)?;
+                self.consume_transmit(session, None, None, Some(sequence.get()))?;
             }
             match header.origin_security {
                 OriginSecurity::O0 => {
@@ -714,9 +916,145 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
             access,
             plan,
             None,
+            PacketLayer::Complete,
             workspace,
             plaintext_output,
         )
+    }
+
+    /// Open only the Origin-protected C1 Data body; does not authenticate a neighbour.
+    /// 只打开C1 Data的Origin层，不声称认证当前邻居；协调器必须另行验证并提交Hop。
+    /// # Errors
+    /// Exact Origin/ACL/tag/replay checks remain mandatory; no Hop replay is touched.
+    /// Unsupported contract/profile/O0 rejects and caller plaintext remains unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_c1_origin<P: CryptoProvider, const BYTES: usize>(
+        &mut self,
+        provider: &mut P,
+        session: SessionHandle,
+        facts: CurrentFacts,
+        access: AccessRequest,
+        plan: OpenPacketPlan<'_>,
+        workspace: &mut SecurityPacketWorkspace<BYTES>,
+        output: &mut [u8],
+    ) -> Result<OpenedPacket> {
+        self.open_packet_inner(
+            provider,
+            session,
+            facts,
+            access,
+            plan,
+            None,
+            PacketLayer::C1Origin,
+            workspace,
+            output,
+        )
+    }
+
+    /// Refresh only the H1 trailer of an outbound C0 retry; preserve Origin bytes/nonce.
+    /// 仅刷新本端C0重试的H1尾部，保留Origin字节和Nonce，不授权转发他人帧。
+    /// # Errors
+    /// Current Session, exact outbound identity/ACL, format, counter or crypto failure
+    /// leaves the packet unchanged; a counter exposed to the Provider remains burned.
+    #[allow(clippy::too_many_arguments)]
+    pub fn refresh_c0_hop<P: CryptoProvider, const BYTES: usize>(
+        &mut self,
+        provider: &mut P,
+        session: SessionHandle,
+        facts: CurrentFacts,
+        access: AccessRequest,
+        counter: &mut dyn HopSequenceOwner,
+        workspace: &mut SecurityPacketWorkspace<BYTES>,
+        packet: &mut [u8],
+    ) -> Result<()> {
+        if access.session != session || access.direction != AccessDirection::Outbound {
+            return Err(Error::Argument);
+        }
+        let candidate = self.candidate(session, facts)?;
+        let n = 25 + 2 * self.address_width().bytes();
+        if candidate.hop_profile != HopProfile::H1 || packet.len() < n + 32 {
+            return Err(Error::Argument);
+        }
+        let end = packet.len() - HOP_TRAILER_BYTES;
+        let transaction = C0TransactionId::new(u64::from_be_bytes(
+            packet[n - 10..n - 2]
+                .try_into()
+                .map_err(|_| Error::Malformed)?,
+        ))?;
+        let opcode = ProtocolOpcode::try_from(u16::from_be_bytes(
+            packet[n - 2..n].try_into().map_err(|_| Error::Malformed)?,
+        ))?;
+        let context = OriginContext::C0 {
+            fingerprint: candidate.origin_fingerprint,
+            transaction_id: transaction,
+            opcode,
+            direction: if facts.local.principal < facts.peer.principal {
+                SenderDirection::AscendingPrincipal
+            } else {
+                SenderDirection::DescendingPrincipal
+            },
+        };
+        let plan = PacketPlan {
+            prefix: &packet[..n],
+            payload: &packet[n..end - ORIGIN_TAG_BYTES],
+            canonical_identity: &packet[3..n],
+            origin_context: context,
+            hop_profile: HopProfile::H1,
+        };
+        let header = self.validate_packet_plan(&plan)?;
+        if header.contract != HeaderContract::C0
+            || header.origin_security == OriginSecurity::O0
+            || header.origin_security != candidate.origin_level.wire()
+        {
+            return Err(Error::Security);
+        }
+        validate_wire_bindings(
+            candidate,
+            self.realm(),
+            self.address_width().bytes(),
+            header,
+            plan.prefix,
+            plan.canonical_identity,
+            AccessDirection::Outbound,
+            context,
+        )?;
+        validate_access_context(access, header, context, candidate.hop_fingerprint)?;
+        self.authorize(access, facts)?;
+        let sequence = counter.preview()?;
+        let old_sequence = u32::from_be_bytes(
+            packet[end..end + 4]
+                .try_into()
+                .map_err(|_| Error::Malformed)?,
+        );
+        if sequence.get() <= old_sequence {
+            return Err(Error::State);
+        }
+        self.preflight_transmit(session, facts, None, None, Some(sequence.get()))?;
+        let aad = build_hop_aad(
+            &packet[..end],
+            sequence.get(),
+            candidate.hop_fingerprint,
+            &mut workspace.aad,
+        )?;
+        let claim = self.next_claim(CALLBACK_CRYPTO)?;
+        let gate = self.gate();
+        let lease = gate.try_enter(claim)?;
+        let mut tag = [0; HOP_TAG_BYTES];
+        let result = (|| {
+            counter.burn(sequence)?;
+            self.consume_transmit(session, None, None, Some(sequence.get()))?;
+            provider.compute_hop_tag(
+                candidate.hop_tx.ok_or(Error::State)?,
+                &workspace.aad[..aad],
+                &mut tag,
+            )
+        })();
+        let left = gate.leave(lease);
+        result?;
+        left?;
+        packet[end..end + 4].copy_from_slice(&sequence.get().to_be_bytes());
+        packet[end + 4..].copy_from_slice(&tag);
+        Ok(())
     }
 
     /// 使用精确 Flow 绑定认证并打开 C2/C3/C4 Packet。
@@ -742,6 +1080,7 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
             access,
             plan,
             Some(binding),
+            PacketLayer::Complete,
             workspace,
             plaintext_output,
         )
@@ -756,6 +1095,7 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
         access: AccessRequest,
         plan: OpenPacketPlan<'_>,
         flow_binding: Option<FlowSecurityBinding>,
+        layer: PacketLayer,
         workspace: &mut SecurityPacketWorkspace<BYTES>,
         plaintext_output: &mut [u8],
     ) -> Result<OpenedPacket> {
@@ -794,13 +1134,13 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
         };
         let checked_header = self.validate_packet_plan(&structural)?;
         if checked_header != header
-            || plan.hop_profile != candidate.hop_profile
             || (header.origin_security != OriginSecurity::O0
                 && header.origin_security != candidate.origin_level.wire())
             || (header.origin_security == OriginSecurity::O0 && plan.hop_profile == HopProfile::H0)
         {
             return Err(Error::Security);
         }
+        validate_layer(layer, header, plan.hop_profile, candidate.hop_profile)?;
         let expected_context = if let Some(binding) = flow_binding {
             validate_flow_security_binding(
                 self.owner_instance(),
@@ -822,6 +1162,7 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
                 structural.prefix,
                 structural.canonical_identity,
                 AccessDirection::Inbound,
+                plan.origin_context,
             )?;
             candidate.origin_fingerprint
         };
@@ -941,13 +1282,24 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
             access,
         )?;
 
-        let aad_digest = blake2s128(&workspace.aad[..aad_bytes], &mut workspace.codec);
-        let payload_digest =
-            blake2s128(&workspace.plaintext[..payload.len()], &mut workspace.codec);
+        let aad_digest = canonical_digest(
+            b"UCN6-AAD-V1",
+            &workspace.aad[..aad_bytes],
+            &mut workspace.codec,
+        )?;
+        let payload_digest = canonical_digest(
+            b"UCN6-PAYLOAD-V1",
+            &workspace.plaintext[..payload.len()],
+            &mut workspace.codec,
+        )?;
         let hop_aad_digest = if hop_aad_bytes == 0 {
             aad_digest
         } else {
-            blake2s128(&workspace.packet[..hop_aad_bytes], &mut workspace.codec)
+            canonical_digest(
+                b"UCN6-AAD-V1",
+                &workspace.packet[..hop_aad_bytes],
+                &mut workspace.codec,
+            )?
         };
         let origin_sequence = origin_replay_sequence(plan.origin_context, header.origin_security)?;
         let mut origin_handle = None;
@@ -974,7 +1326,12 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
                     payload_digest,
                 });
             } else {
-                match self.classify_origin_replay(session, facts, sequence)? {
+                match self.classify_origin_replay(
+                    session,
+                    facts,
+                    sequence,
+                    header.contract == HeaderContract::C0,
+                )? {
                     crate::ReplayClassification::Fresh => {
                         origin_handle = Some(self.reserve_origin_replay(
                             session,
@@ -983,6 +1340,7 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
                             sequence,
                             aad_digest,
                             payload_digest,
+                            header.contract == HeaderContract::C0,
                         )?);
                     }
                     crate::ReplayClassification::Duplicate => {
@@ -994,6 +1352,7 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
                             sequence,
                             aad_digest,
                             payload_digest,
+                            header.contract == HeaderContract::C0,
                         )?);
                     }
                     crate::ReplayClassification::Stale => return Err(Error::Replay),
@@ -1037,6 +1396,19 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
             0
         };
         Ok(OpenedPacket {
+            evidence: PacketEvidence {
+                realm: self.realm().get(),
+                source: facts.peer,
+                destination: facts.local,
+                session: candidate.session_generation.get(),
+                key: candidate.origin_rx.key_generation,
+                policy: facts.policy_generation,
+                origin: header.origin_security,
+                fingerprint: expected_context.bytes(),
+                sequence: origin_sequence.unwrap_or(0),
+                aad: aad_digest,
+                payload: payload_digest,
+            },
             payload_bytes,
             disposition,
             duplicate_evidence,
@@ -1049,6 +1421,29 @@ impl<const SESSIONS: usize, const REPLAY_SLOTS: usize> SecurityOwner<'_, SESSION
                 disposition,
             },
         })
+    }
+
+    /// Validate a pending Replay without committing it. Coordinator can then perform a
+    /// non-callback Owner mutation and commit in the same exclusive-borrow quantum.
+    /// 只读验证Replay；Coordinator在同一独占借用内完成无回调Owner mutation与提交。
+    /// # Errors
+    /// Wrong Session, generation, deadline or already-consumed handle rejects.
+    pub fn replay_preflight(
+        &self,
+        handle: &SecurityReplayHandle,
+        facts: CurrentFacts,
+    ) -> Result<()> {
+        if handle.owner_instance != self.owner_instance() {
+            return Err(Error::NotFound);
+        }
+        self.candidate(handle.session, facts)?;
+        if let Some(origin) = handle.origin {
+            self.preflight_replay(handle.session, facts, origin, false)?;
+        }
+        if let Some(hop) = handle.hop {
+            self.preflight_replay(handle.session, facts, hop, true)?;
+        }
+        Ok(())
     }
 
     /// 在所有业务资源预检成功后原子提交组合 Replay mutation。
@@ -1395,9 +1790,6 @@ fn validate_combination(header: CommonHeader, hop: HopProfile) -> Result<()> {
     if !valid {
         return Err(Error::Malformed);
     }
-    if header.interaction != I::OneWay && header.payload_kind == K::Data {
-        return Err(Error::Malformed);
-    }
     Ok(())
 }
 
@@ -1445,7 +1837,7 @@ pub(crate) fn validate_payload_code(
                 Err(Error::Malformed)
             }
         }
-        PayloadKind::Data => Ok(()),
+        PayloadKind::Data => ucn_types::validate_data_envelope(header.interaction, payload),
     }
 }
 
@@ -1534,6 +1926,7 @@ fn validate_wire_bindings(
     prefix: &[u8],
     canonical_identity: &[u8],
     direction: AccessDirection,
+    context: OriginContext,
 ) -> Result<()> {
     let (source, destination) = match direction {
         AccessDirection::Outbound => (candidate.local, candidate.peer),
@@ -1541,6 +1934,14 @@ fn validate_wire_bindings(
     };
     match header.contract {
         HeaderContract::C0 => {
+            let expected = if source.principal < destination.principal {
+                SenderDirection::AscendingPrincipal
+            } else {
+                SenderDirection::DescendingPrincipal
+            };
+            if !matches!(context, OriginContext::C0 {direction,..} if direction==expected) {
+                return Err(Error::Security);
+            }
             if read_u32_be(prefix, 3) != realm.get()
                 || read_address(prefix, 7, width) != source.address.get()
                 || read_address(prefix, 7 + width, width) != destination.address.get()

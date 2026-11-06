@@ -36,9 +36,10 @@ pub fn c1_o0_h0_encoded_size(width: AddressWidth, payload_bytes: usize) -> Resul
         .ok_or(Error::Argument)
 }
 
-fn validate_payload(kind: PayloadKind, payload: &[u8]) -> Result<()> {
+fn validate_payload(common: CommonHeader, payload: &[u8]) -> Result<()> {
+    let kind = common.payload_kind;
     match kind {
-        PayloadKind::Data => Ok(()),
+        PayloadKind::Data => ucn_types::validate_data_envelope(common.interaction, payload),
         PayloadKind::Transfer => {
             if payload.len() < 2 {
                 return Err(Error::Malformed);
@@ -71,7 +72,7 @@ fn validate_frame(frame: &C1Frame<'_>, width: AddressWidth, profile: HopProfile)
     }
     NodeAddress::new(frame.source.get(), width)?;
     NodeAddress::new(frame.destination.get(), width)?;
-    validate_payload(frame.common.payload_kind, frame.payload).map_err(|_| Error::Argument)
+    validate_payload(frame.common, frame.payload).map_err(|_| Error::Argument)
 }
 
 /// 将 C1 `O0/H0` 帧编码到调用方固定缓冲区。
@@ -156,7 +157,7 @@ pub fn decode_c1_o0_h0(
     let origin_sequence = ucn_types::OriginSequence::new(read_u32_be(input, sequence_offset))
         .map_err(|_| Error::Malformed)?;
     let payload = &input[payload_offset..];
-    validate_payload(common.payload_kind, payload)?;
+    validate_payload(common, payload)?;
 
     Ok(C1Frame {
         common,

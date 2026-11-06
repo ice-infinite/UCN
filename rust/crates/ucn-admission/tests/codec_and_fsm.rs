@@ -65,7 +65,12 @@ impl CookieProvider for Provider {
         Ok(4)
     }
 
-    fn verify_cookie(&mut self, _hello_cookie: &HelloCookie, _key: &AdmissionKey) -> Result<()> {
+    fn verify_cookie(
+        &mut self,
+        _hello_cookie: &HelloCookie,
+        _key: &AdmissionKey,
+        _now_us: u64,
+    ) -> Result<()> {
         self.verified += 1;
         Ok(())
     }
@@ -197,7 +202,7 @@ fn hello_and_cookie() -> (Hello, HelloCookie, AdmissionKey) {
         selected_link_instance_id: link.link_id,
         selected_link_instance_generation: link.link_generation,
         prior_messages_hash: [0x31; 32],
-        cookie_evidence: Evidence::new(&[0xC1, 0xC2, 0xC3, 0xC4]).expect("evidence"),
+        cookie_evidence: ucn_admission::Cookie::new(&[0xC1, 0xC2, 0xC3, 0xC4]).expect("evidence"),
     };
     (hello, hello_cookie, key)
 }
@@ -215,6 +220,8 @@ fn hello_and_cookie_use_frozen_big_endian_layout() {
         flow: BootstrapFlow::Join,
         transaction_id: hello.transaction_id,
         cookie_time_bucket: 0x0102_0304,
+        issuer_link_id: 7,
+        issuer_link_generation: 9,
         cookie_length: 4,
         cookie: [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     };
@@ -350,6 +357,102 @@ fn fragments_are_exact_and_reassembly_is_key_bound() {
         Err(Error::Argument)
     );
     assert_eq!(reassembly.borrow(), Ok(&logical[..logical_length]));
+}
+
+#[test]
+fn partial_future_groups_and_old_unregistered_opcodes_cannot_pass_phase_validation() {
+    let mut cookie = transcript(BootstrapPhase::CookieVerified);
+    cookie.authority_generation = 1; // Incomplete group must not be mistaken for absent.
+    let mut bytes = [0xA5; TRANSCRIPT_BYTES];
+    let before = bytes;
+    assert_eq!(
+        encode_transcript(&cookie, BootstrapPhase::CookieVerified, &mut bytes),
+        Err(Error::Argument)
+    );
+    assert_eq!(bytes, before);
+    for phase in [
+        BootstrapPhase::AuthorityVerified,
+        BootstrapPhase::DeviceVerified,
+    ] {
+        let mut t = transcript(phase);
+        t.binding_mode = 1;
+        assert!(encode_transcript(&t, phase, &mut bytes).is_err());
+        assert_eq!(bytes, before);
+    }
+    assert_eq!(BootstrapEvent::AuthorityProof.opcode(), Ok(4));
+    for old in 131..=136 {
+        assert!(BootstrapEvent::from_opcode(old).is_err());
+    }
+    assert_eq!(BootstrapEvent::Abort.opcode(), Err(Error::Unsupported));
+    let cookie = transcript(BootstrapPhase::CookieVerified);
+    let mut logical = [0xA5; 508];
+    for event in [BootstrapEvent::Abort, BootstrapEvent::Cookie] {
+        assert_eq!(
+            encode_logical_event(
+                event,
+                BootstrapPhase::CookieVerified,
+                &cookie,
+                Evidence::new(&[7]).unwrap(),
+                &mut logical
+            ),
+            Err(Error::Argument)
+        );
+        assert_eq!(logical, [0xA5; 508]);
+    }
+}
+
+#[test]
+fn bounded_mtu_chunks_cover_16_fragment_boundary_and_freeze_geometry() {
+    let (_, _, key) = hello_and_cookie();
+    let value = transcript(BootstrapPhase::DeviceCommitted);
+    let mut logical = [0; 508];
+    let n = encode_logical_event(
+        BootstrapEvent::DeviceCommit,
+        BootstrapPhase::DeviceCommitted,
+        &value,
+        Evidence::new(&[0x77; 128]).unwrap(),
+        &mut logical,
+    )
+    .unwrap();
+    for chunk in [32, 59, 63, 128] {
+        let mut r = Reassembly::new();
+        let count = n.div_ceil(usize::from(chunk));
+        for index in 0..count {
+            let f = BootstrapFragment::from_logical_chunk(
+                key,
+                BootstrapFlow::Join,
+                BootstrapEvent::DeviceCommit,
+                BootstrapPhase::DeviceCommitted,
+                u8::try_from(index).unwrap(),
+                chunk,
+                &logical[..n],
+            )
+            .unwrap();
+            let mut raw = [0; 164];
+            let len = encode_fragment(f, &mut raw).unwrap();
+            assert_eq!(raw[5], chunk);
+            let d = decode_fragment(&raw[..len]).unwrap();
+            assert_eq!(
+                r.accept(OPCODE_DEVICE_COMMIT, key, 1000, 100, d).unwrap(),
+                index + 1 == count
+            );
+        }
+        assert_eq!(r.borrow().unwrap(), logical);
+        let changed = BootstrapFragment::from_logical_chunk(
+            key,
+            BootstrapFlow::Join,
+            BootstrapEvent::DeviceCommit,
+            BootstrapPhase::DeviceCommitted,
+            0,
+            if chunk == 63 { 59 } else { 63 },
+            &logical[..n],
+        )
+        .unwrap();
+        assert_eq!(
+            r.accept(OPCODE_DEVICE_COMMIT, key, 1000, 100, changed),
+            Err(Error::State)
+        );
+    }
 }
 
 #[test]

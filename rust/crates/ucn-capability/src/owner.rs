@@ -68,12 +68,14 @@ pub enum HelloDisposition {
 #[derive(Clone, Copy)]
 struct PeerSlot {
     occupied: bool,
+    revoked: bool,
     value: Option<CachedPeerCapability>,
 }
 
 impl PeerSlot {
     const EMPTY: Self = Self {
         occupied: false,
+        revoked: false,
         value: None,
     };
 }
@@ -136,7 +138,7 @@ impl<const PEERS: usize> CapabilityOwner<PEERS> {
     ///
     /// # Errors
     ///
-    /// 认证父域到期或 Link Generation 错绑时返回错误。
+    /// 认证父域到期或Summary字段非法时返回错误；发送端Link代际不等于本地入口代际。
     pub fn ingest_summary(
         &self,
         authenticated: AuthenticatedPeerView,
@@ -145,15 +147,15 @@ impl<const PEERS: usize> CapabilityOwner<PEERS> {
     ) -> Result<HelloDisposition> {
         validate_summary(summary)?;
         let peer_ref = self.peer_ref(authenticated, now_us)?;
-        if summary.link_instance_generation != peer_ref.ingress_link_generation {
-            return Err(Error::Security);
-        }
         let matched = self
             .peers
             .iter()
+            .filter(|slot| !slot.revoked)
             .filter_map(|slot| slot.value)
             .any(|cached| {
                 cached.peer_ref == peer_ref
+                    && cached.record.link.link_instance_generation
+                        == summary.link_instance_generation
                     && cached.record.capability_generation == summary.capability_generation
                     && cached.digest == summary.digest
                     && peer_is_live(cached, now_us)
@@ -180,9 +182,8 @@ impl<const PEERS: usize> CapabilityOwner<PEERS> {
     ) -> Result<PeerCapabilityRef> {
         record.validate()?;
         let peer_ref = self.peer_ref(authenticated, now_us)?;
-        if record.link.link_instance_generation != peer_ref.ingress_link_generation {
-            return Err(Error::Security);
-        }
+        // The authenticated Session binds our ingress; Record describes the peer's Link.
+        // 认证Session绑定本地入口；Record描述对端Link，二者不能跨节点比数值。
         let digest = capability_digest(record)?;
         if let Some(index) = self
             .peers
@@ -190,8 +191,14 @@ impl<const PEERS: usize> CapabilityOwner<PEERS> {
             .position(|slot| slot.value.is_some_and(|cached| cached.peer_ref == peer_ref))
         {
             let previous = self.peers[index].value.ok_or(Error::State)?;
+            if record.link.link_instance_generation != previous.record.link.link_instance_generation
+            {
+                return Err(Error::Security);
+            }
             if record.capability_generation == previous.record.capability_generation {
-                return if digest == previous.digest {
+                return if self.peers[index].revoked {
+                    Err(Error::Replay)
+                } else if digest == previous.digest && record == previous.record {
                     Ok(peer_ref)
                 } else {
                     Err(Error::Security)
@@ -204,6 +211,7 @@ impl<const PEERS: usize> CapabilityOwner<PEERS> {
             }
             let value = self.make_cached(peer_ref, record, digest, authenticated, now_us)?;
             self.peers[index].value = Some(value);
+            self.peers[index].revoked = false;
             return Ok(peer_ref);
         }
         if self
@@ -224,9 +232,57 @@ impl<const PEERS: usize> CapabilityOwner<PEERS> {
         let value = self.make_cached(peer_ref, record, digest, authenticated, now_us)?;
         self.peers[index] = PeerSlot {
             occupied: true,
+            revoked: false,
             value: Some(value),
         };
         Ok(peer_ref)
+    }
+
+    /// Atomically replace one retained parent with an authenticated durable successor.
+    /// 用认证后继原子替换保留的父域；不经过清槽窗口，不继承旧租期或Profile。
+    /// The Coordinator must verify/commit the actual Advertise and current Session;
+    /// this Owner consumes the resulting authenticated view, not raw Driver facts.
+    /// # Errors
+    /// Wrong exact predecessor, Binding/Realm/Owner, nonincreasing Session, invalid
+    /// record or expired authentication rejects without changing any cache slot.
+    pub fn replace_session(
+        &mut self,
+        previous: PeerCapabilityRef,
+        authenticated: AuthenticatedPeerView,
+        record: CapabilityRecord,
+        now_us: u64,
+    ) -> Result<PeerCapabilityRef> {
+        record.validate()?;
+        let next = self.peer_ref(authenticated, now_us)?;
+        let slot = self
+            .peers
+            .iter()
+            .position(|s| s.value.is_some_and(|v| v.peer_ref == previous))
+            .ok_or(Error::NotFound)?;
+        if next.runtime_instance != previous.runtime_instance
+            || next.security_owner_instance != previous.security_owner_instance
+            || next.realm != previous.realm
+            || next.principal != previous.principal
+            || next.binding != previous.binding
+            || next.session_generation <= previous.session_generation
+            || self.peers.iter().enumerate().any(|(i, s)| {
+                i != slot
+                    && s.value.is_some_and(|v| {
+                        v.peer_ref.principal == next.principal
+                            || v.peer_ref.binding.address == next.binding.address
+                    })
+            })
+        {
+            return Err(Error::Replay);
+        }
+        let digest = capability_digest(record)?;
+        let value = self.make_cached(next, record, digest, authenticated, now_us)?;
+        self.peers[slot] = PeerSlot {
+            occupied: true,
+            revoked: false,
+            value: Some(value),
+        };
+        Ok(next)
     }
 
     /// 从稳定引用重新解析当前 live 能力；过期历史不可读取为有效能力。
@@ -239,16 +295,46 @@ impl<const PEERS: usize> CapabilityOwner<PEERS> {
         reference: PeerCapabilityRef,
         now_us: u64,
     ) -> Result<CachedPeerCapability> {
-        let value = self
+        let slot = self
             .peers
             .iter()
-            .filter_map(|slot| slot.value)
-            .find(|cached| cached.peer_ref == reference)
+            .find(|slot| {
+                slot.value
+                    .is_some_and(|cached| cached.peer_ref == reference)
+            })
             .ok_or(Error::NotFound)?;
+        if slot.revoked {
+            return Err(Error::State);
+        }
+        let value = slot.value.ok_or(Error::State)?;
         if !peer_is_live(value, now_us) {
             return Err(Error::Timeout);
         }
         Ok(value)
+    }
+
+    /// Revoke without deleting same-Session generation history; 撤销不删除同会话代际历史。
+    /// # Errors
+    /// Wrong exact generation/digest or missing reference rejects without writes.
+    pub fn revoke(
+        &mut self,
+        reference: PeerCapabilityRef,
+        query: crate::CapabilityQuery,
+    ) -> Result<()> {
+        let index = self
+            .peers
+            .iter()
+            .position(|slot| slot.value.is_some_and(|v| v.peer_ref == reference))
+            .ok_or(Error::NotFound)?;
+        let previous = self.peers[index].value.ok_or(Error::State)?;
+        if query.requested_generation == 0
+            || query.requested_generation != previous.record.capability_generation
+            || query.known_digest != previous.digest
+        {
+            return Err(Error::Security);
+        }
+        self.peers[index].revoked = true;
+        Ok(())
     }
 
     /// 明确退休认证 Session 父域并释放其固定槽。
@@ -278,6 +364,7 @@ impl<const PEERS: usize> CapabilityOwner<PEERS> {
         let live = self
             .peers
             .iter()
+            .filter(|slot| !slot.revoked)
             .filter_map(|slot| slot.value)
             .filter(|value| peer_is_live(*value, now_us))
             .count();

@@ -4,9 +4,6 @@
 
 #include <string.h>
 
-#define UCN_I_PROTOCOL_VERSION 6U
-#define UCN_I_CONTRACT_C1 1U
-
 static uint32_t address_limit(uint8_t address_width)
 {
     if (address_width == 4U) {
@@ -29,10 +26,12 @@ static bool address_is_valid(uint32_t address, uint8_t address_width)
 static bool frame_is_valid(const ucn_i_c1_frame_t *frame,
                            uint8_t address_width)
 {
-    return frame != NULL &&
-           (frame->payload != NULL || frame->payload_bytes == 0U) &&
-           address_is_valid(frame->source_address, address_width) &&
-           address_is_valid(frame->destination_address, address_width) &&
+    uint32_t limit;
+    if(frame == NULL || address_width == 0U || address_width > 4U) return false;
+    limit=address_limit(address_width);
+    return (frame->payload != NULL || frame->payload_bytes == 0U) &&
+           frame->source_address != 0U && frame->source_address < limit &&
+           frame->destination_address != 0U && frame->destination_address < limit &&
            frame->origin_sequence != 0U && frame->service_id != 0U &&
            frame->service_id != UINT16_MAX &&
            frame->traffic_class < UCN_TRAFFIC_CLASS_COUNT &&
@@ -67,16 +66,21 @@ static void write_header_and_fields(const ucn_i_c1_frame_t *frame,
 {
     size_t offset = UCN_I_C1_COMMON_BYTES;
 
-    output[0] = (uint8_t)((UCN_I_PROTOCOL_VERSION << 4U) | UCN_I_CONTRACT_C1);
+    output[0] = (uint8_t)((UCN_I_WIRE_PROTOCOL_VERSION << 4U) |
+                          UCN_I_WIRE_CONTRACT_C1);
     output[1] = (uint8_t)(frame->traffic_class << 6U);
     output[2] = frame->hop_limit;
     write_be(output + offset, frame->source_address, address_width);
     offset += address_width;
     write_be(output + offset, frame->destination_address, address_width);
     offset += address_width;
-    write_be(output + offset, frame->service_id, 2U);
+    output[offset] = (uint8_t)(frame->service_id >> 8U);
+    output[offset+1U] = (uint8_t)frame->service_id;
     offset += 2U;
-    write_be(output + offset, frame->origin_sequence, 4U);
+    output[offset] = (uint8_t)(frame->origin_sequence >> 24U);
+    output[offset+1U] = (uint8_t)(frame->origin_sequence >> 16U);
+    output[offset+2U] = (uint8_t)(frame->origin_sequence >> 8U);
+    output[offset+3U] = (uint8_t)frame->origin_sequence;
 }
 
 ucn_result_t ucn_i_c1_header_bytes(uint8_t address_width,
@@ -144,8 +148,8 @@ ucn_result_t ucn_i_c1_encode(const ucn_i_c1_frame_t *frame,
     if (result != UCN_OK) {
         return result;
     }
-    result = ucn_i_c1_encoded_size(address_width, frame->payload_bytes,
-                                   &encoded_bytes);
+    result = ucn_i_size_add(header_bytes, frame->payload_bytes,
+                             &encoded_bytes);
     if (result != UCN_OK || encoded_bytes > output_capacity) {
         return result == UCN_OK ? UCN_ERR_NO_SPACE : result;
     }
@@ -182,8 +186,8 @@ ucn_result_t ucn_i_c1_encode_in_place(ucn_i_c1_frame_t *frame,
     if (result != UCN_OK) {
         return result;
     }
-    result = ucn_i_c1_encoded_size(address_width, frame->payload_bytes,
-                                   &encoded_bytes);
+    result = ucn_i_size_add(header_bytes, frame->payload_bytes,
+                             &encoded_bytes);
     if (result != UCN_OK || encoded_bytes > capacity) {
         return result == UCN_OK ? UCN_ERR_NO_SPACE : result;
     }
@@ -231,12 +235,13 @@ ucn_result_t ucn_i_c1_decode(const uint8_t *input,
     interaction = (uint8_t)((input[1] >> 2U) & 0x03U);
     payload_kind = (uint8_t)(input[1] & 0x03U);
     origin_security = (uint8_t)(input[2] >> 6U);
-    if (version != UCN_I_PROTOCOL_VERSION || contract > 5U ||
+    if (version != UCN_I_WIRE_PROTOCOL_VERSION || contract > 5U ||
         delivery == 3U || origin_security == 3U ||
         (input[2] & 0x3FU) == 0U) {
         return UCN_ERR_MALFORMED;
     }
-    if (contract != UCN_I_CONTRACT_C1 || delivery != UCN_DELIVERY_BEST_EFFORT ||
+    if (contract != UCN_I_WIRE_CONTRACT_C1 ||
+        delivery != UCN_DELIVERY_BEST_EFFORT ||
         interaction != UCN_INTERACTION_ONE_WAY || payload_kind != 0U ||
         origin_security != 0U) {
         return UCN_ERR_UNSUPPORTED;
@@ -249,9 +254,12 @@ ucn_result_t ucn_i_c1_decode(const uint8_t *input,
     offset += address_width;
     decoded.destination_address = read_be(input + offset, address_width);
     offset += address_width;
-    decoded.service_id = (uint16_t)read_be(input + offset, 2U);
+    decoded.service_id = (uint16_t)(((uint16_t)input[offset] << 8U) |
+                                    input[offset+1U]);
     offset += 2U;
-    decoded.origin_sequence = read_be(input + offset, 4U);
+    decoded.origin_sequence = ((uint32_t)input[offset] << 24U) |
+        ((uint32_t)input[offset+1U] << 16U) |
+        ((uint32_t)input[offset+2U] << 8U) | input[offset+3U];
     if (!address_is_valid(decoded.source_address, address_width) ||
         !address_is_valid(decoded.destination_address, address_width) ||
         decoded.service_id == 0U || decoded.service_id == UINT16_MAX ||

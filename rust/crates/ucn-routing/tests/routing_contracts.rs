@@ -56,7 +56,7 @@ fn link(id: u16, generation: u32, peer: Binding, cost: u32) -> LinkRef {
 fn payload_codecs_are_big_endian_exact_and_zero_write_on_failure() {
     let request_payload = ucn_routing::RreqPayload {
         accumulated_cost: 0x0102_0304,
-        minimum_payload_budget: 0x1122,
+        minimum_frame_mtu: 0x1122,
         required_capability_bits: 0x3344,
         flags: 0x03,
     };
@@ -122,6 +122,12 @@ fn three_node_discovery_installs_only_volatile_soft_routes() {
         .expect("coalesce");
     assert!(!coalesced.created);
     assert_eq!(coalesced.request, start.request);
+    let before = node_a.counts();
+    assert_eq!(
+        node_a.on_rreq(start.request, link(1, 1, b, 10), 12),
+        Err(Error::Access)
+    );
+    assert_eq!(node_a.counts(), before);
 
     let forwarded = match node_b
         .on_rreq(start.request, link(1, 1, a, 10), 20)
@@ -134,7 +140,7 @@ fn three_node_discovery_installs_only_volatile_soft_routes() {
     };
     assert_eq!(forwarded.remaining_hops.get(), 7);
     assert_eq!(forwarded.payload.accumulated_cost, 10);
-    assert_eq!(forwarded.payload.minimum_payload_budget, 200);
+    assert_eq!(forwarded.payload.minimum_frame_mtu, 200);
     assert_eq!(
         node_b.on_rreq(start.request, link(1, 1, a, 10), 21),
         Ok(RequestAction::Duplicate)
@@ -511,4 +517,57 @@ fn rrep_must_satisfy_the_original_mtu_capability_and_hop_contract() {
         routes.on_rrep(good, ingress, 2),
         Ok(ReplyAction::ReachedOrigin(_))
     ));
+}
+
+#[test]
+fn retiring_one_peer_keeps_other_peers_and_pending_forward_proofs() {
+    let a = binding(1, 0xa1);
+    let b = binding(2, 0xb2);
+    let c = binding(3, 0xc3);
+    let d = binding(4, 0xd4);
+    let mut source = owner(1, a);
+    let mut other = owner(4, d);
+    let mut relay = owner(2, b);
+    let request = source
+        .ensure_discovery(c.address, 0, 100, 0, 1)
+        .unwrap()
+        .request;
+    let upstream = link(1, 1, a, 10);
+    relay.on_rreq(request, upstream, 2).unwrap();
+    let other_request = other
+        .ensure_discovery(c.address, 0, 100, 0, 1)
+        .unwrap()
+        .request;
+    relay.on_rreq(other_request, link(1, 1, d, 10), 2).unwrap();
+    let reply = RrepMessage {
+        key: request.key,
+        payload: RrepPayload {
+            destination_principal: c.principal,
+            destination_binding_generation: 1,
+            hop_count: 0,
+            accumulated_cost: 0,
+            path_frame_mtu: 512,
+            capability_bits: 0,
+        },
+    };
+    let ReplyAction::Forward { completion, .. } =
+        relay.on_rrep(reply, link(2, 1, c, 10), 3).unwrap()
+    else {
+        panic!("relay proof");
+    };
+    let before = relay.counts();
+    assert_eq!(relay.retire_peer_history(upstream), Err(Error::State));
+    assert_eq!(relay.counts(), before);
+    relay.complete_rrep_forward(completion, false).unwrap();
+    relay.retire_peer_history(upstream).unwrap();
+    assert_eq!(
+        relay.counts().1,
+        1,
+        "other peer on the same physical Link is retained"
+    );
+    assert_eq!(relay.reply_upstream(request.key, 4), Err(Error::NotFound));
+    assert_eq!(
+        relay.reply_upstream(other_request.key, 4),
+        Ok(Some(link(1, 1, d, 10)))
+    );
 }

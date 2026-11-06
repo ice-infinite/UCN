@@ -9,8 +9,8 @@
 extern "C" {
 #endif
 
-#define UCN_API_VERSION UINT16_C(1)
-#define UCN_STORAGE_LAYOUT UINT16_C(1)
+#define UCN_API_VERSION UINT16_C(2)
+#define UCN_STORAGE_LAYOUT UINT16_C(5)
 
 /* EN: This mask describes the simplified binary that is being built, not the
  * pre-simplification optional-v6 targets which may coexist during migration.

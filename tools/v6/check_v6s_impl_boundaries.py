@@ -54,6 +54,7 @@ def main() -> int:
     }
     impl04_sources = {
         "src/admission/ucn_admission.c",
+        "src/admission/ucn_admission_wire.c",
         "src/admission/ucn_identity_binding.c",
         "src/capability/ucn_capability.c",
     }
@@ -69,6 +70,7 @@ def main() -> int:
     }
     impl07_sources = {
         "src/service/ucn_service.c",
+        "src/service/ucn_service_control.c",
         "src/service/ucn_qos.c",
         "src/service/ucn_operation.c",
         "src/service/ucn_operation_id.c",
@@ -98,18 +100,22 @@ def main() -> int:
     }
     impl01_sources = {
         "src/wire/ucn_wire.c",
+        "src/wire/ucn_control_wire.c",
         "src/adapter/ucn_adapter.c",
         "src/runtime/ucn_node.c",
+        "src/runtime/ucn_tx.c",
     }
     impl09_sources = {"src/runtime/ucn_composition.c"}
     persistence_sources = {
         "src/persistence/ucn_persistence.c",
         "src/persistence/ucn_persistence_codec.c",
+        "src/persistence/ucn_persistence_record_header.c",
         "src/persistence/ucn_persistence_coordinator.c",
     }
     persistence_foundation_sources = {
         "src/persistence/ucn_persistence.c",
         "src/persistence/ucn_persistence_codec.c",
+        "src/persistence/ucn_persistence_record_header.c",
     }
     internal_headers = {
         "src/internal/ucn_checked.h",
@@ -117,6 +123,8 @@ def main() -> int:
         "src/internal/ucn_owner.h",
         "src/internal/ucn_coordinator.h",
         "src/internal/ucn_wire.h",
+        "src/internal/ucn_control_wire.h",
+        "src/internal/ucn_operation_wire.h",
         "src/internal/ucn_adapter.h",
         "src/internal/ucn_runtime.h",
         "src/internal/ucn_persistence.h",
@@ -280,16 +288,19 @@ def main() -> int:
         errors.append("ucn_coordinator target does not own its exact source")
     if source_set(module_scaffold_block) != module_scaffold_source:
         errors.append("module scaffold target does not own its exact source")
-    if source_set(wire_block) != {"src/wire/ucn_wire.c"}:
+    if source_set(wire_block) != {
+        "src/wire/ucn_wire.c", "src/wire/ucn_control_wire.c"
+    }:
         errors.append("ucn_wire target does not own its exact source")
     if source_set(adapter_block) != {"src/adapter/ucn_adapter.c"}:
         errors.append("ucn_adapter target does not own its exact source")
-    if source_set(kernel_block) != {"src/runtime/ucn_node.c"}:
+    if source_set(kernel_block) != {"src/runtime/ucn_node.c", "src/runtime/ucn_tx.c"}:
         errors.append("ucn_kernel target does not own its exact source")
     if source_set(simplified_block) != {
         "src/core/ucn_checked.c", "src/core/ucn_owner.c",
         "src/wire/ucn_wire.c", "src/adapter/ucn_adapter.c",
         "src/runtime/ucn_node.c",
+        "src/runtime/ucn_tx.c",
     }:
         errors.append("ucn_simplified aggregate source set differs from registry")
     if source_set(persistence_block) != persistence_foundation_sources:
@@ -300,7 +311,7 @@ def main() -> int:
         errors.append("internal Persistence Coordinator adapter source differs from registry")
     if source_set(security_block) != {"src/security/ucn_security_session.c"}:
         errors.append("Security Session target does not own its exact source")
-    if source_set(admission_block) != {"src/admission/ucn_admission.c"}:
+    if source_set(admission_block) != {"src/admission/ucn_admission.c", "src/admission/ucn_admission_wire.c"}:
         errors.append("Admission target does not own its exact source")
     if source_set(identity_block) != {"src/admission/ucn_identity_binding.c"}:
         errors.append("Identity Binding target does not own its exact source")
@@ -352,9 +363,9 @@ def main() -> int:
     security_links = cmake_block(
         cmake, "target_link_libraries", "ucn_v6s_security_session")
     if security_links is None or not re.fullmatch(
-        r"\s*PRIVATE\s+ucn_common\s*", security_links
+        r"\s*PRIVATE\s+ucn_common\s+ucn_wire\s*", security_links
     ):
-        errors.append("Security Session must depend only on Common")
+        errors.append("Security Session must depend only on Common and Wire")
     for target in (
         "ucn_v6s_admission", "ucn_v6s_identity_binding",
         "ucn_v6s_capability", "ucn_v6s_route", "ucn_v6s_flow",

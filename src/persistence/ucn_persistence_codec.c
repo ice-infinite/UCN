@@ -14,8 +14,8 @@
 #endif
 
 UCN_STATIC_ASSERT(sizeof(ucn_i_persist_hash_workspace_t) <=
-                      UCN_PERSIST_DIGEST_WORKSPACE_BYTES,
-                  persistence_codec_hash_workspace_must_fit_public_storage);
+                      UCN_I_PERSIST_MANIFEST_DIGEST_OFFSET,
+                  persistence_codec_hash_and_digest_must_not_overlap);
 
 static bool ranges_overlap(const void *left,
                            size_t left_bytes,
@@ -55,6 +55,12 @@ static const uint8_t blake2s_sigma[10][16] = {
     {6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5},
     {10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0}};
 
+/* Column G calls followed by diagonal G calls, in the RFC order.
+ * 先列后对角，保留BLAKE2s原始G顺序；每次仅保留四个工作字。 */
+static const uint8_t blake2s_mix[8][4] = {
+    {0,4,8,12}, {1,5,9,13}, {2,6,10,14}, {3,7,11,15},
+    {0,5,10,15}, {1,6,11,12}, {2,7,8,13}, {3,4,9,14}};
+
 static UCN_I_ALWAYS_INLINE uint32_t read_le32(const uint8_t *bytes)
 {
     return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8U) |
@@ -87,7 +93,6 @@ static uint32_t rotr32(uint32_t value, uint8_t count)
     } while (0)
 
 static void blake2s_compress(ucn_i_blake2s_t *state,
-                             const uint8_t block[64],
                              bool final)
 {
     uint8_t round;
@@ -104,30 +109,19 @@ static void blake2s_compress(ucn_i_blake2s_t *state,
     }
     for (round = 0U; round < 10U; ++round) {
         const uint8_t *s = blake2s_sigma[round];
-        B2S_G(state->v[0], state->v[4], state->v[8], state->v[12],
-              read_le32(&block[(size_t)s[0] * 4U]),
-              read_le32(&block[(size_t)s[1] * 4U]));
-        B2S_G(state->v[1], state->v[5], state->v[9], state->v[13],
-              read_le32(&block[(size_t)s[2] * 4U]),
-              read_le32(&block[(size_t)s[3] * 4U]));
-        B2S_G(state->v[2], state->v[6], state->v[10], state->v[14],
-              read_le32(&block[(size_t)s[4] * 4U]),
-              read_le32(&block[(size_t)s[5] * 4U]));
-        B2S_G(state->v[3], state->v[7], state->v[11], state->v[15],
-              read_le32(&block[(size_t)s[6] * 4U]),
-              read_le32(&block[(size_t)s[7] * 4U]));
-        B2S_G(state->v[0], state->v[5], state->v[10], state->v[15],
-              read_le32(&block[(size_t)s[8] * 4U]),
-              read_le32(&block[(size_t)s[9] * 4U]));
-        B2S_G(state->v[1], state->v[6], state->v[11], state->v[12],
-              read_le32(&block[(size_t)s[10] * 4U]),
-              read_le32(&block[(size_t)s[11] * 4U]));
-        B2S_G(state->v[2], state->v[7], state->v[8], state->v[13],
-              read_le32(&block[(size_t)s[12] * 4U]),
-              read_le32(&block[(size_t)s[13] * 4U]));
-        B2S_G(state->v[3], state->v[4], state->v[9], state->v[14],
-              read_le32(&block[(size_t)s[14] * 4U]),
-              read_le32(&block[(size_t)s[15] * 4U]));
+        for (index = 0U; index < 8U; ++index) {
+            const uint8_t *positions = blake2s_mix[index];
+            uint32_t a = state->v[positions[0]];
+            uint32_t b = state->v[positions[1]];
+            uint32_t c = state->v[positions[2]];
+            uint32_t d = state->v[positions[3]];
+            B2S_G(a,b,c,d,read_le32(&state->buffer[(size_t)s[2U*index]*4U]),
+                  read_le32(&state->buffer[(size_t)s[2U*index+1U]*4U]));
+            state->v[positions[0]] = a;
+            state->v[positions[1]] = b;
+            state->v[positions[2]] = c;
+            state->v[positions[3]] = d;
+        }
     }
     for (index = 0U; index < 8U; ++index) {
         state->h[index] ^= state->v[index] ^ state->v[index + 8U];
@@ -166,7 +160,7 @@ static void blake2s_update(ucn_i_blake2s_t *state,
         length -= take;
         if (state->buffered == 64U && length > 0U) {
             blake2s_add_count(state, 64U);
-            blake2s_compress(state, state->buffer, false);
+            blake2s_compress(state, false);
             state->buffered = 0U;
         }
     }
@@ -176,7 +170,7 @@ static void blake2s_update_byte(ucn_i_blake2s_t *state, uint8_t byte)
 {
     if (state->buffered == 64U) {
         blake2s_add_count(state, 64U);
-        blake2s_compress(state, state->buffer, false);
+        blake2s_compress(state, false);
         state->buffered = 0U;
     }
     state->buffer[state->buffered] = byte;
@@ -189,7 +183,7 @@ static void blake2s_final(ucn_i_blake2s_t *state,
     uint8_t index;
     blake2s_add_count(state, (uint32_t)state->buffered);
     memset(&state->buffer[state->buffered], 0, 64U - state->buffered);
-    blake2s_compress(state, state->buffer, true);
+    blake2s_compress(state, true);
     for (index = 0U; index < UCN_PERSIST_DIGEST_BYTES / 4U; ++index) {
         write_le32(&digest[(size_t)index * 4U], state->h[index]);
     }
@@ -216,11 +210,6 @@ static void write_be64(uint8_t *bytes, uint64_t value)
     for (index = 0U; index < 8U; ++index) {
         bytes[index] = (uint8_t)(value >> (56U - (uint32_t)index * 8U));
     }
-}
-
-static uint16_t read_be16(const uint8_t *bytes)
-{
-    return (uint16_t)(((uint16_t)bytes[0] << 8U) | bytes[1]);
 }
 
 static uint32_t read_be32(const uint8_t *bytes)
@@ -304,12 +293,12 @@ bool ucn_i_persist_domain_equal(ucn_persist_domain_key_t left,
            right.reserved_zero == 0U && right.reserved_zero2 == 0U;
 }
 
-static bool domain_key_is_valid(ucn_persist_domain_key_t key)
+static bool domain_key_is_valid(const ucn_persist_domain_key_t *key)
 {
-    return key.domain_kind >= UCN_PERSIST_DOMAIN_IDENTITY_BINDING &&
-           key.domain_kind <= UCN_PERSIST_DOMAIN_PRODUCT_CONFIG &&
-           key.domain_id != 0U && key.domain_id != UINT64_MAX &&
-           key.reserved_zero == 0U && key.reserved_zero2 == 0U;
+    return key->domain_kind >= UCN_PERSIST_DOMAIN_IDENTITY_BINDING &&
+           key->domain_kind <= UCN_PERSIST_DOMAIN_PRODUCT_CONFIG &&
+           key->domain_id != 0U && key->domain_id != UINT64_MAX &&
+           key->reserved_zero == 0U && key->reserved_zero2 == 0U;
 }
 
 static void hash_be16(ucn_i_blake2s_t *state, uint16_t value)
@@ -339,7 +328,7 @@ static bool manifest_entry_is_valid(const ucn_persist_manifest_entry_t *entry)
 {
     return entry != NULL && entry->struct_size == sizeof(*entry) &&
            entry->api_version == UCN_PERSIST_API_VERSION &&
-           domain_key_is_valid(entry->domain) && entry->schema_id != 0U &&
+           domain_key_is_valid(&entry->domain) && entry->schema_id != 0U &&
            entry->schema_version != 0U &&
            entry->digest_suite == UCN_PERSIST_DIGEST_BLAKE2S_128 &&
            entry->witness_policy ==
@@ -417,8 +406,10 @@ ucn_result_t ucn_persistence_manifest_digest(
         ranges_overlap(workspace, sizeof(*workspace), manifest->entries,
                        (size_t)manifest->entry_count *
                            sizeof(manifest->entries[0])) ||
-        ranges_overlap(workspace, sizeof(*workspace), digest_out,
-                       UCN_PERSIST_DIGEST_BYTES)) {
+        (ranges_overlap(workspace, sizeof(*workspace), digest_out,
+                        UCN_PERSIST_DIGEST_BYTES) &&
+         digest_out !=
+             &workspace->bytes[UCN_I_PERSIST_MANIFEST_DIGEST_OFFSET])) {
         return UCN_ERR_CONFIG;
     }
     for (index = 0U; index < manifest->entry_count; ++index) {
@@ -459,7 +450,7 @@ ucn_result_t ucn_i_persist_body_digest(
         (digest_out != workspace->digest &&
          ranges_overlap(workspace, sizeof(*workspace), digest_out,
                         UCN_PERSIST_DIGEST_BYTES)) ||
-        !domain_key_is_valid(meta->domain) || meta->schema_id == 0U ||
+        !domain_key_is_valid(&meta->domain) || meta->schema_id == 0U ||
         meta->schema_version == 0U || meta->record_generation == 0U ||
         meta->transaction_id == 0U || meta->transaction_id == UINT64_MAX ||
         meta->operation_kind == 0U) {
@@ -522,17 +513,26 @@ ucn_result_t ucn_i_persist_marker_decode(
 }
 
 ucn_result_t ucn_i_persist_record_encode(
-    const ucn_i_persist_record_meta_t *meta,
-    const uint8_t manifest_digest[UCN_PERSIST_DIGEST_BYTES],
-    const uint8_t *body,
-    size_t body_capacity,
-    size_t slot_bytes,
-    uint8_t erased_value,
-    uint8_t *slot_out,
+    const ucn_i_persist_record_encode_request_t *request,
     ucn_i_persist_codec_workspace_t *workspace)
 {
+    const ucn_i_persist_record_meta_t *meta;
+    const uint8_t *manifest_digest;
+    const uint8_t *body;
+    size_t body_capacity, slot_bytes, marker_offset;
+    uint8_t erased_value, *slot_out;
     uint32_t header_crc;
-    const size_t marker_offset = slot_bytes - UCN_PERSIST_COMMIT_MARKER_BYTES;
+    if (request == NULL || workspace == NULL ||
+        ranges_overlap(request,sizeof(*request),workspace,sizeof(*workspace)) ||
+        ranges_overlap(workspace,sizeof(*workspace),request->slot_out,request->slot_bytes) ||
+        ranges_overlap(workspace,sizeof(*workspace),request->manifest_digest,UCN_PERSIST_DIGEST_BYTES) ||
+        ranges_overlap(request,sizeof(*request),request->slot_out,request->slot_bytes))
+        return UCN_ERR_ARGUMENT;
+    meta=request->meta; manifest_digest=request->manifest_digest;
+    body=request->body; body_capacity=request->body_capacity;
+    slot_bytes=request->slot_bytes; erased_value=request->erased_value;
+    slot_out=request->slot_out;
+    marker_offset = slot_bytes - UCN_PERSIST_COMMIT_MARKER_BYTES;
     if (meta == NULL || manifest_digest == NULL || slot_out == NULL ||
         workspace == NULL ||
         (meta->body_bytes != 0U && body == NULL) ||
@@ -578,94 +578,18 @@ ucn_result_t ucn_i_persist_record_encode(
     return UCN_OK;
 }
 
+
 ucn_result_t ucn_i_persist_record_decode(
     const ucn_i_persist_record_decode_request_t *request,
     ucn_i_persist_codec_workspace_t *workspace)
 {
     ucn_i_persist_record_meta_t *meta;
-    static const uint8_t zero_crc_field[4] = {0U, 0U, 0U, 0U};
-    uint64_t marker_generation;
-    uint32_t recorded_header_crc;
-    uint32_t calculated_header_crc;
     size_t marker_offset;
-
-    if (request == NULL || workspace == NULL ||
-        ranges_overlap(request, sizeof(*request), workspace,
-                       sizeof(*workspace))) {
-        return UCN_ERR_ARGUMENT;
-    }
-    if (request->slot == NULL || request->manifest == NULL ||
-        request->durable_manifest_digest == NULL ||
-        request->meta_out == NULL ||
-        !manifest_entry_is_valid(request->manifest) ||
-        request->slot_bytes != request->manifest->slot_capacity_bytes ||
-        request->slot_bytes > UCN_PERSIST_SLOT_BYTES ||
-        ranges_overlap(request->slot, request->slot_bytes,
-                       request->meta_out, sizeof(*request->meta_out)) ||
-        ranges_overlap(request->slot, request->slot_bytes,
-                       request->body_out, request->body_capacity) ||
-        ranges_overlap(request->meta_out, sizeof(*request->meta_out),
-                       request->body_out, request->body_capacity) ||
-        ranges_overlap(workspace, sizeof(*workspace), request->slot,
-                       request->slot_bytes) ||
-        ranges_overlap(workspace, sizeof(*workspace), request->manifest,
-                       sizeof(*request->manifest)) ||
-        ranges_overlap(workspace, sizeof(*workspace),
-                       request->durable_manifest_digest,
-                       UCN_PERSIST_DIGEST_BYTES) ||
-        ranges_overlap(workspace, sizeof(*workspace), request->meta_out,
-                       sizeof(*request->meta_out)) ||
-        ranges_overlap(workspace, sizeof(*workspace), request->body_out,
-                       request->body_capacity)) {
-        return UCN_ERR_ARGUMENT;
-    }
+    const ucn_result_t result = ucn_i_persist_record_header_decode(request, workspace);
+    if (result != UCN_OK) return result;
     meta = &workspace->meta;
     marker_offset = request->slot_bytes - UCN_PERSIST_COMMIT_MARKER_BYTES;
-    if (ucn_i_persist_marker_decode(&request->slot[marker_offset],
-                                    &marker_generation) != UCN_OK ||
-        memcmp(request->slot, "UC6R", 4U) != 0 ||
-        read_be16(&request->slot[4]) != UCN_PERSIST_RECORD_ENVELOPE_VERSION ||
-        read_be16(&request->slot[6]) != UCN_PERSIST_ENVELOPE_BYTES ||
-        read_be16(&request->slot[8]) != request->manifest->domain.domain_kind ||
-        read_be16(&request->slot[10]) != request->manifest->schema_id ||
-        read_be16(&request->slot[12]) != request->manifest->schema_version ||
-        read_be16(&request->slot[14]) != 0U ||
-        memcmp(&request->slot[16], request->durable_manifest_digest,
-               UCN_PERSIST_DIGEST_BYTES) != 0 ||
-        read_be64(&request->slot[32]) != request->manifest->domain.domain_id ||
-        read_be16(&request->slot[58]) !=
-            UCN_I_PERSIST_DIGEST_SUITE_BLAKE2S_128 ||
-        !ucn_i_persist_bytes_are_value(&request->slot[88], 8U, 0U)) {
-        return UCN_ERR_MALFORMED;
-    }
-    memset(meta, 0, sizeof(*meta));
-    meta->domain = request->manifest->domain;
-    meta->schema_id = read_be16(&request->slot[10]);
-    meta->schema_version = read_be16(&request->slot[12]);
-    meta->record_generation = read_be64(&request->slot[40]);
-    meta->transaction_id = read_be64(&request->slot[48]);
-    meta->operation_kind = read_be16(&request->slot[56]);
-    meta->body_bytes = read_be32(&request->slot[60]);
-    if (meta->record_generation != marker_generation ||
-        meta->record_generation == 0U ||
-        meta->record_generation == UINT64_MAX || meta->transaction_id == 0U ||
-        meta->transaction_id == UINT64_MAX || meta->operation_kind == 0U ||
-        meta->body_bytes > request->manifest->body_capacity_bytes ||
-        meta->body_bytes > request->body_capacity ||
-        meta->body_bytes > marker_offset - UCN_PERSIST_ENVELOPE_BYTES ||
-        (meta->body_bytes != 0U && request->body_out == NULL)) {
-        return UCN_ERR_MALFORMED;
-    }
-    recorded_header_crc = read_be32(&request->slot[68]);
-    calculated_header_crc = crc32c_update(UINT32_MAX, request->slot, 68U);
-    calculated_header_crc = crc32c_update(
-        calculated_header_crc, zero_crc_field, sizeof(zero_crc_field));
-    calculated_header_crc = crc32c_update(
-        calculated_header_crc, &request->slot[72],
-        UCN_PERSIST_ENVELOPE_BYTES - 72U);
-    calculated_header_crc = ~calculated_header_crc;
-    if (recorded_header_crc != calculated_header_crc ||
-        read_be32(&request->slot[64]) !=
+    if (read_be32(&request->slot[64]) !=
             ucn_i_persist_crc32c(
                 &request->slot[UCN_PERSIST_ENVELOPE_BYTES],
                                   meta->body_bytes) ||

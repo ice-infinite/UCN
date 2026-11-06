@@ -347,9 +347,13 @@ static int test_dynamic_lifecycle_and_reload(void)
                              &reopened) == UCN_OK);
     CHECK(ucn_i_group_context_view(&reload_owner, reopened, &view,
                                    &phase) == UCN_OK);
-    CHECK(view.group_id == 1U && phase == UCN_I_GROUP_ACTIVE);
+    CHECK(view.group_id == 1U && phase == UCN_I_GROUP_FENCED);
+    CHECK(view.security.runtime_instance == 0U && view.security.owner_instance == 0U &&
+          view.security.slot == 0U && view.security.generation == 0U);
 
     config = view;
+    /* Recreate a current Security dependency; disk cannot restore a Handle. */
+    config.security = group_config(UCN_I_GROUP_DYNAMIC, 1U, true).security;
     config.group_generation = 2U;
     config.policy_generation = 2U;
     line = publish_dynamic(&config, 2U, 1U, &handle, NULL);

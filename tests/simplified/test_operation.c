@@ -47,6 +47,93 @@ static ucn_i_service_operation_key_t operation_key(uint64_t operation_id)
     return key;
 }
 
+static int test_operation_control_codecs(void)
+{
+    static const uint8_t expected_key[UCN_I_SERVICE_OPERATION_WIRE_KEY_BYTES] = {
+        0x01U, 0x02U, 0x03U, 0x04U, 0x05U, 0x06U, 0x07U, 0x08U,
+        0x12U, 0x34U, 0x56U, 0x78U,
+        0x00U, 0x01U, 0x02U, 0x03U, 0x04U, 0x05U, 0x06U, 0x07U,
+        0x08U, 0x09U, 0x0AU, 0x0BU, 0x0CU, 0x0DU, 0x0EU, 0x0FU
+    };
+    ucn_i_service_operation_wire_key_t key;
+    ucn_i_service_operation_wire_key_t decoded_key;
+    ucn_i_service_operation_receipt_body_t receipt;
+    ucn_i_service_operation_receipt_body_t decoded_receipt;
+    ucn_i_service_operation_cancel_body_t cancel;
+    ucn_i_service_operation_cancel_body_t decoded_cancel;
+    uint8_t key_bytes[UCN_I_SERVICE_OPERATION_WIRE_KEY_BYTES];
+    uint8_t receipt_bytes[UCN_I_SERVICE_OPERATION_RECEIPT_BYTES];
+    uint8_t cancel_bytes[UCN_I_SERVICE_OPERATION_CANCEL_BYTES];
+    uint8_t sentinel[UCN_I_SERVICE_OPERATION_CANCEL_BYTES];
+    size_t index;
+
+    memset(&key, 0, sizeof(key));
+    key.operation_id = UINT64_C(0x0102030405060708);
+    key.service_id = UINT16_C(0x1234);
+    key.service_opcode = UINT16_C(0x5678);
+    for (index = 0U; index < sizeof(key.request_digest); ++index) {
+        key.request_digest[index] = (uint8_t)index;
+    }
+    CHECK(ucn_i_service_operation_wire_key_encode(&key, key_bytes) == UCN_OK);
+    CHECK(memcmp(key_bytes, expected_key, sizeof(expected_key)) == 0);
+    memset(&decoded_key, 0, sizeof(decoded_key));
+    CHECK(ucn_i_service_operation_wire_key_decode(key_bytes,
+                                                   &decoded_key) == UCN_OK);
+    CHECK(memcmp(&decoded_key, &key, sizeof(key)) == 0);
+    /* Data business opcode=0 is not the nonzero outer Control Registry opcode. */
+    key.service_opcode = 0U;
+    CHECK(ucn_i_service_operation_wire_key_encode(&key, key_bytes) == UCN_OK);
+    CHECK(key_bytes[10] == 0U && key_bytes[11] == 0U);
+    CHECK(ucn_i_service_operation_wire_key_decode(key_bytes, &decoded_key) == UCN_OK);
+    CHECK(decoded_key.service_opcode == 0U);
+    memcpy(sentinel, key_bytes, sizeof(key_bytes));
+    key.service_opcode = UINT16_MAX;
+    CHECK(ucn_i_service_operation_wire_key_encode(&key, key_bytes) == UCN_ERR_ARGUMENT);
+    CHECK(memcmp(sentinel, key_bytes, sizeof(key_bytes)) == 0);
+    key.service_opcode = UINT16_C(0x5678);
+
+    memset(&receipt, 0, sizeof(receipt));
+    receipt.key = key;
+    memset(receipt.result_digest, 0xA5, sizeof(receipt.result_digest));
+    receipt.terminal_phase = UCN_I_SERVICE_OPERATION_COMMITTED_RESULT;
+    CHECK(ucn_i_service_operation_receipt_encode(
+              &receipt, receipt_bytes) == UCN_OK);
+    CHECK(receipt_bytes[44] == UCN_I_SERVICE_OPERATION_COMMITTED_RESULT &&
+          receipt_bytes[45] == 0U && receipt_bytes[47] == 0U);
+    memset(&decoded_receipt, 0, sizeof(decoded_receipt));
+    CHECK(ucn_i_service_operation_receipt_decode(
+              receipt_bytes, &decoded_receipt) == UCN_OK);
+    CHECK(memcmp(&decoded_receipt, &receipt, sizeof(receipt)) == 0);
+
+    memset(&cancel, 0, sizeof(cancel));
+    cancel.key = key;
+    cancel.reason = UCN_I_SERVICE_CANCEL_POLICY;
+    CHECK(ucn_i_service_operation_cancel_encode(&cancel,
+                                                 cancel_bytes) == UCN_OK);
+    CHECK(cancel_bytes[28] == UCN_I_SERVICE_CANCEL_POLICY &&
+          cancel_bytes[29] == 0U && cancel_bytes[31] == 0U);
+    memset(&decoded_cancel, 0, sizeof(decoded_cancel));
+    CHECK(ucn_i_service_operation_cancel_decode(
+              cancel_bytes, &decoded_cancel) == UCN_OK);
+    CHECK(memcmp(&decoded_cancel, &cancel, sizeof(cancel)) == 0);
+
+    memset(sentinel, 0xA5, sizeof(sentinel));
+    cancel.reason = 0U;
+    CHECK(ucn_i_service_operation_cancel_encode(&cancel, sentinel) ==
+          UCN_ERR_ARGUMENT);
+    for (index = 0U; index < sizeof(sentinel); ++index) {
+        CHECK(sentinel[index] == 0xA5U);
+    }
+    cancel_bytes[29] = 1U;
+    memset(&decoded_cancel, 0x5A, sizeof(decoded_cancel));
+    CHECK(ucn_i_service_operation_cancel_decode(
+              cancel_bytes, &decoded_cancel) == UCN_ERR_MALFORMED);
+    for (index = 0U; index < sizeof(decoded_cancel); ++index) {
+        CHECK(((const uint8_t *)&decoded_cancel)[index] == 0x5AU);
+    }
+    return 0;
+}
+
 static ucn_i_service_operation_durability_t durability(uint64_t tx,
                                                         uint64_t generation)
 {
@@ -508,7 +595,8 @@ static int test_operation_id_intervals(void)
 
 int main(void)
 {
-    int result = configure();
+    int result = test_operation_control_codecs();
+    if (result == 0) result = configure();
     if (result == 0) result = test_committed_and_tombstone();
     if (result == 0) result = test_abort_before_executor();
     if (result == 0) result = test_executing_restart_forces_in_doubt();

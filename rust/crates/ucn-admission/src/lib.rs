@@ -12,12 +12,12 @@ mod owner;
 
 pub use codec::{
     BootstrapEvent, BootstrapFlow, BootstrapPhase, BootstrapTranscript, COOKIE_CHALLENGE_BYTES,
-    COOKIE_MAX_BYTES, CookieChallenge, Evidence, HELLO_BYTES, HELLO_COOKIE_FIXED_BYTES, Hello,
-    HelloCookie, LOGICAL_MAX_BYTES, MAX_EVIDENCE_BYTES, OPCODE_ABORT, OPCODE_ADDRESS_OFFER,
+    COOKIE_MAX_BYTES, Cookie, CookieChallenge, Evidence, HELLO_BYTES, HELLO_COOKIE_FIXED_BYTES,
+    Hello, HelloCookie, LOGICAL_MAX_BYTES, MAX_EVIDENCE_BYTES, OPCODE_ADDRESS_OFFER,
     OPCODE_DEVICE_COMMIT, OPCODE_FINAL_COMMIT, OPCODE_IDENTITY_CHALLENGE, OPCODE_IDENTITY_RESPONSE,
     TRANSCRIPT_BYTES, decode_cookie_challenge, decode_hello, decode_hello_cookie,
     decode_logical_event, decode_transcript, encode_cookie_challenge, encode_hello,
-    encode_hello_cookie, encode_logical_event, encode_transcript,
+    encode_hello_cookie, encode_logical_event, encode_transcript, transcript_transition_valid,
 };
 pub use fragment::{
     BootstrapFragment, FRAGMENT_DATA_BYTES, FRAGMENT_HEADER_BYTES, MAX_FRAGMENTS, Reassembly,

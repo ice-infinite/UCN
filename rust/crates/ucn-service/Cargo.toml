@@ -1,0 +1,24 @@
+[package]
+name = "ucn-service"
+description = "Independent RPC, fair reference queues and durable Operation for UCN"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["rpc", "qos", "operation"]
+rpc = []
+qos = []
+operation = ["dep:ucn-durable", "dep:ucn-persistence", "dep:ucn-owner"]
+
+[dependencies]
+ucn-types = { path = "../ucn-types" }
+ucn-digest = { path = "../ucn-digest" }
+ucn-persistence = { path = "../ucn-persistence", optional = true }
+ucn-durable = { path = "../ucn-durable", optional = true }
+ucn-owner = { path = "../ucn-owner", optional = true }
+
+[lints]
+workspace = true

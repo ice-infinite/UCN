@@ -98,8 +98,9 @@ static ucn_result_t issue_cookie(
 
 static ucn_result_t verify_cookie(
     void *context,
-    const ucn_i_admission_hello_cookie_t *hello_cookie)
+    const ucn_i_admission_hello_cookie_t *hello_cookie, uint64_t now_us)
 {
+    CHECK(now_us != 0U);
     test_provider_t *provider = context;
     ucn_i_admission_pending_view_t view;
 
@@ -249,6 +250,73 @@ static ucn_i_admission_evidence_t evidence_for(uint8_t event)
     return evidence;
 }
 
+static int test_canonical_logical_and_mtu_fragments(void)
+{
+    static ucn_i_admission_wire_workspace_t workspace;
+    ucn_i_admission_transcript_t t=make_cookie_transcript(),out,before;
+    ucn_i_admission_evidence_t e=evidence_for(1U),eo,ebefore;
+    ucn_i_admission_fragment_t f={0},fo,fbefore;
+    uint8_t bytes[508],saved[508];size_t n=777U,fn=0U;
+    t.authority_generation=1U;
+    CHECK(!ucn_i_admission_transcript_valid(&t,UCN_I_ADMISSION_COOKIE_VERIFIED));
+    t=make_cookie_transcript();add_authority(&t);
+    memset(e.bytes,0x77,sizeof(e.bytes));e.length=128U;
+    memset(bytes,0xA5,sizeof(bytes));memcpy(saved,bytes,sizeof(bytes));
+    CHECK(ucn_i_admission_logical_encode(131U,2U,&t,&e,bytes,sizeof(bytes),&n)==UCN_ERR_ARGUMENT);
+    CHECK(n==777U && memcmp(bytes,saved,sizeof(bytes))==0);
+    CHECK(ucn_i_admission_logical_encode(4U,2U,&t,&e,bytes,507U,&n)==UCN_ERR_NO_SPACE);
+    CHECK(n==777U && memcmp(bytes,saved,sizeof(bytes))==0);
+    CHECK(ucn_i_admission_logical_encode(4U,2U,&t,&e,bytes,sizeof(bytes),&n)==UCN_OK);
+    CHECK(n==508U && bytes[0]==6U && bytes[3]==1U && bytes[4]==1U && bytes[379]==128U);
+    CHECK(ucn_i_admission_logical_decode(4U,2U,bytes,n,&out,&eo,&workspace)==UCN_OK);
+    CHECK(memcmp(&out,&t,sizeof(t))==0 && memcmp(&e,&eo,sizeof(e))==0);
+    before=out;ebefore=eo;
+    CHECK(ucn_i_admission_logical_decode(7U,2U,bytes,n,&out,&eo,&workspace)==UCN_ERR_MALFORMED);
+    CHECK(memcmp(&out,&before,sizeof(out))==0 && memcmp(&eo,&ebefore,sizeof(eo))==0);
+    CHECK(ucn_i_admission_logical_decode(4U,2U,bytes,n,(ucn_i_admission_transcript_t *)bytes,&eo,&workspace)==UCN_ERR_ARGUMENT);
+    CHECK(ucn_i_admission_logical_decode(4U,2U,bytes,n,&workspace.transcript,&eo,&workspace)==UCN_ERR_ARGUMENT);
+    CHECK(memcmp(&eo,&ebefore,sizeof(eo))==0);
+    f.phase=2U;f.chunk_bytes=32U;f.fragment_count=16U;f.fragment_index=15U;
+    f.total_length=508U;f.fragment_offset=480U;f.fragment_length=28U;
+    f.transaction_id=t.transaction_id;memcpy(f.identity_digest,t.joining_device_identity_digest,16U);
+    memcpy(f.data,bytes+480U,28U);
+    CHECK(ucn_i_admission_fragment_encode(&f,saved,sizeof(saved),&fn)==UCN_OK);
+    CHECK(fn==64U && saved[5]==32U);
+    CHECK(ucn_i_admission_fragment_decode(saved,fn,&fo)==UCN_OK);
+    CHECK(memcmp(&f,&fo,sizeof(f))==0);fbefore=fo;saved[5]=0U;
+    CHECK(ucn_i_admission_fragment_decode(saved,fn,&fo)==UCN_ERR_MALFORMED);
+    CHECK(memcmp(&fo,&fbefore,sizeof(fo))==0);
+    return 0;
+}
+
+static int test_deterministic_session_seed(void)
+{
+    static ucn_i_admission_seed_workspace_t work;
+    ucn_i_admission_transcript_t t = make_cookie_transcript();
+    ucn_i_admission_session_seed_t out, before;
+    uint16_t id;
+    add_authority(&t); add_device(&t); add_address(&t);
+    CHECK(ucn_i_admission_session_seed(&t,100U,5000U,2000U,&out,&work)==UCN_OK);
+    CHECK(out.expires_at_us==2000U && out.origin_forward_key_id==3U &&
+          out.origin_reverse_key_id==4U && out.hop_forward_key_id==1U && out.hop_reverse_key_id==2U);
+    memset(&out,0xA5,sizeof(out)); before=out;
+    for(id=UINT16_MAX-1U;;++id) {
+        t.selected_e2e_key_id=id;
+        CHECK(ucn_i_admission_session_seed(&t,100U,5000U,2000U,&out,&work)==UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&out,&before,sizeof(out))==0);
+        if(id==UINT16_MAX) break;
+    }
+    t.selected_e2e_key_id=3U;
+    CHECK(ucn_i_admission_session_seed(&t,UINT64_MAX-1U,2U,UINT64_MAX,&out,&work)==UCN_ERR_ARGUMENT);
+    CHECK(memcmp(&out,&before,sizeof(out))==0);
+    CHECK(ucn_i_admission_session_seed(&t,100U,5000U,100U,&out,&work)==UCN_ERR_ARGUMENT);
+    CHECK(ucn_i_admission_session_seed(&t,100U,5000U,2000U,&work.seed,&work)==UCN_ERR_ARGUMENT);
+    t.selected_e2e_suite=2U;
+    CHECK(ucn_i_admission_session_seed(&t,100U,5000U,2000U,&out,&work)==UCN_ERR_ARGUMENT);
+    CHECK(memcmp(&out,&before,sizeof(out))==0);
+    return 0;
+}
+
 int main(void)
 {
     static const uint8_t hello_golden[40] = {
@@ -284,6 +352,8 @@ int main(void)
     uint16_t inspected;
     uint16_t expired;
 
+    CHECK(test_canonical_logical_and_mtu_fragments() == 0);
+    CHECK(test_deterministic_session_seed() == 0);
     memset(&owner, 0, sizeof(owner));
     memset(&gate, 0, sizeof(gate));
     memset(&provider, 0, sizeof(provider));

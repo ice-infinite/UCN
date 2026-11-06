@@ -6,6 +6,59 @@
 //! Protocol-visible scalar types and registries for UCN v6 simplified.
 //! 所有构造函数都在产生线上值之前执行合法域检查；最大值本身合法，但单调分配器不得回绕。
 
+/// Operation execution mode bits; Operation执行模式位。
+pub const OPERATION_MODE_MASK: u8 = 3;
+/// Repeatable execution; 可重复执行。
+pub const OPERATION_REPEATABLE: u8 = 0;
+/// Runtime-only deduplication; 仅Runtime去重。
+pub const OPERATION_VOLATILE_DEDUP: u8 = 1;
+/// Durable at-most-once with an uncertain result; 耐久至多一次且允许结果不确定。
+pub const OPERATION_DURABLE_AT_MOST_ONCE: u8 = 2;
+/// Terminal Result/Error bit; 终态Result/Error位。
+pub const OPERATION_FINAL: u8 = 4;
+/// Reserved flags; 保留位。
+pub const OPERATION_RESERVED_MASK: u8 = 248;
+/// Durable Data error code: proven no executor handoff; 耐久Data错误码：已证明未交接。
+pub const DURABLE_RPC_NO_EFFECT: u16 = 0xfffd;
+/// Durable Data error code: uncertain execution, never auto-reexecute; 耐久Data错误码：结果不确定。
+pub const DURABLE_RPC_IN_DOUBT: u16 = 0xfffe;
+
+/// Validate the shared byte contract before interpreting execution policy.
+/// 解释执行策略前校验共同字节合同。
+#[must_use]
+pub const fn operation_flags_valid(role: InteractionRole, flags: u8) -> bool {
+    if matches!(role, InteractionRole::OneWay) {
+        return flags == 0;
+    }
+    if flags & OPERATION_RESERVED_MASK != 0 || flags & OPERATION_MODE_MASK == OPERATION_MODE_MASK {
+        return false;
+    }
+    if matches!(role, InteractionRole::Request) {
+        flags & OPERATION_FINAL == 0
+    } else {
+        flags & OPERATION_FINAL != 0
+    }
+}
+
+/// Validate the conditional Data RPC prefix; `OneWay` remains zero overhead.
+/// 校验条件Data RPC前缀；OneWay仍零额外开销。
+/// # Errors
+/// Short/zero ID/reserved flags reject before state or Replay writes.
+pub fn validate_data_envelope(role: InteractionRole, payload: &[u8]) -> Result<()> {
+    if role == InteractionRole::OneWay {
+        return Ok(());
+    }
+    let size = if role == InteractionRole::Request {
+        9
+    } else {
+        11
+    };
+    if payload.len() < size || payload[..8] == [0; 8] || !operation_flags_valid(role, payload[8]) {
+        return Err(Error::Malformed);
+    }
+    Ok(())
+}
+
 use core::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 
 /// UCN v6 的主版本号。
@@ -825,11 +878,16 @@ protocol_opcodes! {
     CapabilitySelect = 0x0104,
     CapabilityAck = 0x0105,
     CapabilityRevoke = 0x0106,
+    // Authenticated full query, never a revocation alias; 认证完整查询，非撤销别名。
+    CapabilityQuery = 0x0107,
+    // Authenticated two-part capability body, not an ordinary Data extension.
+    CapabilityFragment = 0x0108,
     RouteRreq = 0x0201,
     RouteRrep = 0x0202,
     RouteRerr = 0x0203,
     RouteProbe = 0x0204,
     RouteProbeAck = 0x0205,
+    RouteFragment = 0x0206,
     FlowPrepare = 0x0301,
     FlowAccept = 0x0302,
     FlowCommit = 0x0303,
@@ -856,6 +914,9 @@ protocol_opcodes! {
     OperationQuery = 0x0501,
     OperationReceipt = 0x0502,
     OperationCancel = 0x0503,
+    OperationResultAck = 0x0504,
+    OperationResume = 0x0505,
+    OperationResult = 0x0506,
     TimeSync = 0x0601,
     TimeFollowUp = 0x0602,
     TimeDelayRequest = 0x0603,
@@ -1000,6 +1061,6 @@ mod tests {
         for opcode in ProtocolOpcode::ALL {
             assert_eq!(ProtocolOpcode::try_from(u16::from(*opcode)), Ok(*opcode));
         }
-        assert_eq!(ProtocolOpcode::ALL.len(), 94);
+        assert_eq!(ProtocolOpcode::ALL.len(), 100);
     }
 }

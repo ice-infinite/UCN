@@ -23,9 +23,20 @@ dependencies = [
 name = "ucn-capability"
 version = "0.0.0"
 dependencies = [
+ "ucn-digest",
  "ucn-owner",
  "ucn-persistence",
  "ucn-security",
+ "ucn-types",
+]
+
+[[package]]
+name = "ucn-cluster"
+version = "0.0.0"
+dependencies = [
+ "ucn-digest",
+ "ucn-durable",
+ "ucn-persistence",
  "ucn-types",
 ]
 
@@ -37,6 +48,21 @@ dependencies = [
  "ucn-owner",
  "ucn-types",
  "ucn-wire",
+]
+
+[[package]]
+name = "ucn-digest"
+version = "0.0.0"
+dependencies = [
+ "ucn-types",
+]
+
+[[package]]
+name = "ucn-durable"
+version = "0.0.0"
+dependencies = [
+ "ucn-persistence",
+ "ucn-types",
 ]
 
 [[package]]
@@ -52,11 +78,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucn-group"
+version = "0.0.0"
+dependencies = [
+ "ucn-digest",
+ "ucn-durable",
+ "ucn-identity",
+ "ucn-owner",
+ "ucn-persistence",
+ "ucn-types",
+]
+
+[[package]]
 name = "ucn-identity"
 version = "0.0.0"
 dependencies = [
  "ucn-owner",
  "ucn-persistence",
+ "ucn-types",
+]
+
+[[package]]
+name = "ucn-native"
+version = "0.0.0"
+dependencies = [
+ "ucn-adapter",
+ "ucn-core",
  "ucn-types",
 ]
 
@@ -76,6 +123,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucn-realtime"
+version = "0.0.0"
+dependencies = [
+ "ucn-durable",
+ "ucn-owner",
+ "ucn-persistence",
+ "ucn-types",
+]
+
+[[package]]
 name = "ucn-routing"
 version = "0.0.0"
 dependencies = [
@@ -84,16 +141,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucn-runtime"
+version = "0.0.0"
+dependencies = [
+ "ucn-adapter",
+ "ucn-admission",
+ "ucn-capability",
+ "ucn-cluster",
+ "ucn-digest",
+ "ucn-durable",
+ "ucn-group",
+ "ucn-identity",
+ "ucn-owner",
+ "ucn-persistence",
+ "ucn-realtime",
+ "ucn-routing",
+ "ucn-security",
+ "ucn-service",
+ "ucn-transport",
+ "ucn-types",
+ "ucn-wire",
+]
+
+[[package]]
 name = "ucn-security"
 version = "0.0.0"
 dependencies = [
  "ucn-capability",
+ "ucn-digest",
  "ucn-flow",
  "ucn-owner",
  "ucn-persistence",
  "ucn-routing",
  "ucn-types",
  "ucn-wire",
+]
+
+[[package]]
+name = "ucn-service"
+version = "0.0.0"
+dependencies = [
+ "ucn-digest",
+ "ucn-durable",
+ "ucn-owner",
+ "ucn-persistence",
+ "ucn-types",
+]
+
+[[package]]
+name = "ucn-transport"
+version = "0.0.0"
+dependencies = [
+ "ucn-digest",
+ "ucn-durable",
+ "ucn-persistence",
+ "ucn-types",
 ]
 
 [[package]]

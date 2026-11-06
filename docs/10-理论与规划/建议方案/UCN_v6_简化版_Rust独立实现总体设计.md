@@ -1,6 +1,7 @@
 # UCN v6 简化版 Rust 独立实现总体设计
 
-> 文档状态：`RUST-05 / DONE / SELF-REVIEW PASS`
+> 当前状态（2026-10-13）：`RUST-08/09 OWNER HOST PARTIAL / COMPLETE WIRE INTEGRATION HOLD`。
+> 下文各历史阶段结论保持原范围；当前缺口以最新 RUST-10 报告为准。
 >
 > 对应分支：`v6-simplified-rust`
 >
@@ -11,7 +12,9 @@
 本项目新增一套 Rust 实现，用于验证 UCN v6 简化协议能否在保持 MCU-first、固定内存、低 Wire
 开销和可裁剪模块边界的前提下，获得更强的类型、生命周期和并发安全。
 
-Rust 版不是新协议版本，也不是 C 版包装器。C 与 Rust 必须遵守同一份语言无关协议合同：
+Rust 版不是新协议版本，也不是 C 版包装器。C 与 Rust 必须遵守同一份语言无关协议合同。
+早期 Group 的 GRC1 原型已经移除；当前使用共同 v2 Context Record 与独立 Realm allocator。
+共同正文一致不代表所有控制面与 Runtime 已闭环：
 
 ```text
 协议 RFC / Wire Registry / Golden / Negative / 恢复矩阵
@@ -482,7 +485,78 @@ Debug/Release/MSRV 测试、Clippy/rustdoc、双 Cortex-M、7 条独立 Route/Fl
 非历史签字基线 51/51。Host 固定对象尺寸为 Routing `1840/5408/14368 B`、Flow
 `3448/12712/41768 B`（Nano/Lite/Full）。
 
-RUST-07 只解除 RUST-08 的实施顺序阻塞。当前尚未实现统一动态 Runtime 编排、Reliable、Transfer、
+RUST-07 当时只解除 RUST-08 的实施顺序阻塞。当时尚未实现统一动态 Runtime 编排、Reliable、Transfer、
 Service/Operation、生产密码 Provider、真实 Flash、物理多跳或 ESP32-S3 的 RAM/栈/性能验证。
 详细证据见
 `docs/08-实现与验证/版本演进/UCN_V6S_RUST_07_自动路由与Flow实施及自审报告.md`。
+
+### 13.8 RUST-08/09 后续 Owner 实施边界（2026-10-13）
+
+Transport/Service 的 Reliable、Setup/Fragment/SACK、固定重组、RPC/QoS、耐久 Operation 与
+ID 分配已通过本地 Owner/实际 Foundation 测试。Realtime 实际调用 TimedLink、原子 RX、四种
+Wire Body 与本地释放 proof；Static Group、实验 Realm catalog 和 Cluster Config/Joint/
+完整票记录/双缓冲/Handover/Fence 已有独立代码和回归。全部仍由 Coordinator 跨 Owner 路由。
+
+两个新增共同工具 crate `ucn-digest`、`ucn-durable` 分别承担规范摘要与精确恢复/Proof 消费，
+没有把 Provider I/O 塞入业务 Owner。恢复既核对精确正文，也绑定已恢复/已确认 durable
+generation；新 Owner 跳过恢复不能重新从初值写 ID/Generation。
+
+`ucn-runtime` 当前仅完成直接 C1 Reliable/C0 ACK 的 actual Security/Replay/Receipt 桥以及
+实际 Adapter 发送/退休桥。剩余 Parent/Transfer/Service Control dispatch、统一动态
+Runtime、C5/H3/Tree、完整 Cluster 线上证书/Delta/Merge/Dissolve 仍属软件工作。Group catalog
+实验 Record 使用 GRC1/0x0902，不能冒充 C 的共同 Record 或直接进入生产 Manifest。
+
+全 Workspace Debug/Release/MSRV 各 166/166、Clippy/rustfmt、双 Cortex-M、ESP32-S3 编译、
+9 个裁剪组合和 10 条三方 Body Oracle 通过；Host sizeof、编译、模拟不是新模块实机证明。
+顶层 RUST-08/09/10 保持 PARTIAL，不冻结新 Wire，不签生产或完整软件 GO。
+
+详见 [RUST-10 软件矩阵与后续门禁](../../08-实现与验证/版本演进/UCN_V6S_RUST_10_软件矩阵与后续门禁.md)。
+
+### 13.9 自动多跳 Data 的软件接线边界（2026-10-18）
+
+`ucn-runtime/route-data-runtime` 已将实际路由控制与 C1 不透明 Hop 原语装入固定容量
+`RoutedNode`。普通业务的复制请求触发认证 RREQ/RREP；唯一实际原子 RX 分派路由控制
+和 Data，按精确 Origin 域及当前父事实发往正确邻居。中继不解密，目标独立验证 Origin
+Session、ACL 和 Replay 后才发布消息。控制与业务轮转调度，两个退休通道保留 Unknown。
+
+本地 `PeerTxDriver` 提供共享物理 Link 的下一跳定位，不向普通 Data 头增加字段。
+Source必须取得自己的RREP回执，不能把RREQ在各中继学到的本地返回提示当成完整路径。
+真实Host三节点正反向、127 B控制分片、有限背压、满队列、TTL和重放均已加入回归。
+
+这是尽力单向Data子集，不是完整动态Node。端到端Session仍需预先真实发布，`send/step`
+仍显式借入产品持有的基础Owner。动态跨路握手、用户Facade、Reliable/Transfer/Journal/
+Time全量统一、Flow、Group/Cluster、C自动Root和跨语言Runtime仍未完成；硬件另行授权。
+当前范围详见[共同合同16](UCN_v6_C_Rust共用合同收口/16-自动多跳Data协调器与本地下一跳合同.md)。
+
+### 13.10 Origin登记续接的本地屏障（2026-10-18）
+
+在自动Data Root上补入实际Session全服务撤权、旧Data/App/物理Token排空与耐久ACTIVE
+后继的原子替换。新Service空槽、更旧墓碑、更大代际数字都不能替代当前屏障；旧Handle
+不复活、加密策略不降级。五次连续真实后继可复用固定登记/Security槽，不建立无限历史表。
+
+该功能只消费已真实发布的Session，不实现跨多跳握手。这里的drained仅涵盖当前Data
+Root，不描述其他Runtime/Driver的全局静止；统一Coordinator仍需汇合各模块真实义务。
+C/Rust Wire/Body/Record不变，当前新增Rust接线，C等价Root尚待实现；普通头新增0 B。
+详见[共同合同17](UCN_v6_C_Rust共用合同收口/17-Origin登记围栏排空与耐久后继交接合同.md)。
+
+### 13.11 直连与多跳的统一Context（2026-10-18）
+
+Origin/Hop是两种认证角色，不强制两个Session。显式C1 Origin投影复用真实H0/H1
+Session，不修改协商Profile；完整packet API仍精确匹配。直连目标命中完整Binding的
+认证邻居后复验Capability/MTU/ACL，无需RREQ；非邻居仍需精确RREP，统一普通send。
+
+共享Session的围栏与本Root排空须包含Control和中继Holder，不能只看Endpoint工作。
+普通头、Body、Record均不增字段。C同步安全原语，但C自动Data Root和Rust O2自动
+邻居控制/热续接尚未完成；不能据此放行整Node或生产。
+详见[共同合同18](UCN_v6_C_Rust共用合同收口/18-直连多跳统一Origin与HopContext接线合同.md)。
+
+### 13.12 邻居后继的本地热接纳（2026-10-18）
+
+实际Session围栏、Control/Data/App/中继/RX义务排空后，才接纳实际耐久ACTIVE后继及
+重新认证的live Capability；原槽替换并推进Handle代际，不清槽重建Root。C/Rust共用
+Capability父域原子替换及精确Route/Reverse退休，未完成RREP proof阻止历史退休。
+
+同Root恢复直连/三节点，独立Origin不因Hop换代重置。新MTU不继承旧值；reopen后旧
+本地Capability发布拒绝。完整自动Reauth/Capability/Node阶段机、C自动Root及全Root
+本地发布/多Bearer迁移仍待，不把本地热接纳等同于整协议完成。
+详见[共同合同19](UCN_v6_C_Rust共用合同收口/19-邻居围栏真实排空与耐久后继Capability热交接合同.md)。

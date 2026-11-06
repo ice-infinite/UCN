@@ -371,6 +371,43 @@ pub struct BindingHandle {
 }
 
 /// 固定容量 Identity Owner。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RealmAuthorityView {
+    runtime: u32,
+    owner: u32,
+    epoch: AuthorityEpoch,
+    deadline: u64,
+    checked_at: u64,
+}
+impl RealmAuthorityView {
+    /// Verified Authority epoch; 已验证Authority Epoch。
+    #[must_use]
+    pub const fn epoch(self) -> AuthorityEpoch {
+        self.epoch
+    }
+    /// Issuing Runtime; 签发Runtime。
+    #[must_use]
+    pub const fn runtime(self) -> u32 {
+        self.runtime
+    }
+    /// Issuing Identity Owner; `签发IdentityOwner`。
+    #[must_use]
+    pub const fn owner(self) -> u32 {
+        self.owner
+    }
+    /// Local half-open lease deadline; 本地半开租约。
+    #[must_use]
+    pub const fn deadline(self) -> u64 {
+        self.deadline
+    }
+    /// Time of current Owner verification; 当前Owner核对时刻。
+    #[must_use]
+    pub const fn checked_at(self) -> u64 {
+        self.checked_at
+    }
+}
+
+/// Fixed-capacity Identity state Owner; `固定容量Identity状态Owner`。
 pub struct IdentityOwner<'a, const BINDINGS: usize> {
     config: IdentityConfig<'a>,
     next_operation_id: u32,
@@ -389,6 +426,12 @@ pub type LiteIdentityOwner<'a> = IdentityOwner<'a, 8>;
 pub type FullIdentityOwner<'a> = IdentityOwner<'a, 16>;
 
 impl<'a, const BINDINGS: usize> IdentityOwner<'a, BINDINGS> {
+    /// Actual shared callback gate for Coordinator identity checks, not a permission grant.
+    /// 为 Coordinator 提供实际共用回调门身份，不授予权限。
+    #[must_use]
+    pub const fn callback_gate(&self) -> &'a CallbackGate {
+        self.config.provider_gate
+    }
     /// 建立空 Identity Owner。
     ///
     /// # Errors
@@ -745,6 +788,21 @@ impl<'a, const BINDINGS: usize> IdentityOwner<'a, BINDINGS> {
             return Err(Error::Access);
         }
         self.authority.epoch.ok_or(Error::State)
+    }
+
+    /// Issue a private-field fresh Authority fact for Coordinator-routed consumers.
+    /// `为Coordinator路由消费者签发字段私有的新鲜Authority事实`。
+    /// # Errors
+    /// Unpublished, fenced or expired Authority cannot issue a fact.
+    pub fn authority_view(&self, now_us: u64) -> Result<RealmAuthorityView> {
+        let epoch = self.authority_get(now_us)?;
+        Ok(RealmAuthorityView {
+            runtime: self.config.runtime_instance,
+            owner: self.config.owner_instance,
+            epoch,
+            deadline: self.authority.local_deadline_us,
+            checked_at: now_us,
+        })
     }
 
     /// 验证 Binding Certificate 并形成 persist-before-publish requirement。

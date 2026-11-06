@@ -5,7 +5,20 @@
 #include <limits.h>
 #include <string.h>
 
-#define UCN_I_OWNER_MAILBOX_MAGIC UINT32_C(0x55434D42)
+/* EN: Header/state predicates are deliberately forced inline.  They are
+ * short pure checks used below an already bounded mailbox operation; keeping
+ * separate debug frames made the Nano production call chain exceed its task
+ * stack budget without preserving any additional failure boundary.
+ * 中文：Header/State predicate 是短小纯校验，且只在有界 Mailbox 操作内
+ * 使用，因此强制内联。若在 Debug 中保留独立栈帧，会让 Nano 生产调用链
+ * 超出任务栈预算，却不会增加任何失败隔离能力。 */
+#if defined(_MSC_VER)
+#define UCN_I_OWNER_ALWAYS_INLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+#define UCN_I_OWNER_ALWAYS_INLINE inline __attribute__((always_inline))
+#else
+#define UCN_I_OWNER_ALWAYS_INLINE inline
+#endif
 
 static bool bytes_are_zero(const void *object, size_t size)
 {
@@ -20,7 +33,8 @@ static bool bytes_are_zero(const void *object, size_t size)
     return true;
 }
 
-static bool lock_ops_are_valid(const ucn_i_lock_ops_t *lock)
+static UCN_I_OWNER_ALWAYS_INLINE bool lock_ops_are_valid(
+    const ucn_i_lock_ops_t *lock)
 {
     return lock != NULL && lock->struct_size == sizeof(*lock) &&
            lock->api_version == UCN_I_LOCK_OPS_VERSION &&
@@ -195,7 +209,8 @@ ucn_result_t ucn_i_callback_gate_destroy(ucn_i_callback_gate_t *gate)
     return UCN_OK;
 }
 
-static bool owner_mailbox_header_is_valid(const ucn_i_owner_mailbox_t *mailbox)
+static UCN_I_OWNER_ALWAYS_INLINE bool owner_mailbox_header_is_valid(
+    const ucn_i_owner_mailbox_t *mailbox)
 {
     return mailbox != NULL && mailbox->magic == UCN_I_OWNER_MAILBOX_MAGIC &&
            mailbox->schema == UCN_I_OWNER_MAILBOX_SCHEMA &&
@@ -204,7 +219,8 @@ static bool owner_mailbox_header_is_valid(const ucn_i_owner_mailbox_t *mailbox)
            lock_ops_are_valid(&mailbox->lock);
 }
 
-static bool owner_mailbox_is_valid_locked(const ucn_i_owner_mailbox_t *mailbox)
+static UCN_I_OWNER_ALWAYS_INLINE bool owner_mailbox_is_valid_locked(
+    const ucn_i_owner_mailbox_t *mailbox)
 {
     uint8_t index;
     uint32_t valid_mask;
@@ -259,7 +275,6 @@ ucn_result_t ucn_i_owner_mailbox_publish(
     ucn_i_owner_mailbox_t *mailbox,
     ucn_i_owner_work_class_t work_class)
 {
-    uint32_t bit;
     ucn_result_t result;
 
     if (!owner_mailbox_header_is_valid(mailbox) ||
@@ -274,13 +289,9 @@ ucn_result_t ucn_i_owner_mailbox_publish(
         mailbox->lock.leave(mailbox->lock.context);
         return UCN_ERR_STATE;
     }
-    bit = UINT32_C(1) << work_class;
-    mailbox->pending_mask |= bit;
-    if (mailbox->occurrences[work_class] != UINT32_MAX) {
-        ++mailbox->occurrences[work_class];
-    }
+    result = ucn_i_owner_mailbox_publish_locked(mailbox, work_class);
     mailbox->lock.leave(mailbox->lock.context);
-    return UCN_OK;
+    return result;
 }
 
 ucn_result_t ucn_i_owner_mailbox_take(

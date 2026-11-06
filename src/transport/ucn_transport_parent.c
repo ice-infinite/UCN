@@ -1,10 +1,45 @@
 #include "transport/ucn_transport_private.h"
 
 #include "internal/ucn_checked.h"
+#include "internal/ucn_control_wire.h"
 
 #include <string.h>
 
 #define UCN_I_TRANSPORT_PARENT_MAGIC UINT32_C(0x55435054)
+
+/* EN: Pure bounded Transport phase policy, not an authenticated or physical proof.
+ * 中文：纯有界Transport阶段规则，不是认证或物理提交证明。 */
+ucn_result_t ucn_i_parent_phase_transition(
+    bool source, uint8_t phase, uint16_t opcode, uint8_t disposition,
+    uint8_t sent, uint8_t *phase_out, uint8_t *reply_disposition_out)
+{
+    uint8_t next, reply = 0U;
+    if (phase_out == NULL || reply_disposition_out == NULL ||
+        ucn_i_ranges_overlap(phase_out, 1U, reply_disposition_out, 1U)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (phase > 4U || sent > 2U ||
+        (source && (phase == 0U || phase == 2U)) ||
+        (!source && (phase == 1U || phase == 3U))) { return UCN_ERR_STATE; }
+    if (opcode == UCN_I_OPCODE_TRANSPORT_PARENT_ABORT && disposition != 0U) {
+        next = 5U;
+    } else if (!source && (phase == 0U || phase == 2U) &&
+               opcode == UCN_I_OPCODE_TRANSPORT_PARENT_PREPARE && disposition == 0U) {
+        next = 2U; reply = 1U;
+    } else if (!source && (phase == 2U || phase == 4U) &&
+               opcode == UCN_I_OPCODE_TRANSPORT_PARENT_COMMIT && disposition == 0U) {
+        next = 4U; reply = 2U;
+    } else if (!source && phase == 4U &&
+               opcode == UCN_I_OPCODE_TRANSPORT_PARENT_PREPARE && disposition == 0U) {
+        next = 4U; reply = 2U;
+    } else if (source && phase == 1U && opcode == UCN_I_OPCODE_TRANSPORT_PARENT_ACCEPT &&
+               disposition == 1U && sent == 1U) { next = 3U;
+    } else if (source && phase == 3U && opcode == UCN_I_OPCODE_TRANSPORT_PARENT_ACCEPT &&
+               disposition == 2U && sent == 2U) { next = 4U;
+    } else { return UCN_ERR_STATE; }
+    *phase_out = next; *reply_disposition_out = reply;
+    return UCN_OK;
+}
 
 static void put16(uint8_t *bytes, size_t offset, uint16_t value)
 {
@@ -158,6 +193,24 @@ ucn_result_t ucn_i_transport_parent_record_encode(
     put64(body, 80U, foundation_transaction_id);
     memcpy(output, body, sizeof(body));
     return UCN_OK;
+}
+
+/* EN: Hash only canonical Parent identity, excluding allocation progress.
+ * 中文：仅摘要规范Parent身份，不包含分配进度。 */
+ucn_result_t ucn_i_transport_parent_context_digest(
+    const ucn_i_transport_parent_context_t *context,
+    uint8_t digest_out[16], ucn_i_sha256_workspace_t *workspace)
+{
+    uint8_t body[UCN_I_TRANSPORT_PARENT_RECORD_BYTES];
+    ucn_result_t result;
+    if (context == NULL || digest_out == NULL || workspace == NULL ||
+        ucn_i_ranges_overlap(context, sizeof(*context), digest_out, 16U) ||
+        ucn_i_ranges_overlap(context, sizeof(*context), workspace, sizeof(*workspace))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = ucn_i_transport_parent_record_encode(context, 0U, 1U, body);
+    if (result != UCN_OK) { return result; }
+    return UCN_I_DIGEST_CANONICAL("UCN6-C1-PARENT-V1", body, 76U, digest_out, workspace);
 }
 
 ucn_result_t ucn_i_transport_parent_record_decode(

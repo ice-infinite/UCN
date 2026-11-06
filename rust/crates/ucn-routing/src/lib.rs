@@ -7,7 +7,11 @@
 //! SoftRoute；这些本地提示只能用于 C1，普通业务流量不会延长其租期。
 
 mod codec;
+mod control;
+mod fragment;
+pub use fragment::{RouteFragment, route_fragment_count};
 mod owner;
+pub use control::{DISCOVERY_KEY_BYTES, ROUTE_REPLY_BYTES, ROUTE_REQUEST_BYTES, RouteControl};
 
 pub use codec::{
     RERR_PAYLOAD_BYTES, RREP_PAYLOAD_BYTES, RREQ_PAYLOAD_BYTES, RerrPayload, RerrReason,

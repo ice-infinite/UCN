@@ -372,6 +372,59 @@ C0 Transaction ID 只在对应 Source Binding/Bootstrap nonce 域内有意义。
 - 旧 Binding Generation：拒绝；
 - 未持久化完成：不能发送承诺帧。
 
+### 4.5 Capability/Neighbor 控制 Body 冻结
+
+Capability 发现只在已经认证的逐跳 Session 上运行，不能使用 `O0`，也不能被中继转发。六类消息都
+使用 `Q2 + Payload Kind=Control + HopLimit=1`；HELLO/KEEPALIVE 为 Best Effort One-Way，其余消息为
+Reliable。`SELECT` 是 Request，`ACK` 是 Result，`ADVERTISE/REVOKE` 是 One-Way。错误 Role、Delivery、
+长度或 Session/Link Generation 必须在进入 Capability Owner 前拒绝。
+
+| Opcode | Body | 字节数 | 作用 |
+| --- | --- | ---: | --- |
+| `NEIGHBOR_HELLO` | Capability Summary | 24 | 建邻时声明当前能力摘要 |
+| `NEIGHBOR_KEEPALIVE` | Capability Summary | 24 | 复核当前能力摘要，不携带完整 Record |
+| `CAPABILITY_ADVERTISE` | Capability Record | 68 | 发布完整能力事实 |
+| `CAPABILITY_SELECT` | Profile Select | 59 | 请求双方使用精确交集 Profile |
+| `CAPABILITY_ACK` | Profile Select + Transcript Digest | 75 | 精确确认 Select 与协商 transcript |
+| `CAPABILITY_REVOKE` | Capability Query | 20 | 精确撤销当前 Session 下已缓存的 generation/digest |
+
+Capability Summary：
+
+| Offset | 字段 | 长度 |
+| ---: | --- | ---: |
+| 0 | Capability Generation | 4 B |
+| 4 | Link Instance Generation | 4 B |
+| 8 | Capability Digest | 16 B |
+
+Capability Query：
+
+| Offset | 字段 | 长度 |
+| ---: | --- | ---: |
+| 0 | Requested/Revoked Capability Generation | 4 B |
+| 4 | Known Capability Digest | 16 B |
+
+Profile Select：
+
+| Offset | 字段 | 长度 |
+| ---: | --- | ---: |
+| 0 | Local Capability Generation | 4 B |
+| 4 | Peer Capability Generation | 4 B |
+| 8 | Selected Feature Bits | 4 B |
+| 12 | Selected Hop Suite Bits | 4 B |
+| 16 | Selected E2E Suite Bits | 4 B |
+| 20 | Maximum RX Window | 2 B |
+| 22 | Maximum Concurrent Transfers | 2 B |
+| 24 | Selected Realtime Mode Bits | 2 B |
+| 26 | Maximum Message Class | 1 B |
+| 27 | Local Capability Digest | 16 B |
+| 43 | Peer Capability Digest | 16 B |
+
+Profile Ack 在上述 59 B 后追加 16 B Transcript Digest。所有整数为 big-endian。Select 接收方必须从
+当前已认证 Capability Cache、自己的当前 Record 和本地 Requirements 重新计算完整 Select，并逐字段
+精确比较；不能只比较 digest 或接受发送方自行缩减后的 Profile。Ack 必须精确匹配尚未退休的 Select 和
+Transcript Digest。Revoke 只有在 `{Session, Link Generation, Capability Generation, Digest}` 全部
+匹配时才删除缓存；错代际或错 digest 零状态拒绝。
+
 ## 5. C1 STATELESS：无 Flow 的普通寻址数据
 
 ### 5.1 作用
@@ -875,9 +928,10 @@ Header 不承载所有功能。功能特有字段放在 Payload 开头，并由 
 | Diagnostic | Header 内既有 `Protocol Opcode:u16` | Payload offset 0 编码 `Diagnostic Code:u16` | 线上非零 u16；只能观察，任何副作用必须改为 Control |
 | Transfer | Setup/ACK/Abort/Receipt 使用 C0 Header Opcode | C1/C2/C4 使用 11.4/11.5 固定 `Fragment Index/Kind` 位置；C3/C5 禁止 | 由 C0 Opcode 或固定 FRAGMENT/SACK subtype 规范化 |
 
-对 C1/C2/C4/C5 的 Control/Diagnostic，2 B code 之后才依次出现条件 Operation Envelope、功能
-Envelope 和业务/控制体；C0 则从 Payload offset 0 直接进入条件 Operation Envelope 或 Opcode
-body，因为 Opcode 已在 C0 Header。Parser 必须先按 Contract+Kind 得到这一固定位置，再查
+对 C1/C2/C4/C5 的 Control/Diagnostic，2 B code 之后出现该 Opcode Registry 冻结的功能
+Envelope 和控制体；协议 Control/Diagnostic 不额外叠加应用 Operation Envelope，按 Opcode
+自身的键关联。C0 从 Payload offset 0 直接进入 Opcode body，因为 Opcode 已在 C0 Header。
+应用 Data RPC 才按 Role 携带条件 Operation Envelope。Parser 必须先按 Contract+Kind 得到这一固定位置，再查
 registry、认证和 ACL；未知/零 code、C3 Control、C3/C5 Transfer、重复在 body 中放第二个“真实
 Opcode”都在状态写入前拒绝。中继可只按允许的 Contract 转发密文，但终止节点必须把线上 code
 规范化为同一个 `protocol_operation_code`，外层 Hop ACL 与目标 E2E ACL 不得得出两个 Opcode。
@@ -893,8 +947,10 @@ Payload 全部是业务数据。最常见的传感器和状态发布不会携带
 
 ### 11.2 Request/Result/Error Envelope
 
-只在 Interaction 不是 One Way 且 Payload Kind 不是 Transfer 时存在；Transfer 的相同业务关联
-改由 11.3 Setup 承载：
+只在应用 Data 的 Interaction 不是 One Way 时存在；协议 Control/Diagnostic 使用各自
+Registry 的精确事务正文，不重复叠加应用 Envelope。Transfer 的相同业务关联改由
+11.3 Setup 承载。两种语言的共同收口规则详见
+[C/Rust共用合同](UCN_v6_C_Rust共用合同收口/README.md)：
 
 | 字段 | 长度 | 说明 |
 | --- | ---: | --- |
@@ -987,11 +1043,39 @@ deadline 和 receipt，绝不能刷新完整寿命。
 完全相同 Setup 幂等返回同一 ACK；同事务键不同字段冲突拒绝。Abort 只能释放尚未产生交付
 副作用且精确匹配的 Setup；终态由 receipt 有界保留。
 
-ACK/Abort/Receipt 均携带
-`{Parent Kind,Parent ID,Parent Generation,Transfer ID,Service ID,Setup Digest}`；
-ACK 再携带 accepted Fragment Budget/Credit，Abort 携带固定 Reason，Terminal Receipt 携带
-固定 Terminal State/Result Code。它们的精确 offset、长度、Opcode 数值和 Golden Bytes 必须
-在 Wire Registry 评审中一次冻结；在此之前这些语义只能用于离线状态机，不能进入生产 Codec。
+ACK/Abort/Receipt 均携带以下固定 29 B `TransferKeyBody`，它是 Setup 的完整不可变短引用，
+禁止只凭 `Transfer ID`、当前槽位或可变路由状态提交结果：
+
+| Offset | 字段 | 长度 | 约束 |
+| ---: | --- | ---: | --- |
+| 0 | Parent Context Kind | 1 B | `C1_TRANSPORT=1` 或 `FLOW=2` |
+| 1 | Parent Context ID | 2 B | C1 为 0；Flow 非零 |
+| 3 | Parent Generation | 4 B | 非零，精确匹配 Setup |
+| 7 | Transfer ID | 4 B | 非零，精确匹配 Setup |
+| 11 | Service ID | 2 B | 非零，精确匹配 Setup |
+| 13 | Setup Digest | 16 B | `Digest128(canonical TRANSFER_SETUP Body)`，非全零 |
+
+响应 Body 在该前缀后固定扩展：
+
+| Opcode | Offset 29 后的字段 | 总长度 |
+| --- | --- | ---: |
+| `TRANSFER_SETUP_ACK (0x0421)` | Accepted Fragment Budget `u16`、Receive Credit `u16` | 33 B |
+| `TRANSFER_ABORT (0x0422)` | Reason `u8`、Reserved Zero `3 B` | 33 B |
+| `TRANSFER_TERMINAL_RECEIPT (0x0423)` | Terminal State `u8`、Result Code `u16` | 32 B |
+
+所有整数为大端。ACK 的 Accepted Fragment Budget 必须非零且不得大于 Setup 值；Credit 不得
+超过冻结窗口。Abort Reason 与 Terminal State 的 0 值保留并拒绝。Receipt 的 Result Code 是
+业务/Transport 的规范结果值，不能拿本地 `enum` 内存布局直接上 Wire。三类 Decoder 都要求
+精确长度、保留字节为零、失败零写回。
+
+冻结 Golden 前缀为：
+
+```text
+01 0000 01020304 05060708 1234 000102030405060708090A0B0C0D0E0F
+```
+
+对应 Setup ACK 后缀 `0102 0304`；Abort 后缀 `07 000000`；Terminal 后缀
+`02 5678`。`TRANSFER_SETUP` 使用上一表冻结的 43/52/54 B Body，不重复附加该前缀。
 
 C1 的 Setup 状态属于 C1 Transport Parent 表；C2/C4 的 Setup 状态属于该次 Transfer，不得
 把总长度、Operation 或可变重组进度写回长期 Flow Context。Flow 只提供冻结的父代际、MTU、
@@ -1205,8 +1289,82 @@ Context Digest
 
 任一字段不匹配不得写 Route、删除 Candidate 或增加成功统计。精确重复 Stage/Commit 必须
 返回相同 receipt，不能重复占槽或推进 Generation；相同事务键携带不同字段属于冲突并
-fail-closed。以上五个符号 Opcode 是 C0 Registry 的必备语义，具体数值和 Golden Byte Offset
-必须在 Wire 冻结阶段登记；登记完成前 Route 激活逻辑仍不得标记 `FROZEN FOR IMPLEMENTATION`。
+fail-closed。各 Opcode 的数值、Body 和 Golden Byte Offset 由下节统一冻结；不得再由各 Owner
+私自增加同义字段或改变宽度。
+
+#### 12.2.1 Advanced Flow C0 Body 冻结
+
+C0 Header 已经认证 `Realm、Source/Destination Address、双方 Binding Generation、Transaction
+ID、Opcode`，Origin Security Session 又精确绑定 Origin Session Generation。因此 Body 不重复
+携带这些字段。所有多字节整数使用大端；所有保留字节必须为零；输出缓冲区别名、错误长度、
+零值、保留终值和字段冲突必须在首次写入前拒绝。
+
+`PathKeyBody` 固定为 28 B：
+
+| Offset | 字段 | 长度 | 约束 |
+| ---: | --- | ---: | --- |
+| 0 | Proposal Digest | 16 B | 非全零；精确绑定完整 Proposal |
+| 16 | Candidate ID | 2 B | `1..65534` |
+| 18 | Route Generation | 4 B | `1..UINT32_MAX`，终值可用但不得再分配 |
+| 22 | Reverse Label | 2 B | `1..65534` |
+| 24 | Forward Label | 2 B | `1..65534`，且不得等于 Reverse Label |
+| 26 | Path Profile ID | 2 B | `1..65534` |
+
+`PATH_PROBE (0x0316)` 固定为 44 B：前 28 B 为 `PathKeyBody`，随后为：
+
+| Offset | 字段 | 长度 | 约束 |
+| ---: | --- | ---: | --- |
+| 28 | Context ID | 2 B | `1..65534` |
+| 30 | Payload Budget | 2 B | 非零且不大于 Path Frame MTU |
+| 32 | Path Frame MTU | 2 B | 非零 |
+| 34 | Capability Bits | 2 B | 精确快照，不得由 Relay 扩大 |
+| 36 | Flow Expires At | 8 B | 绝对单调时钟截止期，接收时必须仍在有效期内 |
+
+`PATH_PROBE_ACK (0x0317)` 固定为 30 B：
+
+| Offset | 字段 | 长度 |
+| ---: | --- | ---: |
+| 0 | Proposal Digest | 16 B |
+| 16 | Candidate ID | 2 B |
+| 18 | Route Generation | 4 B |
+| 22 | Measured RTT us | 4 B |
+| 26 | Path Frame MTU | 2 B |
+| 28 | Capability Bits | 2 B |
+
+`PATH_ACTIVATE_STAGE (0x0310)`、`PATH_STAGE_ACK (0x0311)`、
+`PATH_ACTIVATE_COMMIT (0x0312)`、`PATH_COMMIT_ACK (0x0313)` 均精确使用 28 B
+`PathKeyBody`。`PATH_ACTIVATE_ABORT (0x0314)` 与 `PATH_TERMINAL_RECEIPT (0x0315)`
+固定为 30 B：前 28 B 为 `PathKeyBody`，Offset 28 为 `phase_or_reason`，Offset 29 为零。
+Abort reason 的合法值为 `1..4`（Policy、Capacity、Timeout、Conflict）；Terminal phase 的合法值
+为 `STAGED=1、ACTIVE=2、ABORTED=3、IN_DOUBT=4`。未知值必须拒绝，不能按成功解释。
+
+固定 Profile：Traffic Class 为 Q0，Delivery 为 Reliable，Payload Kind 为 Control，Origin Security
+必须为 **O1 Auth-only**，不得使用 O2。原因是每个 Relay 都必须读取 Path Body、按当前逐跳 Session
+和本地容量安装自己的 Staged Label；O2 会把 Body 只暴露给最终目标，无法安全完成逐跳安装。
+这不降低后续业务数据的保密等级：Flow 建立成功后的 C4 Data 仍可使用 O2。Probe、Stage、Commit
+的 Interaction 为 Request；对应 ACK 与 Terminal Receipt 为 Result；Abort 为 Error。H0 只允许
+一跳，跨节点路径必须使用 H1，且 `hop_limit` 每跳递减。
+
+Relay 对 Path Body 的写权限来自当前已认证 Hop Session，而不是它无法验证的端到端 Origin Tag。
+因此每条 Staged/Active Label 必须额外绑定 `{ingress link id, ingress link generation, upstream hop
+session generation}`；同一 Body 从另一 Link/Session 重放不得命中。资源配额也归属当前上游 Peer，
+不能只按 C0 Header 中的逻辑 Source 计费。最终 Target 仍必须验证 Origin O1 Tag；Relay 只允许建立
+本 Link 的有界转发表项，不能据此执行 Endpoint、Service、Operation 或 Authority 副作用。
+
+最小 Golden（Body，不含 C0 Header/Tag）：
+
+```text
+PathKeyBody:
+  ProposalDigest = 000102030405060708090A0B0C0D0E0F
+  CandidateID = 0x1234, RouteGeneration = 0x01020304
+  ReverseLabel = 0x1122, ForwardLabel = 0x3344, PathProfileID = 0x5566
+Bytes:
+  000102030405060708090A0B0C0D0E0F123401020304112233445566
+```
+
+Codec 只证明字段的无歧义表示，不代表路径已被 Probe/Stage/Commit。Owner 必须再次精确校验 C0
+Header、当前 Session/Capability/Route、完整事务键、当前 phase 和 deadline，成功发布状态后才能
+把 Replay 标记为业务完成。
 
 逐跳发布顺序固定为：`STAGE_PENDING → STAGED → COMMITTING → ACTIVE`。Relay 不得把“本地
 槽已预留”冒充“下游链已 Staged”，也不得在下游 Commit ACK 前把本地 Route 暴露为 Active。

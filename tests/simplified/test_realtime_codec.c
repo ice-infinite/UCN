@@ -156,6 +156,80 @@ static int test_uncertainty(void)
     return 0;
 }
 
+static int test_time_control_codecs(void)
+{
+    static const uint8_t key_golden[UCN_I_REALTIME_TIME_KEY_BYTES] = {
+        0x12U, 0x34U, 0x00U, 0x00U,
+        0x01U, 0x02U, 0x03U, 0x04U,
+        0x05U, 0x06U, 0x07U, 0x08U
+    };
+    ucn_i_realtime_time_key_t key;
+    ucn_i_realtime_time_key_t decoded_key;
+    ucn_i_realtime_time_follow_up_t follow_up;
+    ucn_i_realtime_time_follow_up_t decoded_follow_up;
+    ucn_i_realtime_time_delay_response_t response;
+    ucn_i_realtime_time_delay_response_t decoded_response;
+    ucn_i_realtime_time_abort_t abort;
+    ucn_i_realtime_time_abort_t decoded_abort;
+    uint8_t key_bytes[UCN_I_REALTIME_TIME_KEY_BYTES];
+    uint8_t follow_up_bytes[UCN_I_REALTIME_TIME_FOLLOW_UP_BYTES];
+    uint8_t response_bytes[UCN_I_REALTIME_TIME_DELAY_RESPONSE_BYTES];
+    uint8_t abort_bytes[UCN_I_REALTIME_TIME_SYNC_ABORT_BYTES];
+
+    memset(&key, 0, sizeof(key));
+    key.clock_domain_id = UINT16_C(0x1234);
+    key.domain_generation = UINT32_C(0x01020304);
+    key.sync_sequence = UINT32_C(0x05060708);
+    CHECK(ucn_i_realtime_time_key_encode(&key, key_bytes) == UCN_OK);
+    CHECK(memcmp(key_bytes, key_golden, sizeof(key_golden)) == 0);
+    memset(&decoded_key, 0, sizeof(decoded_key));
+    CHECK(ucn_i_realtime_time_key_decode(key_bytes, &decoded_key) == UCN_OK);
+    CHECK(memcmp(&decoded_key, &key, sizeof(key)) == 0);
+
+    memset(&follow_up, 0, sizeof(follow_up));
+    follow_up.key = key;
+    follow_up.t1_master_tx_us = UINT64_C(0x1112131415161718);
+    follow_up.t1_uncertainty_us = UINT32_C(0x01020304);
+    CHECK(ucn_i_realtime_time_follow_up_encode(
+              &follow_up, follow_up_bytes) == UCN_OK);
+    CHECK(follow_up_bytes[12] == 0x11U && follow_up_bytes[19] == 0x18U &&
+          follow_up_bytes[20] == 0x01U && follow_up_bytes[23] == 0x04U);
+    memset(&decoded_follow_up, 0, sizeof(decoded_follow_up));
+    CHECK(ucn_i_realtime_time_follow_up_decode(
+              follow_up_bytes, &decoded_follow_up) == UCN_OK);
+    CHECK(memcmp(&decoded_follow_up, &follow_up,
+                 sizeof(follow_up)) == 0);
+
+    memset(&response, 0, sizeof(response));
+    response.key = key;
+    response.t4_master_rx_us = UINT64_C(0x2122232425262728);
+    response.t4_uncertainty_us = UINT32_C(0x05060708);
+    CHECK(ucn_i_realtime_time_delay_response_encode(
+              &response, response_bytes) == UCN_OK);
+    memset(&decoded_response, 0, sizeof(decoded_response));
+    CHECK(ucn_i_realtime_time_delay_response_decode(
+              response_bytes, &decoded_response) == UCN_OK);
+    CHECK(memcmp(&decoded_response, &response, sizeof(response)) == 0);
+
+    memset(&abort, 0, sizeof(abort));
+    abort.key = key;
+    abort.reason = UCN_I_REALTIME_ABORT_TIMEOUT;
+    CHECK(ucn_i_realtime_time_abort_encode(&abort, abort_bytes) == UCN_OK);
+    CHECK(abort_bytes[12] == UCN_I_REALTIME_ABORT_TIMEOUT &&
+          abort_bytes[13] == 0U && abort_bytes[15] == 0U);
+    memset(&decoded_abort, 0, sizeof(decoded_abort));
+    CHECK(ucn_i_realtime_time_abort_decode(abort_bytes,
+                                            &decoded_abort) == UCN_OK);
+    CHECK(memcmp(&decoded_abort, &abort, sizeof(abort)) == 0);
+    abort_bytes[13] = 1U;
+    memset(&decoded_abort, 0xA5, sizeof(decoded_abort));
+    CHECK(ucn_i_realtime_time_abort_decode(abort_bytes,
+                                            &decoded_abort) ==
+          UCN_ERR_MALFORMED);
+    CHECK(((const uint8_t *)&decoded_abort)[0] == 0xA5U);
+    return 0;
+}
+
 static int test_owner_lifecycle(void)
 {
     ucn_i_realtime_owner_t owner;
@@ -193,6 +267,7 @@ int main(void)
     int result = test_golden();
     if (result == 0) result = test_negative_no_write();
     if (result == 0) result = test_uncertainty();
+    if (result == 0) result = test_time_control_codecs();
     if (result == 0) result = test_owner_lifecycle();
     if (result != 0) fprintf(stderr, "realtime codec failed: %d\n", result);
     return result;

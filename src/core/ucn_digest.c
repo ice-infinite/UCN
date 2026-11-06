@@ -50,10 +50,8 @@ static void write_be32(uint8_t *bytes, uint32_t value)
     bytes[3] = (uint8_t)value;
 }
 
-static void compress(ucn_i_sha256_workspace_t *workspace,
-                     const uint8_t block[64])
+static void compress(ucn_i_sha256_workspace_t *workspace)
 {
-    uint32_t schedule[16];
     uint32_t a;
     uint32_t b;
     uint32_t c;
@@ -65,7 +63,7 @@ static void compress(ucn_i_sha256_workspace_t *workspace,
     uint8_t index;
 
     for (index = 0U; index < 16U; ++index) {
-        schedule[index] = read_be32(&block[(size_t)index * 4U]);
+        workspace->storage.schedule[index] = read_be32(&workspace->storage.block[(size_t)index * 4U]);
     }
     a = workspace->state[0];
     b = workspace->state[1];
@@ -87,18 +85,18 @@ static void compress(ucn_i_sha256_workspace_t *workspace,
         uint32_t temp2;
 
         if (index < 16U) {
-            word = schedule[index];
+            word = workspace->storage.schedule[index];
         } else {
-            uint32_t left = schedule[(index + 1U) & 15U];
-            uint32_t right = schedule[(index + 14U) & 15U];
+            uint32_t left = workspace->storage.schedule[(index + 1U) & 15U];
+            uint32_t right = workspace->storage.schedule[(index + 14U) & 15U];
             uint32_t extend0 = rotate_right(left, 7U) ^
                                rotate_right(left, 18U) ^ (left >> 3U);
             uint32_t extend1 = rotate_right(right, 17U) ^
                                rotate_right(right, 19U) ^ (right >> 10U);
 
-            word = schedule[index & 15U] + extend0 +
-                   schedule[(index + 9U) & 15U] + extend1;
-            schedule[index & 15U] = word;
+            word = workspace->storage.schedule[index & 15U] + extend0 +
+                   workspace->storage.schedule[(index + 9U) & 15U] + extend1;
+            workspace->storage.schedule[index & 15U] = word;
         }
         temp1 = h + s1 + choose + sha256_k[index] + word;
         temp2 = s0 + majority;
@@ -145,62 +143,156 @@ static void update(ucn_i_sha256_workspace_t *workspace,
         size_t available = 64U - workspace->block_bytes;
         size_t take = length - offset < available ? length - offset : available;
 
-        memcpy(&workspace->block[workspace->block_bytes], &bytes[offset], take);
+        memcpy(&workspace->storage.block[workspace->block_bytes], &bytes[offset], take);
         workspace->block_bytes = (uint8_t)(workspace->block_bytes + take);
         workspace->total_bytes += take;
         offset += take;
         if (workspace->block_bytes == 64U) {
-            compress(workspace, workspace->block);
+            compress(workspace);
             workspace->block_bytes = 0U;
         }
     }
 }
 
 static void finalize(ucn_i_sha256_workspace_t *workspace,
-                     uint8_t digest_out[UCN_I_DIGEST128_BYTES])
+                     uint8_t *digest_out, size_t digest_bytes)
 {
     uint64_t total_bits = workspace->total_bytes * UINT64_C(8);
     uint8_t index;
 
-    workspace->block[workspace->block_bytes++] = UINT8_C(0x80);
+    workspace->storage.block[workspace->block_bytes++] = UINT8_C(0x80);
     if (workspace->block_bytes > 56U) {
-        memset(&workspace->block[workspace->block_bytes], 0,
+        memset(&workspace->storage.block[workspace->block_bytes], 0,
                64U - workspace->block_bytes);
-        compress(workspace, workspace->block);
+        compress(workspace);
         workspace->block_bytes = 0U;
     }
-    memset(&workspace->block[workspace->block_bytes], 0,
+    memset(&workspace->storage.block[workspace->block_bytes], 0,
            56U - workspace->block_bytes);
     for (index = 0U; index < 8U; ++index) {
-        workspace->block[63U - index] = (uint8_t)(total_bits >>
+        workspace->storage.block[63U - index] = (uint8_t)(total_bits >>
                                                    ((uint32_t)index * 8U));
     }
-    compress(workspace, workspace->block);
-    for (index = 0U; index < 4U; ++index) {
+    compress(workspace);
+    for (index = 0U; index < digest_bytes/4U; ++index) {
         write_be32(&digest_out[(size_t)index * 4U], workspace->state[index]);
     }
 }
 
-ucn_result_t ucn_i_sha256_128(
+ucn_result_t ucn_i_sha256_begin(ucn_i_sha256_workspace_t *workspace)
+{
+    if (workspace == NULL) return UCN_ERR_ARGUMENT;
+    initialize(workspace);
+    workspace->stream_active = 1U;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_sha256_append(ucn_i_sha256_workspace_t *workspace,
+                                const uint8_t *bytes, size_t length)
+{
+    if (workspace == NULL || (bytes == NULL && length != 0U) ||
+        ucn_i_ranges_overlap(workspace,sizeof(*workspace),bytes,length))
+        return UCN_ERR_ARGUMENT;
+    if (workspace->stream_active != 1U || workspace->block_bytes >= 64U ||
+        workspace->block_bytes != (workspace->total_bytes & UINT64_C(63)))
+        return UCN_ERR_STATE;
+    if (workspace->total_bytes > UINT64_MAX/8U ||
+        length > UINT64_MAX/8U - workspace->total_bytes)
+        return UCN_ERR_EXHAUSTED;
+    if (length != 0U) update(workspace,bytes,length);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_sha256_finish128(ucn_i_sha256_workspace_t *workspace,
+                                   uint8_t digest_out[16])
+{
+    if (workspace == NULL || digest_out == NULL ||
+        ucn_i_ranges_overlap(workspace,sizeof(*workspace),digest_out,16U))
+        return UCN_ERR_ARGUMENT;
+    if (workspace->stream_active != 1U || workspace->block_bytes >= 64U ||
+        workspace->block_bytes != (workspace->total_bytes & UINT64_C(63)) ||
+        workspace->total_bytes > UINT64_MAX/8U) return UCN_ERR_STATE;
+    finalize(workspace,digest_out,16U);
+    workspace->stream_active=0U;
+    return UCN_OK;
+}
+
+static bool digest_ranges_valid(
     const uint8_t *bytes,
     size_t length,
-    uint8_t digest_out[UCN_I_DIGEST128_BYTES],
+    uint8_t *digest_out, size_t digest_bytes,
     ucn_i_sha256_workspace_t *workspace)
 {
+    /* A 32-bit size_t cannot exceed SHA-256's 64-bit bit-count bound.
+     * 32位size_t天然小于该上界；64位平台仍须在读写前显式拒绝。 */
+#if SIZE_MAX > (UINT64_MAX / UINT64_C(8))
+    if (length > UINT64_MAX / UINT64_C(8)) return false;
+#endif
     if ((bytes == NULL && length != 0U) || digest_out == NULL ||
         workspace == NULL ||
         ucn_i_ranges_overlap(bytes, length, digest_out,
-                             UCN_I_DIGEST128_BYTES) ||
+                             digest_bytes) ||
         ucn_i_ranges_overlap(workspace, sizeof(*workspace), digest_out,
-                             UCN_I_DIGEST128_BYTES) ||
-        ucn_i_ranges_overlap(bytes, length, workspace, sizeof(*workspace)) ||
-        length > UINT64_MAX / UINT64_C(8)) {
+                             digest_bytes) ||
+        ucn_i_ranges_overlap(bytes, length, workspace, sizeof(*workspace))) {
+        return false;
+    }
+    return true;
+}
+
+ucn_result_t ucn_i_sha256_128(const uint8_t *bytes, size_t length,
+    uint8_t digest_out[UCN_I_DIGEST128_BYTES], ucn_i_sha256_workspace_t *workspace)
+{
+    if (!digest_ranges_valid(bytes, length, digest_out, 16U, workspace))
+        return UCN_ERR_ARGUMENT;
+    initialize(workspace);
+    if (length != 0U) update(workspace, bytes, length);
+    finalize(workspace, digest_out, 16U);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_sha256_256(const uint8_t *bytes, size_t length,
+    uint8_t digest_out[32], ucn_i_sha256_workspace_t *workspace)
+{
+    if (!digest_ranges_valid(bytes, length, digest_out, 32U, workspace))
+        return UCN_ERR_ARGUMENT;
+    initialize(workspace);
+    if (length != 0U) update(workspace, bytes, length);
+    finalize(workspace, digest_out, 32U);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_canonical_digest128(
+    const uint8_t *domain, size_t domain_bytes,
+    const uint8_t *bytes, size_t length,
+    uint8_t digest_out[UCN_I_DIGEST128_BYTES],
+    ucn_i_sha256_workspace_t *workspace)
+{
+    uint8_t index;
+    if (domain == NULL || domain_bytes == 0U || domain_bytes > 64U ||
+        (bytes == NULL && length != 0U) || length > UINT32_MAX ||
+        digest_out == NULL || workspace == NULL ||
+        ucn_i_ranges_overlap(domain, domain_bytes, digest_out, 16U) ||
+        ucn_i_ranges_overlap(bytes, length, digest_out, 16U) ||
+        ucn_i_ranges_overlap(workspace, sizeof(*workspace), digest_out, 16U) ||
+        ucn_i_ranges_overlap(domain, domain_bytes, workspace, sizeof(*workspace)) ||
+        ucn_i_ranges_overlap(bytes, length, workspace, sizeof(*workspace))) {
         return UCN_ERR_ARGUMENT;
     }
     initialize(workspace);
-    if (length != 0U) {
-        update(workspace, bytes, length);
+    update(workspace, domain, domain_bytes);
+    /* EN: Append the BE length directly; no escaped temporary-array address.
+     * 中文：长度前缀直接进入已初始化块，避免临时数组及其跨调用别名推断。 */
+    for (index = 0U; index < 4U; ++index) {
+        workspace->storage.block[workspace->block_bytes++] =
+            (uint8_t)((uint32_t)length >> ((3U - index) * 8U));
+        ++workspace->total_bytes;
+        if (workspace->block_bytes == 64U) {
+            compress(workspace);
+            workspace->block_bytes = 0U;
+        }
     }
-    finalize(workspace, digest_out);
+    if (length != 0U) update(workspace, bytes, length);
+    finalize(workspace, digest_out, 16U);
     return UCN_OK;
 }

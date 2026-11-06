@@ -2,7 +2,9 @@
 """Bound the longest statically visible synchronous call chain.
 
 GCC's ``-fcallgraph-info=su`` output supplies both the call graph and each
-function's static stack frame.  Provider/Driver callback internals are outside
+function's stack upper bound.  GCC's ``dynamic,bounded`` includes bounded
+argument-push adjustments; count its entire bound, never just a static part.
+Unbounded/unknown usage is rejected. Provider/Driver callback internals are outside
 the protocol archive and therefore stay in the product's separate stack
 budget; every statically visible protocol frame is included here.
 """
@@ -43,12 +45,14 @@ def main() -> int:
         text = path.read_text(encoding="utf-8", errors="replace")
         for match in NODE.finditer(text):
             title = match.group("title")
-            label = match.group("label").replace("\\\\", "/")
+            label = match.group("label").replace("\\\\", "/").replace("\\", "/")
             stack = STACK.search(match.group("label"))
             if not any(prefix in label for prefix in prefixes):
                 continue
-            if stack is None or stack.group("kind") != "static":
-                invalid.append(f"unknown or dynamic stack for {title}")
+            if stack is None or stack.group("kind") not in (
+                "static", "dynamic,bounded"
+            ):
+                invalid.append(f"unknown or unbounded stack for {title}")
                 continue
             value = int(stack.group("bytes"))
             previous = frames.get(title)

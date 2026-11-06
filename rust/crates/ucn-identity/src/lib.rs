@@ -21,6 +21,6 @@ pub use owner::{
     BINDING_ISSUE_OPERATION_KIND, BINDING_RECORD_BYTES, BINDING_RETIRE_OPERATION_KIND,
     BINDING_SCHEMA_ID, BINDING_SCHEMA_VERSION, BindingChallengeHandle, BindingHandle,
     FullIdentityOwner, IdentityConfig, IdentityDurabilityBase, IdentityDurabilityRequirement,
-    IdentityOwner, LiteIdentityOwner, NanoIdentityOwner, decode_authority_record,
-    decode_binding_record,
+    IdentityOwner, LiteIdentityOwner, NanoIdentityOwner, RealmAuthorityView,
+    decode_authority_record, decode_binding_record,
 };

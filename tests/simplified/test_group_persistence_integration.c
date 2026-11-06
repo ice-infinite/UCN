@@ -168,6 +168,7 @@ static ucn_i_group_context_config_t dynamic_group(void)
     config.security.slot = 1U;
     config.security.generation = 1U;
     config.security.valid = 1U;
+    config.security.exact_principal = 1U;
     memset(config.security.context_digest, 0xA5,
            sizeof(config.security.context_digest));
     config.members[0].address = 10U;

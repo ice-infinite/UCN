@@ -46,17 +46,6 @@ static uint32_t read_be32(const uint8_t *bytes)
            ((uint32_t)bytes[2] << 8U) | bytes[3];
 }
 
-static uint64_t read_be64(const uint8_t *bytes)
-{
-    uint64_t value = 0U;
-    uint8_t index;
-
-    for (index = 0U; index < 8U; ++index) {
-        value = (value << 8U) | bytes[index];
-    }
-    return value;
-}
-
 static void write_be16(uint8_t *bytes, uint16_t value)
 {
     bytes[0] = (uint8_t)(value >> 8U);
@@ -71,15 +60,6 @@ static void write_be32(uint8_t *bytes, uint32_t value)
     bytes[3] = (uint8_t)value;
 }
 
-static void write_be64(uint8_t *bytes, uint64_t value)
-{
-    uint8_t index;
-
-    for (index = 0U; index < 8U; ++index) {
-        bytes[7U - index] = (uint8_t)(value >> ((uint32_t)index * 8U));
-    }
-}
-
 static bool security_ref_valid(const ucn_i_group_security_ref_t *security)
 {
     if (security == NULL || security->valid > 1U ||
@@ -91,6 +71,33 @@ static bool security_ref_valid(const ucn_i_group_security_ref_t *security)
            security->generation != 0U && security->key_generation != 0U &&
            bytes_nonzero(security->context_digest,
                          sizeof(security->context_digest));
+}
+
+ucn_result_t ucn_i_group_allocator_record_encode(
+    const ucn_i_group_allocator_record_t *record, uint8_t output[16])
+{
+    if (record == NULL || output == NULL || record->realm_id == 0U ||
+        record->high_water == 0U || record->authority_generation == 0U ||
+        ucn_i_ranges_overlap(record, sizeof(*record), output, 16U)) return UCN_ERR_ARGUMENT;
+    memcpy(output, "GID1", 4U);
+    write_be32(output + 4U, record->realm_id);
+    write_be32(output + 8U, record->high_water);
+    write_be32(output + 12U, record->authority_generation);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_group_allocator_record_decode(
+    const uint8_t input[16], ucn_i_group_allocator_record_t *record_out)
+{
+    ucn_i_group_allocator_record_t record;
+    if (input == NULL || record_out == NULL ||
+        ucn_i_ranges_overlap(input, 16U, record_out, sizeof(*record_out))) return UCN_ERR_ARGUMENT;
+    if (memcmp(input, "GID1", 4U) != 0) return UCN_ERR_MALFORMED;
+    record.realm_id = read_be32(input + 4U); record.high_water = read_be32(input + 8U);
+    record.authority_generation = read_be32(input + 12U);
+    if (record.realm_id == 0U || record.high_water == 0U || record.authority_generation == 0U) return UCN_ERR_MALFORMED;
+    *record_out = record;
+    return UCN_OK;
 }
 
 static bool tree_ref_valid(const ucn_i_group_tree_ref_t *tree)
@@ -160,8 +167,9 @@ static bool handle_equal(ucn_handle_t left, ucn_handle_t right)
            left.reserved_zero == right.reserved_zero;
 }
 
-bool ucn_i_group_p_context_valid(
-    const ucn_i_group_context_config_t *config, bool pending_allowed)
+static bool context_valid(
+    const ucn_i_group_context_config_t *config, bool pending_allowed,
+    bool logical_only)
 {
     uint16_t total_weight = 0U;
     uint8_t left;
@@ -174,7 +182,8 @@ bool ucn_i_group_p_context_valid(
            config->group_generation == 1U)) ||
         config->group_generation == 0U || config->policy_generation == 0U ||
         config->member_generation == 0U || config->endpoint == 0U ||
-        config->opcode == 0U ||
+        config->endpoint == UINT16_MAX || config->opcode == 0U ||
+        config->opcode == UINT16_MAX ||
         (config->mode != UCN_I_GROUP_STATIC &&
          config->mode != UCN_I_GROUP_DYNAMIC) ||
         config->member_count == 0U ||
@@ -187,8 +196,8 @@ bool ucn_i_group_p_context_valid(
          UCN_I_GROUP_SCOPE_BIT(UCN_I_GROUP_SCOPE_LOCAL_ONLY)) == 0U ||
         config->secure_required > 1U || config->public_static > 1U ||
         config->reserved_zero != 0U ||
-        !security_ref_valid(&config->security) ||
-        !tree_ref_valid(&config->tree) ||
+        (!logical_only && !security_ref_valid(&config->security)) ||
+        (!logical_only && !tree_ref_valid(&config->tree)) ||
         (config->secure_required != 0U && config->security.valid == 0U) ||
         (config->mode == UCN_I_GROUP_DYNAMIC &&
          (config->public_static != 0U || config->security.valid == 0U)) ||
@@ -219,6 +228,12 @@ bool ucn_i_group_p_context_valid(
     }
     return config->quorum_weight != 0U &&
            config->quorum_weight <= total_weight;
+}
+
+bool ucn_i_group_p_context_valid(
+    const ucn_i_group_context_config_t *config, bool pending_allowed)
+{
+    return context_valid(config, pending_allowed, false);
 }
 
 static bool config_equal(const ucn_i_group_context_config_t *left,
@@ -526,6 +541,8 @@ ucn_result_t ucn_i_group_record_encode(
 
     if (!ucn_i_group_p_context_valid(config, false) || body_out == NULL ||
         config->mode != UCN_I_GROUP_DYNAMIC ||
+        config->secure_required != 1U ||
+        config->security.exact_principal != 1U ||
         (record_phase != UCN_I_GROUP_ACTIVE &&
          record_phase != UCN_I_GROUP_RETIRED) ||
         dynamic_id_high_water == 0U ||
@@ -533,6 +550,12 @@ ucn_result_t ucn_i_group_record_encode(
         ucn_i_ranges_overlap(config, sizeof(*config), body_out,
                              UCN_I_GROUP_RECORD_BYTES)) {
         return UCN_ERR_ARGUMENT;
+    }
+    for (index = 1U; index < config->member_count; ++index) {
+        if (memcmp(config->members[index - 1U].principal,
+                   config->members[index].principal, 16U) >= 0) {
+            return UCN_ERR_ARGUMENT;
+        }
     }
     memset(body_out, 0, UCN_I_GROUP_RECORD_BYTES);
     write_be16(&body_out[0], UCN_I_GROUP_RECORD_SCHEMA);
@@ -551,23 +574,13 @@ ucn_result_t ucn_i_group_record_encode(
     body_out[31] = config->allowed_scope_mask;
     body_out[32] = config->secure_required;
     body_out[33] = config->public_static;
-    write_be32(&body_out[36], config->security.runtime_instance);
-    write_be32(&body_out[40], config->security.key_generation);
-    write_be16(&body_out[44], config->security.owner_instance);
-    write_be16(&body_out[46], config->security.slot);
-    write_be16(&body_out[48], config->security.generation);
-    body_out[50] = config->security.valid;
-    body_out[51] = config->security.exact_principal;
-    memcpy(&body_out[52], config->security.context_digest,
+    body_out[34] = config->security.exact_principal;
+    body_out[35] = config->tree.valid;
+    write_be32(&body_out[36], config->security.key_generation);
+    write_be32(&body_out[40], config->tree.tree_generation);
+    write_be32(&body_out[44], dynamic_id_high_water);
+    memcpy(&body_out[48], config->security.context_digest,
            UCN_I_GROUP_DIGEST_BYTES);
-    write_be64(&body_out[68], config->tree.route_causal_id);
-    write_be32(&body_out[76], config->tree.route_generation);
-    write_be32(&body_out[80], config->tree.tree_generation);
-    write_be16(&body_out[84], config->tree.owner_instance);
-    write_be16(&body_out[86], config->tree.slot);
-    write_be16(&body_out[88], config->tree.generation);
-    body_out[90] = config->tree.valid;
-    write_be32(&body_out[92], dynamic_id_high_water);
     for (index = 0U; index < config->member_count; ++index) {
         size_t offset = UCN_I_GROUP_RECORD_HEADER_BYTES +
                         (size_t)index * UCN_I_GROUP_RECORD_MEMBER_BYTES;
@@ -598,9 +611,6 @@ static ucn_result_t record_decode(const uint8_t *body, size_t body_bytes,
         read_be16(&body[0]) != UCN_I_GROUP_RECORD_SCHEMA) {
         return UCN_ERR_MALFORMED;
     }
-    for (index = 96U; index < UCN_I_GROUP_RECORD_HEADER_BYTES; ++index) {
-        if (body[index] != 0U) return UCN_ERR_MALFORMED;
-    }
     config = config_out;
     memset(config, 0, sizeof(*config));
     phase = body[2];
@@ -618,26 +628,19 @@ static ucn_result_t record_decode(const uint8_t *body, size_t body_bytes,
     config->allowed_scope_mask = body[31];
     config->secure_required = body[32];
     config->public_static = body[33];
-    if (body[34] != 0U || body[35] != 0U || body[91] != 0U) {
+    if (body[34] > 1U || body[35] > 1U ||
+        ((body[35] != 0U) != (read_be32(&body[40]) != 0U))) {
         return UCN_ERR_MALFORMED;
     }
-    config->security.runtime_instance = read_be32(&body[36]);
-    config->security.key_generation = read_be32(&body[40]);
-    config->security.owner_instance = read_be16(&body[44]);
-    config->security.slot = read_be16(&body[46]);
-    config->security.generation = read_be16(&body[48]);
-    config->security.valid = body[50];
-    config->security.exact_principal = body[51];
-    memcpy(config->security.context_digest, &body[52],
+    /* Only logical values are durable. Never reload runtime/Owner/slot handles. */
+    config->security.key_generation = read_be32(&body[36]);
+    config->security.valid = 1U;
+    config->security.exact_principal = body[34];
+    memcpy(config->security.context_digest, &body[48],
            UCN_I_GROUP_DIGEST_BYTES);
-    config->tree.route_causal_id = read_be64(&body[68]);
-    config->tree.route_generation = read_be32(&body[76]);
-    config->tree.tree_generation = read_be32(&body[80]);
-    config->tree.owner_instance = read_be16(&body[84]);
-    config->tree.slot = read_be16(&body[86]);
-    config->tree.generation = read_be16(&body[88]);
-    config->tree.valid = body[90];
-    high_water = read_be32(&body[92]);
+    config->tree.tree_generation = read_be32(&body[40]);
+    config->tree.valid = body[35];
+    high_water = read_be32(&body[44]);
     if (config->member_count > UCN_I_GROUP_MEMBER_COUNT) {
         return UCN_ERR_MALFORMED;
     }
@@ -662,8 +665,15 @@ static ucn_result_t record_decode(const uint8_t *body, size_t body_bytes,
     if ((phase != UCN_I_GROUP_ACTIVE && phase != UCN_I_GROUP_RETIRED) ||
         config->mode != UCN_I_GROUP_DYNAMIC || high_water == 0U ||
         config->group_id > high_water ||
-        !ucn_i_group_p_context_valid(config, false)) {
+        config->secure_required != 1U || config->security.exact_principal != 1U ||
+        config->security.key_generation == 0U ||
+        !bytes_nonzero(config->security.context_digest, 16U) ||
+        !context_valid(config, false, true)) {
         return UCN_ERR_MALFORMED;
+    }
+    for (index = 1U; index < config->member_count; ++index) {
+        if (memcmp(config->members[index - 1U].principal,
+                   config->members[index].principal, 16U) >= 0) return UCN_ERR_MALFORMED;
     }
     *phase_out = phase;
     *high_water_out = high_water;
@@ -1139,7 +1149,8 @@ ucn_result_t ucn_i_group_import(
             (owner->contexts[found].current.group_generation ==
                  decoded->group_generation &&
              (!config_equal(&owner->contexts[found].current, decoded) ||
-              owner->contexts[found].phase != phase))) {
+              (owner->contexts[found].phase != phase &&
+               owner->contexts[found].phase != UCN_I_GROUP_FENCED)))) {
             result = UCN_ERR_REPLAY;
             goto done;
         }
@@ -1150,7 +1161,7 @@ ucn_result_t ucn_i_group_import(
         owner->contexts[found].occupied = 1U;
     }
     owner->contexts[found].current = *decoded;
-    owner->contexts[found].phase = phase;
+    owner->contexts[found].phase = UCN_I_GROUP_FENCED;
     memcpy(owner->contexts[found].current_body_digest,
            published_body_digest, UCN_I_GROUP_DIGEST_BYTES);
     owner->dynamic_id_high_water = high_water;

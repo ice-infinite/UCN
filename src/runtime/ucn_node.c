@@ -7,10 +7,13 @@
 
 #if defined(_MSC_VER)
 #define UCN_I_NOINLINE __declspec(noinline)
+#define UCN_I_NODE_ALWAYS_INLINE __forceinline
 #elif defined(__GNUC__) || defined(__clang__)
 #define UCN_I_NOINLINE __attribute__((noinline))
+#define UCN_I_NODE_ALWAYS_INLINE inline __attribute__((always_inline))
 #else
 #define UCN_I_NOINLINE
+#define UCN_I_NODE_ALWAYS_INLINE inline
 #endif
 
 #define UCN_I_NODE_MAGIC UINT32_C(0x55434E53)
@@ -39,7 +42,9 @@ static void increment_saturated(uint32_t *value)
     }
 }
 
-static bool address_is_valid(uint32_t address, uint8_t width)
+static bool address_is_valid(
+    uint32_t address,
+    uint8_t width)
 {
     uint32_t limit;
 
@@ -71,11 +76,13 @@ static ucn_i_lock_ops_t make_internal_lock(const ucn_lock_ops_t *lock)
     return result;
 }
 
-static bool node_is_valid(const ucn_node_t *node)
+static bool node_is_valid(
+    const ucn_node_t *node)
 {
     return node != NULL && node->magic == UCN_I_NODE_MAGIC &&
            node->runtime_instance != 0U &&
-           node->owner_instance == UCN_I_CORE_OWNER_INSTANCE &&
+           node->owner_instance != 0U &&
+           node->owner_instance != UCN_I_ADAPTER_OWNER_INSTANCE &&
            node->schema == UCN_I_NODE_SCHEMA &&
            node->storage_layout == UCN_STORAGE_LAYOUT &&
            node->compiled_manifest_hash == UCN_COMPILED_MANIFEST_HASH &&
@@ -102,6 +109,7 @@ static bool node_owned_state_is_valid(const ucn_node_t *node)
     if (node->lifecycle < UCN_LIFECYCLE_INITIALIZED ||
         node->lifecycle > UCN_LIFECYCLE_FAULT || node->work_cursor >= 4U ||
         node->scheduler_cursor >= 12U ||
+        node->external_ingress_demux > 1U ||
         node->time_initialized > 1U ||
         node->callback_read_snapshot.active > 1U ||
         (node->callback_read_snapshot.active == 0U &&
@@ -264,7 +272,19 @@ static ucn_result_t callback_read_snapshot_begin(ucn_node_t *node,
     uint16_t index;
     ucn_result_t result;
 
-    if (!node_is_valid(node) || scope_out == NULL) {
+    /* EN: The callback runs below an already validated ucn_step/API gate.
+     * Recheck only the immutable header and the bounds used while copying the
+     * snapshot; the full node audit remains at the public entry boundary.
+     * 中文：回调位于已完成校验的 ucn_step/API 门内；这里只复核不可变头及复制
+     * Snapshot 所需边界，完整 Node 审计仍由公共入口执行。 */
+    if (node == NULL || node->magic != UCN_I_NODE_MAGIC ||
+        node->runtime_instance == 0U || node->owner_instance == 0U ||
+        node->schema != UCN_I_NODE_SCHEMA ||
+        node->storage_layout != UCN_STORAGE_LAYOUT ||
+        node->compiled_manifest_hash != UCN_COMPILED_MANIFEST_HASH ||
+        node->link_count == 0U || node->link_count > UCN_LINK_COUNT ||
+        node->stats.struct_size != sizeof(node->stats) ||
+        node->stats.api_version != UCN_API_VERSION || scope_out == NULL) {
         return UCN_ERR_ARGUMENT;
     }
     snapshot = &node->callback_read_snapshot;
@@ -304,12 +324,7 @@ static ucn_result_t callback_read_snapshot_begin(ucn_node_t *node,
         snapshot->sends[index].view = node->receipts[receipt_slot].view;
     }
     for (index = 0U; index < node->link_count; ++index) {
-        result = ucn_i_adapter_link_handle(&node->adapter, index,
-                                           &snapshot->links[index]);
-        if (result != UCN_OK) {
-            memset(snapshot, 0, sizeof(*snapshot));
-            return UCN_ERR_STATE;
-        }
+        snapshot->links[index] = node->link_handles[index];
     }
     snapshot->link_count = node->link_count;
     result = node->lock.enter(node->lock.context);
@@ -591,17 +606,21 @@ size_t ucn_storage_required(void)
     return UCN_STORAGE_BYTES;
 }
 
-ucn_result_t ucn_init(void *storage,
-                      size_t storage_bytes,
-                      const ucn_config_t *config,
-                      const ucn_ports_t *ports,
-                      ucn_node_t **out_node)
+ucn_result_t ucn_i_node_init_with_owner_instance(
+    void *storage,
+    size_t storage_bytes,
+    const ucn_config_t *config,
+    const ucn_ports_t *ports,
+    uint16_t owner_instance,
+    ucn_node_t **out_node)
 {
     ucn_node_t *node;
     uint16_t index;
     ucn_result_t result;
 
-    if (!config_is_valid(storage, storage_bytes, config, ports, out_node)) {
+    if (owner_instance == 0U ||
+        owner_instance == UCN_I_ADAPTER_OWNER_INSTANCE ||
+        !config_is_valid(storage, storage_bytes, config, ports, out_node)) {
         return UCN_ERR_CONFIG;
     }
     node = (ucn_node_t *)storage;
@@ -613,7 +632,7 @@ ucn_result_t ucn_init(void *storage,
     node->compiled_manifest_hash = config->compiled_manifest_hash;
     node->schema = UCN_I_NODE_SCHEMA;
     node->storage_layout = config->storage_layout;
-    node->owner_instance = UCN_I_CORE_OWNER_INSTANCE;
+    node->owner_instance = owner_instance;
     node->binding_count = config->binding_count;
     node->link_count = ports->link_count;
     node->address_width = config->address_width;
@@ -635,6 +654,15 @@ ucn_result_t ucn_init(void *storage,
         memset(storage, 0, UCN_STORAGE_BYTES);
         return result;
     }
+    for (index = 0U; index < node->link_count; ++index) {
+        result = ucn_i_adapter_link_handle(
+            &node->adapter, index, &node->link_handles[index]);
+        if (result != UCN_OK) {
+            (void)ucn_i_adapter_destroy(&node->adapter);
+            memset(storage, 0, UCN_STORAGE_BYTES);
+            return UCN_ERR_STATE;
+        }
+    }
     result = ucn_i_callback_gate_init(&node->callback_gate,
                                       node->runtime_instance, &node->lock);
     if (result != UCN_OK) {
@@ -645,6 +673,17 @@ ucn_result_t ucn_init(void *storage,
     node->magic = UCN_I_NODE_MAGIC;
     *out_node = node;
     return UCN_OK;
+}
+
+ucn_result_t ucn_init(void *storage,
+                      size_t storage_bytes,
+                      const ucn_config_t *config,
+                      const ucn_ports_t *ports,
+                      ucn_node_t **out_node)
+{
+    return ucn_i_node_init_with_owner_instance(
+        storage, storage_bytes, config, ports,
+        UCN_I_CORE_OWNER_INSTANCE, out_node);
 }
 
 ucn_result_t ucn_start(ucn_node_t *node, uint64_t now_us)
@@ -685,6 +724,47 @@ static bool endpoint_handle_matches(const ucn_node_t *node,
     }
     *slot_out = slot;
     return true;
+}
+
+ucn_result_t ucn_endpoint_install(ucn_node_t *node, const uint16_t *services,
+                                  size_t count, ucn_endpoint_receive_fn receive,
+                                  void *context, ucn_endpoint_handle_t *out)
+{
+    ucn_i_callback_claim_t claim;
+    ucn_result_t r;
+    size_t i, j;
+    if (!node_is_valid(node) || services == NULL || out == NULL || receive == NULL ||
+        count == 0U || count > UCN_ENDPOINT_COUNT ||
+        ucn_i_ranges_overlap(node, sizeof(*node), services, count * sizeof(*services)) ||
+        ucn_i_ranges_overlap(node, sizeof(*node), out, count * sizeof(*out)) ||
+        ucn_i_ranges_overlap(services, count * sizeof(*services), out, count * sizeof(*out)) ||
+        (context != NULL && (ucn_i_ranges_overlap(node, sizeof(*node), context, 1U) ||
+                            ucn_i_ranges_overlap(out, count * sizeof(*out), context, 1U)))) { return UCN_ERR_ARGUMENT; }
+    for (i = 0U; i < count; ++i) {
+        if (services[i] == 0U || services[i] == UINT16_MAX) { return UCN_ERR_ARGUMENT; }
+        for (j = 0U; j < i; ++j) { if (services[j] == services[i]) { return UCN_ERR_CONFIG; } }
+    }
+    r = api_enter(node, 17U, &claim); if (r != UCN_OK) { return r; }
+    if (node->lifecycle != UCN_LIFECYCLE_INITIALIZED || node->faulted) { return api_leave(node, &claim, UCN_ERR_STATE); }
+    for (i = 0U; i < UCN_ENDPOINT_COUNT; ++i) {
+        if (node->endpoints[i].valid || node->endpoints[i].generation != 0U) { return api_leave(node, &claim, UCN_ERR_STATE); }
+    }
+    for (i = 0U; i < count; ++i) {
+        node->endpoints[i].receive = receive; node->endpoints[i].context = context;
+        node->endpoints[i].service_id = services[i]; node->endpoints[i].generation = 1U;
+        node->endpoints[i].valid = 1U;
+    }
+    r = api_leave(node, &claim, UCN_OK);
+    if (r != UCN_OK) {
+        /* Exclusive INITIALIZED state: no callback/handle has escaped. Keep Fault. */
+        for (i = 0U; i < count; ++i) { memset(&node->endpoints[i], 0, sizeof(node->endpoints[i])); }
+        return r;
+    }
+    for (i = 0U; i < count; ++i) {
+        out[i] = make_core_handle(node, (uint16_t)i, 1U, UCN_OBJECT_KIND_ENDPOINT);
+    }
+    node->endpoint_allocate_cursor = (uint16_t)(count % UCN_ENDPOINT_COUNT);
+    return UCN_OK;
 }
 
 ucn_result_t ucn_endpoint_add(ucn_node_t *node,
@@ -966,9 +1046,9 @@ ucn_result_t ucn_link_get(const ucn_node_t *node,
     return result;
 }
 
-static bool handle_is_zero(ucn_handle_t handle)
+static bool handle_is_zero(const ucn_handle_t *handle)
 {
-    return bytes_are_zero(&handle, sizeof(handle));
+    return bytes_are_zero(handle, sizeof(*handle));
 }
 
 static bool send_options_are_well_formed(const ucn_send_options_t *options)
@@ -998,7 +1078,7 @@ static ucn_result_t select_path(const ucn_node_t *node,
 {
     uint16_t slot;
 
-    if (!handle_is_zero(pinned)) {
+    if (!handle_is_zero(&pinned)) {
         if (!path_handle_matches(node, pinned, &slot) ||
             node->paths[slot].destination_address != target->address ||
             node->paths[slot].destination_binding_generation !=
@@ -1373,7 +1453,7 @@ static UCN_I_NOINLINE ucn_result_t publish_admit_locked(
     return UCN_OK;
 }
 
-ucn_result_t ucn_publish(ucn_node_t *node,
+ucn_result_t ucn_send(ucn_node_t *node,
                          const ucn_target_t *target,
                          const void *payload,
                          size_t payload_bytes,
@@ -1385,6 +1465,21 @@ ucn_result_t ucn_publish(ucn_node_t *node,
     size_t frame_bytes;
     bool tracked;
     ucn_result_t result;
+    /* Shared immutable defaults have no per-call stack or mutable ownership.
+     * 只读默认值不占每次调用栈，也不引入共享可变状态。 */
+    static const ucn_send_options_t defaults = {
+        .struct_size = sizeof(ucn_send_options_t),
+        .api_version = UCN_API_VERSION,
+        .traffic_class = UCN_TRAFFIC_Q2,
+        .delivery_guarantee = UCN_DELIVERY_BEST_EFFORT,
+        .interaction_role = UCN_INTERACTION_ONE_WAY,
+        .hop_limit = 1U,
+        .copy_payload = 1U
+    };
+
+    if (options == NULL) {
+        options = &defaults;
+    }
 
     if (!publish_inputs_are_valid(node, target, payload, payload_bytes,
                                   options, out_handle)) {
@@ -1593,8 +1688,8 @@ static ucn_result_t terminalize_tx(ucn_node_t *node,
         return UCN_ERR_STATE;
     }
 
-    if (!handle_is_zero(tx->adapter_token)) {
-        result = ucn_i_adapter_tx_retire(&node->adapter, tx->adapter_token);
+    if (!handle_is_zero(&tx->adapter_token)) {
+        result = ucn_i_adapter_tx_retire(&node->adapter, &(tx->adapter_token));
         if (result != UCN_OK) {
             node->faulted = 1U;
             node->lifecycle = UCN_LIFECYCLE_FAULT;
@@ -1659,7 +1754,7 @@ static ucn_result_t requeue_not_submitted_tx(ucn_node_t *node,
         return UCN_ERR_ARGUMENT;
     }
     tx = &node->tx_slots[tx_slot];
-    if (tx->state == UCN_I_TX_FREE || handle_is_zero(tx->adapter_token)) {
+    if (tx->state == UCN_I_TX_FREE || handle_is_zero(&tx->adapter_token)) {
         return UCN_ERR_STATE;
     }
     token = tx->adapter_token;
@@ -1694,7 +1789,7 @@ static ucn_result_t requeue_not_submitted_tx(ucn_node_t *node,
         node->lifecycle = UCN_LIFECYCLE_FAULT;
         return UCN_ERR_STATE;
     }
-    result = ucn_i_adapter_tx_retire(&node->adapter, token);
+    result = ucn_i_adapter_tx_retire(&node->adapter, &(token));
     if (result != UCN_OK) {
         node->faulted = 1U;
         node->lifecycle = UCN_LIFECYCLE_FAULT;
@@ -1711,20 +1806,22 @@ static ucn_result_t requeue_not_submitted_tx(ucn_node_t *node,
     return UCN_OK;
 }
 
-static UCN_I_NOINLINE bool process_one_completion(ucn_node_t *node)
+static UCN_I_NOINLINE bool process_one_completion(ucn_node_t *node,
+                                                  ucn_i_tx_action_t *action)
 {
     uint16_t index;
 
+    memset(action, 0, sizeof(*action));
     for (index = 0U; index < UCN_TX_SLOT_COUNT; ++index) {
         uint16_t slot = (uint16_t)(
             (node->completion_cursor + index) % UCN_TX_SLOT_COUNT);
         ucn_i_tx_slot_t *tx = &node->tx_slots[slot];
         ucn_i_adapter_tx_view_t adapter_view;
         if (tx->state == UCN_I_TX_FREE ||
-            handle_is_zero(tx->adapter_token)) {
+            handle_is_zero(&tx->adapter_token)) {
             continue;
         }
-        if (ucn_i_adapter_tx_view(&node->adapter, tx->adapter_token,
+        if (ucn_i_adapter_tx_view(&node->adapter, &(tx->adapter_token),
                                   &adapter_view) != UCN_OK) {
             node->faulted = 1U;
             node->lifecycle = UCN_LIFECYCLE_FAULT;
@@ -1736,7 +1833,7 @@ static UCN_I_NOINLINE bool process_one_completion(ucn_node_t *node)
             !adapter_view.terminal_latched) {
             node->completion_cursor =
                 (uint16_t)((slot + 1U) % UCN_TX_SLOT_COUNT);
-            (void)requeue_not_submitted_tx(node, slot);
+            action->kind = 2U; action->slot = slot;
             return true;
         }
         if (adapter_view.state == UCN_I_ADAPTER_TX_COMPLETED ||
@@ -1750,8 +1847,8 @@ static UCN_I_NOINLINE bool process_one_completion(ucn_node_t *node)
                 tx->timeout_requested) {
                 terminal_result = UCN_ERR_TIMEOUT;
             }
-            (void)terminalize_tx(
-                node, slot, terminal_result);
+            action->kind = 1U; action->slot = slot;
+            action->result = terminal_result;
             return true;
         }
     }
@@ -1759,10 +1856,12 @@ static UCN_I_NOINLINE bool process_one_completion(ucn_node_t *node)
 }
 
 static UCN_I_NOINLINE bool process_one_timer(ucn_node_t *node,
-                                             uint64_t now_us)
+                                             uint64_t now_us,
+                                             ucn_i_tx_action_t *action)
 {
     uint16_t index;
 
+    memset(action, 0, sizeof(*action));
     for (index = 0U; index < UCN_TX_SLOT_COUNT; ++index) {
         uint16_t slot =
             (uint16_t)((node->timer_cursor + index) % UCN_TX_SLOT_COUNT);
@@ -1778,17 +1877,16 @@ static UCN_I_NOINLINE bool process_one_timer(ucn_node_t *node,
             (!stopping && !deadline_expired && !cancel_required)) {
             continue;
         }
-        if (handle_is_zero(tx->adapter_token)) {
+        if (handle_is_zero(&tx->adapter_token)) {
             tx->cancel_required = 0U;
             tx->absolute_deadline_us = 0U;
             node->timer_cursor =
                 (uint16_t)((slot + 1U) % UCN_TX_SLOT_COUNT);
-            (void)terminalize_tx(
-                node, slot,
-                deadline_expired ? UCN_ERR_TIMEOUT : UCN_ERR_CANCELLED);
+            action->kind = 1U; action->slot = slot;
+            action->result = deadline_expired ? UCN_ERR_TIMEOUT : UCN_ERR_CANCELLED;
             return true;
         }
-        result = ucn_i_adapter_tx_cancel(&node->adapter, tx->adapter_token);
+        result = ucn_i_adapter_tx_cancel(&node->adapter, &(tx->adapter_token));
         if (result == UCN_OK || result == UCN_ERR_IN_DOUBT) {
             tx->cancel_requested = 1U;
             tx->cancel_required = 0U;
@@ -1799,15 +1897,14 @@ static UCN_I_NOINLINE bool process_one_timer(ucn_node_t *node,
                 tx->timeout_requested = 1U;
             }
             if (result == UCN_OK && tx->state == UCN_I_TX_QUEUED) {
-                (void)terminalize_tx(
-                    node, slot,
-                    deadline_expired ? UCN_ERR_TIMEOUT
-                                     : UCN_ERR_CANCELLED);
+                action->kind = 1U; action->slot = slot;
+            action->result = deadline_expired ? UCN_ERR_TIMEOUT
+                                     : UCN_ERR_CANCELLED;
             }
             return true;
         }
         if (result == UCN_ERR_STATE &&
-            ucn_i_adapter_tx_view(&node->adapter, tx->adapter_token,
+            ucn_i_adapter_tx_view(&node->adapter, &(tx->adapter_token),
                                   &view) == UCN_OK &&
             (view.state == UCN_I_ADAPTER_TX_RESERVED ||
              view.state == UCN_I_ADAPTER_TX_SUBMITTED ||
@@ -1885,7 +1982,6 @@ static UCN_I_NOINLINE ucn_endpoint_disposition_t invoke_endpoint_callback(
 {
     ucn_endpoint_message_t message;
     ucn_endpoint_disposition_t disposition;
-    ucn_callback_scope_t scope;
 
     memset(&message, 0, sizeof(message));
     message.struct_size = sizeof(message);
@@ -1899,13 +1995,14 @@ static UCN_I_NOINLINE ucn_endpoint_disposition_t invoke_endpoint_callback(
     message.payload = frame->payload;
     message.payload_bytes = frame->payload_bytes;
     message.receive_timestamp_us = rx->meta.timestamp_us;
-    memset(&scope, 0, sizeof(scope));
-    if (callback_read_snapshot_begin(node, &scope) != UCN_OK) {
+    if (callback_read_snapshot_begin(node, &message.callback_scope) != UCN_OK) {
         node->faulted = 1U;
         node->lifecycle = UCN_LIFECYCLE_FAULT;
         return UCN_ENDPOINT_DROP;
     }
-    message.callback_scope = scope;
+    message.origin_sequence = frame->origin_sequence;
+    message.configured_principal_digest =
+        node->bindings[binding_slot].principal_digest;
     node->endpoints[endpoint_slot].callback_active = 1U;
     disposition = node->endpoints[endpoint_slot].receive(
         node->endpoints[endpoint_slot].context, &message);
@@ -1919,8 +2016,8 @@ static UCN_I_NOINLINE ucn_endpoint_disposition_t invoke_endpoint_callback(
 
 static UCN_I_NOINLINE bool process_one_rx(ucn_node_t *node)
 {
-    ucn_i_adapter_rx_view_t rx;
-    ucn_i_c1_frame_t frame;
+    ucn_i_adapter_rx_view_t *rx = &node->rx_staging.view;
+    ucn_i_c1_frame_t *frame = &node->rx_staging.frame;
     uint32_t current_link_instance;
     uint16_t binding_slot;
     uint16_t endpoint_slot;
@@ -1928,51 +2025,76 @@ static UCN_I_NOINLINE bool process_one_rx(ucn_node_t *node)
     bool link_ready;
     ucn_result_t result;
 
-    result = ucn_i_adapter_rx_claim(&node->adapter, &rx);
+    /* A composed product shares one Adapter RX queue between C0 Control and
+     * the Foundation C1 fast path.  Selective claim is therefore an
+     * ownership boundary, not an optimization: C1 must leave C0 claimed by
+     * the Coordinator path. / 组合产品由 C0 Control 与 Foundation C1
+     * Fast Path 共享 Adapter RX 队列。选择性认领是所有权边界而非优化：
+     * C1 必须把 C0 留给 Coordinator 路径。 */
+    result = ucn_i_adapter_rx_claim_filtered(
+        &node->adapter, node->external_ingress_demux != 0U,
+        UCN_I_WIRE_PROTOCOL_VERSION, UCN_I_WIRE_CONTRACT_C1,
+        false, 0U, 0U, rx);
     if (result != UCN_OK) {
         return false;
     }
     increment_saturated(&node->stats.rx_published);
     if (node->lifecycle == UCN_LIFECYCLE_STOPPING) {
         increment_saturated(&node->stats.rx_dropped);
-        if (ucn_i_adapter_rx_retire(&node->adapter, rx.token) != UCN_OK) {
+        if (ucn_i_adapter_rx_retire(&node->adapter, &(rx->token)) != UCN_OK) {
             node->faulted = 1U;
             node->lifecycle = UCN_LIFECYCLE_FAULT;
         }
         return true;
     }
     result = ucn_i_adapter_link_snapshot(
-        &node->adapter, rx.link_slot, &current_link_instance,
+        &node->adapter, rx->link_slot, &current_link_instance,
         &current_link_mtu, &link_ready);
     if (result != UCN_OK || !link_ready ||
-        current_link_instance != rx.link_instance_generation) {
+        current_link_instance != rx->link_instance_generation) {
         increment_saturated(&node->stats.rx_dropped);
-    } else if (ucn_i_c1_decode(rx.frame, rx.frame_bytes, node->address_width,
-                               &frame) != UCN_OK) {
+    } else if (ucn_i_c1_decode(rx->frame, rx->frame_bytes, node->address_width,
+                               frame) != UCN_OK) {
         increment_saturated(&node->stats.malformed);
         increment_saturated(&node->stats.rx_dropped);
-    } else if (frame.destination_address != node->local_address ||
-               !source_binding_find(node, frame.source_address,
+    } else if (frame->destination_address != node->local_address ||
+               !source_binding_find(node, frame->source_address,
                                     &binding_slot) ||
-               !find_endpoint(node, frame.service_id, &endpoint_slot)) {
+               !find_endpoint(node, frame->service_id, &endpoint_slot)) {
         increment_saturated(&node->stats.rx_dropped);
     } else if (!binding_replay_accept(&node->bindings[binding_slot],
-                                      frame.origin_sequence)) {
+                                      frame->origin_sequence)) {
         increment_saturated(&node->stats.rx_dropped);
     } else {
         ucn_endpoint_disposition_t disposition = invoke_endpoint_callback(
-            node, endpoint_slot, binding_slot, &rx, &frame);
+            node, endpoint_slot, binding_slot, rx, frame);
         if (disposition == UCN_ENDPOINT_ACCEPT) {
             increment_saturated(&node->stats.rx_delivered);
         } else {
             increment_saturated(&node->stats.rx_dropped);
         }
     }
-    if (ucn_i_adapter_rx_retire(&node->adapter, rx.token) != UCN_OK) {
+    if (ucn_i_adapter_rx_retire(&node->adapter, &(rx->token)) != UCN_OK) {
         node->faulted = 1U;
         node->lifecycle = UCN_LIFECYCLE_FAULT;
     }
     (void)current_link_mtu;
+    return true;
+}
+
+static UCN_I_NOINLINE bool process_one_stopping_rx(ucn_node_t *node)
+{
+    ucn_i_adapter_rx_view_t rx;
+
+    if (ucn_i_adapter_rx_claim(&node->adapter, &rx) != UCN_OK) {
+        return false;
+    }
+    increment_saturated(&node->stats.rx_published);
+    increment_saturated(&node->stats.rx_dropped);
+    if (ucn_i_adapter_rx_retire(&node->adapter, &(rx.token)) != UCN_OK) {
+        node->faulted = 1U;
+        node->lifecycle = UCN_LIFECYCLE_FAULT;
+    }
     return true;
 }
 
@@ -2007,16 +2129,41 @@ static bool next_queued_tx(ucn_node_t *node, uint16_t *slot_out)
     return false;
 }
 
-static UCN_I_NOINLINE bool process_one_tx(ucn_node_t *node,
-                                          uint64_t now_us)
+static ucn_result_t encode_queued_tx(ucn_node_t *node,
+                                     ucn_i_tx_slot_t *tx)
 {
-    ucn_i_tx_slot_t *tx;
     ucn_i_c1_frame_t frame;
-    ucn_i_adapter_tx_view_t view;
-    uint16_t slot;
     size_t frame_bytes;
     ucn_result_t result;
 
+    memset(&frame, 0, sizeof(frame));
+    frame.payload = tx->frame;
+    frame.payload_bytes = tx->payload_bytes;
+    frame.source_address = node->local_address;
+    frame.destination_address = tx->destination_address;
+    frame.origin_sequence = tx->origin_sequence;
+    frame.service_id = tx->service_id;
+    frame.traffic_class = tx->traffic_class;
+    frame.hop_limit = tx->hop_limit;
+    result = ucn_i_c1_encode_in_place(&frame, node->address_width,
+                                      tx->frame, sizeof(tx->frame),
+                                      &frame_bytes);
+    if (result == UCN_OK) {
+        tx->frame_bytes = (uint16_t)frame_bytes;
+        tx->encoded = 1U;
+    }
+    return result;
+}
+
+static UCN_I_NOINLINE bool process_one_tx(ucn_node_t *node,
+                                          uint64_t now_us,
+                                          ucn_i_tx_action_t *action)
+{
+    ucn_i_tx_slot_t *tx;
+    uint16_t slot;
+    ucn_result_t result;
+
+    memset(action, 0, sizeof(*action));
     if (!next_queued_tx(node, &slot)) {
         return false;
     }
@@ -2026,16 +2173,14 @@ static UCN_I_NOINLINE bool process_one_tx(ucn_node_t *node,
     }
     if (tx->absolute_deadline_us != 0U &&
         ucn_i_deadline_expired_us(now_us, tx->absolute_deadline_us)) {
-        (void)terminalize_tx(node, slot, UCN_ERR_TIMEOUT);
+        action->kind = 1U; action->slot = slot; action->result = UCN_ERR_TIMEOUT;
         return true;
     }
-    if (handle_is_zero(tx->adapter_token)) {
-        ucn_driver_token_t adapter_token;
-
+    if (handle_is_zero(&tx->adapter_token)) {
         result = ucn_i_adapter_tx_reserve(
             &node->adapter, node->paths[tx->path_slot].link_index,
             node->paths[tx->path_slot].link_instance_generation, slot,
-            &adapter_token);
+            &tx->adapter_token);
         if (result == UCN_ERR_NO_SPACE || result == UCN_ERR_STATE) {
             return false;
         }
@@ -2044,100 +2189,27 @@ static UCN_I_NOINLINE bool process_one_tx(ucn_node_t *node,
                 node->faulted = 1U;
                 node->lifecycle = UCN_LIFECYCLE_FAULT;
             }
-            (void)terminalize_tx(node, slot, result);
+            action->kind = 1U; action->slot = slot; action->result = result;
             return true;
         }
-        tx->adapter_token = adapter_token;
         if (tx->tracked) {
             uint16_t attempt_slot =
                 node->requests[tx->request_slot].attempt_slot;
-            node->attempts[attempt_slot].adapter_token = adapter_token;
+            node->attempts[attempt_slot].adapter_token = tx->adapter_token;
         }
     }
     if (!tx->encoded) {
-        memset(&frame, 0, sizeof(frame));
-        frame.payload = tx->frame;
-        frame.payload_bytes = tx->payload_bytes;
-        frame.source_address = node->local_address;
-        frame.destination_address = tx->destination_address;
-        frame.origin_sequence = tx->origin_sequence;
-        frame.service_id = tx->service_id;
-        frame.traffic_class = tx->traffic_class;
-        frame.hop_limit = tx->hop_limit;
-        result = ucn_i_c1_encode_in_place(&frame, node->address_width,
-                                          tx->frame, sizeof(tx->frame),
-                                          &frame_bytes);
+        result = encode_queued_tx(node, tx);
         if (result != UCN_OK) {
             node->faulted = 1U;
             node->lifecycle = UCN_LIFECYCLE_FAULT;
             return true;
         }
-        tx->frame_bytes = (uint16_t)frame_bytes;
-        tx->encoded = 1U;
     }
-    result = ucn_i_adapter_tx_submit(&node->adapter, tx->adapter_token,
-                                     tx->frame, tx->frame_bytes, &view);
-    if (result != UCN_OK) {
-        if (ucn_i_adapter_tx_view(&node->adapter, tx->adapter_token,
-                                  &view) != UCN_OK) {
-            node->faulted = 1U;
-            node->lifecycle = UCN_LIFECYCLE_FAULT;
-            return true;
-        }
-        if (view.state == UCN_I_ADAPTER_TX_NOT_SUBMITTED &&
-            !view.terminal_latched) {
-            (void)requeue_not_submitted_tx(node, slot);
-            return true;
-        }
-        if (view.state == UCN_I_ADAPTER_TX_COMPLETED ||
-            view.state == UCN_I_ADAPTER_TX_CANCELLED ||
-            (view.state == UCN_I_ADAPTER_TX_NOT_SUBMITTED &&
-             view.terminal_latched)) {
-            (void)terminalize_tx(node, slot, view.terminal_result);
-            return true;
-        }
-        if (view.state == UCN_I_ADAPTER_TX_IN_DOUBT ||
-            view.state == UCN_I_ADAPTER_TX_SUBMITTED) {
-            tx->state = UCN_I_TX_SUBMITTED;
-            if (tx->tracked) {
-                uint16_t receipt_slot =
-                    node->requests[tx->request_slot].receipt_slot;
-                node->receipts[receipt_slot].view.link_outcome =
-                    view.state == UCN_I_ADAPTER_TX_SUBMITTED
-                        ? UCN_LINK_OUTCOME_SUBMITTED
-                        : UCN_LINK_OUTCOME_IN_DOUBT;
-            }
-            return true;
-        }
-        if (result == UCN_ERR_STATE &&
-            view.state == UCN_I_ADAPTER_TX_RESERVED) {
-            return false;
-        }
-        node->faulted = 1U;
-        node->lifecycle = UCN_LIFECYCLE_FAULT;
-        return true;
-    }
-    if (view.state == UCN_I_ADAPTER_TX_NOT_SUBMITTED &&
-        !view.terminal_latched) {
-        (void)requeue_not_submitted_tx(node, slot);
-        return true;
-    }
-    tx->state = UCN_I_TX_SUBMITTED;
-    if (view.state == UCN_I_ADAPTER_TX_COMPLETED ||
-        view.state == UCN_I_ADAPTER_TX_CANCELLED ||
-        (view.state == UCN_I_ADAPTER_TX_NOT_SUBMITTED &&
-         view.terminal_latched)) {
-        (void)terminalize_tx(node, slot, view.terminal_result);
-    } else if (tx->tracked) {
-        uint16_t receipt_slot =
-            node->requests[tx->request_slot].receipt_slot;
-        node->receipts[receipt_slot].view.link_outcome =
-            view.state == UCN_I_ADAPTER_TX_SUBMITTED
-                ? UCN_LINK_OUTCOME_SUBMITTED
-                : UCN_LINK_OUTCOME_IN_DOUBT;
-    }
+    action->kind = 3U; action->slot = slot;
     return true;
 }
+
 
 static uint64_t earliest_deadline(const ucn_node_t *node)
 {
@@ -2260,25 +2332,30 @@ ucn_result_t ucn_step(ucn_node_t *node,
         return api_leave(node, &claim, UCN_ERR_STATE);
     }
     node->last_now_us = now_us;
-    memset(&result_view, 0, sizeof(result_view));
-    result_view.struct_size = sizeof(result_view);
-    result_view.api_version = UCN_API_VERSION;
     drain_adapter_hints(node);
     phase = node->work_cursor;
-    for (work = 0U; work < budget->max_work; ++work) {
+    work = 0U;
+    while (work < budget->max_work) {
         bool progressed = false;
         uint8_t attempt;
         for (attempt = 0U; attempt < 4U; ++attempt) {
+            ucn_i_tx_action_t action = {0};
             uint8_t selected = (uint8_t)((phase + attempt) % 4U);
             if (selected == 0U) {
-                progressed = process_one_completion(node);
+                progressed = process_one_completion(node, &action);
             } else if (selected == 1U) {
-                progressed = process_one_timer(node, now_us);
+                progressed = process_one_timer(node, now_us, &action);
             } else if (selected == 2U) {
                 progressed = process_one_rx(node);
             } else if (node->lifecycle == UCN_LIFECYCLE_RUNNING) {
-                progressed = process_one_tx(node, now_us);
+                progressed = process_one_tx(node, now_us, &action);
             }
+            if (action.kind == 3U)
+                progressed = ucn_i_node_tx_submit(node, action.slot, &action);
+            if (action.kind == 1U)
+                (void)terminalize_tx(node, action.slot, action.result);
+            else if (action.kind == 2U)
+                (void)requeue_not_submitted_tx(node, action.slot);
             if (progressed) {
                 phase = (uint8_t)((selected + 1U) % 4U);
                 break;
@@ -2287,7 +2364,7 @@ ucn_result_t ucn_step(ucn_node_t *node,
         if (!progressed) {
             break;
         }
-        ++result_view.work_done;
+        ++work;
         if (node->faulted) {
             break;
         }
@@ -2297,6 +2374,99 @@ ucn_result_t ucn_step(ucn_node_t *node,
         !ucn_i_adapter_has_work(&node->adapter)) {
         node->lifecycle = UCN_LIFECYCLE_QUIESCENT;
     }
+    memset(&result_view, 0, sizeof(result_view));
+    result_view.struct_size = sizeof(result_view);
+    result_view.api_version = UCN_API_VERSION;
+    result_view.work_done = work;
+    result_view.next_deadline_us = earliest_deadline(node);
+    result_view.more_work = local_runnable_work(node, now_us) ? 1U : 0U;
+    result_view.lifecycle = node->lifecycle;
+    node->work_cursor = phase;
+    result = api_leave(node, &claim,
+                       node->lifecycle == UCN_LIFECYCLE_FAULT
+                           ? UCN_ERR_STATE
+                           : UCN_OK);
+    if (result == UCN_OK) {
+        *out_result = result_view;
+    }
+    return result;
+}
+
+ucn_result_t ucn_i_node_stop_step(
+    ucn_node_t *node,
+    uint64_t now_us,
+    const ucn_step_budget_t *budget,
+    ucn_step_result_t *out_result)
+{
+    ucn_i_callback_claim_t claim;
+    ucn_step_result_t result_view;
+    uint16_t work;
+    uint8_t phase;
+    ucn_result_t result;
+
+    if (!node_is_valid(node) || budget == NULL || out_result == NULL ||
+        budget->struct_size != sizeof(*budget) ||
+        budget->api_version != UCN_API_VERSION || budget->max_work == 0U ||
+        budget->reserved_zero != 0U ||
+        ucn_i_ranges_overlap(node, sizeof(*node), budget, sizeof(*budget)) ||
+        ucn_i_ranges_overlap(node, sizeof(*node), out_result,
+                             sizeof(*out_result)) ||
+        ucn_i_ranges_overlap(budget, sizeof(*budget), out_result,
+                             sizeof(*out_result))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = api_enter(node, 12U, &claim);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (node->lifecycle != UCN_LIFECYCLE_STOPPING ||
+        !node->time_initialized || now_us < node->last_now_us) {
+        return api_leave(node, &claim, UCN_ERR_STATE);
+    }
+    node->last_now_us = now_us;
+    drain_adapter_hints(node);
+    phase = (uint8_t)(node->work_cursor % 3U);
+    work = 0U;
+    while (work < budget->max_work) {
+        bool progressed = false;
+        uint8_t attempt;
+
+        for (attempt = 0U; attempt < 3U; ++attempt) {
+            ucn_i_tx_action_t action = {0};
+            const uint8_t selected = (uint8_t)((phase + attempt) % 3U);
+
+            if (selected == 0U) {
+                progressed = process_one_completion(node, &action);
+            } else if (selected == 1U) {
+                progressed = process_one_timer(node, now_us, &action);
+            } else {
+                progressed = process_one_stopping_rx(node);
+            }
+            if (action.kind == 1U)
+                (void)terminalize_tx(node, action.slot, action.result);
+            else if (action.kind == 2U)
+                (void)requeue_not_submitted_tx(node, action.slot);
+            if (progressed) {
+                phase = (uint8_t)((selected + 1U) % 3U);
+                break;
+            }
+        }
+        if (!progressed) {
+            break;
+        }
+        ++work;
+        if (node->faulted) {
+            break;
+        }
+    }
+    if (!local_protocol_obligations_exist(node) &&
+        !ucn_i_adapter_has_work(&node->adapter)) {
+        node->lifecycle = UCN_LIFECYCLE_QUIESCENT;
+    }
+    memset(&result_view, 0, sizeof(result_view));
+    result_view.struct_size = sizeof(result_view);
+    result_view.api_version = UCN_API_VERSION;
+    result_view.work_done = work;
     result_view.next_deadline_us = earliest_deadline(node);
     result_view.more_work = local_runnable_work(node, now_us) ? 1U : 0U;
     result_view.lifecycle = node->lifecycle;
@@ -2388,6 +2558,73 @@ ucn_result_t ucn_get_stats(const ucn_node_t *node, ucn_stats_t *out_stats)
     if (result == UCN_OK) {
         *out_stats = stats;
     }
+    return result;
+}
+
+ucn_result_t ucn_get_node_view(const ucn_node_t *node, ucn_node_view_t *out_view)
+{
+    ucn_i_callback_claim_t claim;
+    ucn_node_view_t view;
+    ucn_result_t result;
+    uint16_t i;
+    if (!node_is_valid(node) || out_view == NULL ||
+        ucn_i_ranges_overlap(node, sizeof(*node), out_view, sizeof(*out_view))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = api_enter((ucn_node_t *)node, 15U, &claim);
+    if (result != UCN_OK) { return result; }
+    memset(&view, 0, sizeof(view));
+    view.struct_size = sizeof(view);
+    view.api_version = UCN_API_VERSION;
+    view.runtime_instance = node->runtime_instance;
+    view.realm_id = node->realm_id;
+    view.local_address = node->local_address;
+    view.local_binding_generation = node->local_binding_generation;
+    view.last_now_us = node->last_now_us;
+    view.lifecycle = node->lifecycle;
+    view.trusted_o0_network = node->trusted_o0_network;
+    for (i = 0U; i < UCN_ENDPOINT_COUNT; ++i) {
+        view.endpoint_count += node->endpoints[i].valid ? 1U : 0U;
+        if (node->endpoints[i].generation > view.endpoint_generation_high_water) {
+            view.endpoint_generation_high_water = node->endpoints[i].generation;
+        }
+    }
+    for (i = 0U; i < UCN_TX_SLOT_COUNT; ++i) {
+        view.pending_tx += node->tx_slots[i].state != UCN_I_TX_FREE ? 1U : 0U;
+    }
+    result = api_leave((ucn_node_t *)node, &claim, UCN_OK);
+    if (result == UCN_OK) { *out_view = view; }
+    return result;
+}
+
+ucn_result_t ucn_get_static_binding(const ucn_node_t *node, uint32_t address,
+                                    ucn_static_binding_t *out_binding)
+{
+    ucn_i_callback_claim_t claim;
+    ucn_static_binding_t binding;
+    ucn_result_t result;
+    uint16_t i;
+    if (!node_is_valid(node) || out_binding == NULL ||
+        ucn_i_ranges_overlap(node, sizeof(*node), out_binding, sizeof(*out_binding))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = api_enter((ucn_node_t *)node, 16U, &claim);
+    if (result != UCN_OK) { return result; }
+    memset(&binding, 0, sizeof(binding));
+    binding.struct_size = sizeof(binding);
+    binding.api_version = UCN_API_VERSION;
+    result = UCN_ERR_ARGUMENT;
+    for (i = 0U; i < node->binding_count; ++i) {
+        if (node->bindings[i].address == address) {
+            binding.address = address;
+            binding.binding_generation = node->bindings[i].binding_generation;
+            binding.principal_digest = node->bindings[i].principal_digest;
+            result = UCN_OK;
+            break;
+        }
+    }
+    result = api_leave((ucn_node_t *)node, &claim, result);
+    if (result == UCN_OK) { *out_binding = binding; }
     return result;
 }
 

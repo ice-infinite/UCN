@@ -23,7 +23,7 @@ pub struct LinkIdentity {
 
 impl LinkIdentity {
     fn validate(self) -> Result<()> {
-        if self.link_id == 0 || self.link_generation == 0 {
+        if self.link_id == 0 || self.link_id == u16::MAX || self.link_generation == 0 {
             return Err(Error::Argument);
         }
         Ok(())
@@ -73,7 +73,12 @@ pub trait CookieProvider {
     /// # Errors
     ///
     /// Cookie 或其绑定的 JOIN 主键不成立时返回错误。
-    fn verify_cookie(&mut self, hello_cookie: &HelloCookie, key: &AdmissionKey) -> Result<()>;
+    fn verify_cookie(
+        &mut self,
+        hello_cookie: &HelloCookie,
+        key: &AdmissionKey,
+        now_us: u64,
+    ) -> Result<()>;
 
     /// 验证严格状态机中一个事件的完整 transcript 与 Evidence。
     ///
@@ -349,6 +354,8 @@ impl<'a, const PENDING: usize, const LINKS: usize> AdmissionOwner<'a, PENDING, L
             flow: BootstrapFlow::Join,
             transaction_id: hello.transaction_id,
             cookie_time_bucket: context.cookie_time_bucket,
+            issuer_link_id: context.link.link_id,
+            issuer_link_generation: context.link.link_generation,
             cookie_length: length,
             cookie,
         })
@@ -367,6 +374,9 @@ impl<'a, const PENDING: usize, const LINKS: usize> AdmissionOwner<'a, PENDING, L
         transcript: BootstrapTranscript,
         now_us: u64,
     ) -> Result<AdmissionHandle> {
+        if now_us == 0 {
+            return Err(Error::Argument);
+        }
         key.validate()?;
         validate_transcript_phase(&transcript, BootstrapPhase::CookieVerified)?;
         if hello_cookie.flow != BootstrapFlow::Join
@@ -386,14 +396,17 @@ impl<'a, const PENDING: usize, const LINKS: usize> AdmissionOwner<'a, PENDING, L
         {
             return Err(Error::Security);
         }
-        self.call_verify_cookie(provider, &hello_cookie, &key)?;
+        self.call_verify_cookie(provider, &hello_cookie, &key, now_us)?;
         if let Some((index, existing)) = self
             .pending
             .iter()
             .enumerate()
             .find(|(_, slot)| slot.occupied && slot.key == Some(key))
         {
-            if existing.transcript != Some(transcript) || now_us >= existing.deadline_us {
+            if existing.transcript != Some(transcript)
+                || now_us >= existing.deadline_us
+                || now_us < existing.challenge_started_local_us
+            {
                 return Err(Error::Replay);
             }
             return self.make_handle(index);
@@ -566,6 +579,16 @@ impl<'a, const PENDING: usize, const LINKS: usize> AdmissionOwner<'a, PENDING, L
         })
     }
 
+    /// Exact immutable pending transcript for Coordinator routing; not a capability grant.
+    /// 为Coordinator提供精确只读事务内容，不授予任何能力。
+    /// # Errors
+    /// An expired/foreign handle fails without changing state.
+    pub fn pending_transcript(&self, handle: AdmissionHandle) -> Result<BootstrapTranscript> {
+        self.pending[self.handle_index(handle)?]
+            .transcript
+            .ok_or(Error::State)
+    }
+
     /// 取出最终 ADMITTED 快照。
     ///
     /// # Errors
@@ -651,10 +674,11 @@ impl<'a, const PENDING: usize, const LINKS: usize> AdmissionOwner<'a, PENDING, L
         provider: &mut P,
         hello_cookie: &HelloCookie,
         key: &AdmissionKey,
+        now_us: u64,
     ) -> Result<()> {
         let claim = self.next_claim(CALLBACK_VERIFY_COOKIE)?;
         let callback_lease = self.config.provider_gate.try_enter(claim)?;
-        let result = provider.verify_cookie(hello_cookie, key);
+        let result = provider.verify_cookie(hello_cookie, key, now_us);
         let leave_result = self.config.provider_gate.leave(callback_lease);
         result.and(leave_result)
     }

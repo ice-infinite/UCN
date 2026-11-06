@@ -17,17 +17,15 @@ pub const TRANSCRIPT_BYTES: usize = 379;
 pub const LOGICAL_MAX_BYTES: usize = TRANSCRIPT_BYTES + 1 + MAX_EVIDENCE_BYTES;
 
 /// Bootstrap Authority proof Opcode。
-pub const OPCODE_IDENTITY_CHALLENGE: u16 = 131;
+pub const OPCODE_IDENTITY_CHALLENGE: u16 = ucn_types::ProtocolOpcode::IdentityChallenge as u16;
 /// Bootstrap Device proof Opcode。
-pub const OPCODE_IDENTITY_RESPONSE: u16 = 132;
+pub const OPCODE_IDENTITY_RESPONSE: u16 = ucn_types::ProtocolOpcode::IdentityResponse as u16;
 /// Bootstrap Address offer Opcode。
-pub const OPCODE_ADDRESS_OFFER: u16 = 133;
+pub const OPCODE_ADDRESS_OFFER: u16 = ucn_types::ProtocolOpcode::AddressOffer as u16;
 /// Bootstrap Device commit Opcode。
-pub const OPCODE_DEVICE_COMMIT: u16 = 134;
+pub const OPCODE_DEVICE_COMMIT: u16 = ucn_types::ProtocolOpcode::DeviceCommit as u16;
 /// Bootstrap Final durable Opcode。
-pub const OPCODE_FINAL_COMMIT: u16 = 135;
-/// Bootstrap Abort Opcode。
-pub const OPCODE_ABORT: u16 = 136;
+pub const OPCODE_FINAL_COMMIT: u16 = ucn_types::ProtocolOpcode::FinalCommit as u16;
 
 /// Bootstrap 流；Rust Dynamic Admission 只接受 JOIN。
 #[repr(u8)]
@@ -121,7 +119,9 @@ impl BootstrapEvent {
             Self::AddressOffer => Ok(OPCODE_ADDRESS_OFFER),
             Self::DeviceCommit => Ok(OPCODE_DEVICE_COMMIT),
             Self::FinalDurable => Ok(OPCODE_FINAL_COMMIT),
-            Self::Abort => Ok(OPCODE_ABORT),
+            // No registered Bootstrap abort frame; stop/timeout is local only.
+            // 未登记Bootstrap终止帧；停止/超时仅为本地动作。
+            Self::Abort => Err(Error::Unsupported),
             Self::Cookie => Err(Error::State),
         }
     }
@@ -138,7 +138,6 @@ impl BootstrapEvent {
             OPCODE_ADDRESS_OFFER => Ok(Self::AddressOffer),
             OPCODE_DEVICE_COMMIT => Ok(Self::DeviceCommit),
             OPCODE_FINAL_COMMIT => Ok(Self::FinalDurable),
-            OPCODE_ABORT => Ok(Self::Abort),
             _ => Err(Error::Malformed),
         }
     }
@@ -166,6 +165,10 @@ pub struct CookieChallenge {
     pub transaction_id: u64,
     /// Cookie 时间桶。
     pub cookie_time_bucket: u32,
+    /// Issuer-local Link ID, echoed unchanged; 签发方本地Link编号，原样回显。
+    pub issuer_link_id: u16,
+    /// Issuer-local Link generation, never the client's generation; 签发方本地代际。
+    pub issuer_link_generation: u32,
     /// 有效 Cookie 字节数。
     pub cookie_length: u8,
     /// 固定容量 Cookie；尾部必须为零。
@@ -204,6 +207,33 @@ impl Evidence {
     }
 }
 
+/// Small opaque Cookie, not a generic 128 byte proof; 独立小型Cookie。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Cookie {
+    bytes: [u8; COOKIE_MAX_BYTES],
+    length: u8,
+}
+impl Cookie {
+    /// Nonempty nonzero 1..16 byte Cookie; 非空非全零1～16字节Cookie。
+    /// # Errors
+    /// Empty, all-zero or oversized bytes reject without a partial value.
+    pub fn new(input: &[u8]) -> Result<Self> {
+        if input.is_empty() || input.len() > COOKIE_MAX_BYTES || input.iter().all(|b| *b == 0) {
+            return Err(Error::Argument);
+        }
+        let mut bytes = [0; COOKIE_MAX_BYTES];
+        bytes[..input.len()].copy_from_slice(input);
+        Ok(Self {
+            bytes,
+            length: u8::try_from(input.len()).map_err(|_| Error::Argument)?,
+        })
+    }
+    /// Exact Cookie bytes; 精确Cookie字节。
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.length)]
+    }
+}
 /// 携回 Cookie 的固定前缀 JOIN 请求。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HelloCookie {
@@ -224,7 +254,7 @@ pub struct HelloCookie {
     /// HELLO 与 Challenge 的 canonical hash。
     pub prior_messages_hash: [u8; 32],
     /// Cookie proof。
-    pub cookie_evidence: Evidence,
+    pub cookie_evidence: Cookie,
 }
 
 /// 379 B canonical JOIN transcript。
@@ -375,6 +405,8 @@ pub fn encode_cookie_challenge(challenge: CookieChallenge, output: &mut [u8]) ->
     encoded[4..12].copy_from_slice(&challenge.transaction_id.to_be_bytes());
     encoded[12..16].copy_from_slice(&challenge.cookie_time_bucket.to_be_bytes());
     encoded[16..32].copy_from_slice(&challenge.cookie);
+    encoded[32..34].copy_from_slice(&challenge.issuer_link_id.to_be_bytes());
+    encoded[34..38].copy_from_slice(&challenge.issuer_link_generation.to_be_bytes());
     output.copy_from_slice(&encoded);
     Ok(())
 }
@@ -388,7 +420,7 @@ pub fn decode_cookie_challenge(input: &[u8]) -> Result<CookieChallenge> {
     if input.len() != COOKIE_CHALLENGE_BYTES
         || input[0] != 1
         || input[3] != 0
-        || input[32..].iter().any(|byte| *byte != 0)
+        || input[38..].iter().any(|byte| *byte != 0)
     {
         return Err(Error::Malformed);
     }
@@ -399,6 +431,10 @@ pub fn decode_cookie_challenge(input: &[u8]) -> Result<CookieChallenge> {
         transaction_id: u64::from_be_bytes(input[4..12].try_into().map_err(|_| Error::Malformed)?),
         cookie_time_bucket: u32::from_be_bytes(
             input[12..16].try_into().map_err(|_| Error::Malformed)?,
+        ),
+        issuer_link_id: u16::from_be_bytes(input[32..34].try_into().map_err(|_| Error::Malformed)?),
+        issuer_link_generation: u32::from_be_bytes(
+            input[34..38].try_into().map_err(|_| Error::Malformed)?,
         ),
         cookie_length: input[2],
         cookie,
@@ -418,7 +454,7 @@ pub fn encode_hello_cookie(value: HelloCookie, output: &mut [u8]) -> Result<usiz
     if output.len() < length {
         return Err(Error::NoSpace);
     }
-    let mut encoded = [0; HELLO_COOKIE_FIXED_BYTES + MAX_EVIDENCE_BYTES];
+    let mut encoded = [0; HELLO_COOKIE_FIXED_BYTES + COOKIE_MAX_BYTES];
     encoded[0] = 1;
     encoded[1] = value.flow as u8;
     encoded[2] = value.cookie_evidence.length;
@@ -441,7 +477,7 @@ pub fn encode_hello_cookie(value: HelloCookie, output: &mut [u8]) -> Result<usiz
 /// 长度、保留位或 typed 字段非法时返回格式错误。
 pub fn decode_hello_cookie(input: &[u8]) -> Result<HelloCookie> {
     if input.len() < HELLO_COOKIE_FIXED_BYTES + 1
-        || input.len() > HELLO_COOKIE_FIXED_BYTES + MAX_EVIDENCE_BYTES
+        || input.len() > HELLO_COOKIE_FIXED_BYTES + COOKIE_MAX_BYTES
         || input[0] != 1
         || input[3] != 0
         || input.len() != HELLO_COOKIE_FIXED_BYTES + usize::from(input[2])
@@ -464,7 +500,7 @@ pub fn decode_hello_cookie(input: &[u8]) -> Result<HelloCookie> {
             input[46..50].try_into().map_err(|_| Error::Malformed)?,
         ),
         prior_messages_hash: input[50..82].try_into().map_err(|_| Error::Malformed)?,
-        cookie_evidence: Evidence::new(&input[82..]).map_err(|_| Error::Malformed)?,
+        cookie_evidence: Cookie::new(&input[82..]).map_err(|_| Error::Malformed)?,
     };
     validate_hello_cookie(value).map_err(|_| Error::Malformed)?;
     Ok(value)
@@ -614,7 +650,7 @@ pub fn encode_logical_event(
     evidence: Evidence,
     output: &mut [u8],
 ) -> Result<usize> {
-    if !event_matches_phase(event, transcript.flow, expected_phase) {
+    if event.opcode().is_err() || !event_matches_phase(event, transcript.flow, expected_phase) {
         return Err(Error::Argument);
     }
     let length = TRANSCRIPT_BYTES + 1 + evidence.bytes().len();
@@ -666,6 +702,9 @@ fn validate_cookie_challenge(value: CookieChallenge) -> Result<()> {
     let length = usize::from(value.cookie_length);
     if value.transaction_id == 0
         || value.cookie_time_bucket == 0
+        || value.issuer_link_id == 0
+        || value.issuer_link_id == u16::MAX
+        || value.issuer_link_generation == 0
         || length == 0
         || length > COOKIE_MAX_BYTES
         || value.cookie[..length].iter().all(|byte| *byte == 0)
@@ -681,7 +720,9 @@ fn validate_hello_cookie(value: HelloCookie) -> Result<()> {
         || value.transaction_id == 0
         || value.lease_freshness_challenge_nonce == 0
         || value.selected_link_instance_id == 0
+        || value.selected_link_instance_id == u16::MAX
         || value.selected_link_instance_generation == 0
+        || value.cookie_evidence.bytes().len() > COOKIE_MAX_BYTES
         || value.prior_messages_hash.iter().all(|byte| *byte == 0)
     {
         return Err(Error::Argument);
@@ -719,17 +760,20 @@ pub(crate) fn validate_transcript_phase(
     let address = address_fields_valid(value);
     match phase {
         BootstrapPhase::CookieVerified => {
-            if authority || device || address {
+            if !authority_fields_zero(value)
+                || !device_fields_zero(value)
+                || !address_fields_zero(value)
+            {
                 return Err(Error::Malformed);
             }
         }
         BootstrapPhase::AuthorityVerified => {
-            if !authority || device || address {
+            if !authority || !device_fields_zero(value) || !address_fields_zero(value) {
                 return Err(Error::Malformed);
             }
         }
         BootstrapPhase::DeviceVerified => {
-            if !authority || !device || address {
+            if !authority || !device || !address_fields_zero(value) {
                 return Err(Error::Malformed);
             }
         }
@@ -768,7 +812,10 @@ pub(crate) fn event_matches_phase(
     }
 }
 
-pub(crate) fn transcript_transition_valid(
+/// Exact immutable-field comparison; pure validation, never authorization.
+/// 精确比较已冻结字段；仅验证，不授予任何权限。
+#[must_use]
+pub fn transcript_transition_valid(
     previous: &BootstrapTranscript,
     next: &BootstrapTranscript,
     event: BootstrapEvent,

@@ -2,6 +2,8 @@
 #define UCN_INTERNAL_SECURITY_H
 
 #include "internal/ucn_owner.h"
+#include "internal/ucn_control_wire.h"
+#include "internal/ucn_digest.h"
 #include "ucn/ucn_config.h"
 
 #define UCN_I_SECURITY_SCHEMA UINT16_C(1)
@@ -13,8 +15,39 @@
 #define UCN_I_SECURITY_PRINCIPAL_BYTES 16U
 #define UCN_I_SECURITY_FINGERPRINT_BYTES 16U
 #define UCN_I_SECURITY_TRANSCRIPT_BYTES 32U
+#define UCN_I_PEER_REAUTH_RECORD_BYTES 208U
+/* EN: Canonical structural bytes only, never an authenticated peer or Session.
+ * 中文：仅规范结构字节，不是已认证邻居或Session。 */
+typedef struct ucn_i_peer_reauth_record {
+    uint8_t canonical[UCN_I_PEER_REAUTH_RECORD_BYTES];
+} ucn_i_peer_reauth_record_t;
+/* EN: Strict canonical decode/copy; errors preserve output, aliases reject.
+ * 中文：严格规范解码/复制；失败不写输出，拒绝任何别名。 */
+ucn_result_t ucn_i_peer_reauth_decode(const uint8_t *input, size_t length,
+                                    ucn_i_peer_reauth_record_t *output);
+/* EN: Encode only validated canonical bytes, no authentication grant.
+ * 中文：仅编码校验后的规范字节，不授予认证。 */
+ucn_result_t ucn_i_peer_reauth_encode(const ucn_i_peer_reauth_record_t *input,
+                                    uint8_t *output, size_t capacity);
+#define UCN_I_PEER_REAUTH_FRAGMENT_PREFIX 18U
+typedef struct ucn_i_peer_reauth_fragment {
+    uint64_t transaction;
+    uint16_t total_bytes;
+    uint8_t stage;
+    uint8_t index;
+    uint8_t data_bytes;
+    uint8_t data[80];
+} ucn_i_peer_reauth_fragment_t;
+/* EN: Structural fragment only; full logical signature remains mandatory.
+ * 中文：仅结构分片；完整逻辑签名仍是必要门禁。 */
+ucn_result_t ucn_i_peer_reauth_fragment_encode(const ucn_i_peer_reauth_fragment_t *input,
+    uint8_t *output,size_t capacity,size_t *written);
+/* EN: Strict canonical decode, zero writes on error.
+ * 中文：严格规范解码，失败零写入。 */
+ucn_result_t ucn_i_peer_reauth_fragment_decode(const uint8_t *input,size_t length,
+    ucn_i_peer_reauth_fragment_t *output);
 #define UCN_I_SECURITY_C1_ORIGIN_AAD_BYTES 72U
-#define UCN_I_SECURITY_SEQUENCE_NONCE_INPUT_BYTES 37U
+#define UCN_I_SECURITY_SEQUENCE_NONCE_INPUT_BYTES 44U
 #define UCN_I_SECURITY_ORIGIN_TAG_BYTES 16U
 #define UCN_I_SECURITY_HOP_TAG_BYTES 12U
 #define UCN_I_SECURITY_HOP_TRAILER_BYTES 16U
@@ -137,6 +170,8 @@ typedef struct ucn_i_security_session_view {
     uint32_t link_generation;
     uint32_t session_generation;
     uint32_t policy_generation;
+    uint32_t origin_tx_key_generation;
+    uint32_t origin_rx_key_generation;
     uint8_t origin_level;
     uint8_t hop_profile;
     uint8_t phase;
@@ -168,6 +203,20 @@ typedef struct ucn_i_security_access_request {
     uint8_t reserved_zero[3];
 } ucn_i_security_access_request_t;
 
+/* EN: C0 has no Service ID.  Its ACL key is the exact authenticated Peer,
+ * Binding, context fingerprint, opcode and direction; ACL rules represent
+ * this domain with service_id == 0 and a nonzero registered opcode.
+ * 中文：C0 没有 Service ID。其 ACL 键由精确认证 Peer、Binding、上下文摘要、
+ * Opcode 和方向组成；ACL 规则使用 service_id == 0 且非零已登记 Opcode 表示
+ * 该域。 */
+typedef struct ucn_i_security_control_access_request {
+    ucn_i_security_handle_t session;
+    uint8_t context_fingerprint[UCN_I_SECURITY_FINGERPRINT_BYTES];
+    uint16_t protocol_opcode;
+    uint8_t direction;
+    uint8_t reserved_zero;
+} ucn_i_security_control_access_request_t;
+
 typedef struct ucn_i_security_current_facts {
     ucn_i_security_binding_t local;
     ucn_i_security_binding_t peer;
@@ -175,6 +224,27 @@ typedef struct ucn_i_security_current_facts {
     uint32_t link_generation;
     uint32_t policy_generation;
 } ucn_i_security_current_facts_t;
+
+/* EN: A Control FSM owns and persists the C0 Transaction ID.  Security owns
+ * only canonical binding, protection and the exact ACL check; it must never
+ * allocate a second transaction counter for the same Wire field.
+ * 中文：C0 Transaction ID 由对应 Control FSM 唯一分配并按需持久化。Security
+ * 只负责 canonical 绑定、密码保护与精确 ACL；不得为同一线上字段再维护第二套
+ * 事务计数器。 */
+typedef struct ucn_i_security_c0_protect_request {
+    ucn_i_security_handle_t session;
+    ucn_i_security_current_facts_t facts;
+    uint64_t transaction_id;
+    uint16_t protocol_opcode;
+    uint8_t context_fingerprint[UCN_I_SECURITY_FINGERPRINT_BYTES];
+    uint8_t traffic_class;
+    uint8_t delivery_guarantee;
+    uint8_t interaction_role;
+    uint8_t payload_kind;
+    uint8_t hop_limit;
+    uint8_t direction;
+    uint8_t reserved_zero[2];
+} ucn_i_security_c0_protect_request_t;
 
 /* EN: Canonical C1 material is assembled from authenticated Session facts,
  * never from a bare address-to-principal guess.
@@ -228,8 +298,22 @@ typedef struct ucn_i_security_replay_handle {
     uint16_t reservation_slot;
     uint16_t hop_reservation_slot;
     uint8_t has_hop;
-    uint8_t reserved_zero[3];
+    uint8_t replay_domain; /* 0=C1+ Origin, 1=C0; independent replay namespaces. */
+    uint8_t reserved_zero[2];
 } ucn_i_security_replay_handle_t;
+
+/* EN: A relay owns only the inbound hop replay reservation.  It must not
+ * fabricate an origin replay reservation because relays never authenticate
+ * or decrypt the end-to-end payload.
+ * 中文：中继只持有入站逐跳 Replay 预留。中继不会认证或解密端到端 Payload，
+ * 因而绝不能伪造 Origin Replay 预留。 */
+typedef struct ucn_i_security_hop_replay_handle {
+    ucn_i_security_handle_t session;
+    uint32_t hop_sequence;
+    uint32_t reservation_generation;
+    uint16_t reservation_slot;
+    uint16_t reserved_zero;
+} ucn_i_security_hop_replay_handle_t;
 
 typedef struct ucn_i_security_tx_handle {
     ucn_i_security_handle_t session;
@@ -257,7 +341,14 @@ typedef struct ucn_i_security_replay_reservation {
     uint8_t payload_digest[16];
     uint32_t generation;
     uint8_t valid;
-    uint8_t reserved_zero[3];
+    /* EN: Only a typed Composition handler may publish business completion.
+     * The generic authenticated-control boundary must not turn a structurally
+     * valid but unsupported body into a committed replay entry.
+     * 中文：只有强类型 Composition Handler 才能发布业务完成。通用认证控制
+     * 边界不得把“结构合法但语义未实现”的 Body 直接提交为已消费 Replay。 */
+    uint8_t business_completed;
+    uint8_t replay_domain;
+    uint8_t reserved_zero;
 } ucn_i_security_replay_reservation_t;
 
 typedef struct ucn_i_security_replay_window {
@@ -365,8 +456,18 @@ typedef struct ucn_i_security_slot {
     ucn_handle_t persistence_handle;
     uint8_t expected_published_digest[16];
     ucn_i_security_replay_window_t origin_replay;
+    /* EN: Separate C0 committed window, shared bounded reservation pool.
+     * 中文：C0独立已提交窗口，共用有界预留槽，不增加报文头。 */
+    uint64_t c0_rx_highest_committed;
+    uint64_t c0_rx_committed_bitmap;
     ucn_i_security_replay_window_t hop_replay;
     ucn_i_security_tx_reservation_t origin_tx_reservation;
+    /* EN: C0 transaction identifiers are monotonically consumed inside one
+     * active Session/direction.  A Driver retry must reuse the already sealed
+     * frame and must never call the crypto Provider again with the same nonce.
+     * 中文：同一活动 Session/方向内的 C0 Transaction ID 单调消耗。Driver
+     * 重试必须复用已封装帧，绝不能用同一 nonce 再次调用密码 Provider。 */
+    uint64_t c0_tx_highest_consumed;
     uint32_t origin_tx_highest_reserved;
     uint32_t hop_tx_highest_reserved;
     uint32_t slot_generation;
@@ -407,9 +508,21 @@ typedef struct ucn_i_security_codec_workspace {
     ucn_i_security_candidate_t candidate;
 } ucn_i_security_codec_workspace_t;
 
+/* EN: Context resolution may decode a complete C0 header and stage both
+ * result DTOs.  Keep that bounded storage caller-owned so MCU task stacks do
+ * not depend on the selected address width or security profile.
+ * 中文：上下文解析可能需要解码完整 C0 头并暂存两个结果 DTO。该有界存储由
+ * 调用方持有，避免 MCU 任务栈随地址宽度或安全 Profile 变化。 */
+typedef struct ucn_i_security_c0_origin_resolve_workspace {
+    ucn_i_c0_frame_t frame;
+    ucn_i_security_control_access_request_t access;
+    ucn_i_security_current_facts_t facts;
+} ucn_i_security_c0_origin_resolve_workspace_t;
+
 typedef struct ucn_i_security_packet_workspace {
     ucn_i_security_candidate_t candidate;
     ucn_i_security_c1_origin_material_t material;
+    ucn_i_c0_frame_t control_frame;
     ucn_i_security_origin_protect_request_t origin_protect;
     ucn_i_security_origin_open_request_t origin_open;
     ucn_i_security_hop_request_t hop_protect;
@@ -421,17 +534,103 @@ typedef struct ucn_i_security_packet_workspace {
     uint8_t nonce_input[UCN_I_SECURITY_SEQUENCE_NONCE_INPUT_BYTES];
     uint8_t hop_aad[UCN_I_SECURITY_HOP_AAD_BYTES];
     uint8_t digest[32];
+    ucn_i_sha256_workspace_t digest_workspace;
     struct {
         size_t header_bytes;
         size_t packet_bytes;
         size_t packet_before_hop_bytes;
         size_t hop_trailer_bytes;
+        size_t hop_aad_bytes;
         size_t offset;
         uint32_t hop_sequence;
         uint8_t provider_invoked;
         uint8_t reserved_zero[3];
-    } protect_control;
+    } packet_state;
 } ucn_i_security_packet_workspace_t;
+
+/* EN: Only Security can publish this fact after origin/hop verification and
+ * replay reservation.  It is valid only while the exact replay reservation
+ * remains pending and the caller-owned plaintext buffer is unchanged.
+ * 中文：只有 Security 在 Origin/Hop 验证并预留 Replay 后才能发布本事实。它仅在
+ * 精确 Replay 预留仍待提交且调用方 Plaintext 缓冲未改变期间有效。 */
+typedef struct ucn_i_security_authenticated_control {
+    ucn_i_security_handle_t session;
+    ucn_i_security_replay_handle_t replay;
+    const uint8_t *body;
+    size_t body_bytes;
+    uint64_t transaction_id;
+    uint32_t runtime_instance;
+    uint32_t realm_id;
+    uint32_t source_address;
+    uint32_t destination_address;
+    uint32_t source_binding_generation;
+    uint32_t destination_binding_generation;
+    uint16_t security_owner_instance;
+    uint16_t protocol_opcode;
+    uint8_t body_digest[UCN_I_DIGEST128_BYTES];
+    uint8_t traffic_class;
+    uint8_t delivery_guarantee;
+    uint8_t interaction_role;
+    uint8_t payload_kind;
+    uint8_t origin_security;
+    uint8_t hop_limit;
+    uint8_t direction;
+    uint8_t reserved_zero;
+} ucn_i_security_authenticated_control_t;
+
+/* EN: This immutable relay fact exposes only canonical C0 routing metadata
+ * and the still-protected origin bytes.  The source packet must remain
+ * byte-identical until the hop replay obligation is committed or aborted.
+ * 中文：该不可变中继事实只暴露规范 C0 路由元数据和仍受 Origin 保护的字节。
+ * 在逐跳 Replay obligation 提交或回滚前，源 Packet 必须逐字节不变。 */
+typedef struct ucn_i_security_c0_relay_fact {
+    ucn_i_security_hop_replay_handle_t replay;
+    const uint8_t *packet;
+    size_t packet_bytes;
+    uint64_t transaction_id;
+    uint32_t runtime_instance;
+    uint32_t realm_id;
+    uint32_t source_address;
+    uint32_t destination_address;
+    uint32_t source_binding_generation;
+    uint32_t destination_binding_generation;
+    uint16_t protocol_opcode;
+    uint8_t packet_digest[UCN_I_DIGEST128_BYTES];
+    uint8_t traffic_class;
+    uint8_t delivery_guarantee;
+    uint8_t interaction_role;
+    uint8_t payload_kind;
+    uint8_t origin_security;
+    uint8_t hop_limit;
+    uint8_t reserved_zero[2];
+} ucn_i_security_c0_relay_fact_t;
+
+/* EN: A protected multi-hop C0 path has two independent security contexts.
+ * origin_session authenticates the immutable end-to-end principal and body;
+ * hop_session authenticates only the current physical neighbour.  They may
+ * be the same only for the existing direct-link fast path.
+ * 中文：受保护的多跳 C0 路径包含两个独立安全上下文。origin_session 认证
+ * 不可变的端到端主体与正文；hop_session 只认证当前物理邻居。只有既有直达
+ * 快速路径才允许二者相同。 */
+typedef struct ucn_i_security_c0_path_context {
+    ucn_i_security_handle_t origin_session;
+    ucn_i_security_current_facts_t origin_facts;
+    ucn_i_security_handle_t hop_session;
+    ucn_i_security_current_facts_t hop_facts;
+} ucn_i_security_c0_path_context_t;
+
+typedef struct ucn_i_security_c0_path_workspace {
+    ucn_i_security_packet_workspace_t packet;
+    ucn_i_security_c0_relay_fact_t relay;
+    uint8_t origin_packet[UCN_ADAPTER_FRAME_BYTES];
+} ucn_i_security_c0_path_workspace_t;
+
+typedef struct ucn_i_security_control_validate_workspace {
+    ucn_i_c0_frame_t canonical;
+    uint8_t digest[UCN_I_DIGEST128_BYTES];
+    uint8_t aad[UCN_I_C0_ORIGIN_AAD_MAX_BYTES];
+    ucn_i_sha256_workspace_t digest_workspace;
+} ucn_i_security_control_validate_workspace_t;
 
 /* EN: owner must point to fully zeroed caller-owned storage. Initialization
  * acquires config->state_lock and rejects every live/nonzero Owner without
@@ -509,6 +708,145 @@ ucn_result_t ucn_i_security_c1_open(
     size_t plaintext_capacity,
     size_t *plaintext_bytes,
     ucn_i_security_replay_handle_t *replay_out);
+/* EN: Project the actual H0/H1 Session onto its Origin layer. Neither function
+ * authenticates a physical neighbour or consumes Hop counters/replay. The
+ * Coordinator must separately establish the current Hop before app delivery.
+ * ZH: 将真实H0/H1 Session投影到Origin层；不认证物理邻居、不消耗Hop序号或Replay。
+ * 协调器须在业务交付前另行完成当前Hop验证，禁止伪造第二个同Peer活动Session。 */
+ucn_result_t ucn_i_security_c1_origin_protect(
+    ucn_i_security_owner_t *owner,
+    ucn_i_security_tx_handle_t tx,
+    const ucn_i_security_c1_origin_material_t *material,
+    const uint8_t *plaintext,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_bytes);
+ucn_result_t ucn_i_security_c1_origin_open(
+    ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t session,
+    const ucn_i_security_current_facts_t *facts,
+    const ucn_i_security_access_request_t *access,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *plaintext_output,
+    size_t plaintext_capacity,
+    size_t *plaintext_bytes,
+    ucn_i_security_replay_handle_t *replay_out);
+ucn_result_t ucn_i_security_c0_open(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_control_access_request_t *access,
+    const ucn_i_security_current_facts_t *facts,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *plaintext_output,
+    size_t plaintext_capacity,
+    size_t *plaintext_bytes,
+    ucn_i_security_authenticated_control_t *fact_out);
+ucn_result_t ucn_i_security_c0_hop_open(
+    ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t inbound_session,
+    const ucn_i_security_current_facts_t *facts,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    ucn_i_security_c0_path_workspace_t *workspace);
+ucn_result_t ucn_i_security_c0_hop_seal(
+    ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t outbound_session,
+    const ucn_i_security_current_facts_t *facts,
+    const ucn_i_security_c0_relay_fact_t *relay,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_bytes);
+ucn_result_t ucn_i_security_c0_path_protect(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_c0_protect_request_t *origin_request,
+    ucn_i_security_handle_t hop_session,
+    const ucn_i_security_current_facts_t *hop_facts,
+    const uint8_t *plaintext,
+    size_t plaintext_bytes,
+    ucn_i_security_c0_path_workspace_t *workspace,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_bytes);
+ucn_result_t ucn_i_security_c0_path_open(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_control_access_request_t *origin_access,
+    const ucn_i_security_current_facts_t *origin_facts,
+    ucn_i_security_handle_t hop_session,
+    const ucn_i_security_current_facts_t *hop_facts,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    ucn_i_security_c0_path_workspace_t *workspace,
+    uint8_t *plaintext_output,
+    size_t plaintext_capacity,
+    size_t *plaintext_bytes,
+    ucn_i_security_authenticated_control_t *fact_out,
+    ucn_i_security_hop_replay_handle_t *hop_replay_out);
+ucn_result_t ucn_i_security_c0_hop_receive_context_resolve(
+    ucn_i_security_owner_t *owner,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    uint64_t now_us,
+    uint32_t link_generation,
+    ucn_i_security_handle_t *session_out,
+    ucn_i_security_current_facts_t *facts_out);
+ucn_result_t ucn_i_security_c0_hop_send_context_resolve(
+    ucn_i_security_owner_t *owner,
+    uint16_t protocol_opcode,
+    uint64_t now_us,
+    uint32_t link_generation,
+    ucn_i_security_handle_t *session_out,
+    ucn_i_security_current_facts_t *facts_out);
+ucn_result_t ucn_i_security_c0_origin_receive_context_resolve(
+    ucn_i_security_owner_t *owner,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    uint64_t now_us,
+    ucn_i_security_c0_origin_resolve_workspace_t *workspace,
+    ucn_i_security_control_access_request_t *access_out,
+    ucn_i_security_current_facts_t *facts_out);
+ucn_result_t ucn_i_security_hop_replay_commit(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_hop_replay_handle_t *handle,
+    const ucn_i_security_current_facts_t *facts);
+ucn_result_t ucn_i_security_hop_replay_abort(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_hop_replay_handle_t *handle);
+/* EN: Adapter ingress never manufactures a Session handle or ACL request.
+ * Security resolves one and only one active Session from the canonical C0
+ * addresses, Bindings, protection profile, link generation and exact inbound
+ * Opcode before the provider is invoked.  No match or an ambiguous match is
+ * fail-closed and leaves both outputs untouched.
+ * 中文：Adapter 入站不得自行拼装 Session Handle 或 ACL 请求。Security 必须先
+ * 根据 canonical C0 地址、Binding、保护 Profile、Link Generation 与精确入站
+ * Opcode 唯一解析出一个活动 Session，之后才允许调用 Provider。无匹配或多重
+ * 匹配均失败关闭，两个输出保持不变。 */
+ucn_result_t ucn_i_security_c0_receive_context_resolve(
+    ucn_i_security_owner_t *owner,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    uint64_t now_us,
+    uint32_t link_generation,
+    ucn_i_security_control_access_request_t *access_out,
+    ucn_i_security_current_facts_t *facts_out);
+ucn_result_t ucn_i_security_c0_protect(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_c0_protect_request_t *request,
+    const uint8_t *plaintext,
+    size_t plaintext_bytes,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_bytes);
+ucn_result_t ucn_i_security_control_fact_validate(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_authenticated_control_t *fact,
+    const ucn_i_security_current_facts_t *current_facts,
+    ucn_i_security_control_validate_workspace_t *workspace);
 ucn_result_t ucn_i_security_replay_reserve(
     ucn_i_security_owner_t *owner,
     ucn_i_security_handle_t session,
@@ -519,11 +857,19 @@ ucn_result_t ucn_i_security_replay_reserve(
     ucn_i_security_replay_handle_t *handle_out);
 ucn_result_t ucn_i_security_replay_commit(
     ucn_i_security_owner_t *owner,
-    ucn_i_security_replay_handle_t handle,
+    const ucn_i_security_replay_handle_t *handle,
+    const ucn_i_security_current_facts_t *facts);
+ucn_result_t ucn_i_security_control_replay_complete(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_replay_handle_t *handle,
+    const ucn_i_security_current_facts_t *facts);
+ucn_result_t ucn_i_security_control_replay_commit(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_replay_handle_t *handle,
     const ucn_i_security_current_facts_t *facts);
 ucn_result_t ucn_i_security_replay_abort(
     ucn_i_security_owner_t *owner,
-    ucn_i_security_replay_handle_t handle);
+    const ucn_i_security_replay_handle_t *handle);
 ucn_result_t ucn_i_security_replay_maintain(
     ucn_i_security_owner_t *owner,
     uint64_t now_us,

@@ -1,0 +1,22 @@
+[package]
+name = "ucn-transport"
+description = "Bounded Reliable and Transfer Owners for UCN v6 simplified"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["reliable", "transfer"]
+reliable = []
+transfer = ["dep:ucn-durable", "dep:ucn-persistence"]
+
+[dependencies]
+ucn-types = { path = "../ucn-types" }
+ucn-digest = { path = "../ucn-digest" }
+ucn-persistence = { path = "../ucn-persistence", optional = true }
+ucn-durable = { path = "../ucn-durable", optional = true }
+
+[lints]
+workspace = true

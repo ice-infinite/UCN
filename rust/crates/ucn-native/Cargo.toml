@@ -1,0 +1,14 @@
+[package]
+name = "ucn-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ucn-core = { path = "../ucn-core" }
+ucn-adapter = { path = "../ucn-adapter" }
+ucn-types = { path = "../ucn-types" }
+
+[lints]
+workspace = true

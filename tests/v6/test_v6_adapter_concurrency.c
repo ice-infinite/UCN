@@ -27,6 +27,10 @@ typedef struct producer {
 
 static ucn_v6_adapter_owner_storage_t storage;
 
+/* Two producers own disjoint, compile-time bounded shares of the RX pool.
+ * Do not assume Full's 32 slots when testing Nano's four slots. */
+#define PRODUCER_ATTEMPTS (UCN_V6_CONFIG_ADAPTER_RX_SLOTS / 2U)
+
 static ucn_v6_result_t lock_task(void *context)
 {
     shared_lock_t *lock = (shared_lock_t *)context;
@@ -89,7 +93,7 @@ static void *produce(void *context)
     uint8_t frame[40];
     unsigned index;
     memset(frame, (int)producer->link_id, sizeof(frame));
-    for (index = 0U; index < 16U; ++index) {
+    for (index = 0U; index < PRODUCER_ATTEMPTS; ++index) {
         ucn_v6_driver_event_key_t key;
         ucn_v6_result_t result = ucn_v6_adapter_publish_rx(
             producer->adapter, producer->link_id, 1U, 1U, frame,
@@ -110,7 +114,7 @@ static int register_uart(ucn_v6_adapter_owner_t *adapter, uint16_t link_id)
     memset(&settings, 0, sizeof(settings));
     settings.base.link_id = link_id;
     settings.base.initial_generation = 1U;
-    settings.base.rx_slot_quota = 16U;
+    settings.base.rx_slot_quota = PRODUCER_ATTEMPTS;
     settings.base.tx_slot_quota = 1U;
     settings.base.ops.struct_size = sizeof(settings.base.ops);
     settings.base.ops.api_version = UCN_V6_ADAPTER_API_VERSION;
@@ -168,8 +172,8 @@ int main(void)
         ++retired;
     }
     CHECK(retired == task_producer.accepted + isr_producer.accepted);
-    CHECK(task_producer.accepted == 16U);
-    CHECK(isr_producer.accepted + isr_producer.contended == 16U);
+    CHECK(task_producer.accepted == PRODUCER_ATTEMPTS);
+    CHECK(isr_producer.accepted + isr_producer.contended == PRODUCER_ATTEMPTS);
     CHECK(pthread_mutex_destroy(&lock.mutex) == 0);
     puts("ucn v6 adapter concurrency tests passed");
     return 0;

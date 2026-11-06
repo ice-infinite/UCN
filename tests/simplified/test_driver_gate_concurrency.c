@@ -214,7 +214,7 @@ int main(void)
                                   &view_b) == UCN_ERR_STATE);
     CHECK(memcmp(&view_b, &before_b, sizeof(view_b)) == 0);
     CHECK(fixture_b.submit_calls == 0U);
-    CHECK(ucn_i_adapter_tx_view(&adapter_b, token_b, &view_b) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_view(&adapter_b, &(token_b), &view_b) == UCN_OK);
     CHECK(view_b.state == UCN_I_ADAPTER_TX_RESERVED);
 
     CHECK(pthread_mutex_lock(&gate.event_mutex) == 0);
@@ -228,9 +228,9 @@ int main(void)
 
     CHECK(ucn_i_adapter_tx_complete(&adapter_a, token_a, UCN_OK, NULL) ==
           UCN_OK);
-    CHECK(ucn_i_adapter_tx_retire(&adapter_a, token_a) == UCN_OK);
-    CHECK(ucn_i_adapter_tx_cancel(&adapter_b, token_b) == UCN_OK);
-    CHECK(ucn_i_adapter_tx_retire(&adapter_b, token_b) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_retire(&adapter_a, &(token_a)) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_cancel(&adapter_b, &(token_b)) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_retire(&adapter_b, &(token_b)) == UCN_OK);
     while (ucn_i_owner_mailbox_take(
                &adapter_a.mailbox, &(ucn_i_owner_work_hint_t){0}) == UCN_OK) {
     }

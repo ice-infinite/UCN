@@ -176,6 +176,12 @@ pub struct DurabilityBase {
 }
 
 impl DurabilityBase {
+    /// Validated historical candidate, never a live authentication view.
+    /// 已校验的历史候选，不是当前认证或权限证明。
+    #[must_use]
+    pub const fn previous_session(&self) -> Option<HandshakeCandidate> {
+        self.prior_session
+    }
     /// 从 Ready Domain view 构造下一提交基线。
     ///
     /// # Errors
@@ -275,8 +281,37 @@ impl DurabilityBase {
 
 /// Security Owner 交给 Coordinator 的完整持久化 Requirement。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RequirementBase {
+    runtime_instance: u32,
+    caller_owner_instance: u16,
+    domain_generation: u16,
+    domain: DomainKey,
+    next_transaction_id: u64,
+    expected_record_generation: u64,
+    expected_body_digest: [u8; DIGEST_BYTES],
+    absolute_deadline_us: u64,
+    volatile_continuation: u32,
+}
+impl From<DurabilityBase> for RequirementBase {
+    fn from(base: DurabilityBase) -> Self {
+        Self {
+            runtime_instance: base.runtime_instance,
+            caller_owner_instance: base.caller_owner_instance,
+            domain_generation: base.domain_generation,
+            domain: base.domain,
+            next_transaction_id: base.next_transaction_id,
+            expected_record_generation: base.expected_record_generation,
+            expected_body_digest: base.expected_body_digest,
+            absolute_deadline_us: base.absolute_deadline_us,
+            volatile_continuation: base.volatile_continuation,
+        }
+    }
+}
+/// Full immutable persistence requirement without retaining an unused historical candidate.
+/// 不保留无用历史Candidate的完整不可变持久化要求。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionDurabilityRequirement {
-    base: DurabilityBase,
+    base: RequirementBase,
     body: [u8; SESSION_RECORD_BYTES],
     expected_published_digest: [u8; DIGEST_BYTES],
     business_transition_digest: u64,
@@ -580,7 +615,11 @@ struct SessionSlot<const REPLAY_SLOTS: usize> {
     requirement: Option<SessionDurabilityRequirement>,
     persistence_handle: Option<PersistenceHandle>,
     origin_replay: ReplayWindow<REPLAY_SLOTS>,
+    c0_replay: ReplayWindow<1>,
     hop_replay: ReplayWindow<REPLAY_SLOTS>,
+    c0_tx_consumed: u64,
+    origin_tx_consumed: u32,
+    hop_tx_consumed: u32,
 }
 
 impl<const REPLAY_SLOTS: usize> SessionSlot<REPLAY_SLOTS> {
@@ -592,7 +631,11 @@ impl<const REPLAY_SLOTS: usize> SessionSlot<REPLAY_SLOTS> {
         requirement: None,
         persistence_handle: None,
         origin_replay: ReplayWindow::new(),
+        c0_replay: ReplayWindow::new(),
         hop_replay: ReplayWindow::new(),
+        c0_tx_consumed: 0,
+        origin_tx_consumed: 0,
+        hop_tx_consumed: 0,
     };
 }
 
@@ -681,6 +724,91 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         base: DurabilityBase,
         facts: CurrentFacts,
     ) -> Result<(SessionHandle, SessionDurabilityRequirement)> {
+        self.prepare_session(provider, candidate, proof, base, facts, false)
+    }
+
+    /// Verify both fresh identity signatures and exact local durable history before
+    /// allowing the successor of the maximum of the two signed histories.
+    /// 双身份签名及本端耐久历史精确匹配后，才允许高于双方的共同后继。
+    /// # Errors
+    /// Stale baseline, unsigned/skewed history, no-wrap, proof or capacity failure rejects.
+    #[allow(clippy::too_many_arguments)] // Independent product providers and local durability dependency.
+    pub fn prepare_peer_reauth_session(
+        &mut self,
+        crypto: &mut impl CryptoProvider,
+        signer: &mut impl crate::PeerReauthProvider,
+        plan: crate::PeerReauthSessionPlan,
+        proof: HandshakeProof<'_>,
+        base: DurabilityBase,
+        facts: CurrentFacts,
+    ) -> Result<(SessionHandle, SessionDurabilityRequirement)> {
+        let r = plan.record;
+        r.validate()?;
+        if r.stage != 2
+            || plan.started > facts.now_us
+            || !(32..=128).contains(&proof.bytes.len())
+            || proof.bytes.len() % 2 != 0
+        {
+            return Err(Error::Security);
+        }
+        let c = r.candidate(
+            plan.initiator,
+            plan.policy,
+            plan.started,
+            plan.parent_deadline,
+        )?;
+        c.validate(self.config.address_width, facts.now_us)?;
+        let prior = base.prior_session.ok_or(Error::Replay)?;
+        let h = if plan.initiator {
+            r.initiator_history()
+        } else {
+            r.responder_history
+        };
+        if h.session != prior.session_generation.get()
+            || h.digest != prior.transcript_digest
+            || h.origin != prior.origin_tx.key_generation
+            || h.origin != prior.origin_rx.key_generation
+            || prior.hop_tx.map(|k| k.key_generation) != Some(h.hop)
+            || prior.hop_rx.map(|k| k.key_generation) != Some(h.hop)
+            || c.local != prior.local
+            || c.peer != prior.peer
+            || c.origin_tx.key_id != prior.origin_tx.key_id
+            || c.origin_rx.key_id != prior.origin_rx.key_id
+            || c.origin_tx.suite != prior.origin_tx.suite
+            || c.origin_rx.suite != prior.origin_rx.suite
+            || c.hop_tx.map(|k| k.key_id) != prior.hop_tx.map(|k| k.key_id)
+            || c.hop_rx.map(|k| k.key_id) != prior.hop_rx.map(|k| k.key_id)
+            || !self.peer_is_fenced(c.local, c.peer)
+        {
+            return Err(Error::Replay);
+        }
+        let n = proof.bytes.len() / 2;
+        for (i, stage, principal) in [(0, 1, r.responder.principal), (1, 2, r.initiator.principal)]
+        {
+            let mut message = [0; crate::REAUTH_SIGN_DOMAIN.len() + crate::REAUTH_RECORD_BYTES];
+            message[..crate::REAUTH_SIGN_DOMAIN.len()].copy_from_slice(crate::REAUTH_SIGN_DOMAIN);
+            crate::PeerReauthRecord { stage, ..r }
+                .encode(&mut message[crate::REAUTH_SIGN_DOMAIN.len()..])?;
+            let claim = self.next_claim(5)?;
+            let lease = self.config.provider_gate.try_enter(claim)?;
+            let result =
+                signer.verify_reauth(principal, &message, &proof.bytes[i * n..(i + 1) * n]);
+            self.config.provider_gate.leave(lease)?;
+            result?;
+        }
+        self.prepare_session(crypto, c, proof, base, facts, true)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Shared validation and atomic publication.
+    fn prepare_session<P: CryptoProvider>(
+        &mut self,
+        provider: &mut P,
+        candidate: HandshakeCandidate,
+        proof: HandshakeProof<'_>,
+        base: DurabilityBase,
+        facts: CurrentFacts,
+        signed_reauth: bool,
+    ) -> Result<(SessionHandle, SessionDurabilityRequirement)> {
         candidate.validate(self.config.address_width, facts.now_us)?;
         let domain_rule = self
             .config
@@ -715,7 +843,11 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
                     || base.prior_width != Some(self.config.address_width)
                     || prior.local.principal != candidate.local.principal
                     || prior.peer.principal != candidate.peer.principal
-                    || candidate.session_generation != expected
+                    || (if signed_reauth {
+                        candidate.session_generation.get() <= prior.session_generation.get()
+                    } else {
+                        candidate.session_generation != expected
+                    })
                     || candidate.origin_tx.key_generation <= prior.origin_tx.key_generation
                     || candidate.origin_rx.key_generation <= prior.origin_rx.key_generation
                     || candidate.transcript_digest == prior.transcript_digest
@@ -779,7 +911,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
             return Err(Error::State);
         }
         let requirement = SessionDurabilityRequirement {
-            base,
+            base: base.into(),
             body,
             expected_published_digest,
             business_transition_digest,
@@ -898,6 +1030,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
             {
                 existing.phase = SessionPhase::Fenced;
                 existing.origin_replay.clear();
+                existing.c0_replay.clear();
                 existing.hop_replay.clear();
             }
         }
@@ -925,6 +1058,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         slot.requirement = None;
         slot.persistence_handle = None;
         slot.origin_replay.clear();
+        slot.c0_replay.clear();
         slot.hop_replay.clear();
         Ok(())
     }
@@ -959,6 +1093,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
                 slot.requirement = None;
                 slot.persistence_handle = None;
                 slot.origin_replay.clear();
+                slot.c0_replay.clear();
                 slot.hop_replay.clear();
                 count += 1;
             }
@@ -975,12 +1110,12 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         now_us: u64,
         inspection_budget: usize,
     ) -> ReplayMaintenance {
-        let total = SESSIONS * REPLAY_SLOTS * 2;
+        let total = SESSIONS * (REPLAY_SLOTS * 2 + 1);
         let inspected = inspection_budget.min(total);
         let mut expired = 0;
         for _ in 0..inspected {
             let flat = self.replay_maintenance_cursor;
-            let per_session = REPLAY_SLOTS * 2;
+            let per_session = REPLAY_SLOTS * 2 + 1;
             let session_index = flat / per_session;
             let within_session = flat % per_session;
             let replay_index = within_session % REPLAY_SLOTS;
@@ -988,8 +1123,10 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
             expired += usize::from(if within_session < REPLAY_SLOTS {
                 slot.origin_replay
                     .expire_reservation_at(replay_index, now_us)
-            } else {
+            } else if within_session < REPLAY_SLOTS * 2 {
                 slot.hop_replay.expire_reservation_at(replay_index, now_us)
+            } else {
+                slot.c0_replay.expire_reservation_at(0, now_us)
             });
             self.replay_maintenance_cursor = (flat + 1) % total;
         }
@@ -1013,6 +1150,40 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
             origin_security: candidate.origin_level.wire(),
             hop_profile: candidate.hop_profile,
         })
+    }
+    /// Normalize a reverse receipt into its still-current forward key domain.
+    /// `把反向Receipt归一到仍有效的正向Key域`。
+    /// # Errors
+    /// Stale Session/Binding/Link/policy/lease cannot provide an outbound generation.
+    pub fn outbound_key_generation(
+        &self,
+        session: SessionHandle,
+        facts: CurrentFacts,
+    ) -> Result<u32> {
+        Ok(self.candidate(session, facts)?.origin_tx.key_generation)
+    }
+    /// Read current exact Origin/Hop contexts, not an authorization grant.
+    /// 读取当前精确Origin/Hop上下文；不构成授权。
+    /// # Errors
+    /// Stale/fenced session or changed parents cannot expose a current context.
+    pub fn context_fingerprints(
+        &self,
+        session: SessionHandle,
+        facts: CurrentFacts,
+    ) -> Result<(Fingerprint, Fingerprint)> {
+        let candidate = self.candidate(session, facts)?;
+        Ok((candidate.origin_fingerprint, candidate.hop_fingerprint))
+    }
+    /// Current inbound generation for an exact retained request domain.
+    /// 当前入站代际，用于精确保留的请求域复验。
+    /// # Errors
+    /// Fenced/expired or changed facts cannot authorize a retained request.
+    pub fn inbound_key_generation(
+        &self,
+        session: SessionHandle,
+        facts: CurrentFacts,
+    ) -> Result<u32> {
+        Ok(self.candidate(session, facts)?.origin_rx.key_generation)
     }
 
     /// 生成 Capability Owner 可消费、其他 crate 无法伪造的认证 Peer view。
@@ -1072,6 +1243,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // Two independent counter namespaces, same exact authentication evidence.
     pub(crate) fn reserve_origin_replay(
         &mut self,
         session: SessionHandle,
@@ -1080,6 +1252,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         sequence: u64,
         aad_digest: [u8; 16],
         payload_digest: [u8; 16],
+        c0: bool,
     ) -> Result<ReplayMutationHandle> {
         let owner_instance = self.config.owner_instance;
         let reservation_lifetime = self.config.replay_reservation_lifetime_us;
@@ -1093,19 +1266,37 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
             .checked_add(reservation_lifetime)
             .ok_or(Error::Exhausted)?
             .min(candidate.expires_at_us);
-        slot.origin_replay.reserve(
-            owner_instance,
-            slot_number,
-            session.slot_generation,
-            candidate.session_generation.get(),
-            candidate.origin_rx.key_generation,
-            context_fingerprint.bytes(),
-            sequence,
-            facts.now_us,
-            deadline,
-            aad_digest,
-            payload_digest,
-        )
+        let mut handle = if c0 {
+            slot.c0_replay.reserve(
+                owner_instance,
+                slot_number,
+                session.slot_generation,
+                candidate.session_generation.get(),
+                candidate.origin_rx.key_generation,
+                context_fingerprint.bytes(),
+                sequence,
+                facts.now_us,
+                deadline,
+                aad_digest,
+                payload_digest,
+            )?
+        } else {
+            slot.origin_replay.reserve(
+                owner_instance,
+                slot_number,
+                session.slot_generation,
+                candidate.session_generation.get(),
+                candidate.origin_rx.key_generation,
+                context_fingerprint.bytes(),
+                sequence,
+                facts.now_us,
+                deadline,
+                aad_digest,
+                payload_digest,
+            )?
+        };
+        handle.c0 = c0;
+        Ok(handle)
     }
 
     pub(crate) fn reserve_hop_replay(
@@ -1170,6 +1361,8 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         }
         if hop {
             slot.hop_replay.commit(handle, facts.now_us)
+        } else if handle.c0 {
+            slot.c0_replay.commit(handle, facts.now_us)
         } else {
             slot.origin_replay.commit(handle, facts.now_us)
         }
@@ -1201,6 +1394,8 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         }
         if hop {
             slot.hop_replay.preflight_commit(handle, facts.now_us)
+        } else if handle.c0 {
+            slot.c0_replay.preflight_commit(handle, facts.now_us)
         } else {
             slot.origin_replay.preflight_commit(handle, facts.now_us)
         }
@@ -1221,6 +1416,8 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         let slot = self.slot_mut(session)?;
         if hop {
             slot.hop_replay.abort(handle)
+        } else if handle.c0 {
+            slot.c0_replay.abort(handle)
         } else {
             slot.origin_replay.abort(handle)
         }
@@ -1231,11 +1428,16 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         session: SessionHandle,
         facts: CurrentFacts,
         sequence: u64,
+        c0: bool,
     ) -> Result<crate::ReplayClassification> {
         let slot = self.slot(session)?;
         let candidate = slot.candidate.ok_or(Error::State)?;
         validate_active_slot(slot, candidate, facts)?;
-        slot.origin_replay.classify(sequence)
+        if c0 {
+            slot.c0_replay.classify(sequence)
+        } else {
+            slot.origin_replay.classify(sequence)
+        }
     }
 
     pub(crate) fn flow_replay_claim_deadline(
@@ -1257,6 +1459,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         Ok(deadline)
     }
 
+    #[allow(clippy::too_many_arguments)] // Complete authenticated equality evidence plus explicit counter domain.
     pub(crate) fn origin_replay_evidence(
         &self,
         session: SessionHandle,
@@ -1265,10 +1468,21 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         sequence: u64,
         aad_digest: [u8; 16],
         payload_digest: [u8; 16],
+        c0: bool,
     ) -> Result<ReplayEvidence> {
         let slot = self.slot(session)?;
         let candidate = slot.candidate.ok_or(Error::State)?;
         validate_active_slot(slot, candidate, facts)?;
+        if c0 {
+            return slot.c0_replay.evidence(
+                sequence,
+                candidate.session_generation.get(),
+                candidate.origin_rx.key_generation,
+                context_fingerprint.bytes(),
+                aad_digest,
+                payload_digest,
+            );
+        }
         slot.origin_replay.evidence(
             sequence,
             candidate.session_generation.get(),
@@ -1290,6 +1504,53 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         Ok(candidate)
     }
 
+    // Check before calling caller-owned counters; reject accidental reset.
+    // 调用外部计数器前检查，拒绝模块交接时意外重置。
+    pub(crate) fn preflight_transmit(
+        &self,
+        session: SessionHandle,
+        facts: CurrentFacts,
+        c0: Option<u64>,
+        origin: Option<u32>,
+        hop: Option<u32>,
+    ) -> Result<()> {
+        self.candidate(session, facts)?;
+        let slot = self.slot(session)?;
+        if c0.is_some_and(|n| n <= slot.c0_tx_consumed)
+            || origin.is_some_and(|n| n <= slot.origin_tx_consumed)
+            || hop.is_some_and(|n| n <= slot.hop_tx_consumed)
+        {
+            return Err(Error::Replay);
+        }
+        Ok(())
+    }
+    // Burned values survive Provider failure/fence; only a fresh durable Session resets them.
+    // 已消耗值跨Provider失败/围栏保留；只有新的耐久Session可重置。
+    pub(crate) fn consume_transmit(
+        &mut self,
+        session: SessionHandle,
+        c0: Option<u64>,
+        origin: Option<u32>,
+        hop: Option<u32>,
+    ) -> Result<()> {
+        let slot = self.slot_mut(session)?;
+        if c0.is_some_and(|n| n <= slot.c0_tx_consumed)
+            || origin.is_some_and(|n| n <= slot.origin_tx_consumed)
+            || hop.is_some_and(|n| n <= slot.hop_tx_consumed)
+        {
+            return Err(Error::Replay);
+        }
+        if let Some(n) = c0 {
+            slot.c0_tx_consumed = n;
+        }
+        if let Some(n) = origin {
+            slot.origin_tx_consumed = n;
+        }
+        if let Some(n) = hop {
+            slot.hop_tx_consumed = n;
+        }
+        Ok(())
+    }
     pub(crate) fn next_claim(&mut self, kind: u16) -> Result<CallbackClaim> {
         let operation_id = self.next_operation_id;
         self.next_operation_id = operation_id.checked_add(1).ok_or(Error::Exhausted)?;
@@ -1300,12 +1561,41 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         self.config.provider_gate
     }
 
-    pub(crate) const fn address_width(&self) -> AddressWidth {
+    /// Configured address width, never guessed from a packet; 配置地址宽度，不由报文猜测。
+    #[must_use]
+    pub const fn address_width(&self) -> AddressWidth {
         self.config.address_width
     }
 
-    pub(crate) const fn realm(&self) -> RealmId {
+    /// Configured Realm; 已配置Realm。
+    #[must_use]
+    pub const fn realm(&self) -> RealmId {
         self.config.realm
+    }
+    /// Actual configured Runtime identity; 实际配置的Runtime身份。
+    #[must_use]
+    pub const fn runtime_instance(&self) -> u32 {
+        self.config.runtime_instance
+    }
+    /// Configured shared callback gate, not a session/authorization capability.
+    /// 已配置共享回调门，不是会话或授权权限。
+    #[must_use]
+    pub const fn callback_gate(&self) -> &'a CallbackGate {
+        self.config.provider_gate
+    }
+
+    /// Reauth requires all old sessions for this exact pair fenced first.
+    /// 重新认证要求同一精确身份对的旧Session均已围栏。
+    #[must_use]
+    pub fn peer_is_fenced(&self, local: Binding, peer: Binding) -> bool {
+        self.sessions.iter().all(|slot| {
+            !slot.occupied
+                || slot.candidate.is_none_or(|c| {
+                    c.local.principal != local.principal
+                        || c.peer.principal != peer.principal
+                        || slot.phase == SessionPhase::Fenced
+                })
+        })
     }
 
     pub(crate) const fn owner_instance(&self) -> u32 {

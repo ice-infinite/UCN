@@ -890,21 +890,25 @@ static void restore_previous_or_clear(ucn_i_identity_slot_t *slot)
     uint32_t high_water = slot->generation_high_water;
 
     if (slot->has_previous != 0U) {
-        ucn_i_identity_binding_view_t previous = slot->previous_view;
-
-        memset(slot, 0, sizeof(*slot));
+        /* Keep the previous view in its final slot while clearing other fields.
+         * 在最终active槽保留前驱，避免完整View自动副本；仍由Owner锁保护。 */
+        slot->active_view = slot->previous_view;
+        memset(slot, 0, offsetof(ucn_i_identity_slot_t, active_view));
+        memset((uint8_t *)slot + offsetof(ucn_i_identity_slot_t, active_view) +
+                   sizeof(slot->active_view), 0,
+               sizeof(*slot) - offsetof(ucn_i_identity_slot_t, active_view) -
+                   sizeof(slot->active_view));
         slot->occupied = 1U;
         slot->phase = UCN_I_IDENTITY_BINDING_ACTIVE;
-        slot->slot_generation = previous.slot_generation;
+        slot->slot_generation = slot->active_view.slot_generation;
         slot->generation_high_water = high_water;
-        slot->active_view = previous;
-        slot->issue.runtime_instance = previous.runtime_instance;
-        slot->issue.realm_id = previous.realm_id;
-        slot->issue.address = previous.address;
-        slot->issue.binding_generation = previous.binding_generation;
-        slot->issue.authority_generation = previous.authority_generation;
-        slot->issue.link_generation = previous.link_generation;
-        memcpy(slot->issue.principal, previous.principal,
+        slot->issue.runtime_instance = slot->active_view.runtime_instance;
+        slot->issue.realm_id = slot->active_view.realm_id;
+        slot->issue.address = slot->active_view.address;
+        slot->issue.binding_generation = slot->active_view.binding_generation;
+        slot->issue.authority_generation = slot->active_view.authority_generation;
+        slot->issue.link_generation = slot->active_view.link_generation;
+        memcpy(slot->issue.principal, slot->active_view.principal,
                sizeof(slot->issue.principal));
     } else {
         memset(slot, 0, sizeof(*slot));

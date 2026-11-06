@@ -127,6 +127,77 @@ fn c0_matches_the_frozen_a1_bootstrap_golden() {
 }
 
 #[test]
+fn data_rpc_prefix_is_conditional_and_bad_envelope_is_zero_write() {
+    for (role, payload) in [
+        (InteractionRole::OneWay, &b"plain"[..]),
+        (
+            InteractionRole::Request,
+            &b"\x00\x00\x00\x00\x00\x00\x00\x01\x01request"[..],
+        ),
+        (
+            InteractionRole::Result,
+            &b"\x00\x00\x00\x00\x00\x00\x00\x01\x05\x00\x07result"[..],
+        ),
+        (
+            InteractionRole::Error,
+            &b"\x00\x00\x00\x00\x00\x00\x00\x01\x05\xff\xfferror"[..],
+        ),
+    ] {
+        let mut frame = c1_data(
+            AddressWidth::A1,
+            1,
+            2,
+            0x40,
+            1,
+            TrafficClass::Q2,
+            1,
+            payload,
+        );
+        frame.common.interaction = role;
+        let mut output = [0xa5; 64];
+        let n = encode_c1_o0_h0(&frame, AddressWidth::A1, HopProfile::H0, &mut output).unwrap();
+        assert_eq!(n, 13 + payload.len());
+        assert_eq!(
+            decode_c1_o0_h0(&output[..n], AddressWidth::A1, HopProfile::H0),
+            Ok(frame)
+        );
+        if role == InteractionRole::OneWay {
+            continue;
+        }
+        for bad in [
+            vec![0; payload.len()],
+            payload[..if role == InteractionRole::Request {
+                8
+            } else {
+                10
+            }]
+                .to_vec(),
+            {
+                let mut bad = payload.to_vec();
+                bad[8] = 3;
+                bad
+            },
+            {
+                let mut bad = payload.to_vec();
+                bad[8] ^= 4;
+                bad
+            },
+        ] {
+            let invalid = C1Frame {
+                payload: &bad,
+                ..frame
+            };
+            output.fill(0xa5);
+            assert_eq!(
+                encode_c1_o0_h0(&invalid, AddressWidth::A1, HopProfile::H0, &mut output),
+                Err(Error::Argument)
+            );
+            assert_eq!(output, [0xa5; 64]);
+        }
+    }
+}
+
+#[test]
 fn c0_and_c1_base_lengths_follow_all_address_width_formulas() {
     for (width, c0_bytes, c1_bytes) in [
         (AddressWidth::A0, 27, 11),

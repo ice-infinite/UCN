@@ -154,6 +154,20 @@ static int test_canonical_digest(void)
     CHECK(ucn_i_sha256_128((const uint8_t *)"abc", 3U, digest,
                            &workspace) == UCN_OK);
     CHECK(memcmp(digest, abc_expected, sizeof(digest)) == 0);
+    {
+        static const uint8_t full_expected[32]={0xBA,0x78,0x16,0xBF,0x8F,0x01,0xCF,0xEA,
+            0x41,0x41,0x40,0xDE,0x5D,0xAE,0x22,0x23,0xB0,0x03,0x61,0xA3,0x96,0x17,0x7A,0x9C,
+            0xB4,0x10,0xFF,0x61,0xF2,0x00,0x15,0xAD};
+        uint8_t full[32],alias[40],before[40];
+        CHECK(ucn_i_sha256_256((const uint8_t *)"abc",3U,full,&workspace)==UCN_OK);
+        CHECK(memcmp(full,full_expected,32U)==0);
+        memset(alias,0xA5,sizeof(alias));memcpy(before,alias,sizeof(alias));
+        CHECK(ucn_i_sha256_256(alias+1U,3U,alias,&workspace)==UCN_ERR_ARGUMENT);
+        CHECK(memcmp(alias,before,sizeof(alias))==0);
+        workspace_before=workspace;
+        CHECK(ucn_i_sha256_256((const uint8_t *)"abc",3U,(uint8_t *)&workspace,&workspace)==UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&workspace,&workspace_before,sizeof(workspace))==0);
+    }
     memset(digest, 0xA5, sizeof(digest));
     CHECK(ucn_i_sha256_128(NULL, 1U, digest, &workspace) ==
           UCN_ERR_ARGUMENT);
@@ -173,6 +187,71 @@ static int test_canonical_digest(void)
     return 0;
 }
 
+/* Independently generated with Python hashlib; catches padding, split-block and
+ * canonical-prefix changes, not a second call to the implementation as oracle.
+ * 独立已知答案覆盖块/填充边界和64字节域后的长度前缀。 */
+static int test_digest_block_boundaries(void)
+{
+    static const size_t lengths[] = {0U,55U,56U,63U,64U,65U};
+    static const char *const expected[] = {
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "463eb28e72f82e0a96c0a4cc53690c571281131f672aa229e0d45ae59b598b59",
+        "da2ae4d6b36748f2a318f23e7ab1dfdf45acdc9d049bd80e59de82a60895f562",
+        "29af2686fd53374a36b0846694cc342177e428d1647515f078784d69cdb9e488",
+        "fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108",
+        "4bfd2c8b6f1eec7a2afeb48b934ee4b2694182027e6d0fc075074f2fabb31781"
+    };
+    static const char hex[] = "0123456789abcdef";
+    static const char *const canonical[] = {
+        "dc9c013b56eb838139806c47cad12047", "57af07e4839d3e45b2a66a87fd18133b",
+        "5d7fac92535b4ef6f0053ed69cc6fb6c", "1e80b604370ccdedb858f60544a57c8f"
+    };
+    ucn_i_sha256_workspace_t work;
+    uint8_t input[65],domain[64],digest[32];
+    char encoded[65];
+    size_t i,j;
+    for(i=0U;i<sizeof(input);++i) input[i]=(uint8_t)i;
+    for(i=0U;i<sizeof(lengths)/sizeof(lengths[0]);++i) {
+        CHECK(ucn_i_sha256_256(input,lengths[i],digest,&work)==UCN_OK);
+        for(j=0U;j<32U;++j) { encoded[2U*j]=hex[digest[j]>>4U]; encoded[2U*j+1U]=hex[digest[j]&15U]; }
+        encoded[64]='\0'; CHECK(strcmp(encoded,expected[i])==0);
+    }
+    memset(domain,'D',sizeof(domain));
+    for(i=61U;i<=64U;++i) {
+        CHECK(ucn_i_canonical_digest128(domain,i,input,sizeof(input),digest,&work)==UCN_OK);
+        for(j=0U;j<16U;++j) { encoded[2U*j]=hex[digest[j]>>4U]; encoded[2U*j+1U]=hex[digest[j]&15U]; }
+        encoded[32]='\0'; CHECK(strcmp(encoded,canonical[i-61U])==0);
+    }
+    return 0;
+}
+
+static int test_digest_stream_and_retirement(void)
+{
+    static const uint8_t expected[16] = {0xBA,0x78,0x16,0xBF,0x8F,0x01,0xCF,0xEA,
+        0x41,0x41,0x40,0xDE,0x5D,0xAE,0x22,0x23};
+    ucn_i_sha256_workspace_t work,before;
+    uint8_t digest[16];
+    CHECK(ucn_i_sha256_begin(&work)==UCN_OK);
+    CHECK(ucn_i_sha256_append(&work,(const uint8_t *)"a",1U)==UCN_OK);
+    before=work;
+    CHECK(ucn_i_sha256_append(&work,(const uint8_t *)&work,1U)==UCN_ERR_ARGUMENT);
+    CHECK(memcmp(&work,&before,sizeof(work))==0);
+    CHECK(ucn_i_sha256_append(&work,(const uint8_t *)"bc",2U)==UCN_OK);
+    CHECK(ucn_i_sha256_finish128(&work,digest)==UCN_OK);
+    CHECK(memcmp(digest,expected,sizeof(digest))==0);
+    before=work; memset(digest,0xA5,sizeof(digest));
+    CHECK(ucn_i_sha256_finish128(&work,digest)==UCN_ERR_STATE);
+    CHECK(memcmp(&work,&before,sizeof(work))==0 && digest[0]==0xA5U && digest[15]==0xA5U);
+    CHECK(ucn_i_sha256_begin(&work)==UCN_OK);
+    CHECK(ucn_i_sha256_append(&work,(const uint8_t *)"a",1U)==UCN_OK);
+    work.block_bytes=0U; before=work;
+    CHECK(ucn_i_sha256_append(&work,NULL,0U)==UCN_ERR_STATE);
+    CHECK(memcmp(&work,&before,sizeof(work))==0);
+    CHECK(ucn_i_sha256_finish128(&work,digest)==UCN_ERR_STATE);
+    CHECK(memcmp(&work,&before,sizeof(work))==0 && digest[0]==0xA5U);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_result_and_handle_abi() == 0);
@@ -180,6 +259,8 @@ int main(void)
     CHECK(test_checked_time_and_size() == 0);
     CHECK(test_range_overlap() == 0);
     CHECK(test_canonical_digest() == 0);
+    CHECK(test_digest_block_boundaries() == 0);
+    CHECK(test_digest_stream_and_retirement() == 0);
     puts("UCN simplified common tests passed");
     return 0;
 }

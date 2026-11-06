@@ -19,7 +19,7 @@ def main() -> int:
     for directory in (
         "wire", "adapter", "runtime", "persistence", "security",
         "admission", "capability", "routing", "transport", "service", "realtime",
-        "group", "cluster",
+        "group", "cluster", "native",
     ):
         runtime_files.extend(sorted((root / "src" / directory).rglob("*.c")))
     public_files = sorted((root / "include" / "ucn").rglob("*.h"))
@@ -29,7 +29,7 @@ def main() -> int:
     heap_pattern = re.compile(r"\b(malloc|calloc|realloc|free|alloca)\s*\(")
     old_include = re.compile(
         r"#\s*include\s*[<\"]ucn/(?!v6/|"
-        r"ucn_(?:simplified|types|config|driver|product|core|persistence)\.h[>\"])")
+        r"ucn_(?:simplified|types|config|driver|product|core|persistence|native)\.h[>\"])")
     for path in runtime_files + public_files:
         text = path.read_text(encoding="utf-8")
         relative = path.relative_to(root).as_posix()
@@ -106,6 +106,7 @@ def main() -> int:
         root / "src" / "transport", root / "src" / "service",
         root / "src" / "realtime", root / "src" / "group",
         root / "src" / "cluster",
+        root / "src" / "native",
     )
     for path in (root / "src").rglob("*"):
         if path.is_file() and not any(base in path.parents for base in allowed_source_roots):
@@ -114,7 +115,7 @@ def main() -> int:
         if (path.is_file() and path.name not in (
                 "ucn.h", "ucn_simplified.h", "ucn_types.h",
                 "ucn_config.h", "ucn_driver.h",
-                "ucn_product.h", "ucn_core.h", "ucn_persistence.h") and
+                "ucn_product.h", "ucn_core.h", "ucn_persistence.h", "ucn_native.h", "ucn.hpp") and
                 (root / "include" / "ucn" / "v6") not in path.parents):
             legacy_paths.append(path)
     for path in (root / "tests").rglob("*"):

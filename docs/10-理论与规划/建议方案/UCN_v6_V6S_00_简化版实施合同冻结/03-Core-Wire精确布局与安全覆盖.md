@@ -64,8 +64,10 @@ byte2 = origin_security<<6 | hop_limit
   Group 发布解释为每个成员都执行了 Request；
 - H Profile 不在线上自报，必须由最小 Context selector 在密码调用前唯一解析；矩阵中存在该
   Profile 不代表远端可自行选择或降级；
-- Interaction 非 OneWay 且 Kind 非 Transfer 时必须携带 Operation Envelope；Transfer 的业务
-  关联只来自已认证 Setup，不在每个 Fragment 重复。
+- 应用 Data 的 Interaction 非 OneWay 时必须携带 Operation Envelope；协议
+  Control/Diagnostic 使用对应 Registry 的精确事务 Body，不额外叠加应用 Envelope。
+  Transfer 的业务关联只来自已认证 Setup，不在每个 Fragment 重复。此处与后续
+  C/Rust 共同合同的条件 Envelope 规则一致，不新增线上字段。
 
 ### 2.2 Protocol Opcode/Subtype 的唯一位置
 
@@ -75,7 +77,7 @@ byte2 = origin_security<<6 | hop_limit
 | C1/C2/C4/C5 Control | Payload offset 0 的 `Protocol Opcode:u16` | 非零且必须位于对应模块 Registry；其后才是条件 Envelope/Body；C5 仍受 OneWay/Result/Error 和 Group Context 约束 |
 | C1/C2/C3/C4/C5 Diagnostic | Payload offset 0 的 `Diagnostic Code:u16` | 只能观察；有副作用的操作必须改用 Control |
 | C1/C2/C4 Transfer | Payload offset 0 的固定 `Fragment/SACK subtype` | 由先行 C0 Setup 精确绑定；不是通用 Protocol Opcode |
-| Data | 不存在 | Payload byte 0 就是业务数据，canonical protocol opcode 为 0 |
+| Data | 不存在 | canonical protocol opcode 为 0；OneWay 的 Payload byte 0 是业务数据；Request 先有9 B Envelope，Result/Error 先有11 B Envelope，再进入业务数据 |
 
 因此 C2/C4/C5 不能从 Service、总长度或 Payload 内容猜 Opcode。未知/零 code、重复在 Body
 中放第二个“真实 Opcode”、或 Kind 与上述位置不一致，均在 Replay/状态写入前拒绝。
@@ -227,10 +229,13 @@ ASCII "UCN6-NONCE-C0-V1" without NUL
 canonical C0 origin context fingerprint
 u64be(c0_transaction_id)
 u16be(protocol_opcode)
-u8(sender_direction)       # 0=initiator->responder, 1=responder->initiator
+u8(sender_direction)       # 0=较小Principal->较大Principal，1=反向
 u8(interaction_role)
 ```
 
+Direction 由已认证 Session 中的 Source/Destination Principal 按16字节无符号字典序唯一推导，
+不是本地 IN/OUT，也不取决于谁先发送 Bootstrap。调用方给出的 Direction 必须精确匹配，
+发送端与接收端对同一帧推导出同一值；两个方向仍必须使用不同 traffic/nonce key。
 同一个 `{Context Fingerprint,Transaction ID,Opcode,Direction,Role}` 只能对应一份不可变明文和
 一份 sealed artifact；精确重传复用原 ciphertext/tag，任何同元组不同 Payload 都按冲突重放
 拒绝。每个方向使用不同 traffic/nonce key，所以双向相同事务值不会复用 Nonce。事务结束后同一
@@ -319,6 +324,7 @@ MessageMeta、Origin Sequence、Payload 或 Origin Tag。raw 本地 Link Generat
 | `0x0203` | ROUTE_RERR | Route |
 | `0x0204` | ROUTE_PROBE | Route |
 | `0x0205` | ROUTE_PROBE_ACK | Route |
+| `0x0206` | ROUTE_FRAGMENT（后续共同合同扩展，非旧候选签字） | Route |
 | `0x0301` | FLOW_PREPARE | Flow |
 | `0x0302` | FLOW_ACCEPT | Flow |
 | `0x0303` | FLOW_COMMIT | Flow |

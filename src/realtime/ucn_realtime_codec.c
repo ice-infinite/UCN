@@ -1,8 +1,17 @@
 #include "internal/ucn_realtime.h"
 
 #include "internal/ucn_checked.h"
+#include "internal/ucn_digest.h"
 
 #include <string.h>
+
+ucn_result_t ucn_i_realtime_domain_body_digest(const uint8_t *body,
+                                               uint8_t digest[16])
+{
+    ucn_i_sha256_workspace_t workspace;
+    return ucn_i_sha256_128(body, UCN_I_REALTIME_DOMAIN_RECORD_BYTES,
+                            digest, &workspace);
+}
 
 #define MODE_MASK UINT8_C(0x03)
 #define VERSION_SHIFT 4U
@@ -233,5 +242,196 @@ ucn_result_t ucn_i_realtime_uncertainty_aggregate(
         return UCN_ERR_EXHAUSTED;
     }
     *upper_bound_us_out = (uint32_t)sum;
+    return UCN_OK;
+}
+
+static bool time_key_valid(const ucn_i_realtime_time_key_t *value)
+{
+    return value != NULL && value->clock_domain_id != 0U &&
+           value->clock_domain_id <= UCN_I_REALTIME_DOMAIN_ID_MAX &&
+           value->domain_generation != 0U &&
+           value->domain_generation <=
+               UCN_I_REALTIME_DOMAIN_GENERATION_MAX &&
+           value->sync_sequence != 0U && value->reserved_zero == 0U;
+}
+
+static void time_key_write(const ucn_i_realtime_time_key_t *value,
+                           uint8_t *output)
+{
+    write_be16(output, value->clock_domain_id);
+    write_be16(output + 2U, 0U);
+    write_be32(output + 4U, value->domain_generation);
+    write_be32(output + 8U, value->sync_sequence);
+}
+
+static void time_key_read(const uint8_t *input,
+                          ucn_i_realtime_time_key_t *value)
+{
+    value->clock_domain_id = read_be16(input);
+    value->reserved_zero = read_be16(input + 2U);
+    value->domain_generation = read_be32(input + 4U);
+    value->sync_sequence = read_be32(input + 8U);
+}
+
+ucn_result_t ucn_i_realtime_time_key_encode(
+    const ucn_i_realtime_time_key_t *value,
+    uint8_t output[UCN_I_REALTIME_TIME_KEY_BYTES])
+{
+    uint8_t encoded[UCN_I_REALTIME_TIME_KEY_BYTES];
+    if (!time_key_valid(value) || output == NULL ||
+        ucn_i_ranges_overlap(value, sizeof(*value), output,
+                             UCN_I_REALTIME_TIME_KEY_BYTES)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    time_key_write(value, encoded);
+    memcpy(output, encoded, sizeof(encoded));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_realtime_time_key_decode(
+    const uint8_t input[UCN_I_REALTIME_TIME_KEY_BYTES],
+    ucn_i_realtime_time_key_t *value_out)
+{
+    ucn_i_realtime_time_key_t value;
+    if (input == NULL || value_out == NULL ||
+        ucn_i_ranges_overlap(input, UCN_I_REALTIME_TIME_KEY_BYTES,
+                             value_out, sizeof(*value_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(&value, 0, sizeof(value));
+    time_key_read(input, &value);
+    if (!time_key_valid(&value)) {
+        return UCN_ERR_MALFORMED;
+    }
+    *value_out = value;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_realtime_time_follow_up_encode(
+    const ucn_i_realtime_time_follow_up_t *value,
+    uint8_t output[UCN_I_REALTIME_TIME_FOLLOW_UP_BYTES])
+{
+    uint8_t encoded[UCN_I_REALTIME_TIME_FOLLOW_UP_BYTES];
+    if (value == NULL || output == NULL || !time_key_valid(&value->key) ||
+        value->t1_master_tx_us == 0U ||
+        value->t1_uncertainty_us == 0U ||
+        ucn_i_ranges_overlap(value, sizeof(*value), output,
+                             UCN_I_REALTIME_TIME_FOLLOW_UP_BYTES)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    time_key_write(&value->key, encoded);
+    write_be64(encoded + 12U, value->t1_master_tx_us);
+    write_be32(encoded + 20U, value->t1_uncertainty_us);
+    memcpy(output, encoded, sizeof(encoded));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_realtime_time_follow_up_decode(
+    const uint8_t input[UCN_I_REALTIME_TIME_FOLLOW_UP_BYTES],
+    ucn_i_realtime_time_follow_up_t *value_out)
+{
+    ucn_i_realtime_time_follow_up_t value;
+    if (input == NULL || value_out == NULL ||
+        ucn_i_ranges_overlap(input, UCN_I_REALTIME_TIME_FOLLOW_UP_BYTES,
+                             value_out, sizeof(*value_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(&value, 0, sizeof(value));
+    time_key_read(input, &value.key);
+    value.t1_master_tx_us = read_be64(input + 12U);
+    value.t1_uncertainty_us = read_be32(input + 20U);
+    if (!time_key_valid(&value.key) || value.t1_master_tx_us == 0U ||
+        value.t1_uncertainty_us == 0U) {
+        return UCN_ERR_MALFORMED;
+    }
+    *value_out = value;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_realtime_time_delay_response_encode(
+    const ucn_i_realtime_time_delay_response_t *value,
+    uint8_t output[UCN_I_REALTIME_TIME_DELAY_RESPONSE_BYTES])
+{
+    uint8_t encoded[UCN_I_REALTIME_TIME_DELAY_RESPONSE_BYTES];
+    if (value == NULL || output == NULL || !time_key_valid(&value->key) ||
+        value->t4_master_rx_us == 0U ||
+        value->t4_uncertainty_us == 0U ||
+        ucn_i_ranges_overlap(value, sizeof(*value), output,
+                             UCN_I_REALTIME_TIME_DELAY_RESPONSE_BYTES)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    time_key_write(&value->key, encoded);
+    write_be64(encoded + 12U, value->t4_master_rx_us);
+    write_be32(encoded + 20U, value->t4_uncertainty_us);
+    memcpy(output, encoded, sizeof(encoded));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_realtime_time_delay_response_decode(
+    const uint8_t input[UCN_I_REALTIME_TIME_DELAY_RESPONSE_BYTES],
+    ucn_i_realtime_time_delay_response_t *value_out)
+{
+    ucn_i_realtime_time_delay_response_t value;
+    if (input == NULL || value_out == NULL ||
+        ucn_i_ranges_overlap(input,
+                             UCN_I_REALTIME_TIME_DELAY_RESPONSE_BYTES,
+                             value_out, sizeof(*value_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(&value, 0, sizeof(value));
+    time_key_read(input, &value.key);
+    value.t4_master_rx_us = read_be64(input + 12U);
+    value.t4_uncertainty_us = read_be32(input + 20U);
+    if (!time_key_valid(&value.key) || value.t4_master_rx_us == 0U ||
+        value.t4_uncertainty_us == 0U) {
+        return UCN_ERR_MALFORMED;
+    }
+    *value_out = value;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_realtime_time_abort_encode(
+    const ucn_i_realtime_time_abort_t *value,
+    uint8_t output[UCN_I_REALTIME_TIME_SYNC_ABORT_BYTES])
+{
+    uint8_t encoded[UCN_I_REALTIME_TIME_SYNC_ABORT_BYTES] = {0};
+    if (value == NULL || output == NULL || !time_key_valid(&value->key) ||
+        value->reason < UCN_I_REALTIME_ABORT_POLICY ||
+        value->reason > UCN_I_REALTIME_ABORT_CONFLICT ||
+        value->reserved_zero[0] != 0U || value->reserved_zero[1] != 0U ||
+        value->reserved_zero[2] != 0U ||
+        ucn_i_ranges_overlap(value, sizeof(*value), output,
+                             UCN_I_REALTIME_TIME_SYNC_ABORT_BYTES)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    time_key_write(&value->key, encoded);
+    encoded[12] = value->reason;
+    memcpy(output, encoded, sizeof(encoded));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_realtime_time_abort_decode(
+    const uint8_t input[UCN_I_REALTIME_TIME_SYNC_ABORT_BYTES],
+    ucn_i_realtime_time_abort_t *value_out)
+{
+    ucn_i_realtime_time_abort_t value;
+    if (input == NULL || value_out == NULL ||
+        ucn_i_ranges_overlap(input, UCN_I_REALTIME_TIME_SYNC_ABORT_BYTES,
+                             value_out, sizeof(*value_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(&value, 0, sizeof(value));
+    time_key_read(input, &value.key);
+    value.reason = input[12];
+    memcpy(value.reserved_zero, input + 13U,
+           sizeof(value.reserved_zero));
+    if (!time_key_valid(&value.key) ||
+        value.reason < UCN_I_REALTIME_ABORT_POLICY ||
+        value.reason > UCN_I_REALTIME_ABORT_CONFLICT ||
+        value.reserved_zero[0] != 0U || value.reserved_zero[1] != 0U ||
+        value.reserved_zero[2] != 0U) {
+        return UCN_ERR_MALFORMED;
+    }
+    *value_out = value;
     return UCN_OK;
 }

@@ -16,6 +16,7 @@ pub enum ReplayClassification {
 /// Replay Owner 为一次待提交 mutation 签发的精确 Handle。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ReplayMutationHandle {
+    pub(crate) c0: bool,
     pub(crate) owner_instance: u32,
     pub(crate) session_slot: u16,
     pub(crate) session_slot_generation: u32,
@@ -153,6 +154,7 @@ impl<const SLOTS: usize> ReplayWindow<SLOTS> {
             payload_digest,
         };
         Ok(ReplayMutationHandle {
+            c0: false,
             owner_instance,
             session_slot,
             session_slot_generation,

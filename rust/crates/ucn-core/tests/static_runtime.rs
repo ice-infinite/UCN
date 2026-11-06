@@ -9,7 +9,7 @@ use ucn_adapter::{
 };
 use ucn_core::{
     CoreNode, EndpointDisposition, EndpointHandler, EndpointMessage, Lifecycle, NodeConfig,
-    PublishOptions, QueueCapacities, StaticPath, Target,
+    QueueCapacities, SendOptions, StaticPath, Target,
 };
 use ucn_types::{
     AddressWidth, BindingGeneration, DeliveryGuarantee, Error, HeaderContract, HopLimit,
@@ -24,6 +24,34 @@ type Node<'a, const TX: usize> = CoreNode<'a, 2, 2, 2, TX, 64>;
 
 const SERVICE: u16 = 0x1201;
 
+#[test]
+fn initialized_stop_and_atomic_endpoint_batch() {
+    let ingress = Ingress::<2, 2>::new(101).unwrap();
+    let mut adapter = Adapter::new(101, &ingress).unwrap();
+    let receiver = Receiver::default();
+    let mut node = Node::<8>::new(
+        config(1, 101, 1, 10),
+        QueueCapacities::new::<8>(2, 2, 2, 2).unwrap(),
+    )
+    .unwrap();
+    let services = [
+        service(),
+        ServiceId::new(0x1202).unwrap(),
+        ServiceId::new(0x1203).unwrap(),
+    ];
+    assert_eq!(
+        node.endpoint_install(&services, &receiver),
+        Err(Error::Config)
+    );
+    assert_eq!(node.endpoint_preflight(&services[..2]), Ok(()));
+    assert_eq!(node.endpoint_install(&services[..2], &receiver), Ok(()));
+    assert_eq!(node.endpoint_preflight(&[]), Err(Error::State));
+    assert_eq!(node.stop(&mut adapter), Ok(()));
+    let mut driver = LoopDriver::<2, 2, 2, 2>::new(&ingress);
+    node.step(0, 1, &mut adapter, &mut driver).unwrap();
+    assert_eq!(node.lifecycle(), Lifecycle::Quiescent);
+}
+
 fn address(value: u32) -> NodeAddress {
     NodeAddress::new(value, AddressWidth::A0).expect("valid A0 address")
 }
@@ -36,8 +64,8 @@ fn service() -> ServiceId {
     ServiceId::new(SERVICE).expect("service")
 }
 
-fn options(class: TrafficClass) -> PublishOptions {
-    PublishOptions {
+fn options(class: TrafficClass) -> SendOptions {
+    SendOptions {
         traffic_class: class,
         hop_limit: HopLimit::new(1).expect("hop"),
         absolute_deadline_us: 0,
@@ -51,6 +79,7 @@ fn config(node_instance: u32, adapter_instance: u32, local: u32, binding: u32) -
         address_width: AddressWidth::A0,
         local_address: address(local),
         local_binding_generation: generation(binding),
+        local_principal_digest: u64::from(local),
         trusted_o0_network: true,
     }
 }
@@ -64,7 +93,7 @@ fn prepare_node<'a, const CORE_TX: usize, const ADAPTER_TX: usize, const ADAPTER
     link: LinkHandle,
 ) -> Node<'a, CORE_TX> {
     let mut node = Node::new(node_config, queues).expect("node");
-    node.binding_add(address(peer), generation(peer_binding))
+    node.binding_add(address(peer), generation(peer_binding), u64::from(peer))
         .expect("peer binding");
     node.path_add(
         StaticPath {
@@ -191,7 +220,7 @@ fn two_nodes_complete_static_c1_tx_rx_and_reject_exact_replay() {
     node_b.start(1, &mut adapter_b).expect("start B");
 
     let receipt = node_a
-        .publish(
+        .send(
             Target {
                 address: address(2),
                 binding_generation: generation(20),
@@ -266,7 +295,7 @@ fn saturated_queues_follow_the_exact_six_three_two_one_schedule() {
         (TrafficClass::Q3, 1),
     ] {
         for marker in 0..count {
-            node.publish(target, &[class as u8, marker], options(class), &adapter)
+            node.send(target, &[class as u8, marker], options(class), &adapter)
                 .expect("queue fill");
         }
     }
@@ -298,7 +327,7 @@ fn continuously_replenished_queues_remain_fair_for_twelve_thousand_sends() {
         TrafficClass::Q2,
         TrafficClass::Q3,
     ] {
-        node.publish(target, &[class as u8], options(class), &adapter)
+        node.send(target, &[class as u8], options(class), &adapter)
             .expect("initial fill");
     }
     let mut driver = LoopDriver::<1, 1, 1, 1>::new(&ingress);
@@ -318,7 +347,7 @@ fn continuously_replenished_queues_remain_fair_for_twelve_thousand_sends() {
             _ => panic!("invalid class"),
         };
         counts[class as usize] += 1;
-        node.publish(target, &[class as u8], options(class), &adapter)
+        node.send(target, &[class as u8], options(class), &adapter)
             .expect("continuous replenishment");
     }
     assert_eq!(counts, [6_000, 3_000, 2_000, 1_000]);
@@ -338,23 +367,23 @@ fn queue_failure_never_consumes_sequence_or_evicts_an_existing_frame() {
         service_id: service(),
     };
     assert_eq!(
-        node.publish(target, &[1], options(TrafficClass::Q0), &adapter)
+        node.send(target, &[1], options(TrafficClass::Q0), &adapter)
             .expect("first")
             .origin_sequence
             .get(),
         1
     );
     assert_eq!(
-        node.publish(target, &[2], options(TrafficClass::Q0), &adapter),
+        node.send(target, &[2], options(TrafficClass::Q0), &adapter),
         Err(Error::NoSpace)
     );
     let oversized = [0xA5; 60];
     assert_eq!(
-        node.publish(target, &oversized, options(TrafficClass::Q1), &adapter),
+        node.send(target, &oversized, options(TrafficClass::Q1), &adapter),
         Err(Error::NoSpace)
     );
     assert_eq!(
-        node.publish(
+        node.send(
             Target {
                 address: address(3),
                 binding_generation: generation(30),
@@ -372,7 +401,7 @@ fn queue_failure_never_consumes_sequence_or_evicts_an_existing_frame() {
         .expect("drain first");
     assert_eq!(driver.frames[0].last(), Some(&1));
     assert_eq!(
-        node.publish(target, &[4], options(TrafficClass::Q0), &adapter)
+        node.send(target, &[4], options(TrafficClass::Q0), &adapter)
             .expect("after failures")
             .origin_sequence
             .get(),
@@ -387,7 +416,7 @@ fn stale_static_link_is_rejected_before_sequence_allocation() {
     let old_link = adapter.open_link(0, 1, 64).expect("old link");
     let queues = QueueCapacities::new::<4>(1, 1, 1, 1).expect("queues");
     let mut node = Node::<4>::new(config(12, 302, 1, 10), queues).expect("node");
-    node.binding_add(address(2), generation(20))
+    node.binding_add(address(2), generation(20), 2)
         .expect("binding");
     let old_path = node
         .path_add(
@@ -408,7 +437,7 @@ fn stale_static_link_is_rejected_before_sequence_allocation() {
         service_id: service(),
     };
     assert_eq!(
-        node.publish(target, &[0x31], options(TrafficClass::Q0), &adapter),
+        node.send(target, &[0x31], options(TrafficClass::Q0), &adapter),
         Err(Error::NotFound)
     );
 
@@ -433,7 +462,7 @@ fn stale_static_link_is_rejected_before_sequence_allocation() {
     .expect("replacement path");
     node.start(2, &mut adapter).expect("restart");
     assert_eq!(
-        node.publish(target, &[0x32], options(TrafficClass::Q0), &adapter)
+        node.send(target, &[0x32], options(TrafficClass::Q0), &adapter)
             .expect("first admitted sequence")
             .origin_sequence
             .get(),
@@ -485,7 +514,7 @@ fn not_submitted_retries_the_exact_token_and_deadline_cancels_it() {
         binding_generation: generation(20),
         service_id: service(),
     };
-    node.publish(target, &[7], options(TrafficClass::Q2), &adapter)
+    node.send(target, &[7], options(TrafficClass::Q2), &adapter)
         .expect("publish retry");
     let mut driver = LoopDriver::<1, 1, 1, 1>::new(&ingress);
     driver.not_submitted = 2;
@@ -500,7 +529,7 @@ fn not_submitted_retries_the_exact_token_and_deadline_cancels_it() {
 
     let mut deadline_options = options(TrafficClass::Q3);
     deadline_options.absolute_deadline_us = 10;
-    node.publish(target, &[8], deadline_options, &adapter)
+    node.send(target, &[8], deadline_options, &adapter)
         .expect("deadline publish");
     driver.not_submitted = usize::MAX;
     node.step(4, 1, &mut adapter, &mut driver)
@@ -586,11 +615,11 @@ fn adapter_backpressure_preserves_queued_work_until_capacity_returns() {
         binding_generation: generation(20),
         service_id: service(),
     };
-    node.publish(target, &[0], options(TrafficClass::Q0), &adapter)
+    node.send(target, &[0], options(TrafficClass::Q0), &adapter)
         .expect("first");
-    node.publish(target, &[1], options(TrafficClass::Q1), &adapter)
+    node.send(target, &[1], options(TrafficClass::Q1), &adapter)
         .expect("second");
-    node.publish(target, &[2], options(TrafficClass::Q2), &adapter)
+    node.send(target, &[2], options(TrafficClass::Q2), &adapter)
         .expect("third");
     let mut driver = PendingDriver {
         submits: 0,
@@ -653,7 +682,7 @@ fn indeterminate_driver_side_effect_faults_the_core_owner() {
     let queues = QueueCapacities::new::<4>(1, 1, 1, 1).expect("queues");
     let mut node = prepare_node::<4, 1, 1>(config(9, 552, 1, 10), 2, 20, queues, &adapter, link);
     node.start(0, &mut adapter).expect("start");
-    node.publish(
+    node.send(
         Target {
             address: address(2),
             binding_generation: generation(20),
@@ -664,18 +693,31 @@ fn indeterminate_driver_side_effect_faults_the_core_owner() {
         &adapter,
     )
     .expect("publish");
-    let mut driver = UnknownDriver;
+    let mut driver = UnknownDriver { token: None };
     assert_eq!(
         node.step(1, 1, &mut adapter, &mut driver),
         Err(Error::InDoubt)
     );
     assert_eq!(node.lifecycle(), Lifecycle::Fault);
+    node.stop(&mut adapter)
+        .expect("fault may drain, never reactivate");
+    node.step(2, 4, &mut adapter, &mut driver).unwrap();
+    assert_ne!(node.lifecycle(), Lifecycle::Quiescent);
+    ingress
+        .tx_complete(driver.token.unwrap(), TerminalOutcome::Success)
+        .unwrap();
+    node.step(3, 4, &mut adapter, &mut driver).unwrap();
+    assert_eq!(node.lifecycle(), Lifecycle::Quiescent);
+    assert_eq!(node.start(4, &mut adapter), Err(Error::State));
 }
 
-struct UnknownDriver;
+struct UnknownDriver {
+    token: Option<TxToken>,
+}
 
 impl TxDriver for UnknownDriver {
-    fn submit(&mut self, _link: LinkHandle, _frame: &[u8], _token: TxToken) -> DriverSubmit {
+    fn submit(&mut self, _link: LinkHandle, _frame: &[u8], token: TxToken) -> DriverSubmit {
+        self.token = Some(token);
         DriverSubmit::Unknown
     }
 
@@ -697,14 +739,14 @@ fn stop_is_bounded_rejects_new_work_and_reaches_quiescence() {
         binding_generation: generation(20),
         service_id: service(),
     };
-    node.publish(target, &[1], options(TrafficClass::Q0), &adapter)
+    node.send(target, &[1], options(TrafficClass::Q0), &adapter)
         .expect("q0");
-    node.publish(target, &[2], options(TrafficClass::Q1), &adapter)
+    node.send(target, &[2], options(TrafficClass::Q1), &adapter)
         .expect("q1");
     node.stop(&mut adapter).expect("stop");
     assert_eq!(node.lifecycle(), Lifecycle::Stopping);
     assert_eq!(
-        node.publish(target, &[3], options(TrafficClass::Q2), &adapter),
+        node.send(target, &[3], options(TrafficClass::Q2), &adapter),
         Err(Error::State)
     );
     assert_eq!(
@@ -742,7 +784,7 @@ fn endpoint_path_handles_are_exact_and_profile_storage_is_static() {
     let queues = QueueCapacities::new::<4>(1, 1, 1, 1).expect("queues");
     let receiver = Receiver::default();
     let mut node = Node::<4>::new(config(10, 701, 1, 10), queues).expect("node");
-    node.binding_add(address(2), generation(20))
+    node.binding_add(address(2), generation(20), 2)
         .expect("binding");
 
     let first_endpoint = node.endpoint_add(service(), &receiver).expect("endpoint");

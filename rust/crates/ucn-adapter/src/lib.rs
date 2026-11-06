@@ -448,6 +448,12 @@ impl<const LINKS: usize, const TX_SLOTS: usize, const RX_SLOTS: usize, const FRA
         }
 
         let _allocation = AtomicGuard::acquire(&self.rx_allocating)?;
+        // A publisher may have observed enabled before stop acquired this gate.
+        // Recheck under the same gate before claiming a slot; stop then stays linearizable.
+        // 发布者可能在停止取门前看过enabled；同一门内复验后才claim，保持停止线性化。
+        if !self.rx_enabled.load(Ordering::Acquire) {
+            return Err(Error::State);
+        }
         let start = usize::try_from(self.rx_cursor.load(Ordering::Relaxed))
             .map_err(|_| Error::Config)?
             % RX_SLOTS;
@@ -661,6 +667,9 @@ struct TxSlot {
     link: LinkHandle,
     request_slot: u16,
     terminal: Option<TerminalOutcome>,
+    // Unknown is not contradictory evidence. Only that case may accept a later
+    // exact terminal without a physical Link-generation recovery procedure.
+    uncertain_completion_allowed: bool,
 }
 
 impl TxSlot {
@@ -675,6 +684,7 @@ impl TxSlot {
         },
         request_slot: 0,
         terminal: None,
+        uncertain_completion_allowed: false,
     };
 }
 
@@ -803,6 +813,25 @@ impl<'a, const LINKS: usize, const TX_SLOTS: usize, const RX_SLOTS: usize, const
         self.ingress.rx_enabled.store(enabled, Ordering::Release);
         Ok(())
     }
+    /// Disabled admission and no pending/claimed RX, not TX or product quiescence.
+    /// 接纳已禁用且无待处理/已claim RX，不代表TX或产品整体静止。
+    #[must_use]
+    pub fn rx_is_quiescent(&self) -> bool {
+        !self.ingress.rx_enabled.load(Ordering::Acquire)
+            && !self.ingress.rx_allocating.load(Ordering::Acquire)
+            && self
+                .ingress
+                .rx
+                .iter()
+                .all(|slot| slot.state.load(Ordering::Acquire) == RX_FREE)
+    }
+
+    /// No physical TX reservations remain, including terminal-but-unretired tokens.
+    /// 没有物理TX预留，包含尚未退休的终态Token。
+    #[must_use]
+    pub fn tx_is_quiescent(&self) -> bool {
+        self.tx.iter().all(|slot| slot.state == TxState::Free)
+    }
 
     /// 预留一个精确 TX Token；只写一个空槽。
     ///
@@ -835,6 +864,7 @@ impl<'a, const LINKS: usize, const TX_SLOTS: usize, const RX_SLOTS: usize, const
                 link,
                 request_slot: core_tx_slot,
                 terminal: None,
+                uncertain_completion_allowed: false,
             };
             self.tx_cursor = (index + 1) % TX_SLOTS;
             return Ok(token);
@@ -921,6 +951,11 @@ impl<'a, const LINKS: usize, const TX_SLOTS: usize, const RX_SLOTS: usize, const
     pub fn tx_retire(&mut self, token: TxToken) -> Result<()> {
         let index = self.validate_tx_token(token)?;
         self.reconcile_latch(index, token)?;
+        // Reopening seals an unresolved holder; it is not a physical retirement proof.
+        // 重开只围栏未决Holder，不构成物理退休证明；等待精确迟到completion。
+        if self.tx[index].terminal == Some(TerminalOutcome::Failure(Error::InDoubt)) {
+            return Err(Error::InDoubt);
+        }
         if !matches!(
             self.tx[index].state,
             TxState::Completed | TxState::Cancelled | TxState::NotSubmitted
@@ -1062,6 +1097,11 @@ impl<'a, const LINKS: usize, const TX_SLOTS: usize, const RX_SLOTS: usize, const
                     self.tx[index].state = TxState::Cancelled;
                 }
                 TxState::Submitting | TxState::Submitted | TxState::InDoubt => {
+                    // Contradictory evidence is not converted into proof by a new
+                    // logical Link generation. Quarantine this old holder.
+                    if slot.state == TxState::InDoubt && !slot.uncertain_completion_allowed {
+                        continue;
+                    }
                     let outcome = self.ingress.seal_tx_after_link_invalidation(TxToken {
                         adapter_instance: self.adapter_instance,
                         slot: u16::try_from(index).map_err(|_| Error::Config)?,
@@ -1208,10 +1248,10 @@ impl<'a, const LINKS: usize, const TX_SLOTS: usize, const RX_SLOTS: usize, const
                 self.set_completed(index, actual);
                 Ok(())
             }
-            (DriverSubmit::Unknown, _) | (DriverSubmit::NotSubmitted, Some(_)) => {
+            (DriverSubmit::Unknown, _) => self.mark_uncertain(index),
+            (DriverSubmit::NotSubmitted, Some(_)) | (DriverSubmit::Complete(_), None | Some(_)) => {
                 self.mark_in_doubt(index)
             }
-            (DriverSubmit::Complete(_), None | Some(_)) => self.mark_in_doubt(index),
         }
     }
 
@@ -1248,22 +1288,25 @@ impl<'a, const LINKS: usize, const TX_SLOTS: usize, const RX_SLOTS: usize, const
                 self.set_completed(index, actual);
                 Ok(())
             }
-            (DriverCancel::Unknown, _) | (DriverCancel::Cancelled, Some(_)) => {
+            (DriverCancel::Unknown, _) => self.mark_uncertain(index),
+            (DriverCancel::Cancelled, Some(_)) | (DriverCancel::Complete(_), None | Some(_)) => {
                 self.mark_in_doubt(index)
             }
-            (DriverCancel::Complete(_), None | Some(_)) => self.mark_in_doubt(index),
         }
     }
 
     fn reconcile_latch(&mut self, index: usize, token: TxToken) -> Result<()> {
         match self.ingress.tx_latched(token) {
             Ok(Some(outcome)) => {
-                if matches!(
+                if (matches!(
                     self.tx[index].state,
                     TxState::Submitting | TxState::Submitted | TxState::Completed
-                ) && (self.tx[index].terminal.is_none()
-                    || self.tx[index].terminal == Some(outcome)
-                    || self.tx[index].terminal == Some(TerminalOutcome::Failure(Error::InDoubt)))
+                ) || (self.tx[index].state == TxState::InDoubt
+                    && self.tx[index].uncertain_completion_allowed))
+                    && (self.tx[index].terminal.is_none()
+                        || self.tx[index].terminal == Some(outcome)
+                        || self.tx[index].terminal
+                            == Some(TerminalOutcome::Failure(Error::InDoubt)))
                 {
                     self.set_completed(index, outcome);
                     return Ok(());
@@ -1272,6 +1315,11 @@ impl<'a, const LINKS: usize, const TX_SLOTS: usize, const RX_SLOTS: usize, const
             }
             Ok(None) => Ok(()),
             Err(Error::InDoubt) if !self.tx_link_is_current(index) => {
+                if self.tx[index].state == TxState::InDoubt
+                    && !self.tx[index].uncertain_completion_allowed
+                {
+                    return Err(Error::InDoubt);
+                }
                 let outcome = self.ingress.seal_tx_after_link_invalidation(token)?;
                 self.set_completed(index, outcome);
                 Ok(())
@@ -1290,6 +1338,7 @@ impl<'a, const LINKS: usize, const TX_SLOTS: usize, const RX_SLOTS: usize, const
         let link_slot = usize::from(self.tx[index].link.slot);
         self.tx[index].state = TxState::InDoubt;
         self.tx[index].terminal = None;
+        self.tx[index].uncertain_completion_allowed = false;
         if self.tx_link_is_current(index) {
             self.links[link_slot].state = LINK_FENCED;
             let link = self.tx[index].link;
@@ -1297,6 +1346,14 @@ impl<'a, const LINKS: usize, const TX_SLOTS: usize, const RX_SLOTS: usize, const
                 .configure_link(link, self.links[link_slot].mtu, LINK_FENCED)?;
         }
         Err(Error::InDoubt)
+    }
+
+    fn mark_uncertain(&mut self, index: usize) -> Result<()> {
+        let result = self.mark_in_doubt(index);
+        if result == Err(Error::InDoubt) {
+            self.tx[index].uncertain_completion_allowed = true;
+        }
+        result
     }
 
     fn tx_link_is_current(&self, index: usize) -> bool {
@@ -1402,5 +1459,48 @@ mod tests {
         assert_eq!(view.state, TxState::Completed);
         assert_eq!(view.terminal, Some(super::TerminalOutcome::Success));
         ingress.tx[0].locked.store(false, Ordering::Release);
+    }
+    #[test]
+    fn rx_quiescence_requires_disabled_admission_and_exact_queue_retirement() {
+        let ingress = AdapterEventIngress::<1, 1, 1, 8>::new(11).unwrap();
+        let mut owner = AdapterOwner::new(11, &ingress).unwrap();
+        let link = owner.open_link(0, 1, 8).unwrap();
+        assert!(owner.rx_is_quiescent());
+        owner.try_set_rx_enabled(true).unwrap();
+        assert!(!owner.rx_is_quiescent());
+        ingress
+            .rx_publish(
+                link,
+                &[1, 2],
+                super::RxMeta {
+                    timestamp_us: 1,
+                    sender_discriminator: 1,
+                },
+            )
+            .unwrap();
+        owner.try_set_rx_enabled(false).unwrap();
+        assert!(!owner.rx_is_quiescent());
+        let item = owner.rx_claim(&mut [0; 8]).unwrap();
+        assert!(!owner.rx_is_quiescent());
+        owner.rx_retire(item.token).unwrap();
+        assert!(owner.rx_is_quiescent());
+        ingress.rx_allocating.store(true, Ordering::Release);
+        assert!(!owner.rx_is_quiescent());
+        assert_eq!(owner.try_set_rx_enabled(true), Err(Error::State));
+        ingress.rx_allocating.store(false, Ordering::Release);
+        let generation = ingress.rx[0].generation.load(Ordering::Acquire);
+        assert_eq!(
+            ingress.rx_publish(
+                link,
+                &[3],
+                super::RxMeta {
+                    timestamp_us: 2,
+                    sender_discriminator: 1
+                }
+            ),
+            Err(Error::State)
+        );
+        assert_eq!(ingress.rx[0].generation.load(Ordering::Acquire), generation);
+        assert!(owner.rx_is_quiescent());
     }
 }

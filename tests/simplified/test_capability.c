@@ -90,6 +90,120 @@ static ucn_i_authenticated_peer_view_t make_auth(uint8_t principal,
     return view;
 }
 
+/* EN: Independent metadata fixtures, exact chunks and zero-write rejection.
+ * 中文：独立元数据向量、精确分块及拒绝时零写。 */
+static int test_fragment_codec(void)
+{
+    ucn_i_capability_fragment_t v;
+    ucn_i_capability_fragment_t decoded;
+    ucn_i_capability_fragment_t sentinel;
+    uint8_t raw[44];
+    uint8_t before[44];
+    size_t length;
+    size_t total;
+    uint8_t index;
+    size_t i;
+    for (total = 68U; total <= 75U; total += 7U) {
+        for (index = 0U; index < 2U; ++index) {
+            size_t half = (total + 1U) / 2U;
+            memset(&v, 0, sizeof(v));
+            v.opcode = total == 68U ? 0x0103U : 0x0105U;
+            v.total_bytes = (uint16_t)total;
+            v.index = index;
+            v.count = 2U;
+            v.chunk_bytes = (uint8_t)(index == 0U ? half : total - half);
+            for (i = 0U; i < v.chunk_bytes; ++i) { v.chunk[i] = (uint8_t)(index * half + i); }
+            memset(raw, 0xA5, sizeof(raw));
+            CHECK(ucn_i_capability_fragment_encode(&v, raw, sizeof(raw), &length) == UCN_OK);
+            CHECK(length == 6U + v.chunk_bytes && raw[0] == 1U && raw[1] == (total == 68U ? 3U : 5U));
+            CHECK(raw[2] == 0U && raw[3] == total && raw[4] == index && raw[5] == 2U);
+            CHECK(memcmp(raw + 6U, v.chunk, v.chunk_bytes) == 0);
+            CHECK(ucn_i_capability_fragment_decode(raw, length, &decoded) == UCN_OK);
+            CHECK(decoded.opcode == v.opcode && decoded.total_bytes == v.total_bytes && decoded.index == index);
+            CHECK(decoded.chunk_bytes == v.chunk_bytes && memcmp(decoded.chunk, v.chunk, v.chunk_bytes) == 0);
+            memset(&decoded, 0xA5, sizeof(decoded));
+            sentinel = decoded;
+            CHECK(ucn_i_capability_fragment_decode(raw, length - 1U, &decoded) == UCN_ERR_MALFORMED);
+            CHECK(memcmp(&decoded, &sentinel, sizeof(decoded)) == 0);
+            raw[5] = 1U;
+            CHECK(ucn_i_capability_fragment_decode(raw, length, &decoded) == UCN_ERR_MALFORMED);
+            CHECK(memcmp(&decoded, &sentinel, sizeof(decoded)) == 0);
+            memset(raw, 0xA5, sizeof(raw));
+            memcpy(before, raw, sizeof(before));
+            length = 0xA5U;
+            CHECK(ucn_i_capability_fragment_encode(&v, raw, 6U + v.chunk_bytes - 1U, &length) == UCN_ERR_NO_SPACE);
+            CHECK(memcmp(raw, before, sizeof(raw)) == 0 && length == 0xA5U);
+            v.index = 2U;
+            CHECK(ucn_i_capability_fragment_encode(&v, raw, sizeof(raw), &length) == UCN_ERR_ARGUMENT);
+            CHECK(memcmp(raw, before, sizeof(raw)) == 0 && length == 0xA5U);
+        }
+    }
+    return 0;
+}
+
+/* EN: Exact retained-parent replacement, bounded reuse and zero-write failures.
+ * ZH: 精确保留父域替换、固定槽复用与失败零写；认证输入是Coordinator单测SPI向量。 */
+static int test_capability_successor(void)
+{
+    ucn_i_capability_owner_t owner;
+    ucn_i_capability_owner_t snapshot;
+    ucn_i_capability_record_t record = make_record(5U);
+    ucn_i_authenticated_peer_view_t auth = make_auth(0x41U, 3U);
+    ucn_i_authenticated_peer_view_t changed;
+    ucn_i_capability_ref_t old;
+    ucn_i_capability_ref_t next;
+    ucn_i_capability_ref_t sentinel;
+    ucn_i_cached_capability_t cached;
+    test_lock_t lock = {0};
+    ucn_i_lock_ops_t ops = lock_ops(&lock);
+    uint32_t generation;
+    memset(&owner,0,sizeof(owner));
+    CHECK(ucn_i_capability_owner_init(&owner,10U,42U,30U,21U,
+                                      1000U,2000U,&ops) == UCN_OK);
+    CHECK(ucn_i_capability_advertise_ingest(&owner,&auth,&record,100U,&old) == UCN_OK);
+    snapshot = owner;
+    memset(&next,0xA5,sizeof(next)); sentinel = next;
+    changed = auth;
+    CHECK(ucn_i_capability_replace_session(&owner,&old,&changed,&record,101U,&next) == UCN_ERR_REPLAY);
+    CHECK(memcmp(&owner,&snapshot,sizeof(owner)) == 0);
+    CHECK(memcmp(&next,&sentinel,sizeof(next)) == 0);
+    changed.session_generation = 4U;
+    changed.binding_generation++;
+    CHECK(ucn_i_capability_replace_session(&owner,&old,&changed,&record,101U,&next) == UCN_ERR_REPLAY);
+    CHECK(memcmp(&owner,&snapshot,sizeof(owner)) == 0);
+    CHECK(memcmp(&next,&sentinel,sizeof(next)) == 0);
+    changed = auth; changed.session_generation = 4U; changed.expires_at_us = 101U;
+    CHECK(ucn_i_capability_replace_session(&owner,&old,&changed,&record,101U,&next) == UCN_ERR_SECURITY);
+    CHECK(memcmp(&owner,&snapshot,sizeof(owner)) == 0);
+    CHECK(memcmp(&next,&sentinel,sizeof(next)) == 0);
+    changed = auth; changed.session_generation = 4U;
+    CHECK(ucn_i_capability_replace_session(&owner,&old,&changed,&record,101U,&old) == UCN_ERR_ARGUMENT);
+    CHECK(memcmp(&owner,&snapshot,sizeof(owner)) == 0);
+    record = make_record(1U); record.peer.max_rx_window = 4U;
+    for (generation = 4U; generation <= 8U; ++generation) {
+        uint16_t i;
+        uint16_t occupied = 0U;
+        changed.session_generation = generation;
+        CHECK(ucn_i_capability_replace_session(&owner,&old,&changed,&record,
+                  100U + generation,&next) == UCN_OK);
+        CHECK(next.session_generation == generation);
+        CHECK(ucn_i_capability_get(&owner,&old,100U + generation,&cached) == UCN_ERR_NOT_FOUND);
+        CHECK(ucn_i_capability_get(&owner,&next,100U + generation,&cached) == UCN_OK);
+        CHECK(cached.record.capability_generation == 1U);
+        CHECK(cached.record.peer.max_rx_window == 4U);
+        CHECK(cached.capability_deadline_us == 2100U + generation);
+        for (i=0U; i<UCN_I_CAPABILITY_PEER_COUNT; ++i) {
+            occupied = (uint16_t)(occupied + (owner.peers[i].occupied != 0U ? 1U : 0U));
+        }
+        CHECK(occupied == 1U);
+        old = next;
+    }
+    CHECK(ucn_i_capability_advertise_ingest(&owner,&auth,&record,110U,&next) == UCN_ERR_REPLAY);
+    CHECK(ucn_i_capability_invalidate_session(&owner,&old) == UCN_OK);
+    CHECK(ucn_i_capability_owner_destroy(&owner) == UCN_OK);
+    return 0;
+}
+
 int main(void)
 {
     static const uint8_t record_golden[68] = {
@@ -100,6 +214,18 @@ int main(void)
         UCN_V6S_CAPABILITY_SUMMARY_BYTES};
     static const uint8_t query_golden[20] = {
         UCN_V6S_CAPABILITY_QUERY_BYTES};
+    static const uint8_t profile_select_golden[59] = {
+        0x01U, 0x02U, 0x03U, 0x04U, 0x11U, 0x12U, 0x13U, 0x14U,
+        0x00U, 0x00U, 0x01U, 0x0BU, 0x00U, 0x00U, 0x00U, 0x02U,
+        0x00U, 0x00U, 0x00U, 0x06U, 0x00U, 0x10U, 0x00U, 0x02U,
+        0x00U, 0x00U, 0x04U,
+        0x11U, 0x11U, 0x11U, 0x11U, 0x11U, 0x11U, 0x11U, 0x11U,
+        0x11U, 0x11U, 0x11U, 0x11U, 0x11U, 0x11U, 0x11U, 0x11U,
+        0x22U, 0x22U, 0x22U, 0x22U, 0x22U, 0x22U, 0x22U, 0x22U,
+        0x22U, 0x22U, 0x22U, 0x22U, 0x22U, 0x22U, 0x22U, 0x22U};
+    static const uint8_t profile_ack_tail[16] = {
+        0x77U, 0x77U, 0x77U, 0x77U, 0x77U, 0x77U, 0x77U, 0x77U,
+        0x77U, 0x77U, 0x77U, 0x77U, 0x77U, 0x77U, 0x77U, 0x77U};
     ucn_i_capability_owner_t owner;
     ucn_i_capability_record_t record = make_record(UINT32_C(0x01020304));
     ucn_i_capability_record_t decoded;
@@ -112,20 +238,24 @@ int main(void)
     ucn_i_cached_capability_t cached;
     ucn_i_profile_requirements_t requirements;
     ucn_i_profile_select_t selected;
+    ucn_i_profile_select_t decoded_selected;
     ucn_i_profile_ack_t ack;
+    ucn_i_profile_ack_t decoded_ack;
     ucn_i_effective_intent_t intent;
     ucn_i_resource_view_t resources;
     ucn_i_contract_candidate_t candidates[3];
     ucn_i_resolve_result_t resolved;
     test_lock_t state_lock = {0};
     ucn_i_lock_ops_t ops = lock_ops(&state_lock);
-    uint8_t bytes[68];
-    uint8_t before[68];
+    uint8_t bytes[UCN_I_PROFILE_ACK_BYTES];
+    uint8_t before[UCN_I_PROFILE_ACK_BYTES];
     uint8_t digest[16];
     uint8_t disposition;
 
     memset(&owner, 0, sizeof(owner));
     memset(&decoded, 0, sizeof(decoded));
+    CHECK(test_fragment_codec() == 0);
+    CHECK(test_capability_successor() == 0);
     memset(&summary, 0, sizeof(summary));
     memset(&decoded_summary, 0, sizeof(decoded_summary));
     memset(&query, 0, sizeof(query));
@@ -134,7 +264,9 @@ int main(void)
     memset(&cached, 0, sizeof(cached));
     memset(&requirements, 0, sizeof(requirements));
     memset(&selected, 0, sizeof(selected));
+    memset(&decoded_selected, 0, sizeof(decoded_selected));
     memset(&ack, 0, sizeof(ack));
+    memset(&decoded_ack, 0, sizeof(decoded_ack));
     memset(&intent, 0, sizeof(intent));
     memset(&resources, 0, sizeof(resources));
     memset(candidates, 0, sizeof(candidates));
@@ -163,6 +295,50 @@ int main(void)
     CHECK(ucn_i_capability_query_decode(query_golden, &decoded_query) == UCN_OK);
     CHECK(memcmp(&query, &decoded_query, sizeof(query)) == 0);
 
+    selected.local_generation = UINT32_C(0x01020304);
+    selected.peer_generation = UINT32_C(0x11121314);
+    selected.feature_bits = UCN_I_CAPABILITY_REQUIRED_BASE_FEATURES;
+    selected.hop_suite_bits = 2U;
+    selected.e2e_suite_bits = 6U;
+    selected.max_rx_window = 16U;
+    selected.max_concurrent_transfers = 2U;
+    selected.max_message_class = UCN_I_MESSAGE_T512;
+    memset(selected.local_digest, 0x11, sizeof(selected.local_digest));
+    memset(selected.peer_digest, 0x22, sizeof(selected.peer_digest));
+    CHECK(ucn_i_profile_select_encode(&selected, bytes) == UCN_OK);
+    CHECK(memcmp(bytes, profile_select_golden,
+                 sizeof(profile_select_golden)) == 0);
+    CHECK(ucn_i_profile_select_decode(profile_select_golden,
+                                      &decoded_selected) == UCN_OK);
+    CHECK(memcmp(&selected, &decoded_selected, sizeof(selected)) == 0);
+    ack.selected = selected;
+    memcpy(ack.transcript_digest, profile_ack_tail,
+           sizeof(ack.transcript_digest));
+    CHECK(ucn_i_profile_ack_encode(&ack, bytes) == UCN_OK);
+    CHECK(memcmp(bytes, profile_select_golden,
+                 sizeof(profile_select_golden)) == 0);
+    CHECK(memcmp(&bytes[UCN_I_PROFILE_SELECT_BYTES], profile_ack_tail,
+                 sizeof(profile_ack_tail)) == 0);
+    CHECK(ucn_i_profile_ack_decode(bytes, &decoded_ack) == UCN_OK);
+    CHECK(memcmp(&ack, &decoded_ack, sizeof(ack)) == 0);
+    memset(bytes, 0xA5, sizeof(bytes));
+    memcpy(before, bytes, sizeof(bytes));
+    selected.reserved_zero = 1U;
+    CHECK(ucn_i_profile_select_encode(&selected, bytes) ==
+          UCN_ERR_ARGUMENT);
+    CHECK(memcmp(bytes, before, sizeof(bytes)) == 0);
+    selected.reserved_zero = 0U;
+    memcpy(bytes, profile_select_golden, sizeof(profile_select_golden));
+    bytes[26] = UINT8_MAX;
+    memset(&decoded_selected, 0xA5, sizeof(decoded_selected));
+    {
+        ucn_i_profile_select_t decoded_before = decoded_selected;
+        CHECK(ucn_i_profile_select_decode(bytes, &decoded_selected) ==
+              UCN_ERR_MALFORMED);
+        CHECK(memcmp(&decoded_selected, &decoded_before,
+                     sizeof(decoded_selected)) == 0);
+    }
+
     memset(bytes, 0xA5, sizeof(bytes));
     memcpy(before, bytes, sizeof(bytes));
     record.link.carrier_max_fragments = 0U;
@@ -172,6 +348,9 @@ int main(void)
 
     CHECK(ucn_i_capability_owner_init(
               &owner, 10U, 42U, 30U, 21U, 1000U, 2000U, &ops) == UCN_OK);
+    /* The receiving Link's generation belongs to this node, not the sender.
+     * 接收Link的代际属于本端，不要求与发送方Record代际相等。 */
+    auth.link_generation = 9U;
     CHECK(ucn_i_capability_summary_ingest(
               &owner, &auth, &summary, 100U, &disposition) == UCN_OK);
     CHECK(disposition == UCN_I_CAPABILITY_SUMMARY_QUERY_REQUIRED);
@@ -189,6 +368,18 @@ int main(void)
     CHECK(ucn_i_capability_summary_ingest(
               &owner, &auth, &summary, 101U, &disposition) == UCN_OK);
     CHECK(disposition == UCN_I_CAPABILITY_SUMMARY_MATCHED);
+    {
+        ucn_i_capability_summary_t remote_wrong = summary;
+        remote_wrong.link_instance_generation = auth.link_generation;
+        CHECK(ucn_i_capability_summary_ingest(
+                  &owner, &auth, &remote_wrong, 101U, &disposition) == UCN_OK);
+        CHECK(disposition == UCN_I_CAPABILITY_SUMMARY_QUERY_REQUIRED);
+        CHECK(ucn_i_capability_get(
+                  &owner, &reference, 101U, &cached) == UCN_OK);
+        CHECK(cached.record.link.link_instance_generation ==
+              record.link.link_instance_generation);
+        CHECK(cached.reference.link_generation == 9U);
+    }
     CHECK(ucn_i_capability_get(
               &owner, &reference, 1099U, &cached) == UCN_OK);
     CHECK(ucn_i_capability_get(
@@ -215,6 +406,27 @@ int main(void)
     record.capability_generation = 1U;
     CHECK(ucn_i_capability_advertise_ingest(
               &owner, &auth, &record, 201U, &reference) == UCN_OK);
+
+    {
+        ucn_i_capability_query_t revoke = {0};
+        ucn_i_capability_record_t changed = record;
+        ucn_i_capability_owner_t revoke_snapshot;
+        revoke.requested_generation = record.capability_generation;
+        CHECK(ucn_i_capability_digest(&record, revoke.known_digest) == UCN_OK);
+        CHECK(ucn_i_capability_revoke(&owner, &reference, &revoke) == UCN_OK);
+        CHECK(ucn_i_capability_get(&owner,&reference,202U,&cached)==UCN_ERR_STATE);
+        revoke_snapshot = owner;
+        CHECK(ucn_i_capability_advertise_ingest(&owner,&auth,&record,202U,&reference)==UCN_ERR_REPLAY);
+        CHECK(memcmp(&revoke_snapshot,&owner,sizeof(owner))==0);
+        changed.capability_generation += 2U;
+        CHECK(ucn_i_capability_advertise_ingest(&owner,&auth,&changed,202U,&reference)==UCN_ERR_REPLAY);
+        record.capability_generation++;
+        CHECK(ucn_i_capability_advertise_ingest(&owner,&auth,&record,203U,&reference)==UCN_OK);
+        changed = record; changed.peer.max_rx_window++;
+        revoke_snapshot = owner;
+        CHECK(ucn_i_capability_advertise_ingest(&owner,&auth,&changed,204U,&reference)==UCN_ERR_SECURITY);
+        CHECK(memcmp(&revoke_snapshot,&owner,sizeof(owner))==0);
+    }
 
     CHECK(ucn_i_capability_digest(&record, digest) == UCN_OK);
     requirements.required_feature_bits =
@@ -343,7 +555,11 @@ int main(void)
                 CHECK(memcmp(&expired_ref, &refs[0], sizeof(expired_ref)) == 0);
                 CHECK(ucn_i_capability_advertise_ingest(
                           &owner, &extra, &value, 110U,
-                          &sentinel) == UCN_OK);
+                          &sentinel) == UCN_ERR_NO_SPACE);
+                CHECK(ucn_i_capability_get(&owner,&refs[0],110U,&cached)==UCN_ERR_TIMEOUT);
+                CHECK(ucn_i_capability_invalidate_session(&owner,&refs[0])==UCN_OK);
+                CHECK(ucn_i_capability_advertise_ingest(
+                          &owner,&extra,&value,110U,&sentinel)==UCN_OK);
                 CHECK(ucn_i_capability_invalidate_session(
                           &owner, &sentinel) == UCN_OK);
             }

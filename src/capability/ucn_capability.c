@@ -11,6 +11,68 @@
 #define UCN_I_CAPABILITY_KNOWN_TIMESTAMP_BITS UINT16_C(0x000F)
 #define UCN_I_CAPABILITY_KNOWN_REALTIME_BITS UINT16_C(0x0007)
 
+/* EN: Only Record68 and Ack75 may use this fixed two-part control envelope.
+ * 中文：仅Record68和Ack75允许使用固定两片控制封装。 */
+static bool fragment_valid(const ucn_i_capability_fragment_t *v)
+{
+    uint16_t total;
+    uint16_t half;
+    if (v == NULL || v->count != 2U || v->index >= 2U) { return false; }
+    total = v->opcode == 0x0103U ? 68U : v->opcode == 0x0105U ? 75U : 0U;
+    half = (uint16_t)((total + 1U) / 2U);
+    return total != 0U && total == v->total_bytes &&
+           v->chunk_bytes == (v->index == 0U ? half : total - half);
+}
+
+/* EN: Checked shape/alias/capacity; failure changes neither output nor length.
+ * 中文：预检形状、别名和容量；失败不写输出及长度。 */
+ucn_result_t ucn_i_capability_fragment_encode(
+    const ucn_i_capability_fragment_t *value, uint8_t *output,
+    size_t capacity, size_t *length_out)
+{
+    size_t n;
+    if (!fragment_valid(value) || output == NULL || length_out == NULL ||
+        ucn_i_ranges_overlap(value, sizeof(*value), output, capacity) ||
+        ucn_i_ranges_overlap(value, sizeof(*value), length_out, sizeof(*length_out)) ||
+        ucn_i_ranges_overlap(output, capacity, length_out, sizeof(*length_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    n = UCN_I_CAPABILITY_FRAGMENT_PREFIX + value->chunk_bytes;
+    if (capacity < n) { return UCN_ERR_NO_SPACE; }
+    output[0] = (uint8_t)(value->opcode >> 8U);
+    output[1] = (uint8_t)value->opcode;
+    output[2] = (uint8_t)(value->total_bytes >> 8U);
+    output[3] = (uint8_t)value->total_bytes;
+    output[4] = value->index;
+    output[5] = value->count;
+    memcpy(output + 6U, value->chunk, value->chunk_bytes);
+    *length_out = n;
+    return UCN_OK;
+}
+
+/* EN: Strict exact decode; do not expose unauthenticated bytes as an Owner proof.
+ * 中文：严格精确解码，不把未认证字节当作Owner证明。 */
+ucn_result_t ucn_i_capability_fragment_decode(
+    const uint8_t *input, size_t length, ucn_i_capability_fragment_t *value_out)
+{
+    ucn_i_capability_fragment_t v;
+    if (input == NULL || value_out == NULL ||
+        ucn_i_ranges_overlap(input, length, value_out, sizeof(*value_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    if (length < 6U || length > 44U) { return UCN_ERR_MALFORMED; }
+    memset(&v, 0, sizeof(v));
+    v.opcode = (uint16_t)(((uint16_t)input[0] << 8U) | input[1]);
+    v.total_bytes = (uint16_t)(((uint16_t)input[2] << 8U) | input[3]);
+    v.index = input[4];
+    v.count = input[5];
+    v.chunk_bytes = (uint8_t)(length - 6U);
+    if (!fragment_valid(&v)) { return UCN_ERR_MALFORMED; }
+    memcpy(v.chunk, input + 6U, v.chunk_bytes);
+    *value_out = v;
+    return UCN_OK;
+}
+
 static bool bytes_nonzero(const uint8_t *bytes, size_t length)
 {
     size_t index;
@@ -270,6 +332,111 @@ static bool query_valid(const ucn_i_capability_query_t *query)
             bytes_zero(query->known_digest, sizeof(query->known_digest)));
 }
 
+static bool profile_select_valid(const ucn_i_profile_select_t *select)
+{
+    return select != NULL && select->local_generation != 0U &&
+           select->peer_generation != 0U &&
+           (select->feature_bits & ~UCN_I_CAPABILITY_KNOWN_FEATURES) == 0U &&
+           (select->feature_bits & UCN_I_CAPABILITY_REQUIRED_BASE_FEATURES) ==
+               UCN_I_CAPABILITY_REQUIRED_BASE_FEATURES &&
+           select->hop_suite_bits != 0U &&
+           (select->hop_suite_bits & ~UCN_I_CAPABILITY_KNOWN_HOP_SUITES) ==
+               0U &&
+           select->e2e_suite_bits != 0U &&
+           (select->e2e_suite_bits & ~UCN_I_CAPABILITY_KNOWN_E2E_SUITES) ==
+               0U &&
+           select->max_rx_window != 0U &&
+           select->max_concurrent_transfers != 0U &&
+           (select->realtime_mode_bits & UINT16_C(0xFFF8)) == 0U &&
+           select->max_message_class <= UCN_I_MESSAGE_T8K &&
+           select->reserved_zero == 0U &&
+           bytes_nonzero(select->local_digest,
+                         sizeof(select->local_digest)) &&
+           bytes_nonzero(select->peer_digest,
+                         sizeof(select->peer_digest));
+}
+
+static bool profile_ack_valid(const ucn_i_profile_ack_t *ack)
+{
+    return ack != NULL && profile_select_valid(&ack->selected) &&
+           bytes_nonzero(ack->transcript_digest,
+                         sizeof(ack->transcript_digest));
+}
+
+/* EN: Compare every semantic Record field; a digest match is only a prefilter.
+ * 中文：逐字段精确比较完整Record，摘要一致只作预筛选，不使用padding。 */
+static bool record_equal(const ucn_i_capability_record_t *a, const ucn_i_capability_record_t *b)
+{
+#define SAME_LINK(field_) (a->link.field_ == b->link.field_)
+#define SAME_PEER(field_) (a->peer.field_ == b->peer.field_)
+    return a->capability_generation == b->capability_generation &&
+        SAME_LINK(link_instance_generation) && SAME_LINK(carrier_mtu) && SAME_LINK(link_frame_mtu) &&
+        SAME_LINK(processing_frame_mtu) && SAME_LINK(nominal_rate_bps) && SAME_LINK(timestamp_uncertainty_us) &&
+        SAME_LINK(carrier_header_bytes) && SAME_LINK(carrier_padding_bytes) && SAME_LINK(carrier_crc_bytes) &&
+        SAME_LINK(carrier_tag_bytes) && SAME_LINK(carrier_max_fragments) && SAME_LINK(link_flags) &&
+        SAME_LINK(timestamp_capability_bits) && SAME_LINK(hardware_priority_count) &&
+        SAME_PEER(feature_bits) && SAME_PEER(hop_suite_bits) && SAME_PEER(e2e_suite_bits) &&
+        SAME_PEER(clock_domain_generation) && SAME_PEER(max_rx_window) && SAME_PEER(max_concurrent_transfers) &&
+        SAME_PEER(realtime_mode_bits) && SAME_PEER(clock_domain_id) && SAME_PEER(max_message_class);
+#undef SAME_LINK
+#undef SAME_PEER
+}
+
+/* EN: Serialize full SELECT cause, never struct padding or a caller digest alone.
+ * 中文：序列化完整SELECT因果域，不使用结构padding或仅信任调用方摘要。 */
+/* Canonical header encoding is shared as one codec step; no by-value DTO.
+ * 规范头作为独立编码步骤，避免保留多份参数和字段临时值。 */
+static void select_context_encode(const ucn_i_capability_select_context_t *context,
+                                  uint8_t bytes[93])
+{
+    put32(bytes,0U,context->realm);
+    put32(bytes,4U,context->source_address);put32(bytes,8U,context->source_generation);
+    memcpy(bytes+12U,context->source_principal,16U);
+    put32(bytes,28U,context->destination_address);put32(bytes,32U,context->destination_generation);
+    memcpy(bytes+36U,context->destination_principal,16U);
+    put32(bytes,52U,context->session);put32(bytes,56U,context->key);put32(bytes,60U,context->policy);
+    bytes[64]=context->origin;memcpy(bytes+65U,context->fingerprint,16U);
+    put32(bytes,81U,(uint32_t)(context->transaction>>32U));put32(bytes,85U,(uint32_t)context->transaction);
+    put16(bytes,89U,context->service);put16(bytes,91U,UINT16_C(0x0104));
+}
+
+ucn_result_t ucn_i_capability_select_transcript(
+    const ucn_i_capability_select_context_t *context,
+    const ucn_i_profile_select_t *selected,
+    uint8_t digest_out[16], ucn_i_sha256_workspace_t *work)
+{
+    static const uint8_t domain[] = "UCN6-CAPABILITY-SELECT-V1";
+    uint8_t bytes[93];
+    ucn_result_t result;
+    if (context == NULL || selected == NULL || digest_out == NULL || work == NULL ||
+        !profile_select_valid(selected) || context->realm == 0U || context->realm == UINT32_MAX ||
+        context->source_address == 0U || context->destination_address == 0U ||
+        context->source_address == UINT32_MAX || context->destination_address == UINT32_MAX ||
+        context->source_address == context->destination_address ||
+        context->source_generation == 0U || context->destination_generation == 0U ||
+        !bytes_nonzero(context->source_principal,16U) || !bytes_nonzero(context->destination_principal,16U) ||
+        memcmp(context->source_principal,context->destination_principal,16U) == 0 ||
+        context->session == 0U || context->key == 0U || context->policy == 0U ||
+        context->origin < 1U || context->origin > 2U || !bytes_nonzero(context->fingerprint,16U) ||
+        context->transaction == 0U || context->service == 0U || context->service == UINT16_MAX ||
+        ucn_i_ranges_overlap(context,sizeof(*context),digest_out,16U) ||
+        ucn_i_ranges_overlap(selected,sizeof(*selected),digest_out,16U) ||
+        ucn_i_ranges_overlap(context,sizeof(*context),work,sizeof(*work)) ||
+        ucn_i_ranges_overlap(selected,sizeof(*selected),work,sizeof(*work)) ||
+        ucn_i_ranges_overlap(digest_out,16U,work,sizeof(*work))) return UCN_ERR_ARGUMENT;
+    result=ucn_i_sha256_begin(work);
+    if(result!=UCN_OK)return result;
+    result=ucn_i_sha256_append(work,domain,sizeof(domain)-1U);
+    put32(bytes,0U,152U);
+    if(result==UCN_OK)result=ucn_i_sha256_append(work,bytes,4U);
+    select_context_encode(context,bytes);
+    if(result==UCN_OK)result=ucn_i_sha256_append(work,bytes,93U);
+    if(result==UCN_OK)result=ucn_i_profile_select_encode(selected,bytes);
+    if(result==UCN_OK)result=ucn_i_sha256_append(work,bytes,59U);
+    if(result!=UCN_OK)return result;
+    return ucn_i_sha256_finish128(work,digest_out);
+}
+
 ucn_result_t ucn_i_capability_summary_encode(
     const ucn_i_capability_summary_t *summary,
     uint8_t output[UCN_I_CAPABILITY_SUMMARY_BYTES])
@@ -346,6 +513,115 @@ ucn_result_t ucn_i_capability_query_decode(
     return UCN_OK;
 }
 
+ucn_result_t ucn_i_profile_select_encode(
+    const ucn_i_profile_select_t *select,
+    uint8_t output[UCN_I_PROFILE_SELECT_BYTES])
+{
+    uint8_t bytes[UCN_I_PROFILE_SELECT_BYTES];
+
+    if (!profile_select_valid(select) || output == NULL ||
+        ucn_i_ranges_overlap(select, sizeof(*select), output,
+                             UCN_I_PROFILE_SELECT_BYTES)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(bytes, 0, sizeof(bytes));
+    put32(bytes, 0U, select->local_generation);
+    put32(bytes, 4U, select->peer_generation);
+    put32(bytes, 8U, select->feature_bits);
+    put32(bytes, 12U, select->hop_suite_bits);
+    put32(bytes, 16U, select->e2e_suite_bits);
+    put16(bytes, 20U, select->max_rx_window);
+    put16(bytes, 22U, select->max_concurrent_transfers);
+    put16(bytes, 24U, select->realtime_mode_bits);
+    bytes[26] = select->max_message_class;
+    memcpy(&bytes[27], select->local_digest,
+           sizeof(select->local_digest));
+    memcpy(&bytes[43], select->peer_digest,
+           sizeof(select->peer_digest));
+    memcpy(output, bytes, sizeof(bytes));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_profile_select_decode(
+    const uint8_t input[UCN_I_PROFILE_SELECT_BYTES],
+    ucn_i_profile_select_t *select_out)
+{
+    ucn_i_profile_select_t select;
+
+    if (input == NULL || select_out == NULL ||
+        ucn_i_ranges_overlap(input, UCN_I_PROFILE_SELECT_BYTES,
+                             select_out, sizeof(*select_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(&select, 0, sizeof(select));
+    select.local_generation = get32(input, 0U);
+    select.peer_generation = get32(input, 4U);
+    select.feature_bits = get32(input, 8U);
+    select.hop_suite_bits = get32(input, 12U);
+    select.e2e_suite_bits = get32(input, 16U);
+    select.max_rx_window = get16(input, 20U);
+    select.max_concurrent_transfers = get16(input, 22U);
+    select.realtime_mode_bits = get16(input, 24U);
+    select.max_message_class = input[26];
+    memcpy(select.local_digest, &input[27],
+           sizeof(select.local_digest));
+    memcpy(select.peer_digest, &input[43],
+           sizeof(select.peer_digest));
+    if (!profile_select_valid(&select)) {
+        return UCN_ERR_MALFORMED;
+    }
+    *select_out = select;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_profile_ack_encode(
+    const ucn_i_profile_ack_t *ack,
+    uint8_t output[UCN_I_PROFILE_ACK_BYTES])
+{
+    uint8_t bytes[UCN_I_PROFILE_ACK_BYTES];
+    ucn_result_t result;
+
+    if (!profile_ack_valid(ack) || output == NULL ||
+        ucn_i_ranges_overlap(ack, sizeof(*ack), output,
+                             UCN_I_PROFILE_ACK_BYTES)) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = ucn_i_profile_select_encode(&ack->selected, bytes);
+    if (result != UCN_OK) {
+        return result;
+    }
+    memcpy(&bytes[UCN_I_PROFILE_SELECT_BYTES], ack->transcript_digest,
+           sizeof(ack->transcript_digest));
+    memcpy(output, bytes, sizeof(bytes));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_profile_ack_decode(
+    const uint8_t input[UCN_I_PROFILE_ACK_BYTES],
+    ucn_i_profile_ack_t *ack_out)
+{
+    ucn_i_profile_ack_t ack;
+    ucn_result_t result;
+
+    if (input == NULL || ack_out == NULL ||
+        ucn_i_ranges_overlap(input, UCN_I_PROFILE_ACK_BYTES,
+                             ack_out, sizeof(*ack_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(&ack, 0, sizeof(ack));
+    result = ucn_i_profile_select_decode(input, &ack.selected);
+    if (result != UCN_OK) {
+        return result;
+    }
+    memcpy(ack.transcript_digest, &input[UCN_I_PROFILE_SELECT_BYTES],
+           sizeof(ack.transcript_digest));
+    if (!profile_ack_valid(&ack)) {
+        return UCN_ERR_MALFORMED;
+    }
+    *ack_out = ack;
+    return UCN_OK;
+}
+
 static bool authenticated_valid(
     const ucn_i_capability_owner_t *owner,
     const ucn_i_authenticated_peer_view_t *view,
@@ -362,23 +638,21 @@ static bool authenticated_valid(
            now_us != 0U && now_us < view->expires_at_us;
 }
 
-static ucn_i_capability_ref_t make_ref(
+static void make_ref(
     const ucn_i_capability_owner_t *owner,
-    const ucn_i_authenticated_peer_view_t *view)
+    const ucn_i_authenticated_peer_view_t *view,
+    ucn_i_capability_ref_t *reference)
 {
-    ucn_i_capability_ref_t reference;
-
-    memset(&reference, 0, sizeof(reference));
-    reference.runtime_instance = owner->runtime_instance;
-    reference.realm_id = owner->realm_id;
-    reference.address = view->address;
-    reference.binding_generation = view->binding_generation;
-    reference.session_generation = view->session_generation;
-    reference.link_id = view->link_id;
-    reference.link_generation = view->link_generation;
-    reference.security_owner_instance = owner->security_owner_instance;
-    memcpy(reference.principal, view->principal, sizeof(reference.principal));
-    return reference;
+    memset(reference, 0, sizeof(*reference));
+    reference->runtime_instance = owner->runtime_instance;
+    reference->realm_id = owner->realm_id;
+    reference->address = view->address;
+    reference->binding_generation = view->binding_generation;
+    reference->session_generation = view->session_generation;
+    reference->link_id = view->link_id;
+    reference->link_generation = view->link_generation;
+    reference->security_owner_instance = owner->security_owner_instance;
+    memcpy(reference->principal, view->principal, sizeof(reference->principal));
 }
 
 static bool ref_equal(const ucn_i_capability_ref_t *left,
@@ -463,17 +737,18 @@ ucn_result_t ucn_i_capability_summary_ingest(
     if (result != UCN_OK) {
         return result;
     }
-    if (!authenticated_valid(owner, authenticated, now_us) ||
-        summary->link_instance_generation != authenticated->link_generation) {
+    if (!authenticated_valid(owner, authenticated, now_us)) {
         owner_unlock(owner);
         return UCN_ERR_SECURITY;
     }
-    reference = make_ref(owner, authenticated);
+    make_ref(owner, authenticated, &reference);
     for (index = 0U; index < UCN_I_CAPABILITY_PEER_COUNT; ++index) {
         const ucn_i_cached_capability_t *value = &owner->peers[index].value;
 
-        if (owner->peers[index].occupied != 0U &&
+        if (owner->peers[index].occupied != 0U && owner->peers[index].revoked == 0U &&
             ref_equal(&value->reference, &reference) &&
+            value->record.link.link_instance_generation ==
+                summary->link_instance_generation &&
             value->record.capability_generation ==
                 summary->capability_generation &&
             memcmp(value->digest, summary->digest, 16U) == 0 &&
@@ -488,12 +763,13 @@ ucn_result_t ucn_i_capability_summary_ingest(
     return UCN_OK;
 }
 
-ucn_result_t ucn_i_capability_advertise_ingest(
+static ucn_result_t advertise_ingest_impl(
     ucn_i_capability_owner_t *owner,
     const ucn_i_authenticated_peer_view_t *authenticated,
     const ucn_i_capability_record_t *record,
     uint64_t now_us,
-    ucn_i_capability_ref_t *reference_out)
+    ucn_i_capability_ref_t *reference_out,
+    const ucn_i_capability_ref_t *predecessor)
 {
     uint16_t index;
     uint16_t empty = UINT16_MAX;
@@ -505,6 +781,11 @@ ucn_result_t ucn_i_capability_advertise_ingest(
 
     if (owner == NULL || authenticated == NULL ||
         !record_valid(record) || reference_out == NULL ||
+        (predecessor != NULL &&
+         (ucn_i_ranges_overlap(owner, sizeof(*owner), predecessor,
+                               sizeof(*predecessor)) ||
+          ucn_i_ranges_overlap(predecessor, sizeof(*predecessor), reference_out,
+                               sizeof(*reference_out)))) ||
         ucn_i_ranges_overlap(owner, sizeof(*owner), authenticated,
                              sizeof(*authenticated)) ||
         ucn_i_ranges_overlap(owner, sizeof(*owner), record,
@@ -525,14 +806,41 @@ ucn_result_t ucn_i_capability_advertise_ingest(
     if (result != UCN_OK) {
         return result;
     }
-    if (!authenticated_valid(owner, authenticated, now_us) ||
-        record->link.link_instance_generation !=
-            authenticated->link_generation) {
+    /* Authenticated ingress is local; the signed Record's Link is remote.
+     * 认证入口属于本端；签名Record内的Link属于对端，代际不可跨节点比较。 */
+    if (!authenticated_valid(owner, authenticated, now_us)) {
         owner_unlock(owner);
         return UCN_ERR_SECURITY;
     }
-    reference = make_ref(owner, authenticated);
+    make_ref(owner, authenticated, &reference);
+    if (predecessor != NULL) {
+        if (predecessor->reserved_zero != 0U ||
+            reference.runtime_instance != predecessor->runtime_instance ||
+            reference.security_owner_instance != predecessor->security_owner_instance ||
+            reference.realm_id != predecessor->realm_id ||
+            reference.address != predecessor->address ||
+            reference.binding_generation != predecessor->binding_generation ||
+            memcmp(reference.principal, predecessor->principal, 16U) != 0 ||
+            reference.session_generation <= predecessor->session_generation) {
+            owner_unlock(owner);
+            return UCN_ERR_REPLAY;
+        }
+        for (index = 0U; index < UCN_I_CAPABILITY_PEER_COUNT; ++index) {
+            if (owner->peers[index].occupied != 0U &&
+                ref_equal(&owner->peers[index].value.reference, predecessor)) {
+                empty = index;
+                break;
+            }
+        }
+        if (empty == UINT16_MAX) {
+            owner_unlock(owner);
+            return UCN_ERR_NOT_FOUND;
+        }
+    }
     for (index = 0U; index < UCN_I_CAPABILITY_PEER_COUNT; ++index) {
+        if (predecessor != NULL && index == empty) {
+            continue;
+        }
         if (owner->peers[index].occupied == 0U) {
             if (empty == UINT16_MAX) {
                 empty = index;
@@ -543,9 +851,18 @@ ucn_result_t ucn_i_capability_advertise_ingest(
             const ucn_i_cached_capability_t *previous =
                 &owner->peers[index].value;
 
+            if (record->link.link_instance_generation !=
+                previous->record.link.link_instance_generation) {
+                owner_unlock(owner);
+                return UCN_ERR_SECURITY;
+            }
+
             if (record->capability_generation ==
                 previous->record.capability_generation) {
-                if (memcmp(digest, previous->digest, 16U) != 0) {
+                if (owner->peers[index].revoked != 0U) {
+                    owner_unlock(owner); return UCN_ERR_REPLAY;
+                }
+                if (memcmp(digest, previous->digest, 16U) != 0 || !record_equal(record,&previous->record)) {
                     owner_unlock(owner);
                     return UCN_ERR_SECURITY;
                 }
@@ -563,7 +880,9 @@ ucn_result_t ucn_i_capability_advertise_ingest(
             break;
         }
         if (memcmp(owner->peers[index].value.reference.principal,
-                   reference.principal, sizeof(reference.principal)) == 0) {
+                   reference.principal, sizeof(reference.principal)) == 0 ||
+            (predecessor != NULL &&
+             owner->peers[index].value.reference.address == reference.address)) {
             owner_unlock(owner);
             return UCN_ERR_REPLAY;
         }
@@ -603,9 +922,35 @@ ucn_result_t ucn_i_capability_advertise_ingest(
     memcpy(owner->peers[empty].value.digest, digest,
            sizeof(owner->peers[empty].value.digest));
     owner->peers[empty].occupied = 1U;
+    owner->peers[empty].revoked = 0U;
+    owner->peers[empty].expired_notified = 0U;
     *reference_out = reference;
     owner_unlock(owner);
     return UCN_OK;
+}
+
+ucn_result_t ucn_i_capability_advertise_ingest(
+    ucn_i_capability_owner_t *owner,
+    const ucn_i_authenticated_peer_view_t *authenticated,
+    const ucn_i_capability_record_t *record,
+    uint64_t now_us, ucn_i_capability_ref_t *reference_out)
+{
+    return advertise_ingest_impl(owner, authenticated, record, now_us,
+                                  reference_out, NULL);
+}
+
+/* EN: Replace the exact retained parent with a strictly newer authenticated one.
+ * ZH: 用严格更新的认证父域替换精确旧父域，不先清槽，不继承旧Profile/租期。 */
+ucn_result_t ucn_i_capability_replace_session(
+    ucn_i_capability_owner_t *owner,
+    const ucn_i_capability_ref_t *predecessor,
+    const ucn_i_authenticated_peer_view_t *authenticated,
+    const ucn_i_capability_record_t *record,
+    uint64_t now_us, ucn_i_capability_ref_t *reference_out)
+{
+    if (predecessor == NULL) { return UCN_ERR_ARGUMENT; }
+    return advertise_ingest_impl(owner, authenticated, record, now_us,
+                                  reference_out, predecessor);
 }
 
 ucn_result_t ucn_i_capability_get(
@@ -636,6 +981,9 @@ ucn_result_t ucn_i_capability_get(
 
         if (owner->peers[index].occupied != 0U &&
             ref_equal(&value->reference, reference)) {
+            if (owner->peers[index].revoked != 0U) {
+                owner_unlock(owner); return UCN_ERR_STATE;
+            }
             if (now_us >= value->discovery_deadline_us ||
                 now_us >= value->capability_deadline_us) {
                 owner_unlock(owner);
@@ -676,6 +1024,36 @@ ucn_result_t ucn_i_capability_invalidate_session(
     }
     owner_unlock(owner);
     return UCN_ERR_NOT_FOUND;
+}
+
+/* EN: Keep the generation/digest high-water until the parent Session is fenced.
+ * 中文：保留代际/摘要高水位，只有父Session真正围栏后才允许显式清槽。 */
+ucn_result_t ucn_i_capability_revoke(
+    ucn_i_capability_owner_t *owner,
+    const ucn_i_capability_ref_t *reference,
+    const ucn_i_capability_query_t *exact)
+{
+    uint16_t index;
+    ucn_result_t result;
+    if (owner == NULL || reference == NULL || exact == NULL ||
+        exact->requested_generation == 0U || !query_valid(exact) ||
+        ucn_i_ranges_overlap(owner,sizeof(*owner),reference,sizeof(*reference)) ||
+        ucn_i_ranges_overlap(owner,sizeof(*owner),exact,sizeof(*exact))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result=owner_lock(owner); if (result != UCN_OK) return result;
+    for (index=0U; index<UCN_I_CAPABILITY_PEER_COUNT; ++index) {
+        const ucn_i_cached_capability_t *previous=&owner->peers[index].value;
+        if (owner->peers[index].occupied != 0U && ref_equal(&previous->reference,reference)) {
+            if (exact->requested_generation != previous->record.capability_generation ||
+                memcmp(exact->known_digest,previous->digest,16U) != 0) {
+                owner_unlock(owner); return UCN_ERR_SECURITY;
+            }
+            owner->peers[index].revoked=1U;
+            owner_unlock(owner); return UCN_OK;
+        }
+    }
+    owner_unlock(owner); return UCN_ERR_NOT_FOUND;
 }
 
 ucn_result_t ucn_i_capability_maintain(
@@ -724,11 +1102,13 @@ ucn_result_t ucn_i_capability_maintain(
         owner->maintenance_cursor = (uint16_t)(
             (index + 1U) % UCN_I_CAPABILITY_PEER_COUNT);
         inspected++;
-        if (owner->peers[index].occupied != 0U &&
+        if (owner->peers[index].occupied != 0U && owner->peers[index].expired_notified == 0U &&
             (now_us >= owner->peers[index].value.discovery_deadline_us ||
              now_us >= owner->peers[index].value.capability_deadline_us)) {
             expired_reference = owner->peers[index].value.reference;
-            memset(&owner->peers[index], 0, sizeof(owner->peers[index]));
+            /* EN: Expiry is notification, never same-Session high-water deletion.
+             * 中文：到期只通知，不删除同Session防回退高水位。 */
+            owner->peers[index].expired_notified = 1U;
             expired_valid = 1U;
             break;
         }

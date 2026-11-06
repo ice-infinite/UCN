@@ -47,6 +47,13 @@ enum {
 #error "UCN_PROFILE must select NANO, LITE, or FULL"
 #endif
 
+#define UCN_I_REALTIME_TIME_KEY_BYTES 12U
+#define UCN_I_REALTIME_TIME_SYNC_BYTES 12U
+#define UCN_I_REALTIME_TIME_FOLLOW_UP_BYTES 24U
+#define UCN_I_REALTIME_TIME_DELAY_REQUEST_BYTES 12U
+#define UCN_I_REALTIME_TIME_DELAY_RESPONSE_BYTES 24U
+#define UCN_I_REALTIME_TIME_SYNC_ABORT_BYTES 16U
+
 typedef uint8_t ucn_i_realtime_mode_t;
 enum {
     UCN_I_REALTIME_NONE = 0,
@@ -290,22 +297,58 @@ typedef struct ucn_i_realtime_sync_response {
     uint16_t reserved_zero;
 } ucn_i_realtime_sync_response_t;
 
+typedef struct ucn_i_realtime_time_key {
+    uint32_t domain_generation;
+    uint32_t sync_sequence;
+    uint16_t clock_domain_id;
+    uint16_t reserved_zero;
+} ucn_i_realtime_time_key_t;
+
+typedef struct ucn_i_realtime_time_follow_up {
+    ucn_i_realtime_time_key_t key;
+    uint64_t t1_master_tx_us;
+    uint32_t t1_uncertainty_us;
+} ucn_i_realtime_time_follow_up_t;
+
+typedef struct ucn_i_realtime_time_delay_response {
+    ucn_i_realtime_time_key_t key;
+    uint64_t t4_master_rx_us;
+    uint32_t t4_uncertainty_us;
+} ucn_i_realtime_time_delay_response_t;
+
+typedef struct ucn_i_realtime_time_abort {
+    ucn_i_realtime_time_key_t key;
+    uint8_t reason;
+    uint8_t reserved_zero[3];
+} ucn_i_realtime_time_abort_t;
+
+typedef uint8_t ucn_i_realtime_abort_reason_t;
+enum {
+    UCN_I_REALTIME_ABORT_POLICY = 1,
+    UCN_I_REALTIME_ABORT_PATH = 2,
+    UCN_I_REALTIME_ABORT_TIMEOUT = 3,
+    UCN_I_REALTIME_ABORT_CONFLICT = 4
+};
+
 typedef struct ucn_i_realtime_sync_slot {
     ucn_i_realtime_path_facts_t path;
     ucn_i_realtime_event_key_t t2;
     ucn_i_realtime_event_key_t t3;
     uint64_t t2_us;
     uint64_t t3_us;
+    uint64_t t1_us;
     uint64_t deadline_us;
     uint32_t domain_generation;
     uint32_t sync_sequence;
     uint32_t t2_uncertainty_us;
     uint32_t t3_uncertainty_us;
+    uint32_t t1_uncertainty_us;
     uint16_t clock_domain_id;
     uint16_t handle_generation;
     uint8_t occupied;
     uint8_t t3_bound;
-    uint8_t reserved_zero[2];
+    uint8_t t1_bound;
+    uint8_t reserved_zero;
 } ucn_i_realtime_sync_slot_t;
 
 typedef struct ucn_i_realtime_release_slot {
@@ -384,6 +427,10 @@ ucn_result_t ucn_i_realtime_owner_destroy(ucn_i_realtime_owner_t *owner);
 ucn_result_t ucn_i_realtime_local_stamp(
     uint64_t capture_time_us, bool hardware_capture,
     ucn_i_realtime_envelope_t *envelope_out);
+/* EN: Record hashing belongs to the codec; no large SHA workspace in the FSM.
+ * 中文：Record摘要属于Codec，状态机无需持有SHA自动工作区。 */
+ucn_result_t ucn_i_realtime_domain_body_digest(const uint8_t *body,
+                                               uint8_t digest[16]);
 ucn_result_t ucn_i_realtime_domain_record_encode(
     const ucn_i_realtime_domain_config_t *config,
     uint8_t body_out[UCN_I_REALTIME_DOMAIN_RECORD_BYTES]);
@@ -421,6 +468,17 @@ ucn_result_t ucn_i_realtime_sync_bind_t3(
     ucn_i_realtime_owner_t *owner, ucn_handle_t sync,
     const ucn_i_realtime_event_key_t *t3_event,
     uint64_t t3_member_tx_us, uint32_t t3_uncertainty_us);
+ucn_result_t ucn_i_realtime_sync_accept_follow_up(
+    ucn_i_realtime_owner_t *owner, ucn_handle_t sync,
+    const ucn_i_realtime_time_follow_up_t *follow_up,
+    uint64_t member_receive_local_us);
+ucn_result_t ucn_i_realtime_sync_complete_delay_response(
+    ucn_i_realtime_owner_t *owner, ucn_handle_t sync,
+    const ucn_i_realtime_time_delay_response_t *response,
+    uint64_t member_receive_local_us);
+ucn_result_t ucn_i_realtime_sync_abort(
+    ucn_i_realtime_owner_t *owner, ucn_handle_t sync,
+    const ucn_i_realtime_time_abort_t *abort, uint64_t now_us);
 ucn_result_t ucn_i_realtime_sync_complete(
     ucn_i_realtime_owner_t *owner, ucn_handle_t sync,
     const ucn_i_realtime_sync_response_t *response,
@@ -431,6 +489,31 @@ ucn_result_t ucn_i_realtime_release_peek(
 ucn_result_t ucn_i_realtime_release_ack(
     ucn_i_realtime_owner_t *owner,
     const ucn_i_realtime_release_view_t *release);
+
+ucn_result_t ucn_i_realtime_time_key_encode(
+    const ucn_i_realtime_time_key_t *value,
+    uint8_t output[UCN_I_REALTIME_TIME_KEY_BYTES]);
+ucn_result_t ucn_i_realtime_time_key_decode(
+    const uint8_t input[UCN_I_REALTIME_TIME_KEY_BYTES],
+    ucn_i_realtime_time_key_t *value_out);
+ucn_result_t ucn_i_realtime_time_follow_up_encode(
+    const ucn_i_realtime_time_follow_up_t *value,
+    uint8_t output[UCN_I_REALTIME_TIME_FOLLOW_UP_BYTES]);
+ucn_result_t ucn_i_realtime_time_follow_up_decode(
+    const uint8_t input[UCN_I_REALTIME_TIME_FOLLOW_UP_BYTES],
+    ucn_i_realtime_time_follow_up_t *value_out);
+ucn_result_t ucn_i_realtime_time_delay_response_encode(
+    const ucn_i_realtime_time_delay_response_t *value,
+    uint8_t output[UCN_I_REALTIME_TIME_DELAY_RESPONSE_BYTES]);
+ucn_result_t ucn_i_realtime_time_delay_response_decode(
+    const uint8_t input[UCN_I_REALTIME_TIME_DELAY_RESPONSE_BYTES],
+    ucn_i_realtime_time_delay_response_t *value_out);
+ucn_result_t ucn_i_realtime_time_abort_encode(
+    const ucn_i_realtime_time_abort_t *value,
+    uint8_t output[UCN_I_REALTIME_TIME_SYNC_ABORT_BYTES]);
+ucn_result_t ucn_i_realtime_time_abort_decode(
+    const uint8_t input[UCN_I_REALTIME_TIME_SYNC_ABORT_BYTES],
+    ucn_i_realtime_time_abort_t *value_out);
 ucn_result_t ucn_i_realtime_policy_set(
     ucn_i_realtime_owner_t *owner,
     const ucn_i_realtime_policy_t *policy);

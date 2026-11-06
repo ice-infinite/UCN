@@ -213,6 +213,102 @@ static uint64_t read_be64(const uint8_t *in)
     return value;
 }
 
+/* EN: Structural peer reauth validation; no owner or crypto side effects.
+ * 中文：邻接重新认证结构校验，无Owner或密码副作用。 */
+static bool peer_reauth_valid(const uint8_t *b)
+{
+    size_t i, offset;
+    uint32_t limit, previous,remote,origin,hop;
+    if (b == NULL || b[0] != 2U || b[1] > 3U || b[2] < 1U || b[2] > 4U ||
+        b[3] != 0U || b[65] != 16U || b[70] != 0U || b[71] != 0U ||
+        read_be32(b + 4U) == 0U || read_be32(b + 4U) == UINT32_MAX) return false;
+    limit = address_limit(b[2]);
+    for (offset = 8U; offset <= 32U; offset += 24U) {
+        bool all_ff = true;
+        if (read_be32(b + offset) == 0U || read_be32(b + offset) >= limit ||
+            read_be32(b + offset + 4U) == 0U || !bytes_nonzero(b + offset + 8U, 16U)) return false;
+        for (i = 0U; i < 16U; ++i) if (b[offset + 8U + i] != 255U) all_ff = false;
+        if (all_ff) return false;
+    }
+    previous = read_be32(b + 56U);
+    remote=read_be32(b+164U);origin=read_be32(b+156U);hop=read_be32(b+160U);
+    if(read_be32(b+168U)>origin)origin=read_be32(b+168U);
+    if(read_be32(b+172U)>hop)hop=read_be32(b+172U);
+    if (read_be32(b + 8U) == read_be32(b + 32U) || memcmp(b + 16U,b + 40U,16U) == 0 ||
+        previous == 0U || previous == UINT32_MAX || remote==UINT32_MAX ||
+        read_be32(b+60U)!=(previous>remote?previous:remote)+1U || origin==UINT32_MAX || hop==UINT32_MAX ||
+        read_be32(b+156U)==0U || read_be32(b+160U)==0U ||
+        read_be32(b+72U)!=origin+1U || read_be32(b+76U)!=hop+1U ||
+        b[64] < 1U || b[64] > 3U || read_be16(b + 66U) == 0U || read_be16(b + 66U) >= 65534U ||
+        read_be16(b + 68U) == 0U || read_be16(b + 68U) >= 65534U ||
+        read_be32(b + 72U) == 0U || read_be32(b + 76U) == 0U ||
+        read_be16(b + 80U) == 0U || read_be32(b + 84U) == 0U ||
+        read_be64(b + 92U) == 0U || read_be64(b + 100U) == 0U ||
+        read_be64(b + 116U) == 0U || read_be64(b + 116U) > INT64_MAX || !bytes_nonzero(b + 124U,32U)) return false;
+    if (b[1] == 0U) return read_be16(b + 82U) == 0U && read_be32(b + 88U) == 0U && read_be64(b + 108U) == 0U && !bytes_nonzero(b+164U,44U);
+    if(remote==0U||read_be32(b+168U)==0U||read_be32(b+172U)==0U||!bytes_nonzero(b+176U,32U))return false;
+    if(previous==remote && (read_be32(b+156U)!=read_be32(b+168U)||read_be32(b+160U)!=read_be32(b+172U)||memcmp(b+124U,b+176U,32U)!=0))return false;
+    if(previous>remote && (read_be32(b+156U)<=read_be32(b+168U)||read_be32(b+160U)<=read_be32(b+172U)))return false;
+    if(remote>previous && (read_be32(b+168U)<=read_be32(b+156U)||read_be32(b+172U)<=read_be32(b+160U)))return false;
+    return read_be16(b + 82U) != 0U && read_be32(b + 88U) != 0U && read_be64(b + 108U) != 0U;
+}
+
+ucn_result_t ucn_i_peer_reauth_decode(const uint8_t *input, size_t length,
+                                    ucn_i_peer_reauth_record_t *output)
+{
+    if (input == NULL || output == NULL ||
+        ucn_i_ranges_overlap(input,length,output,sizeof(*output))) return UCN_ERR_ARGUMENT;
+    if (length != UCN_I_PEER_REAUTH_RECORD_BYTES || !peer_reauth_valid(input)) return UCN_ERR_MALFORMED;
+    memcpy(output->canonical,input,length); return UCN_OK;
+}
+
+ucn_result_t ucn_i_peer_reauth_encode(const ucn_i_peer_reauth_record_t *input,
+                                    uint8_t *output, size_t capacity)
+{
+    if (input == NULL || output == NULL ||
+        ucn_i_ranges_overlap(input,sizeof(*input),output,capacity) || !peer_reauth_valid(input->canonical)) return UCN_ERR_ARGUMENT;
+    if (capacity < UCN_I_PEER_REAUTH_RECORD_BYTES) return UCN_ERR_NO_SPACE;
+    memcpy(output,input->canonical,UCN_I_PEER_REAUTH_RECORD_BYTES); return UCN_OK;
+}
+
+static bool peer_reauth_fragment_valid(const ucn_i_peer_reauth_fragment_t *v)
+{
+    size_t offset,expected,i;
+    if (v == NULL || v->stage > 3U || v->transaction == 0U || v->total_bytes < 225U || v->total_bytes > 273U) return false;
+    offset=(size_t)v->index*80U;
+    if(offset >= v->total_bytes)return false;
+    expected=v->total_bytes-offset;if(expected>80U)expected=80U;
+    if(v->data_bytes!=expected)return false;
+    for(i=expected;i<80U;++i)if(v->data[i]!=0U)return false;
+    return true;
+}
+ucn_result_t ucn_i_peer_reauth_fragment_encode(const ucn_i_peer_reauth_fragment_t *v,
+    uint8_t *out,size_t capacity,size_t *written)
+{
+    size_t i,n,offset;uint64_t transaction;
+    if(out==NULL||written==NULL||!peer_reauth_fragment_valid(v)||
+        ucn_i_ranges_overlap(v,sizeof(*v),out,capacity)||ucn_i_ranges_overlap(v,sizeof(*v),written,sizeof(*written))||
+        ucn_i_ranges_overlap(out,capacity,written,sizeof(*written)))return UCN_ERR_ARGUMENT;
+    n=18U+v->data_bytes;if(capacity<n)return UCN_ERR_NO_SPACE;
+    offset=(size_t)v->index*80U;out[0]=1U;out[1]=v->stage;out[2]=v->index;out[3]=(uint8_t)((v->total_bytes+79U)/80U);
+    out[4]=(uint8_t)(v->total_bytes>>8U);out[5]=(uint8_t)v->total_bytes;
+    out[6]=(uint8_t)(offset>>8U);out[7]=(uint8_t)offset;out[8]=80U;out[9]=0U;
+    transaction=v->transaction;for(i=0U;i<8U;++i){out[17U-i]=(uint8_t)transaction;transaction>>=8U;}
+    memcpy(out+18U,v->data,v->data_bytes);*written=n;return UCN_OK;
+}
+ucn_result_t ucn_i_peer_reauth_fragment_decode(const uint8_t *in,size_t n,
+    ucn_i_peer_reauth_fragment_t *out)
+{
+    ucn_i_peer_reauth_fragment_t value={0};
+    if(in==NULL||out==NULL||ucn_i_ranges_overlap(in,n,out,sizeof(*out)))return UCN_ERR_ARGUMENT;
+    if(n<19U||n>98U||in[0]!=1U||in[8]!=80U||in[9]!=0U)return UCN_ERR_MALFORMED;
+    value.stage=in[1];value.index=in[2];value.total_bytes=read_be16(in+4U);value.transaction=read_be64(in+10U);
+    if(in[3]!=(value.total_bytes+79U)/80U||read_be16(in+6U)!=(uint16_t)value.index*80U)return UCN_ERR_MALFORMED;
+    value.data_bytes=(uint8_t)(n-18U);memcpy(value.data,in+18U,value.data_bytes);
+    if(!peer_reauth_fragment_valid(&value))return UCN_ERR_MALFORMED;
+    *out=value;return UCN_OK;
+}
+
 static uint32_t read_address_be(const uint8_t *in, uint8_t bytes)
 {
     uint32_t value = 0U;
@@ -413,8 +509,12 @@ static bool rules_valid(const ucn_i_security_config_t *config)
                            UCN_I_SECURITY_PRINCIPAL_BYTES) ||
             !bytes_nonzero(rule->context_fingerprint,
                            UCN_I_SECURITY_FINGERPRINT_BYTES) ||
-            rule->peer_binding_generation == 0U || rule->service_id == 0U ||
+            rule->peer_binding_generation == 0U ||
             rule->service_id == UINT16_MAX ||
+            (rule->service_id == 0U &&
+             !ucn_i_protocol_opcode_valid(rule->protocol_opcode)) ||
+            (rule->service_id != 0U && rule->protocol_opcode != 0U &&
+             !ucn_i_protocol_opcode_valid(rule->protocol_opcode)) ||
             (rule->direction != UCN_I_SECURITY_ACCESS_INBOUND &&
              rule->direction != UCN_I_SECURITY_ACCESS_OUTBOUND) ||
             !bytes_zero(rule->reserved_zero, sizeof(rule->reserved_zero))) {
@@ -1044,7 +1144,8 @@ static bool c1_origin_material_matches(
         !bytes_zero(material->reserved_zero,
                     sizeof(material->reserved_zero)) ||
         material->common_header[0] != UINT8_C(0x61) ||
-        (material->common_header[1] & UINT8_C(0x3F)) != 0U ||
+        (material->common_header[1] & UINT8_C(0x0F)) != 0U ||
+        (material->common_header[1] & UINT8_C(0x30)) == UINT8_C(0x30) ||
         (material->common_header[2] & UINT8_C(0x3F)) == 0U) {
         return false;
     }
@@ -1379,18 +1480,32 @@ ucn_result_t ucn_i_security_tx_abort(
     return UCN_OK;
 }
 
-static bool replay_is_committed(const ucn_i_security_replay_window_t *window,
-                                uint64_t sequence)
+static bool replay_bits_committed(uint64_t highest, uint64_t bitmap,
+                                  uint64_t sequence)
 {
     uint64_t distance;
 
-    if (window->highest_committed == 0U ||
-        sequence > window->highest_committed) {
+    if (highest == 0U || sequence > highest) {
         return false;
     }
-    distance = window->highest_committed - sequence;
+    distance = highest - sequence;
     return distance >= 64U ||
-           (window->committed_bitmap & (UINT64_C(1) << distance)) != 0U;
+           (bitmap & (UINT64_C(1) << distance)) != 0U;
+}
+
+static bool replay_is_committed(const ucn_i_security_replay_window_t *window,
+                                uint64_t sequence)
+{
+    return replay_bits_committed(window->highest_committed,
+                                 window->committed_bitmap, sequence);
+}
+
+static bool origin_is_committed(const ucn_i_security_slot_t *slot,
+                                uint8_t domain, uint64_t sequence)
+{
+    return domain == 0U ? replay_is_committed(&slot->origin_replay, sequence) :
+        replay_bits_committed(slot->c0_rx_highest_committed,
+                               slot->c0_rx_committed_bitmap, sequence);
 }
 
 static bool replay_is_inflight(const ucn_i_security_replay_window_t *window,
@@ -1424,23 +1539,25 @@ static uint16_t replay_free_slot(const ucn_i_security_replay_window_t *window)
 static bool replay_handle_matches(
     const ucn_i_security_owner_t *owner,
     const ucn_i_security_slot_t *session_slot,
-    ucn_i_security_replay_handle_t handle,
+    const ucn_i_security_replay_handle_t *handle,
     uint16_t *reservation_slot_out)
 {
-    uint16_t index = handle.reservation_slot;
+    uint16_t index = handle->reservation_slot;
 
-    if (!bytes_zero(handle.reserved_zero, sizeof(handle.reserved_zero)) ||
-        handle.has_hop > 1U ||
-        (handle.has_hop == 0U &&
-         (handle.hop_sequence != 0U ||
-          handle.hop_reservation_generation != 0U ||
-          handle.hop_reservation_slot != 0U)) ||
+    if (!bytes_zero(handle->reserved_zero, sizeof(handle->reserved_zero)) ||
+        handle->has_hop > 1U || handle->replay_domain > 1U ||
+        (handle->has_hop == 0U &&
+         (handle->hop_sequence != 0U ||
+          handle->hop_reservation_generation != 0U ||
+          handle->hop_reservation_slot != 0U)) ||
         index >= UCN_I_SECURITY_REPLAY_RESERVATION_COUNT ||
         session_slot->origin_replay.reservations[index].valid == 0U ||
         session_slot->origin_replay.reservations[index].generation !=
-            handle.reservation_generation ||
+            handle->reservation_generation ||
         session_slot->origin_replay.reservations[index].sequence !=
-            handle.sequence) {
+            handle->sequence ||
+        session_slot->origin_replay.reservations[index].replay_domain !=
+            handle->replay_domain) {
         return false;
     }
     (void)owner;
@@ -1450,18 +1567,18 @@ static bool replay_handle_matches(
 
 static bool hop_replay_handle_matches(
     const ucn_i_security_slot_t *session_slot,
-    ucn_i_security_replay_handle_t handle,
+    const ucn_i_security_replay_handle_t *handle,
     uint16_t *reservation_slot_out)
 {
-    uint16_t index = handle.hop_reservation_slot;
+    uint16_t index = handle->hop_reservation_slot;
 
-    if (handle.has_hop != 1U ||
+    if (handle->has_hop != 1U ||
         index >= UCN_I_SECURITY_REPLAY_RESERVATION_COUNT ||
         session_slot->hop_replay.reservations[index].valid == 0U ||
         session_slot->hop_replay.reservations[index].generation !=
-            handle.hop_reservation_generation ||
+            handle->hop_reservation_generation ||
         session_slot->hop_replay.reservations[index].sequence !=
-            handle.hop_sequence) {
+            handle->hop_sequence) {
         return false;
     }
     *reservation_slot_out = index;
@@ -1516,9 +1633,10 @@ static ucn_result_t hop_replay_reserve_locked(
 static ucn_result_t replay_reserve_locked(
     ucn_i_security_owner_t *owner,
     ucn_i_security_slot_t *slot,
-    ucn_i_security_handle_t session,
+    const ucn_i_security_handle_t *session,
     const ucn_i_security_current_facts_t *facts,
     uint64_t sequence,
+    uint8_t replay_domain,
     const uint8_t aad_digest[16],
     const uint8_t payload_digest[16],
     ucn_i_security_replay_handle_t *handle_out)
@@ -1533,11 +1651,15 @@ static ucn_result_t replay_reserve_locked(
         !current_facts_match(slot, facts)) {
         return UCN_ERR_STATE;
     }
-    if (replay_is_committed(&slot->origin_replay, sequence)) {
+    if (origin_is_committed(slot, replay_domain, sequence)) {
         return UCN_ERR_REPLAY;
     }
-    if (replay_is_inflight(&slot->origin_replay, sequence)) {
-        return UCN_ERR_STATE;
+    for (reservation_slot = 0U;
+         reservation_slot < UCN_I_SECURITY_REPLAY_RESERVATION_COUNT;
+         ++reservation_slot) {
+        reservation = &slot->origin_replay.reservations[reservation_slot];
+        if (reservation->valid != 0U && reservation->sequence == sequence &&
+            reservation->replay_domain == replay_domain) return UCN_ERR_STATE;
     }
     reservation_slot = replay_free_slot(&slot->origin_replay);
     if (reservation_slot == UINT16_MAX || facts->now_us == 0U ||
@@ -1559,11 +1681,13 @@ static ucn_result_t replay_reserve_locked(
     memcpy(reservation->payload_digest, payload_digest, 16U);
     reservation->generation = generation;
     reservation->valid = 1U;
+    reservation->replay_domain = replay_domain;
     memset(&handle, 0, sizeof(handle));
-    handle.session = session;
+    handle.session = *session;
     handle.sequence = sequence;
     handle.reservation_generation = generation;
     handle.reservation_slot = reservation_slot;
+    handle.replay_domain = replay_domain;
     *handle_out = handle;
     return UCN_OK;
 }
@@ -1607,8 +1731,8 @@ ucn_result_t ucn_i_security_replay_reserve(
         return UCN_ERR_STATE;
     }
     slot = &owner->sessions[session_slot];
-    result = replay_reserve_locked(owner, slot, session, facts, sequence,
-                                   aad_digest, payload_digest, handle_out);
+    result = replay_reserve_locked(owner, slot, &session, facts, sequence,
+                                   0U, aad_digest, payload_digest, handle_out);
     owner_unlock(owner);
     return result;
 }
@@ -1687,7 +1811,10 @@ static void hop_aad_encode(
     *output_bytes = offset;
 }
 
-ucn_result_t ucn_i_security_c1_protect(
+/* Private projection: an Origin-only result is not a complete H1 frame.
+ * 中文：私有分层选择，Origin-only输出绝不代表完整H1帧。 */
+static ucn_result_t c1_protect_layer(
+    bool origin_only,
     ucn_i_security_owner_t *owner,
     ucn_i_security_tx_handle_t tx,
     const ucn_i_security_c1_origin_material_t *material,
@@ -1705,6 +1832,7 @@ ucn_result_t ucn_i_security_c1_protect(
 
     if (!protect_ranges_valid(owner, material, plaintext, workspace,
                               output, output_capacity, output_bytes) ||
+        (origin_only && material->protocol_opcode != 0U) ||
         material->direction != UCN_I_SECURITY_ACCESS_OUTBOUND ||
         memcmp(&tx.session, &material->session,
                sizeof(tx.session)) != 0 ||
@@ -1722,23 +1850,23 @@ ucn_result_t ucn_i_security_c1_protect(
     }
     slot = &owner->sessions[slot_index];
     memset(workspace, 0, sizeof(*workspace));
-    workspace->protect_control.header_bytes =
+    workspace->packet_state.header_bytes =
         c1_header_bytes(owner->address_width);
-    workspace->protect_control.hop_trailer_bytes =
-        slot->candidate.hop_profile ==
+    workspace->packet_state.hop_trailer_bytes =
+        !origin_only && slot->candidate.hop_profile ==
                             UCN_I_HOP_PROFILE_H1 ?
                             UCN_I_SECURITY_HOP_TRAILER_BYTES : 0U;
-    if (ucn_i_size_add(workspace->protect_control.header_bytes,
+    if (ucn_i_size_add(workspace->packet_state.header_bytes,
                        material->payload_bytes,
-                       &workspace->protect_control.packet_bytes) != UCN_OK ||
-        ucn_i_size_add(workspace->protect_control.packet_bytes,
+                       &workspace->packet_state.packet_bytes) != UCN_OK ||
+        ucn_i_size_add(workspace->packet_state.packet_bytes,
                        UCN_I_SECURITY_ORIGIN_TAG_BYTES,
-                       &workspace->protect_control.packet_bytes) != UCN_OK ||
-        ucn_i_size_add(workspace->protect_control.packet_bytes,
-                       workspace->protect_control.hop_trailer_bytes,
-                       &workspace->protect_control.packet_bytes) != UCN_OK ||
-        workspace->protect_control.packet_bytes > UCN_ADAPTER_FRAME_BYTES ||
-        workspace->protect_control.packet_bytes > output_capacity) {
+                       &workspace->packet_state.packet_bytes) != UCN_OK ||
+        ucn_i_size_add(workspace->packet_state.packet_bytes,
+                       workspace->packet_state.hop_trailer_bytes,
+                       &workspace->packet_state.packet_bytes) != UCN_OK ||
+        workspace->packet_state.packet_bytes > UCN_ADAPTER_FRAME_BYTES ||
+        workspace->packet_state.packet_bytes > output_capacity) {
         owner_unlock(owner);
         return UCN_ERR_NO_SPACE;
     }
@@ -1763,21 +1891,21 @@ ucn_result_t ucn_i_security_c1_protect(
                    UCN_ERR_STATE : UCN_ERR_UNSUPPORTED;
     }
     memcpy(workspace->packet, material->common_header, 3U);
-    workspace->protect_control.offset = 3U;
-    write_address_be(workspace->packet + workspace->protect_control.offset,
+    workspace->packet_state.offset = 3U;
+    write_address_be(workspace->packet + workspace->packet_state.offset,
                      material->source_address, owner->address_width);
-    workspace->protect_control.offset += owner->address_width;
-    write_address_be(workspace->packet + workspace->protect_control.offset,
+    workspace->packet_state.offset += owner->address_width;
+    write_address_be(workspace->packet + workspace->packet_state.offset,
                      material->destination_address, owner->address_width);
-    workspace->protect_control.offset += owner->address_width;
-    write_be16(workspace->packet + workspace->protect_control.offset,
+    workspace->packet_state.offset += owner->address_width;
+    write_be16(workspace->packet + workspace->packet_state.offset,
                material->service_id);
-    workspace->protect_control.offset += 2U;
-    write_be32(workspace->packet + workspace->protect_control.offset,
+    workspace->packet_state.offset += 2U;
+    write_be32(workspace->packet + workspace->packet_state.offset,
                material->origin_sequence);
-    workspace->protect_control.offset += 4U;
-    if (workspace->protect_control.offset !=
-        workspace->protect_control.header_bytes) {
+    workspace->packet_state.offset += 4U;
+    if (workspace->packet_state.offset !=
+        workspace->packet_state.header_bytes) {
         owner_unlock(owner);
         return UCN_ERR_STATE;
     }
@@ -1804,25 +1932,25 @@ ucn_result_t ucn_i_security_c1_protect(
     workspace->origin_protect.plaintext = workspace->plaintext;
     workspace->origin_protect.payload_bytes = material->payload_bytes;
     workspace->origin_protect.protected_payload =
-        workspace->packet + workspace->protect_control.header_bytes;
+        workspace->packet + workspace->packet_state.header_bytes;
     workspace->origin_protect.origin_tag =
-        workspace->packet + workspace->protect_control.header_bytes +
+        workspace->packet + workspace->packet_state.header_bytes +
         material->payload_bytes;
-    workspace->protect_control.packet_before_hop_bytes =
-        workspace->protect_control.header_bytes + material->payload_bytes +
+    workspace->packet_state.packet_before_hop_bytes =
+        workspace->packet_state.header_bytes + material->payload_bytes +
         UCN_I_SECURITY_ORIGIN_TAG_BYTES;
-    if (slot->candidate.hop_profile == UCN_I_HOP_PROFILE_H1) {
+    if (workspace->packet_state.hop_trailer_bytes != 0U) {
         if (slot->hop_tx_highest_reserved == UINT32_MAX) {
             owner_unlock(owner);
             return UCN_ERR_EXHAUSTED;
         }
-        workspace->protect_control.hop_sequence =
+        workspace->packet_state.hop_sequence =
             slot->hop_tx_highest_reserved + 1U;
         slot->hop_tx_highest_reserved =
-            workspace->protect_control.hop_sequence;
+            workspace->packet_state.hop_sequence;
         write_be32(workspace->packet +
-                       workspace->protect_control.packet_before_hop_bytes,
-                   workspace->protect_control.hop_sequence);
+                       workspace->packet_state.packet_before_hop_bytes,
+                   workspace->packet_state.hop_sequence);
     }
     workspace->candidate = slot->candidate;
     owner->callback_active = 1U;
@@ -1837,24 +1965,24 @@ ucn_result_t ucn_i_security_c1_protect(
     gate_result = ucn_i_callback_gate_enter(owner->provider_gate,
                                              &owner->callback_claim);
     if (gate_result == UCN_OK) {
-        workspace->protect_control.provider_invoked = 1U;
+        workspace->packet_state.provider_invoked = 1U;
         result = owner->provider.protect_origin(
             owner->provider.context, &workspace->origin_protect);
         if (result == UCN_OK &&
-            workspace->protect_control.hop_trailer_bytes != 0U) {
+            workspace->packet_state.hop_trailer_bytes != 0U) {
             memset(&workspace->hop_protect, 0,
                    sizeof(workspace->hop_protect));
             workspace->hop_protect.selector = workspace->candidate.hop_tx;
             workspace->hop_protect.aad = workspace->hop_aad;
             hop_aad_encode(
                 workspace->packet,
-                workspace->protect_control.packet_before_hop_bytes,
-                workspace->protect_control.hop_sequence,
+                workspace->packet_state.packet_before_hop_bytes,
+                workspace->packet_state.hop_sequence,
                 workspace->candidate.hop_fingerprint,
                 workspace->hop_aad, &workspace->hop_protect.aad_bytes);
             workspace->hop_protect.hop_tag =
                 workspace->packet +
-                workspace->protect_control.packet_before_hop_bytes + 4U;
+                workspace->packet_state.packet_before_hop_bytes + 4U;
             result = owner->provider.protect_hop(
                 owner->provider.context, &workspace->hop_protect);
         }
@@ -1885,14 +2013,14 @@ ucn_result_t ucn_i_security_c1_protect(
         owner_unlock(owner);
         return UCN_ERR_STATE;
     }
-    if (workspace->protect_control.provider_invoked != 0U) {
+    if (workspace->packet_state.provider_invoked != 0U) {
         tx_reservation_clear(&slot->origin_tx_reservation);
     }
     if (result == UCN_OK &&
         workspace->candidate.origin_level ==
             UCN_I_SECURITY_AUTHENTICATED &&
         material->payload_bytes != 0U &&
-        memcmp(workspace->packet + workspace->protect_control.header_bytes,
+        memcmp(workspace->packet + workspace->packet_state.header_bytes,
                workspace->plaintext,
                material->payload_bytes) != 0) {
         result = UCN_ERR_SECURITY;
@@ -1903,11 +2031,35 @@ ucn_result_t ucn_i_security_c1_protect(
         return result;
     }
     memcpy(output, workspace->packet,
-           workspace->protect_control.packet_bytes);
-    *output_bytes = workspace->protect_control.packet_bytes;
+           workspace->packet_state.packet_bytes);
+    *output_bytes = workspace->packet_state.packet_bytes;
     clear_callback(owner);
     owner_unlock(owner);
     return UCN_OK;
+}
+
+ucn_result_t ucn_i_security_c1_protect(
+    ucn_i_security_owner_t *owner,
+    ucn_i_security_tx_handle_t tx,
+    const ucn_i_security_c1_origin_material_t *material,
+    const uint8_t *plaintext,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *output, size_t output_capacity, size_t *output_bytes)
+{
+    return c1_protect_layer(false, owner, tx, material, plaintext, workspace,
+                             output, output_capacity, output_bytes);
+}
+
+ucn_result_t ucn_i_security_c1_origin_protect(
+    ucn_i_security_owner_t *owner,
+    ucn_i_security_tx_handle_t tx,
+    const ucn_i_security_c1_origin_material_t *material,
+    const uint8_t *plaintext,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *output, size_t output_capacity, size_t *output_bytes)
+{
+    return c1_protect_layer(true, owner, tx, material, plaintext, workspace,
+                             output, output_capacity, output_bytes);
 }
 
 static bool open_ranges_valid(
@@ -1978,7 +2130,36 @@ static bool open_ranges_valid(
                                  replay_out, sizeof(*replay_out));
 }
 
-ucn_result_t ucn_i_security_c1_open(
+/* EN: Both C0/C1 use the same unlocked Provider transaction. A missing Hop tag
+ * means Origin-only; never infer a Hop proof from the Origin Session profile.
+ * 中文：C0/C1共用锁外Provider事务；仅Origin输入不得推导出逐跳认证。 */
+static ucn_result_t open_provider_run(ucn_i_security_owner_t *owner,
+    ucn_i_security_packet_workspace_t *workspace, const uint8_t *hop_tag,
+    size_t hop_aad_bytes)
+{
+    ucn_result_t result = ucn_i_callback_gate_enter(owner->provider_gate,
+                                                    &owner->callback_claim);
+    ucn_result_t leave_result;
+    if (result != UCN_OK) return result;
+    if (hop_tag != NULL) {
+        memset(&workspace->hop_verify, 0, sizeof(workspace->hop_verify));
+        workspace->hop_verify.selector = workspace->candidate.hop_rx;
+        workspace->hop_verify.aad = workspace->hop_aad;
+        workspace->hop_verify.aad_bytes = hop_aad_bytes;
+        workspace->hop_verify.hop_tag = hop_tag;
+        result = owner->provider.verify_hop(owner->provider.context,
+                                              &workspace->hop_verify);
+    }
+    if (result == UCN_OK)
+        result = owner->provider.open_origin(owner->provider.context,
+                                               &workspace->origin_open);
+    leave_result = ucn_i_callback_gate_leave(owner->provider_gate,
+                                               &owner->callback_claim);
+    return leave_result == UCN_OK ? result : UCN_ERR_STATE;
+}
+
+static ucn_result_t c1_open_layer(
+    bool origin_only,
     ucn_i_security_owner_t *owner,
     ucn_i_security_handle_t session,
     const ucn_i_security_current_facts_t *facts,
@@ -1994,17 +2175,15 @@ ucn_result_t ucn_i_security_c1_open(
     ucn_i_security_slot_t *slot;
     const uint8_t *origin_tag;
     const uint8_t *hop_tag = NULL;
-    size_t header_bytes;
-    size_t payload_bytes;
-    size_t hop_aad_bytes = 0U;
-    size_t hop_trailer_bytes;
-    size_t packet_before_hop_bytes;
-    size_t offset;
+
+
+
+
+
     uint16_t slot_index;
-    uint32_t hop_sequence = 0U;
+
     ucn_result_t result;
     ucn_result_t gate_result;
-    ucn_result_t leave_result;
 
     if (!open_ranges_valid(owner, facts, access, packet, packet_bytes,
                            workspace, plaintext_output, plaintext_capacity,
@@ -2024,48 +2203,48 @@ ucn_result_t ucn_i_security_c1_open(
         return UCN_ERR_STATE;
     }
     slot = &owner->sessions[slot_index];
+    memset(&workspace->packet_state, 0, sizeof(workspace->packet_state));
+    memset(&workspace->material, 0, sizeof(workspace->material));
     if (slot->candidate.hop_profile != UCN_I_HOP_PROFILE_H0 &&
         slot->candidate.hop_profile != UCN_I_HOP_PROFILE_H1) {
         owner_unlock(owner);
         return UCN_ERR_UNSUPPORTED;
     }
-    hop_trailer_bytes = slot->candidate.hop_profile ==
+    workspace->packet_state.hop_trailer_bytes = !origin_only && slot->candidate.hop_profile ==
                             UCN_I_HOP_PROFILE_H1 ?
                             UCN_I_SECURITY_HOP_TRAILER_BYTES : 0U;
-    header_bytes = c1_header_bytes(owner->address_width);
-    if (packet_bytes < header_bytes + UCN_I_SECURITY_ORIGIN_TAG_BYTES +
-                           hop_trailer_bytes) {
+    workspace->packet_state.header_bytes = c1_header_bytes(owner->address_width);
+    if (packet_bytes < workspace->packet_state.header_bytes + UCN_I_SECURITY_ORIGIN_TAG_BYTES +
+                           workspace->packet_state.hop_trailer_bytes) {
         owner_unlock(owner);
         return UCN_ERR_MALFORMED;
     }
-    payload_bytes = packet_bytes - header_bytes -
-                    UCN_I_SECURITY_ORIGIN_TAG_BYTES - hop_trailer_bytes;
-    if (payload_bytes > plaintext_capacity) {
+    workspace->material.payload_bytes = packet_bytes - workspace->packet_state.header_bytes -
+                    UCN_I_SECURITY_ORIGIN_TAG_BYTES - workspace->packet_state.hop_trailer_bytes;
+    if (workspace->material.payload_bytes > plaintext_capacity) {
         owner_unlock(owner);
         return UCN_ERR_NO_SPACE;
     }
     memcpy(workspace->packet, packet, packet_bytes);
-    memset(&workspace->material, 0, sizeof(workspace->material));
     workspace->material.session = session;
     workspace->material.facts = *facts;
-    workspace->material.payload_bytes = payload_bytes;
     workspace->material.common_header[0] = workspace->packet[0];
     workspace->material.common_header[1] = workspace->packet[1];
     workspace->material.common_header[2] = workspace->packet[2];
-    offset = 3U;
+    workspace->packet_state.offset = 3U;
     workspace->material.source_address =
-        read_address_be(workspace->packet + offset, owner->address_width);
-    offset += owner->address_width;
+        read_address_be(workspace->packet + workspace->packet_state.offset, owner->address_width);
+    workspace->packet_state.offset += owner->address_width;
     workspace->material.destination_address =
-        read_address_be(workspace->packet + offset, owner->address_width);
-    offset += owner->address_width;
-    workspace->material.service_id = read_be16(workspace->packet + offset);
-    offset += 2U;
+        read_address_be(workspace->packet + workspace->packet_state.offset, owner->address_width);
+    workspace->packet_state.offset += owner->address_width;
+    workspace->material.service_id = read_be16(workspace->packet + workspace->packet_state.offset);
+    workspace->packet_state.offset += 2U;
     workspace->material.origin_sequence =
-        read_be32(workspace->packet + offset);
+        read_be32(workspace->packet + workspace->packet_state.offset);
     workspace->material.protocol_opcode = access->protocol_opcode;
     workspace->material.direction = UCN_I_SECURITY_ACCESS_INBOUND;
-    if (offset + 4U != header_bytes ||
+    if (workspace->packet_state.offset + 4U != workspace->packet_state.header_bytes ||
         slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
         access->protocol_opcode != 0U ||
         access->service_id == 0U || access->service_id == UINT16_MAX ||
@@ -2088,20 +2267,20 @@ ucn_result_t ucn_i_security_c1_open(
                                     workspace->material.origin_sequence,
                                     workspace->nonce_input);
     }
-    origin_tag = workspace->packet + header_bytes + payload_bytes;
-    packet_before_hop_bytes = header_bytes + payload_bytes +
+    origin_tag = workspace->packet + workspace->packet_state.header_bytes + workspace->material.payload_bytes;
+    workspace->packet_state.packet_before_hop_bytes = workspace->packet_state.header_bytes + workspace->material.payload_bytes +
                               UCN_I_SECURITY_ORIGIN_TAG_BYTES;
-    if (hop_trailer_bytes != 0U) {
-        hop_sequence = read_be32(workspace->packet +
-                                 packet_before_hop_bytes);
-        if (hop_sequence == 0U) {
+    if (workspace->packet_state.hop_trailer_bytes != 0U) {
+        workspace->packet_state.hop_sequence = read_be32(workspace->packet +
+                                 workspace->packet_state.packet_before_hop_bytes);
+        if (workspace->packet_state.hop_sequence == 0U) {
             owner_unlock(owner);
             return UCN_ERR_MALFORMED;
         }
-        hop_tag = workspace->packet + packet_before_hop_bytes + 4U;
-        hop_aad_encode(workspace->packet, packet_before_hop_bytes,
-                       hop_sequence, slot->candidate.hop_fingerprint,
-                       workspace->hop_aad, &hop_aad_bytes);
+        hop_tag = workspace->packet + workspace->packet_state.packet_before_hop_bytes + 4U;
+        hop_aad_encode(workspace->packet, workspace->packet_state.packet_before_hop_bytes,
+                       workspace->packet_state.hop_sequence, slot->candidate.hop_fingerprint,
+                       workspace->hop_aad, &workspace->packet_state.hop_aad_bytes);
     }
     memset(&workspace->origin_open, 0, sizeof(workspace->origin_open));
     workspace->origin_open.selector = slot->candidate.origin_rx;
@@ -2115,9 +2294,9 @@ ucn_result_t ucn_i_security_c1_open(
     workspace->origin_open.aad_bytes =
         UCN_I_SECURITY_C1_ORIGIN_AAD_BYTES;
     workspace->origin_open.protected_payload =
-        workspace->packet + header_bytes;
+        workspace->packet + workspace->packet_state.header_bytes;
     workspace->origin_open.origin_tag = origin_tag;
-    workspace->origin_open.payload_bytes = payload_bytes;
+    workspace->origin_open.payload_bytes = workspace->material.payload_bytes;
     workspace->origin_open.plaintext = workspace->plaintext;
     workspace->candidate = slot->candidate;
     owner->callback_active = 1U;
@@ -2129,33 +2308,8 @@ ucn_result_t ucn_i_security_c1_open(
     owner->callback_claim.operation_kind = UCN_I_SECURITY_CALLBACK_OPEN;
     owner_unlock(owner);
 
-    gate_result = ucn_i_callback_gate_enter(owner->provider_gate,
-                                             &owner->callback_claim);
-    if (gate_result == UCN_OK) {
-        if (hop_trailer_bytes != 0U) {
-            memset(&workspace->hop_verify, 0,
-                   sizeof(workspace->hop_verify));
-            workspace->hop_verify.selector = workspace->candidate.hop_rx;
-            workspace->hop_verify.aad = workspace->hop_aad;
-            workspace->hop_verify.aad_bytes = hop_aad_bytes;
-            workspace->hop_verify.hop_tag = hop_tag;
-            result = owner->provider.verify_hop(owner->provider.context,
-                                                 &workspace->hop_verify);
-        } else {
-            result = UCN_OK;
-        }
-        if (result == UCN_OK) {
-            result = owner->provider.open_origin(owner->provider.context,
-                                                  &workspace->origin_open);
-        }
-        leave_result = ucn_i_callback_gate_leave(owner->provider_gate,
-                                                  &owner->callback_claim);
-        if (leave_result != UCN_OK) {
-            result = UCN_ERR_STATE;
-        }
-    } else {
-        result = gate_result;
-    }
+    result = open_provider_run(owner, workspace, hop_tag,
+                                   workspace->packet_state.hop_aad_bytes);
 
     gate_result = owner_lock(owner);
     if (gate_result != UCN_OK) {
@@ -2182,26 +2336,27 @@ ucn_result_t ucn_i_security_c1_open(
     }
     if (workspace->candidate.origin_level ==
             UCN_I_SECURITY_AUTHENTICATED &&
-        payload_bytes != 0U &&
-        memcmp(workspace->plaintext, workspace->packet + header_bytes,
-               payload_bytes) != 0) {
+        workspace->material.payload_bytes != 0U &&
+        memcmp(workspace->plaintext, workspace->packet + workspace->packet_state.header_bytes,
+               workspace->material.payload_bytes) != 0) {
         clear_callback(owner);
         owner_unlock(owner);
         return UCN_ERR_SECURITY;
     }
     memcpy(workspace->digest, origin_tag,
            UCN_I_SECURITY_ORIGIN_TAG_BYTES);
-    result = replay_reserve_locked(owner, slot, session, facts,
+    result = replay_reserve_locked(owner, slot, &session, facts,
                                    workspace->material.origin_sequence,
+                                   0U,
                                    workspace->digest, workspace->digest,
                                    &workspace->replay);
-    if (result == UCN_OK && hop_trailer_bytes != 0U) {
+    if (result == UCN_OK && workspace->packet_state.hop_trailer_bytes != 0U) {
         memset(workspace->digest + UCN_I_SECURITY_ORIGIN_TAG_BYTES,
                0, UCN_I_SECURITY_ORIGIN_TAG_BYTES);
         memcpy(workspace->digest + UCN_I_SECURITY_ORIGIN_TAG_BYTES,
                hop_tag, UCN_I_SECURITY_HOP_TAG_BYTES);
         result = hop_replay_reserve_locked(owner, slot, facts,
-            hop_sequence,
+            workspace->packet_state.hop_sequence,
             workspace->digest + UCN_I_SECURITY_ORIGIN_TAG_BYTES,
             &workspace->replay);
         if (result != UCN_OK) {
@@ -2215,12 +2370,1900 @@ ucn_result_t ucn_i_security_c1_open(
         owner_unlock(owner);
         return result;
     }
-    if (payload_bytes != 0U) {
-        memcpy(plaintext_output, workspace->plaintext, payload_bytes);
+    if (workspace->material.payload_bytes != 0U) {
+        memcpy(plaintext_output, workspace->plaintext, workspace->material.payload_bytes);
     }
-    *plaintext_bytes = payload_bytes;
+    *plaintext_bytes = workspace->material.payload_bytes;
     *replay_out = workspace->replay;
     clear_callback(owner);
+    owner_unlock(owner);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_security_c1_open(
+    ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t session,
+    const ucn_i_security_current_facts_t *facts,
+    const ucn_i_security_access_request_t *access,
+    const uint8_t *packet, size_t packet_bytes,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *plaintext_output, size_t plaintext_capacity,
+    size_t *plaintext_bytes, ucn_i_security_replay_handle_t *replay_out)
+{
+    return c1_open_layer(false, owner, session, facts, access, packet,
+                          packet_bytes, workspace, plaintext_output,
+                          plaintext_capacity, plaintext_bytes, replay_out);
+}
+
+ucn_result_t ucn_i_security_c1_origin_open(
+    ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t session,
+    const ucn_i_security_current_facts_t *facts,
+    const ucn_i_security_access_request_t *access,
+    const uint8_t *packet, size_t packet_bytes,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *plaintext_output, size_t plaintext_capacity,
+    size_t *plaintext_bytes, ucn_i_security_replay_handle_t *replay_out)
+{
+    return c1_open_layer(true, owner, session, facts, access, packet,
+                          packet_bytes, workspace, plaintext_output,
+                          plaintext_capacity, plaintext_bytes, replay_out);
+}
+
+static void c0_nonce_input_encode(
+    const ucn_i_security_slot_t *slot,
+    const ucn_i_c0_frame_t *frame,
+    uint8_t direction,
+    uint8_t output[UCN_I_SECURITY_SEQUENCE_NONCE_INPUT_BYTES])
+{
+    static const uint8_t domain[] = "UCN6-NONCE-C0-V1";
+    size_t offset = 0U;
+
+    memcpy(output + offset, domain, sizeof(domain) - 1U);
+    offset += sizeof(domain) - 1U;
+    memcpy(output + offset, slot->candidate.origin_fingerprint,
+           UCN_I_SECURITY_FINGERPRINT_BYTES);
+    offset += UCN_I_SECURITY_FINGERPRINT_BYTES;
+    write_be64(output + offset, frame->transaction_id);
+    offset += 8U;
+    write_be16(output + offset, frame->opcode);
+    offset += 2U;
+    /* Canonical sender direction is shared by both endpoints. Local IN/OUT is not. */
+    output[offset++] = (uint8_t)((direction == UCN_I_SECURITY_ACCESS_OUTBOUND ?
+        memcmp(slot->candidate.local.principal, slot->candidate.peer.principal, 16U) :
+        memcmp(slot->candidate.peer.principal, slot->candidate.local.principal, 16U)) < 0 ? 0U : 1U);
+    output[offset] = frame->interaction_role;
+}
+
+static bool c0_bindings_match(
+    const ucn_i_security_owner_t *owner,
+    const ucn_i_security_slot_t *slot,
+    const ucn_i_c0_frame_t *frame,
+    uint8_t direction)
+{
+    const ucn_i_security_binding_t *source;
+    const ucn_i_security_binding_t *destination;
+
+    if (direction == UCN_I_SECURITY_ACCESS_INBOUND) {
+        source = &slot->candidate.peer;
+        destination = &slot->candidate.local;
+    } else if (direction == UCN_I_SECURITY_ACCESS_OUTBOUND) {
+        source = &slot->candidate.local;
+        destination = &slot->candidate.peer;
+    } else {
+        return false;
+    }
+    return frame->realm_id == owner->realm_id &&
+           frame->source_address == source->address &&
+           frame->destination_address == destination->address &&
+           frame->source_binding_generation == source->binding_generation &&
+           frame->destination_binding_generation ==
+               destination->binding_generation;
+}
+
+static bool c0_open_ranges_valid(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_control_access_request_t *access,
+    const ucn_i_security_current_facts_t *facts,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *plaintext_output,
+    size_t plaintext_capacity,
+    size_t *plaintext_bytes,
+    ucn_i_security_authenticated_control_t *fact_out)
+{
+    return owner != NULL && access != NULL && facts != NULL &&
+           packet != NULL && workspace != NULL && plaintext_output != NULL &&
+           plaintext_bytes != NULL && fact_out != NULL &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), access,
+                                 sizeof(*access)) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), facts,
+                                 sizeof(*facts)) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), packet,
+                                 packet_bytes) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), workspace,
+                                 sizeof(*workspace)) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), plaintext_output,
+                                 plaintext_capacity) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), plaintext_bytes,
+                                 sizeof(*plaintext_bytes)) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), fact_out,
+                                 sizeof(*fact_out)) &&
+           !ucn_i_ranges_overlap(packet, packet_bytes, workspace,
+                                 sizeof(*workspace)) &&
+           !ucn_i_ranges_overlap(packet, packet_bytes, plaintext_output,
+                                 plaintext_capacity) &&
+           !ucn_i_ranges_overlap(packet, packet_bytes, plaintext_bytes,
+                                 sizeof(*plaintext_bytes)) &&
+           !ucn_i_ranges_overlap(packet, packet_bytes, fact_out,
+                                 sizeof(*fact_out)) &&
+           !ucn_i_ranges_overlap(workspace, sizeof(*workspace),
+                                 plaintext_output, plaintext_capacity) &&
+           !ucn_i_ranges_overlap(workspace, sizeof(*workspace),
+                                 plaintext_bytes, sizeof(*plaintext_bytes)) &&
+           !ucn_i_ranges_overlap(workspace, sizeof(*workspace), fact_out,
+                                 sizeof(*fact_out)) &&
+           !ucn_i_ranges_overlap(plaintext_output, plaintext_capacity,
+                                 plaintext_bytes, sizeof(*plaintext_bytes)) &&
+           !ucn_i_ranges_overlap(plaintext_output, plaintext_capacity,
+                                 fact_out, sizeof(*fact_out)) &&
+           !ucn_i_ranges_overlap(plaintext_bytes, sizeof(*plaintext_bytes),
+                                 fact_out, sizeof(*fact_out));
+}
+
+static bool c0_protect_ranges_valid(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_c0_protect_request_t *request,
+    const uint8_t *plaintext,
+    size_t plaintext_bytes,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_bytes)
+{
+    return owner != NULL && request != NULL && workspace != NULL &&
+           output != NULL && output_bytes != NULL &&
+           (plaintext != NULL || plaintext_bytes == 0U) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), request,
+                                 sizeof(*request)) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), plaintext,
+                                 plaintext_bytes) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), workspace,
+                                 sizeof(*workspace)) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), output,
+                                 output_capacity) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), output_bytes,
+                                 sizeof(*output_bytes)) &&
+           !ucn_i_ranges_overlap(request, sizeof(*request), plaintext,
+                                 plaintext_bytes) &&
+           !ucn_i_ranges_overlap(request, sizeof(*request), workspace,
+                                 sizeof(*workspace)) &&
+           !ucn_i_ranges_overlap(request, sizeof(*request), output,
+                                 output_capacity) &&
+           !ucn_i_ranges_overlap(request, sizeof(*request), output_bytes,
+                                 sizeof(*output_bytes)) &&
+           !ucn_i_ranges_overlap(plaintext, plaintext_bytes, workspace,
+                                 sizeof(*workspace)) &&
+           !ucn_i_ranges_overlap(plaintext, plaintext_bytes, output,
+                                 output_capacity) &&
+           !ucn_i_ranges_overlap(plaintext, plaintext_bytes, output_bytes,
+                                 sizeof(*output_bytes)) &&
+           !ucn_i_ranges_overlap(workspace, sizeof(*workspace), output,
+                                 output_capacity) &&
+           !ucn_i_ranges_overlap(workspace, sizeof(*workspace), output_bytes,
+                                 sizeof(*output_bytes)) &&
+           !ucn_i_ranges_overlap(output, output_capacity, output_bytes,
+                                 sizeof(*output_bytes));
+}
+
+ucn_result_t ucn_i_security_c0_protect(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_c0_protect_request_t *request,
+    const uint8_t *plaintext,
+    size_t plaintext_bytes,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_bytes)
+{
+    ucn_i_security_slot_t *slot;
+    size_t encoded_bytes = 0U;
+    size_t preliminary_bytes = 0U;
+    size_t hop_aad_bytes = 0U;
+    uint16_t slot_index;
+    ucn_result_t result;
+    ucn_result_t gate_result;
+    ucn_result_t leave_result;
+
+    if (!c0_protect_ranges_valid(owner, request, plaintext, plaintext_bytes,
+                                  workspace, output, output_capacity,
+                                  output_bytes) ||
+        plaintext_bytes > UCN_ADAPTER_FRAME_BYTES ||
+        request->direction != UCN_I_SECURITY_ACCESS_OUTBOUND ||
+        request->transaction_id == 0U ||
+        request->protocol_opcode == 0U ||
+        !bytes_zero(request->reserved_zero,
+                    sizeof(request->reserved_zero))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = owner_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (owner->callback_active != 0U ||
+        !handle_matches(owner, request->session, &slot_index)) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    slot = &owner->sessions[slot_index];
+    memset(workspace, 0, sizeof(*workspace));
+    if (slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        !current_facts_match(slot, &request->facts) ||
+        (slot->candidate.origin_level != UCN_I_SECURITY_AUTHENTICATED &&
+         slot->candidate.origin_level != UCN_I_SECURITY_CONFIDENTIAL) ||
+        (slot->candidate.hop_profile != UCN_I_HOP_PROFILE_H0 &&
+         slot->candidate.hop_profile != UCN_I_HOP_PROFILE_H1) ||
+        memcmp(request->context_fingerprint,
+               slot->candidate.origin_fingerprint,
+               UCN_I_SECURITY_FINGERPRINT_BYTES) != 0 ||
+        !acl_rule_matches(owner, slot, request->context_fingerprint, 0U,
+                           request->protocol_opcode, request->direction) ||
+        owner->next_operation_id == UINT32_MAX) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    if (request->transaction_id <= slot->c0_tx_highest_consumed) {
+        owner_unlock(owner);
+        return UCN_ERR_REPLAY;
+    }
+    workspace->control_frame.payload = workspace->packet;
+    workspace->control_frame.payload_bytes = plaintext_bytes;
+    workspace->control_frame.origin_tag = workspace->digest;
+    workspace->control_frame.hop_tag =
+        slot->candidate.hop_profile == UCN_I_HOP_PROFILE_H1 ?
+            workspace->digest + UCN_I_SECURITY_ORIGIN_TAG_BYTES : NULL;
+    workspace->control_frame.transaction_id = request->transaction_id;
+    workspace->control_frame.realm_id = owner->realm_id;
+    workspace->control_frame.source_address = slot->candidate.local.address;
+    workspace->control_frame.destination_address = slot->candidate.peer.address;
+    workspace->control_frame.source_binding_generation =
+        slot->candidate.local.binding_generation;
+    workspace->control_frame.destination_binding_generation =
+        slot->candidate.peer.binding_generation;
+    workspace->control_frame.opcode = request->protocol_opcode;
+    workspace->control_frame.traffic_class = request->traffic_class;
+    workspace->control_frame.delivery_guarantee =
+        request->delivery_guarantee;
+    workspace->control_frame.interaction_role = request->interaction_role;
+    workspace->control_frame.payload_kind = request->payload_kind;
+    workspace->control_frame.origin_security = slot->candidate.origin_level;
+    workspace->control_frame.hop_limit = request->hop_limit;
+    if (slot->candidate.hop_profile == UCN_I_HOP_PROFILE_H1) {
+        if (slot->hop_tx_highest_reserved == UINT32_MAX) {
+            owner_unlock(owner);
+            return UCN_ERR_EXHAUSTED;
+        }
+        workspace->control_frame.hop_sequence =
+            slot->hop_tx_highest_reserved + 1U;
+    }
+    result = ucn_i_c0_encoded_size(
+        owner->address_width, workspace->control_frame.origin_security,
+        slot->candidate.hop_profile == UCN_I_HOP_PROFILE_H1 ?
+            UCN_I_CONTROL_H1 : UCN_I_CONTROL_H0,
+        plaintext_bytes, &encoded_bytes);
+    if (result != UCN_OK || encoded_bytes > UCN_ADAPTER_FRAME_BYTES ||
+        encoded_bytes > output_capacity) {
+        owner_unlock(owner);
+        return result == UCN_OK ? UCN_ERR_NO_SPACE : result;
+    }
+    if (plaintext_bytes != 0U) {
+        memcpy(workspace->plaintext, plaintext, plaintext_bytes);
+    }
+    if (slot->candidate.origin_level == UCN_I_SECURITY_CONFIDENTIAL) {
+        c0_nonce_input_encode(slot, &workspace->control_frame,
+                              request->direction, workspace->nonce_input);
+    }
+    memset(&workspace->origin_protect, 0,
+           sizeof(workspace->origin_protect));
+    workspace->origin_protect.selector = slot->candidate.origin_tx;
+    workspace->origin_protect.nonce_input =
+        slot->candidate.origin_level == UCN_I_SECURITY_CONFIDENTIAL ?
+            workspace->nonce_input : NULL;
+    workspace->origin_protect.nonce_input_bytes =
+        slot->candidate.origin_level == UCN_I_SECURITY_CONFIDENTIAL ?
+            UCN_I_SECURITY_SEQUENCE_NONCE_INPUT_BYTES : 0U;
+    workspace->origin_protect.aad = workspace->origin_aad;
+    result = ucn_i_c0_origin_aad_build(
+        &workspace->control_frame, owner->address_width,
+        workspace->origin_aad, &workspace->origin_protect.aad_bytes);
+    if (result != UCN_OK) {
+        owner_unlock(owner);
+        return result;
+    }
+    if (slot->candidate.hop_profile == UCN_I_HOP_PROFILE_H1) {
+        slot->hop_tx_highest_reserved =
+            workspace->control_frame.hop_sequence;
+    }
+    /* EN: Burn the transaction before the Provider can observe the nonce.
+     * Even a Provider or gate failure cannot make this ID reusable.  Exact
+     * physical retries are handled by Composition using the sealed bytes.
+     * 中文：在 Provider 能观察 nonce 之前烧毁事务号。即使 Provider 或 Gate
+     * 失败也不能复用；精确物理重试由 Composition 复用 sealed bytes。 */
+    slot->c0_tx_highest_consumed = request->transaction_id;
+    workspace->origin_protect.plaintext = workspace->plaintext;
+    workspace->origin_protect.payload_bytes = plaintext_bytes;
+    workspace->origin_protect.protected_payload = workspace->packet;
+    workspace->origin_protect.origin_tag = workspace->digest;
+    workspace->candidate = slot->candidate;
+    owner->callback_active = 1U;
+    owner->callback_slot = slot_index;
+    owner->callback_candidate = workspace->candidate;
+    owner->callback_claim.owner_instance = owner->owner_instance;
+    owner->callback_claim.operation_id = owner->next_operation_id++;
+    owner->callback_claim.operation_generation = 1U;
+    owner->callback_claim.operation_kind = UCN_I_SECURITY_CALLBACK_PROTECT;
+    owner_unlock(owner);
+
+    gate_result = ucn_i_callback_gate_enter(owner->provider_gate,
+                                             &owner->callback_claim);
+    if (gate_result == UCN_OK) {
+        result = owner->provider.protect_origin(
+            owner->provider.context, &workspace->origin_protect);
+        if (result == UCN_OK &&
+            workspace->candidate.origin_level ==
+                UCN_I_SECURITY_AUTHENTICATED &&
+            plaintext_bytes != 0U &&
+            memcmp(workspace->packet, workspace->plaintext,
+                   plaintext_bytes) != 0) {
+            result = UCN_ERR_SECURITY;
+        }
+        if (result == UCN_OK &&
+            workspace->candidate.hop_profile == UCN_I_HOP_PROFILE_H1) {
+            result = ucn_i_c0_encode(
+                &workspace->control_frame, workspace->candidate.address_width,
+                UCN_I_CONTROL_H1, workspace->plaintext,
+                sizeof(workspace->plaintext), &preliminary_bytes);
+            if (result == UCN_OK) {
+                workspace->packet_state.packet_before_hop_bytes =
+                    preliminary_bytes - UCN_I_SECURITY_HOP_TRAILER_BYTES;
+                hop_aad_encode(
+                    workspace->plaintext,
+                    workspace->packet_state.packet_before_hop_bytes,
+                    workspace->control_frame.hop_sequence,
+                    workspace->candidate.hop_fingerprint,
+                    workspace->hop_aad, &hop_aad_bytes);
+                memset(&workspace->hop_protect, 0,
+                       sizeof(workspace->hop_protect));
+                workspace->hop_protect.selector =
+                    workspace->candidate.hop_tx;
+                workspace->hop_protect.aad = workspace->hop_aad;
+                workspace->hop_protect.aad_bytes = hop_aad_bytes;
+                workspace->hop_protect.hop_tag =
+                    workspace->digest + UCN_I_SECURITY_ORIGIN_TAG_BYTES;
+                result = owner->provider.protect_hop(
+                    owner->provider.context, &workspace->hop_protect);
+            }
+        }
+        leave_result = ucn_i_callback_gate_leave(owner->provider_gate,
+                                                  &owner->callback_claim);
+        if (leave_result != UCN_OK) {
+            result = UCN_ERR_STATE;
+        }
+    } else {
+        result = gate_result;
+    }
+
+    gate_result = owner_lock(owner);
+    if (gate_result != UCN_OK) {
+        return gate_result;
+    }
+    slot = &owner->sessions[slot_index];
+    if (owner->callback_active == 0U ||
+        owner->callback_slot != slot_index ||
+        memcmp(&owner->callback_candidate, &workspace->candidate,
+               sizeof(workspace->candidate)) != 0 ||
+        slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        memcmp(&slot->candidate, &workspace->candidate,
+               sizeof(workspace->candidate)) != 0 ||
+        !current_facts_match(slot, &request->facts)) {
+        clear_callback(owner);
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    if (result == UCN_OK) {
+        result = ucn_i_c0_encode(
+            &workspace->control_frame, workspace->candidate.address_width,
+            workspace->candidate.hop_profile == UCN_I_HOP_PROFILE_H1 ?
+                UCN_I_CONTROL_H1 : UCN_I_CONTROL_H0,
+            output, output_capacity, output_bytes);
+    }
+    clear_callback(owner);
+    owner_unlock(owner);
+    return result;
+}
+
+ucn_result_t ucn_i_security_c0_receive_context_resolve(
+    ucn_i_security_owner_t *owner,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    uint64_t now_us,
+    uint32_t link_generation,
+    ucn_i_security_control_access_request_t *access_out,
+    ucn_i_security_current_facts_t *facts_out)
+{
+    ucn_i_c0_frame_t frame;
+    uint16_t match_slot = UINT16_MAX;
+    uint16_t match_opcode = 0U;
+    uint16_t slot_index;
+    ucn_result_t result;
+
+    if (owner == NULL || packet == NULL || packet_bytes == 0U ||
+        packet_bytes > UCN_ADAPTER_FRAME_BYTES || now_us == 0U ||
+        link_generation == 0U || access_out == NULL || facts_out == NULL ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), packet, packet_bytes) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), access_out,
+                             sizeof(*access_out)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), facts_out,
+                             sizeof(*facts_out)) ||
+        ucn_i_ranges_overlap(packet, packet_bytes, access_out,
+                             sizeof(*access_out)) ||
+        ucn_i_ranges_overlap(packet, packet_bytes, facts_out,
+                             sizeof(*facts_out)) ||
+        ucn_i_ranges_overlap(access_out, sizeof(*access_out), facts_out,
+                             sizeof(*facts_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = owner_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (owner->callback_active != 0U) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    for (slot_index = 0U; slot_index < UCN_I_SECURITY_SESSION_COUNT;
+         ++slot_index) {
+        ucn_i_security_slot_t *slot = &owner->sessions[slot_index];
+
+        if (!slot->occupied ||
+            slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+            slot->candidate.link_generation != link_generation ||
+            slot->candidate.expires_at_us == 0U ||
+            slot->durability.absolute_deadline_us == 0U ||
+            ucn_i_deadline_expired_us(now_us,
+                                      slot->candidate.expires_at_us) ||
+            ucn_i_deadline_expired_us(
+                now_us, slot->durability.absolute_deadline_us) ||
+            ucn_i_c0_decode(packet, packet_bytes, owner->address_width,
+                            slot->candidate.hop_profile, &frame) != UCN_OK ||
+            frame.origin_security != slot->candidate.origin_level ||
+            frame.origin_security == UCN_I_ORIGIN_O0 ||
+            !c0_bindings_match(owner, slot, &frame,
+                               UCN_I_SECURITY_ACCESS_INBOUND) ||
+            !acl_rule_matches(
+                owner, slot, slot->candidate.origin_fingerprint, 0U,
+                frame.opcode, UCN_I_SECURITY_ACCESS_INBOUND)) {
+            continue;
+        }
+        if (match_slot != UINT16_MAX) {
+            owner_unlock(owner);
+            return UCN_ERR_STATE;
+        }
+        match_slot = slot_index;
+        match_opcode = frame.opcode;
+    }
+    if (match_slot == UINT16_MAX) {
+        owner_unlock(owner);
+        return UCN_ERR_NOT_FOUND;
+    }
+    {
+        const ucn_i_security_slot_t *slot = &owner->sessions[match_slot];
+
+        memset(access_out, 0, sizeof(*access_out));
+        access_out->session.runtime_instance = owner->runtime_instance;
+        access_out->session.owner_instance = owner->owner_instance;
+        access_out->session.slot = match_slot;
+        access_out->session.slot_generation = slot->slot_generation;
+        access_out->session.session_generation =
+            slot->candidate.session_generation;
+        memcpy(access_out->context_fingerprint,
+               slot->candidate.origin_fingerprint,
+               sizeof(access_out->context_fingerprint));
+        access_out->protocol_opcode = match_opcode;
+        access_out->direction = UCN_I_SECURITY_ACCESS_INBOUND;
+        memset(facts_out, 0, sizeof(*facts_out));
+        facts_out->local = slot->candidate.local;
+        facts_out->peer = slot->candidate.peer;
+        facts_out->now_us = now_us;
+        facts_out->link_generation = link_generation;
+        facts_out->policy_generation = slot->candidate.policy_generation;
+    }
+    owner_unlock(owner);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_security_c0_hop_receive_context_resolve(
+    ucn_i_security_owner_t *owner,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    uint64_t now_us,
+    uint32_t link_generation,
+    ucn_i_security_handle_t *session_out,
+    ucn_i_security_current_facts_t *facts_out)
+{
+    ucn_i_c0_frame_t frame;
+    uint16_t match_slot = UINT16_MAX;
+    uint16_t slot_index;
+    ucn_result_t result;
+
+    if (owner == NULL || packet == NULL || packet_bytes == 0U ||
+        packet_bytes > UCN_ADAPTER_FRAME_BYTES || now_us == 0U ||
+        link_generation == 0U || session_out == NULL || facts_out == NULL ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), packet, packet_bytes) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), session_out,
+                             sizeof(*session_out)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), facts_out,
+                             sizeof(*facts_out)) ||
+        ucn_i_ranges_overlap(packet, packet_bytes, session_out,
+                             sizeof(*session_out)) ||
+        ucn_i_ranges_overlap(packet, packet_bytes, facts_out,
+                             sizeof(*facts_out)) ||
+        ucn_i_ranges_overlap(session_out, sizeof(*session_out), facts_out,
+                             sizeof(*facts_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = ucn_i_c0_decode(packet, packet_bytes, owner->address_width,
+                             UCN_I_CONTROL_H1, &frame);
+    if (result != UCN_OK || frame.origin_security == UCN_I_ORIGIN_O0) {
+        return result == UCN_OK ? UCN_ERR_SECURITY : result;
+    }
+    result = owner_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (owner->callback_active != 0U) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    for (slot_index = 0U; slot_index < UCN_I_SECURITY_SESSION_COUNT;
+         ++slot_index) {
+        const ucn_i_security_slot_t *slot = &owner->sessions[slot_index];
+
+        if (!slot->occupied ||
+            slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+            slot->candidate.hop_profile != UCN_I_HOP_PROFILE_H1 ||
+            slot->candidate.link_generation != link_generation ||
+            slot->candidate.expires_at_us == 0U ||
+            slot->durability.absolute_deadline_us == 0U ||
+            ucn_i_deadline_expired_us(now_us,
+                                      slot->candidate.expires_at_us) ||
+            ucn_i_deadline_expired_us(
+                now_us, slot->durability.absolute_deadline_us) ||
+            !acl_rule_matches(owner, slot,
+                              slot->candidate.hop_fingerprint, 0U,
+                              frame.opcode,
+                              UCN_I_SECURITY_ACCESS_INBOUND)) {
+            continue;
+        }
+        if (match_slot != UINT16_MAX) {
+            owner_unlock(owner);
+            return UCN_ERR_STATE;
+        }
+        match_slot = slot_index;
+    }
+    if (match_slot == UINT16_MAX) {
+        owner_unlock(owner);
+        return UCN_ERR_NOT_FOUND;
+    }
+    memset(session_out, 0, sizeof(*session_out));
+    session_out->runtime_instance = owner->runtime_instance;
+    session_out->owner_instance = owner->owner_instance;
+    session_out->slot = match_slot;
+    session_out->slot_generation =
+        owner->sessions[match_slot].slot_generation;
+    session_out->session_generation =
+        owner->sessions[match_slot].candidate.session_generation;
+    memset(facts_out, 0, sizeof(*facts_out));
+    facts_out->local = owner->sessions[match_slot].candidate.local;
+    facts_out->peer = owner->sessions[match_slot].candidate.peer;
+    facts_out->now_us = now_us;
+    facts_out->link_generation = link_generation;
+    facts_out->policy_generation =
+        owner->sessions[match_slot].candidate.policy_generation;
+    owner_unlock(owner);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_security_c0_hop_send_context_resolve(
+    ucn_i_security_owner_t *owner,
+    uint16_t protocol_opcode,
+    uint64_t now_us,
+    uint32_t link_generation,
+    ucn_i_security_handle_t *session_out,
+    ucn_i_security_current_facts_t *facts_out)
+{
+    ucn_i_security_handle_t candidate_session;
+    ucn_i_security_current_facts_t candidate_facts;
+    uint16_t match_slot = UINT16_MAX;
+    uint16_t slot_index;
+    ucn_result_t result;
+
+    if (owner == NULL || protocol_opcode == 0U ||
+        !ucn_i_protocol_opcode_valid(protocol_opcode) || now_us == 0U ||
+        link_generation == 0U || session_out == NULL || facts_out == NULL ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), session_out,
+                             sizeof(*session_out)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), facts_out,
+                             sizeof(*facts_out)) ||
+        ucn_i_ranges_overlap(session_out, sizeof(*session_out), facts_out,
+                             sizeof(*facts_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = owner_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (owner->callback_active != 0U) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    for (slot_index = 0U; slot_index < UCN_I_SECURITY_SESSION_COUNT;
+         ++slot_index) {
+        const ucn_i_security_slot_t *slot = &owner->sessions[slot_index];
+
+        if (!slot->occupied ||
+            slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+            slot->candidate.hop_profile != UCN_I_HOP_PROFILE_H1 ||
+            slot->candidate.link_generation != link_generation ||
+            slot->candidate.expires_at_us == 0U ||
+            slot->durability.absolute_deadline_us == 0U ||
+            ucn_i_deadline_expired_us(now_us,
+                                      slot->candidate.expires_at_us) ||
+            ucn_i_deadline_expired_us(
+                now_us, slot->durability.absolute_deadline_us) ||
+            !acl_rule_matches(owner, slot,
+                              slot->candidate.hop_fingerprint, 0U,
+                              protocol_opcode,
+                              UCN_I_SECURITY_ACCESS_OUTBOUND)) {
+            continue;
+        }
+        if (match_slot != UINT16_MAX) {
+            owner_unlock(owner);
+            return UCN_ERR_STATE;
+        }
+        match_slot = slot_index;
+    }
+    if (match_slot == UINT16_MAX) {
+        owner_unlock(owner);
+        return UCN_ERR_NOT_FOUND;
+    }
+    memset(&candidate_session, 0, sizeof(candidate_session));
+    candidate_session.runtime_instance = owner->runtime_instance;
+    candidate_session.owner_instance = owner->owner_instance;
+    candidate_session.slot = match_slot;
+    candidate_session.slot_generation =
+        owner->sessions[match_slot].slot_generation;
+    candidate_session.session_generation =
+        owner->sessions[match_slot].candidate.session_generation;
+    memset(&candidate_facts, 0, sizeof(candidate_facts));
+    candidate_facts.local = owner->sessions[match_slot].candidate.local;
+    candidate_facts.peer = owner->sessions[match_slot].candidate.peer;
+    candidate_facts.now_us = now_us;
+    candidate_facts.link_generation = link_generation;
+    candidate_facts.policy_generation =
+        owner->sessions[match_slot].candidate.policy_generation;
+    owner_unlock(owner);
+    *session_out = candidate_session;
+    *facts_out = candidate_facts;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_security_c0_origin_receive_context_resolve(
+    ucn_i_security_owner_t *owner,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    uint64_t now_us,
+    ucn_i_security_c0_origin_resolve_workspace_t *workspace,
+    ucn_i_security_control_access_request_t *access_out,
+    ucn_i_security_current_facts_t *facts_out)
+{
+    uint16_t match_slot = UINT16_MAX;
+    uint16_t slot_index;
+    ucn_result_t result;
+
+    if (owner == NULL || packet == NULL || packet_bytes == 0U ||
+        packet_bytes > UCN_ADAPTER_FRAME_BYTES || now_us == 0U ||
+        workspace == NULL || access_out == NULL || facts_out == NULL ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), packet, packet_bytes) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), workspace,
+                             sizeof(*workspace)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), access_out,
+                             sizeof(*access_out)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), facts_out,
+                             sizeof(*facts_out)) ||
+        ucn_i_ranges_overlap(packet, packet_bytes, access_out,
+                             sizeof(*access_out)) ||
+        ucn_i_ranges_overlap(packet, packet_bytes, facts_out,
+                             sizeof(*facts_out)) ||
+        ucn_i_ranges_overlap(packet, packet_bytes, workspace,
+                             sizeof(*workspace)) ||
+        ucn_i_ranges_overlap(workspace, sizeof(*workspace), access_out,
+                             sizeof(*access_out)) ||
+        ucn_i_ranges_overlap(workspace, sizeof(*workspace), facts_out,
+                             sizeof(*facts_out)) ||
+        ucn_i_ranges_overlap(access_out, sizeof(*access_out), facts_out,
+                             sizeof(*facts_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(workspace, 0, sizeof(*workspace));
+    result = ucn_i_c0_decode(packet, packet_bytes, owner->address_width,
+                             UCN_I_CONTROL_H1, &workspace->frame);
+    if (result != UCN_OK) {
+        result = ucn_i_c0_decode(packet, packet_bytes, owner->address_width,
+                                 UCN_I_CONTROL_H0, &workspace->frame);
+    }
+    if (result != UCN_OK ||
+        workspace->frame.origin_security == UCN_I_ORIGIN_O0) {
+        return result == UCN_OK ? UCN_ERR_SECURITY : result;
+    }
+    result = owner_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (owner->callback_active != 0U) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    for (slot_index = 0U; slot_index < UCN_I_SECURITY_SESSION_COUNT;
+         ++slot_index) {
+        const ucn_i_security_slot_t *slot = &owner->sessions[slot_index];
+
+        if (!slot->occupied ||
+            slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+            slot->candidate.hop_profile != UCN_I_HOP_PROFILE_H0 ||
+            slot->candidate.origin_level !=
+                workspace->frame.origin_security ||
+            slot->candidate.expires_at_us == 0U ||
+            slot->durability.absolute_deadline_us == 0U ||
+            ucn_i_deadline_expired_us(now_us,
+                                      slot->candidate.expires_at_us) ||
+            ucn_i_deadline_expired_us(
+                now_us, slot->durability.absolute_deadline_us) ||
+            !c0_bindings_match(owner, slot, &workspace->frame,
+                               UCN_I_SECURITY_ACCESS_INBOUND) ||
+            !acl_rule_matches(owner, slot,
+                              slot->candidate.origin_fingerprint, 0U,
+                              workspace->frame.opcode,
+                              UCN_I_SECURITY_ACCESS_INBOUND)) {
+            continue;
+        }
+        if (match_slot != UINT16_MAX) {
+            owner_unlock(owner);
+            return UCN_ERR_STATE;
+        }
+        match_slot = slot_index;
+    }
+    if (match_slot == UINT16_MAX) {
+        owner_unlock(owner);
+        return UCN_ERR_NOT_FOUND;
+    }
+    workspace->access.session.runtime_instance = owner->runtime_instance;
+    workspace->access.session.owner_instance = owner->owner_instance;
+    workspace->access.session.slot = match_slot;
+    workspace->access.session.slot_generation =
+        owner->sessions[match_slot].slot_generation;
+    workspace->access.session.session_generation =
+        owner->sessions[match_slot].candidate.session_generation;
+    memcpy(workspace->access.context_fingerprint,
+           owner->sessions[match_slot].candidate.origin_fingerprint,
+           sizeof(workspace->access.context_fingerprint));
+    workspace->access.protocol_opcode = workspace->frame.opcode;
+    workspace->access.direction = UCN_I_SECURITY_ACCESS_INBOUND;
+    workspace->facts.local = owner->sessions[match_slot].candidate.local;
+    workspace->facts.peer = owner->sessions[match_slot].candidate.peer;
+    workspace->facts.now_us = now_us;
+    workspace->facts.link_generation =
+        owner->sessions[match_slot].candidate.link_generation;
+    workspace->facts.policy_generation =
+        owner->sessions[match_slot].candidate.policy_generation;
+    owner_unlock(owner);
+    *access_out = workspace->access;
+    *facts_out = workspace->facts;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_security_c0_open(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_control_access_request_t *access,
+    const ucn_i_security_current_facts_t *facts,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *plaintext_output,
+    size_t plaintext_capacity,
+    size_t *plaintext_bytes,
+    ucn_i_security_authenticated_control_t *fact_out)
+{
+    ucn_i_security_slot_t *slot;
+    const uint8_t *origin_tag;
+    const uint8_t *hop_tag = NULL;
+
+
+
+    uint16_t slot_index;
+
+    ucn_result_t result;
+    ucn_result_t gate_result;
+
+    if (!c0_open_ranges_valid(owner, access, facts, packet, packet_bytes,
+                              workspace, plaintext_output,
+                              plaintext_capacity, plaintext_bytes, fact_out) ||
+        packet_bytes > UCN_ADAPTER_FRAME_BYTES ||
+        access->direction != UCN_I_SECURITY_ACCESS_INBOUND ||
+        access->protocol_opcode == 0U || access->reserved_zero != 0U) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = owner_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (owner->callback_active != 0U ||
+        !handle_matches(owner, access->session, &slot_index)) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    slot = &owner->sessions[slot_index];
+    memset(workspace, 0, sizeof(*workspace));
+    result = ucn_i_c0_decode(packet, packet_bytes, owner->address_width,
+                             slot->candidate.hop_profile,
+                             &workspace->control_frame);
+    if (result != UCN_OK) {
+        owner_unlock(owner);
+        return result;
+    }
+    if (workspace->control_frame.payload_bytes > plaintext_capacity ||
+        workspace->control_frame.origin_security !=
+            slot->candidate.origin_level ||
+        workspace->control_frame.origin_security == UCN_I_ORIGIN_O0 ||
+        access->protocol_opcode != workspace->control_frame.opcode ||
+        memcmp(access->context_fingerprint,
+               slot->candidate.origin_fingerprint,
+               UCN_I_SECURITY_FINGERPRINT_BYTES) != 0 ||
+        slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        !current_facts_match(slot, facts) ||
+        !c0_bindings_match(owner, slot, &workspace->control_frame,
+                           access->direction) ||
+        !acl_rule_matches(owner, slot, access->context_fingerprint, 0U,
+                          access->protocol_opcode, access->direction) ||
+        owner->next_operation_id == UINT32_MAX) {
+        owner_unlock(owner);
+        return workspace->control_frame.payload_bytes > plaintext_capacity ?
+                   UCN_ERR_NO_SPACE : UCN_ERR_STATE;
+    }
+    result = ucn_i_c0_header_bytes(owner->address_width, &workspace->packet_state.header_bytes);
+    if (result != UCN_OK) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    if (slot->candidate.origin_level == UCN_I_SECURITY_CONFIDENTIAL) {
+        c0_nonce_input_encode(slot, &workspace->control_frame,
+                              access->direction, workspace->nonce_input);
+    }
+    origin_tag = workspace->control_frame.origin_tag;
+    workspace->packet_state.packet_before_hop_bytes = workspace->packet_state.header_bytes +
+        workspace->control_frame.payload_bytes +
+        UCN_I_SECURITY_ORIGIN_TAG_BYTES;
+    if (slot->candidate.hop_profile == UCN_I_HOP_PROFILE_H1) {
+        workspace->packet_state.hop_sequence = workspace->control_frame.hop_sequence;
+        hop_tag = workspace->control_frame.hop_tag;
+        hop_aad_encode(packet, workspace->packet_state.packet_before_hop_bytes, workspace->packet_state.hop_sequence,
+                       slot->candidate.hop_fingerprint,
+                       workspace->hop_aad, &workspace->packet_state.hop_aad_bytes);
+    }
+    memset(&workspace->origin_open, 0, sizeof(workspace->origin_open));
+    workspace->origin_open.selector = slot->candidate.origin_rx;
+    workspace->origin_open.nonce_input =
+        slot->candidate.origin_level == UCN_I_SECURITY_CONFIDENTIAL ?
+            workspace->nonce_input : NULL;
+    workspace->origin_open.nonce_input_bytes =
+        slot->candidate.origin_level == UCN_I_SECURITY_CONFIDENTIAL ? 44U : 0U;
+    workspace->origin_open.aad = workspace->origin_aad;
+    result = ucn_i_c0_origin_aad_build(&workspace->control_frame,
+                                        owner->address_width,
+                                        workspace->origin_aad,
+                                        &workspace->origin_open.aad_bytes);
+    if (result != UCN_OK) {
+        owner_unlock(owner);
+        return result;
+    }
+    workspace->origin_open.protected_payload =
+        workspace->control_frame.payload;
+    workspace->origin_open.origin_tag = origin_tag;
+    workspace->origin_open.payload_bytes =
+        workspace->control_frame.payload_bytes;
+    workspace->origin_open.plaintext = workspace->plaintext;
+    workspace->candidate = slot->candidate;
+    owner->callback_active = 1U;
+    owner->callback_slot = slot_index;
+    owner->callback_candidate = workspace->candidate;
+    owner->callback_claim.owner_instance = owner->owner_instance;
+    owner->callback_claim.operation_id = owner->next_operation_id++;
+    owner->callback_claim.operation_generation = 1U;
+    owner->callback_claim.operation_kind = UCN_I_SECURITY_CALLBACK_OPEN;
+    owner_unlock(owner);
+
+    result = open_provider_run(owner, workspace, hop_tag,
+                                   workspace->packet_state.hop_aad_bytes);
+
+    gate_result = owner_lock(owner);
+    if (gate_result != UCN_OK) {
+        return gate_result;
+    }
+    slot = &owner->sessions[slot_index];
+    if (owner->callback_active == 0U ||
+        owner->callback_slot != slot_index ||
+        memcmp(&owner->callback_candidate, &workspace->candidate,
+               sizeof(workspace->candidate)) != 0 ||
+        slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        memcmp(&slot->candidate, &workspace->candidate,
+               sizeof(workspace->candidate)) != 0 ||
+        !current_facts_match(slot, facts) ||
+        !c0_bindings_match(owner, slot, &workspace->control_frame,
+                           access->direction)) {
+        clear_callback(owner);
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    if (result != UCN_OK) {
+        clear_callback(owner);
+        owner_unlock(owner);
+        return result;
+    }
+    if (workspace->candidate.origin_level ==
+            UCN_I_SECURITY_AUTHENTICATED &&
+        workspace->control_frame.payload_bytes != 0U &&
+        memcmp(workspace->plaintext, workspace->control_frame.payload,
+               workspace->control_frame.payload_bytes) != 0) {
+        clear_callback(owner);
+        owner_unlock(owner);
+        return UCN_ERR_SECURITY;
+    }
+    result = UCN_I_DIGEST_CANONICAL("UCN6-AAD-V1",
+        workspace->origin_aad, workspace->origin_open.aad_bytes,
+        workspace->digest, &workspace->digest_workspace);
+    if (result == UCN_OK) {
+        result = UCN_I_DIGEST_CANONICAL("UCN6-PAYLOAD-V1",
+            workspace->plaintext, workspace->control_frame.payload_bytes,
+            workspace->digest + UCN_I_DIGEST128_BYTES,
+            &workspace->digest_workspace);
+    }
+    if (result == UCN_OK) {
+        result = replay_reserve_locked(
+            owner, slot, &access->session, facts,
+            workspace->control_frame.transaction_id, 1U, workspace->digest,
+            workspace->digest + UCN_I_DIGEST128_BYTES,
+            &workspace->replay);
+    }
+    if (result == UCN_OK &&
+        workspace->candidate.hop_profile == UCN_I_HOP_PROFILE_H1) {
+        result = UCN_I_DIGEST_CANONICAL("UCN6-AAD-V1",
+            workspace->hop_aad, workspace->packet_state.hop_aad_bytes, workspace->digest,
+            &workspace->digest_workspace);
+        if (result == UCN_OK) {
+            result = hop_replay_reserve_locked(
+                owner, slot, facts, workspace->packet_state.hop_sequence, workspace->digest,
+                &workspace->replay);
+        }
+        if (result != UCN_OK) {
+            replay_reservation_clear(
+                &slot->origin_replay.reservations[
+                    workspace->replay.reservation_slot]);
+        }
+    }
+    if (result != UCN_OK) {
+        clear_callback(owner);
+        owner_unlock(owner);
+        return result;
+    }
+    result = UCN_I_DIGEST_CANONICAL("UCN6-PAYLOAD-V1", workspace->plaintext,
+                              workspace->control_frame.payload_bytes,
+                              workspace->digest,
+                              &workspace->digest_workspace);
+    if (result != UCN_OK) {
+        replay_reservation_clear(
+            &slot->origin_replay.reservations[
+                workspace->replay.reservation_slot]);
+        if (workspace->replay.has_hop != 0U) {
+            replay_reservation_clear(
+                &slot->hop_replay.reservations[
+                    workspace->replay.hop_reservation_slot]);
+        }
+        clear_callback(owner);
+        owner_unlock(owner);
+        return result;
+    }
+    clear_callback(owner);
+    owner_unlock(owner);
+    if (workspace->control_frame.payload_bytes != 0U) {
+        memcpy(plaintext_output, workspace->plaintext,
+               workspace->control_frame.payload_bytes);
+    }
+    memset(fact_out, 0, sizeof(*fact_out));
+    fact_out->session = access->session;
+    fact_out->replay = workspace->replay;
+    fact_out->body = plaintext_output;
+    fact_out->body_bytes = workspace->control_frame.payload_bytes;
+    fact_out->transaction_id = workspace->control_frame.transaction_id;
+    fact_out->runtime_instance = owner->runtime_instance;
+    fact_out->realm_id = workspace->control_frame.realm_id;
+    fact_out->source_address = workspace->control_frame.source_address;
+    fact_out->destination_address =
+        workspace->control_frame.destination_address;
+    fact_out->source_binding_generation =
+        workspace->control_frame.source_binding_generation;
+    fact_out->destination_binding_generation =
+        workspace->control_frame.destination_binding_generation;
+    fact_out->security_owner_instance = owner->owner_instance;
+    fact_out->protocol_opcode = workspace->control_frame.opcode;
+    memcpy(fact_out->body_digest, workspace->digest,
+           sizeof(fact_out->body_digest));
+    fact_out->traffic_class = workspace->control_frame.traffic_class;
+    fact_out->delivery_guarantee =
+        workspace->control_frame.delivery_guarantee;
+    fact_out->interaction_role = workspace->control_frame.interaction_role;
+    fact_out->payload_kind = workspace->control_frame.payload_kind;
+    fact_out->origin_security = workspace->control_frame.origin_security;
+    fact_out->hop_limit = workspace->control_frame.hop_limit;
+    fact_out->direction = access->direction;
+    *plaintext_bytes = workspace->control_frame.payload_bytes;
+    return UCN_OK;
+}
+
+static bool c0_hop_open_ranges_valid(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_current_facts_t *facts,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    ucn_i_security_c0_path_workspace_t *workspace)
+{
+    return owner != NULL && facts != NULL && packet != NULL &&
+           packet_bytes != 0U && workspace != NULL &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), facts,
+                                 sizeof(*facts)) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), packet,
+                                 packet_bytes) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), workspace,
+                                 sizeof(*workspace)) &&
+           !ucn_i_ranges_overlap(facts, sizeof(*facts), packet,
+                                 packet_bytes) &&
+           !ucn_i_ranges_overlap(facts, sizeof(*facts), workspace,
+                                 sizeof(*workspace)) &&
+           !ucn_i_ranges_overlap(packet, packet_bytes, workspace,
+                                 sizeof(*workspace));
+}
+
+ucn_result_t ucn_i_security_c0_hop_open(
+    ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t inbound_session,
+    const ucn_i_security_current_facts_t *facts,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    ucn_i_security_c0_path_workspace_t *workspace)
+{
+    ucn_i_security_packet_workspace_t *packet_workspace;
+    ucn_i_security_slot_t *slot;
+    size_t header_bytes = 0U;
+    size_t hop_aad_bytes = 0U;
+    size_t packet_before_hop_bytes;
+    uint16_t slot_index;
+    ucn_result_t result;
+    ucn_result_t gate_result;
+    ucn_result_t leave_result;
+
+    if (!c0_hop_open_ranges_valid(owner, facts, packet, packet_bytes,
+                                   workspace) ||
+        packet_bytes > UCN_ADAPTER_FRAME_BYTES) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(workspace, 0, sizeof(*workspace));
+    packet_workspace = &workspace->packet;
+    result = owner_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (owner->callback_active != 0U ||
+        !handle_matches(owner, inbound_session, &slot_index)) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    slot = &owner->sessions[slot_index];
+    if (slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        slot->candidate.hop_profile != UCN_I_HOP_PROFILE_H1 ||
+        !current_facts_match(slot, facts) ||
+        ucn_i_c0_decode(packet, packet_bytes, owner->address_width,
+                        UCN_I_CONTROL_H1,
+                        &packet_workspace->control_frame) != UCN_OK ||
+        packet_workspace->control_frame.realm_id != owner->realm_id ||
+        packet_workspace->control_frame.origin_security == UCN_I_ORIGIN_O0 ||
+        packet_workspace->control_frame.hop_limit == 0U ||
+        !acl_rule_matches(owner, slot, slot->candidate.hop_fingerprint, 0U,
+                          packet_workspace->control_frame.opcode,
+                          UCN_I_SECURITY_ACCESS_INBOUND) ||
+        owner->next_operation_id == UINT32_MAX) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    result = ucn_i_c0_header_bytes(owner->address_width, &header_bytes);
+    if (result != UCN_OK) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    packet_before_hop_bytes = header_bytes +
+        packet_workspace->control_frame.payload_bytes +
+        UCN_I_SECURITY_ORIGIN_TAG_BYTES;
+    hop_aad_encode(packet, packet_before_hop_bytes,
+                    packet_workspace->control_frame.hop_sequence,
+                   slot->candidate.hop_fingerprint,
+                    packet_workspace->hop_aad, &hop_aad_bytes);
+    memset(&packet_workspace->hop_verify, 0,
+           sizeof(packet_workspace->hop_verify));
+    packet_workspace->hop_verify.selector = slot->candidate.hop_rx;
+    packet_workspace->hop_verify.aad = packet_workspace->hop_aad;
+    packet_workspace->hop_verify.aad_bytes = hop_aad_bytes;
+    packet_workspace->hop_verify.hop_tag =
+        packet_workspace->control_frame.hop_tag;
+    packet_workspace->candidate = slot->candidate;
+    owner->callback_active = 1U;
+    owner->callback_slot = slot_index;
+    owner->callback_candidate = packet_workspace->candidate;
+    owner->callback_claim.owner_instance = owner->owner_instance;
+    owner->callback_claim.operation_id = owner->next_operation_id++;
+    owner->callback_claim.operation_generation = 1U;
+    owner->callback_claim.operation_kind = UCN_I_SECURITY_CALLBACK_OPEN;
+    owner_unlock(owner);
+
+    gate_result = ucn_i_callback_gate_enter(owner->provider_gate,
+                                             &owner->callback_claim);
+    if (gate_result == UCN_OK) {
+        result = owner->provider.verify_hop(owner->provider.context,
+                                            &packet_workspace->hop_verify);
+        leave_result = ucn_i_callback_gate_leave(owner->provider_gate,
+                                                  &owner->callback_claim);
+        if (leave_result != UCN_OK) {
+            result = UCN_ERR_STATE;
+        }
+    } else {
+        result = gate_result;
+    }
+
+    gate_result = owner_lock(owner);
+    if (gate_result != UCN_OK) {
+        return gate_result;
+    }
+    slot = &owner->sessions[slot_index];
+    if (owner->callback_active == 0U ||
+        owner->callback_slot != slot_index ||
+        memcmp(&owner->callback_candidate, &packet_workspace->candidate,
+               sizeof(packet_workspace->candidate)) != 0 ||
+        slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        memcmp(&slot->candidate, &packet_workspace->candidate,
+               sizeof(packet_workspace->candidate)) != 0 ||
+        !current_facts_match(slot, facts)) {
+        clear_callback(owner);
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    if (result == UCN_OK) {
+        result = ucn_i_sha256_128(packet_workspace->hop_aad, hop_aad_bytes,
+                                  packet_workspace->digest,
+                                  &packet_workspace->digest_workspace);
+    }
+    memset(&packet_workspace->replay, 0, sizeof(packet_workspace->replay));
+    packet_workspace->replay.session = inbound_session;
+    if (result == UCN_OK) {
+        result = hop_replay_reserve_locked(
+            owner, slot, facts,
+            packet_workspace->control_frame.hop_sequence,
+            packet_workspace->digest, &packet_workspace->replay);
+    }
+    if (result == UCN_OK) {
+        result = ucn_i_sha256_128(packet, packet_bytes,
+                                  packet_workspace->digest +
+                                      UCN_I_DIGEST128_BYTES,
+                                  &packet_workspace->digest_workspace);
+    }
+    if (result != UCN_OK) {
+        if (packet_workspace->replay.has_hop != 0U) {
+            replay_reservation_clear(
+                &slot->hop_replay.reservations[
+                    packet_workspace->replay.hop_reservation_slot]);
+        }
+        clear_callback(owner);
+        owner_unlock(owner);
+        return result;
+    }
+    workspace->relay.replay.session = inbound_session;
+    workspace->relay.replay.hop_sequence =
+        packet_workspace->replay.hop_sequence;
+    workspace->relay.replay.reservation_generation =
+        packet_workspace->replay.hop_reservation_generation;
+    workspace->relay.replay.reservation_slot =
+        packet_workspace->replay.hop_reservation_slot;
+    workspace->relay.packet = packet;
+    workspace->relay.packet_bytes = packet_bytes;
+    workspace->relay.transaction_id =
+        packet_workspace->control_frame.transaction_id;
+    workspace->relay.runtime_instance = owner->runtime_instance;
+    workspace->relay.realm_id = packet_workspace->control_frame.realm_id;
+    workspace->relay.source_address =
+        packet_workspace->control_frame.source_address;
+    workspace->relay.destination_address =
+        packet_workspace->control_frame.destination_address;
+    workspace->relay.source_binding_generation =
+        packet_workspace->control_frame.source_binding_generation;
+    workspace->relay.destination_binding_generation =
+        packet_workspace->control_frame.destination_binding_generation;
+    workspace->relay.protocol_opcode = packet_workspace->control_frame.opcode;
+    memcpy(workspace->relay.packet_digest,
+           packet_workspace->digest + UCN_I_DIGEST128_BYTES,
+           sizeof(workspace->relay.packet_digest));
+    workspace->relay.traffic_class =
+        packet_workspace->control_frame.traffic_class;
+    workspace->relay.delivery_guarantee =
+        packet_workspace->control_frame.delivery_guarantee;
+    workspace->relay.interaction_role =
+        packet_workspace->control_frame.interaction_role;
+    workspace->relay.payload_kind =
+        packet_workspace->control_frame.payload_kind;
+    workspace->relay.origin_security =
+        packet_workspace->control_frame.origin_security;
+    workspace->relay.hop_limit = packet_workspace->control_frame.hop_limit;
+    clear_callback(owner);
+    owner_unlock(owner);
+    return UCN_OK;
+}
+
+static bool c0_hop_seal_ranges_valid(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_current_facts_t *facts,
+    const ucn_i_security_c0_relay_fact_t *relay,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_bytes)
+{
+    return owner != NULL && facts != NULL && relay != NULL &&
+           workspace != NULL && output != NULL && output_capacity != 0U &&
+           output_bytes != NULL && relay->packet != NULL &&
+           relay->packet_bytes != 0U &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), facts,
+                                 sizeof(*facts)) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), relay,
+                                 sizeof(*relay)) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), workspace,
+                                 sizeof(*workspace)) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), output,
+                                 output_capacity) &&
+           !ucn_i_ranges_overlap(owner, sizeof(*owner), output_bytes,
+                                 sizeof(*output_bytes)) &&
+           !ucn_i_ranges_overlap(relay->packet, relay->packet_bytes, facts,
+                                 sizeof(*facts)) &&
+           !ucn_i_ranges_overlap(relay->packet, relay->packet_bytes, relay,
+                                 sizeof(*relay)) &&
+           !ucn_i_ranges_overlap(relay->packet, relay->packet_bytes,
+                                 workspace, sizeof(*workspace)) &&
+           !ucn_i_ranges_overlap(relay->packet, relay->packet_bytes, output,
+                                 output_capacity) &&
+           !ucn_i_ranges_overlap(relay->packet, relay->packet_bytes,
+                                 output_bytes, sizeof(*output_bytes)) &&
+           !ucn_i_ranges_overlap(facts, sizeof(*facts), relay,
+                                 sizeof(*relay)) &&
+           !ucn_i_ranges_overlap(facts, sizeof(*facts), workspace,
+                                 sizeof(*workspace)) &&
+           !ucn_i_ranges_overlap(facts, sizeof(*facts), output,
+                                 output_capacity) &&
+           !ucn_i_ranges_overlap(facts, sizeof(*facts), output_bytes,
+                                 sizeof(*output_bytes)) &&
+           !ucn_i_ranges_overlap(relay, sizeof(*relay), workspace,
+                                 sizeof(*workspace)) &&
+           !ucn_i_ranges_overlap(relay, sizeof(*relay), output,
+                                 output_capacity) &&
+           !ucn_i_ranges_overlap(relay, sizeof(*relay), output_bytes,
+                                 sizeof(*output_bytes)) &&
+           !ucn_i_ranges_overlap(workspace, sizeof(*workspace), output,
+                                 output_capacity) &&
+           !ucn_i_ranges_overlap(workspace, sizeof(*workspace), output_bytes,
+                                 sizeof(*output_bytes)) &&
+           !ucn_i_ranges_overlap(output, output_capacity, output_bytes,
+                                 sizeof(*output_bytes));
+}
+
+ucn_result_t ucn_i_security_c0_hop_seal(
+    ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t outbound_session,
+    const ucn_i_security_current_facts_t *facts,
+    const ucn_i_security_c0_relay_fact_t *relay,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_bytes)
+{
+    ucn_i_security_slot_t *slot;
+    size_t encoded_bytes = 0U;
+    size_t preliminary_bytes = 0U;
+    size_t hop_aad_bytes = 0U;
+    uint16_t slot_index;
+    ucn_result_t result;
+    ucn_result_t gate_result;
+    ucn_result_t leave_result;
+
+    if (!c0_hop_seal_ranges_valid(owner, facts, relay, workspace, output,
+                                   output_capacity, output_bytes) ||
+        relay->runtime_instance != owner->runtime_instance ||
+        relay->realm_id != owner->realm_id ||
+        relay->hop_limit <= 1U || relay->origin_security == UCN_I_ORIGIN_O0 ||
+        relay->reserved_zero[0] != 0U || relay->reserved_zero[1] != 0U ||
+        relay->packet_bytes > UCN_ADAPTER_FRAME_BYTES) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = owner_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (owner->callback_active != 0U ||
+        !handle_matches(owner, outbound_session, &slot_index)) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    slot = &owner->sessions[slot_index];
+    memset(workspace, 0, sizeof(*workspace));
+    result = ucn_i_sha256_128(relay->packet, relay->packet_bytes,
+                              workspace->digest,
+                              &workspace->digest_workspace);
+    if (result != UCN_OK ||
+        memcmp(workspace->digest, relay->packet_digest,
+               UCN_I_DIGEST128_BYTES) != 0 ||
+        slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        slot->candidate.hop_profile != UCN_I_HOP_PROFILE_H1 ||
+        !current_facts_match(slot, facts) ||
+        !acl_rule_matches(owner, slot, slot->candidate.hop_fingerprint, 0U,
+                          relay->protocol_opcode,
+                          UCN_I_SECURITY_ACCESS_OUTBOUND) ||
+        ucn_i_c0_decode(relay->packet, relay->packet_bytes,
+                        owner->address_width, UCN_I_CONTROL_H1,
+                        &workspace->control_frame) != UCN_OK ||
+        workspace->control_frame.transaction_id != relay->transaction_id ||
+        workspace->control_frame.realm_id != relay->realm_id ||
+        workspace->control_frame.source_address != relay->source_address ||
+        workspace->control_frame.destination_address !=
+            relay->destination_address ||
+        workspace->control_frame.source_binding_generation !=
+            relay->source_binding_generation ||
+        workspace->control_frame.destination_binding_generation !=
+            relay->destination_binding_generation ||
+        workspace->control_frame.opcode != relay->protocol_opcode ||
+        workspace->control_frame.traffic_class != relay->traffic_class ||
+        workspace->control_frame.delivery_guarantee !=
+            relay->delivery_guarantee ||
+        workspace->control_frame.interaction_role !=
+            relay->interaction_role ||
+        workspace->control_frame.payload_kind != relay->payload_kind ||
+        workspace->control_frame.origin_security != relay->origin_security ||
+        workspace->control_frame.hop_limit != relay->hop_limit ||
+        slot->hop_tx_highest_reserved == UINT32_MAX ||
+        owner->next_operation_id == UINT32_MAX) {
+        owner_unlock(owner);
+        return result == UCN_OK ? UCN_ERR_STATE : result;
+    }
+    workspace->control_frame.hop_limit =
+        (uint8_t)(workspace->control_frame.hop_limit - 1U);
+    workspace->control_frame.hop_sequence =
+        slot->hop_tx_highest_reserved + 1U;
+    workspace->control_frame.hop_tag =
+        workspace->digest + UCN_I_DIGEST128_BYTES;
+    result = ucn_i_c0_encoded_size(
+        owner->address_width, workspace->control_frame.origin_security,
+        UCN_I_CONTROL_H1, workspace->control_frame.payload_bytes,
+        &encoded_bytes);
+    if (result != UCN_OK || encoded_bytes > output_capacity ||
+        encoded_bytes > UCN_ADAPTER_FRAME_BYTES) {
+        owner_unlock(owner);
+        return result == UCN_OK ? UCN_ERR_NO_SPACE : result;
+    }
+    slot->hop_tx_highest_reserved =
+        workspace->control_frame.hop_sequence;
+    workspace->candidate = slot->candidate;
+    result = ucn_i_c0_encode(
+        &workspace->control_frame, owner->address_width, UCN_I_CONTROL_H1,
+        workspace->plaintext, sizeof(workspace->plaintext),
+        &preliminary_bytes);
+    if (result != UCN_OK) {
+        owner_unlock(owner);
+        return result;
+    }
+    workspace->packet_state.packet_before_hop_bytes =
+        preliminary_bytes - UCN_I_SECURITY_HOP_TRAILER_BYTES;
+    hop_aad_encode(
+        workspace->plaintext,
+        workspace->packet_state.packet_before_hop_bytes,
+        workspace->control_frame.hop_sequence,
+        workspace->candidate.hop_fingerprint,
+        workspace->hop_aad, &hop_aad_bytes);
+    memset(&workspace->hop_protect, 0, sizeof(workspace->hop_protect));
+    workspace->hop_protect.selector = workspace->candidate.hop_tx;
+    workspace->hop_protect.aad = workspace->hop_aad;
+    workspace->hop_protect.aad_bytes = hop_aad_bytes;
+    workspace->hop_protect.hop_tag =
+        workspace->digest + UCN_I_DIGEST128_BYTES;
+    owner->callback_active = 1U;
+    owner->callback_slot = slot_index;
+    owner->callback_candidate = workspace->candidate;
+    owner->callback_claim.owner_instance = owner->owner_instance;
+    owner->callback_claim.operation_id = owner->next_operation_id++;
+    owner->callback_claim.operation_generation = 1U;
+    owner->callback_claim.operation_kind = UCN_I_SECURITY_CALLBACK_PROTECT;
+    owner_unlock(owner);
+
+    gate_result = ucn_i_callback_gate_enter(owner->provider_gate,
+                                             &owner->callback_claim);
+    if (gate_result == UCN_OK) {
+        result = owner->provider.protect_hop(owner->provider.context,
+                                             &workspace->hop_protect);
+        leave_result = ucn_i_callback_gate_leave(owner->provider_gate,
+                                                  &owner->callback_claim);
+        if (leave_result != UCN_OK) {
+            result = UCN_ERR_STATE;
+        }
+    } else {
+        result = gate_result;
+    }
+
+    gate_result = owner_lock(owner);
+    if (gate_result != UCN_OK) {
+        return gate_result;
+    }
+    slot = &owner->sessions[slot_index];
+    if (owner->callback_active == 0U ||
+        owner->callback_slot != slot_index ||
+        memcmp(&owner->callback_candidate, &workspace->candidate,
+               sizeof(workspace->candidate)) != 0 ||
+        slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        memcmp(&slot->candidate, &workspace->candidate,
+               sizeof(workspace->candidate)) != 0 ||
+        !current_facts_match(slot, facts)) {
+        clear_callback(owner);
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    if (result == UCN_OK) {
+        result = ucn_i_c0_encode(
+            &workspace->control_frame, owner->address_width,
+            UCN_I_CONTROL_H1, output, output_capacity, output_bytes);
+    }
+    clear_callback(owner);
+    owner_unlock(owner);
+    return result;
+}
+
+static ucn_result_t c0_hop_wrap_protected(
+    ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t outbound_session,
+    const ucn_i_security_current_facts_t *facts,
+    const uint8_t *protected_packet,
+    size_t protected_packet_bytes,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_bytes)
+{
+    ucn_i_security_slot_t *slot;
+    size_t encoded_bytes = 0U;
+    size_t preliminary_bytes = 0U;
+    size_t hop_aad_bytes = 0U;
+    uint16_t slot_index;
+    ucn_result_t result;
+    ucn_result_t gate_result;
+    ucn_result_t leave_result;
+
+    if (owner == NULL || facts == NULL || protected_packet == NULL ||
+        protected_packet_bytes == 0U ||
+        protected_packet_bytes > UCN_ADAPTER_FRAME_BYTES ||
+        workspace == NULL || output == NULL || output_capacity == 0U ||
+        output_bytes == NULL ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), facts,
+                             sizeof(*facts)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), protected_packet,
+                             protected_packet_bytes) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), workspace,
+                             sizeof(*workspace)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), output,
+                             output_capacity) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), output_bytes,
+                             sizeof(*output_bytes)) ||
+        ucn_i_ranges_overlap(facts, sizeof(*facts), protected_packet,
+                             protected_packet_bytes) ||
+        ucn_i_ranges_overlap(facts, sizeof(*facts), workspace,
+                             sizeof(*workspace)) ||
+        ucn_i_ranges_overlap(facts, sizeof(*facts), output,
+                             output_capacity) ||
+        ucn_i_ranges_overlap(facts, sizeof(*facts), output_bytes,
+                             sizeof(*output_bytes)) ||
+        ucn_i_ranges_overlap(protected_packet, protected_packet_bytes,
+                             workspace, sizeof(*workspace)) ||
+        ucn_i_ranges_overlap(protected_packet, protected_packet_bytes,
+                             output, output_capacity) ||
+        ucn_i_ranges_overlap(protected_packet, protected_packet_bytes,
+                             output_bytes, sizeof(*output_bytes)) ||
+        ucn_i_ranges_overlap(workspace, sizeof(*workspace), output,
+                             output_capacity) ||
+        ucn_i_ranges_overlap(workspace, sizeof(*workspace), output_bytes,
+                             sizeof(*output_bytes)) ||
+        ucn_i_ranges_overlap(output, output_capacity, output_bytes,
+                             sizeof(*output_bytes))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = owner_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (owner->callback_active != 0U ||
+        !handle_matches(owner, outbound_session, &slot_index)) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    slot = &owner->sessions[slot_index];
+    memset(workspace, 0, sizeof(*workspace));
+    result = ucn_i_c0_decode(protected_packet, protected_packet_bytes,
+                             owner->address_width, UCN_I_CONTROL_H0,
+                             &workspace->control_frame);
+    if (result != UCN_OK ||
+        workspace->control_frame.realm_id != owner->realm_id ||
+        workspace->control_frame.origin_security == UCN_I_ORIGIN_O0 ||
+        workspace->control_frame.hop_limit == 0U ||
+        slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        slot->candidate.hop_profile != UCN_I_HOP_PROFILE_H1 ||
+        !current_facts_match(slot, facts) ||
+        !acl_rule_matches(owner, slot, slot->candidate.hop_fingerprint, 0U,
+                          workspace->control_frame.opcode,
+                          UCN_I_SECURITY_ACCESS_OUTBOUND) ||
+        slot->hop_tx_highest_reserved == UINT32_MAX ||
+        owner->next_operation_id == UINT32_MAX) {
+        owner_unlock(owner);
+        return result == UCN_OK ? UCN_ERR_STATE : result;
+    }
+    workspace->control_frame.hop_sequence =
+        slot->hop_tx_highest_reserved + 1U;
+    workspace->control_frame.hop_tag =
+        workspace->digest + UCN_I_DIGEST128_BYTES;
+    result = ucn_i_c0_encoded_size(
+        owner->address_width, workspace->control_frame.origin_security,
+        UCN_I_CONTROL_H1, workspace->control_frame.payload_bytes,
+        &encoded_bytes);
+    if (result != UCN_OK || encoded_bytes > output_capacity ||
+        encoded_bytes > UCN_ADAPTER_FRAME_BYTES) {
+        owner_unlock(owner);
+        return result == UCN_OK ? UCN_ERR_NO_SPACE : result;
+    }
+    slot->hop_tx_highest_reserved =
+        workspace->control_frame.hop_sequence;
+    workspace->candidate = slot->candidate;
+    result = ucn_i_c0_encode(
+        &workspace->control_frame, owner->address_width, UCN_I_CONTROL_H1,
+        workspace->plaintext, sizeof(workspace->plaintext),
+        &preliminary_bytes);
+    if (result != UCN_OK) {
+        owner_unlock(owner);
+        return result;
+    }
+    workspace->packet_state.packet_before_hop_bytes =
+        preliminary_bytes - UCN_I_SECURITY_HOP_TRAILER_BYTES;
+    hop_aad_encode(
+        workspace->plaintext,
+        workspace->packet_state.packet_before_hop_bytes,
+        workspace->control_frame.hop_sequence,
+        workspace->candidate.hop_fingerprint,
+        workspace->hop_aad, &hop_aad_bytes);
+    memset(&workspace->hop_protect, 0, sizeof(workspace->hop_protect));
+    workspace->hop_protect.selector = workspace->candidate.hop_tx;
+    workspace->hop_protect.aad = workspace->hop_aad;
+    workspace->hop_protect.aad_bytes = hop_aad_bytes;
+    workspace->hop_protect.hop_tag =
+        workspace->digest + UCN_I_DIGEST128_BYTES;
+    owner->callback_active = 1U;
+    owner->callback_slot = slot_index;
+    owner->callback_candidate = workspace->candidate;
+    owner->callback_claim.owner_instance = owner->owner_instance;
+    owner->callback_claim.operation_id = owner->next_operation_id++;
+    owner->callback_claim.operation_generation = 1U;
+    owner->callback_claim.operation_kind = UCN_I_SECURITY_CALLBACK_PROTECT;
+    owner_unlock(owner);
+
+    gate_result = ucn_i_callback_gate_enter(owner->provider_gate,
+                                             &owner->callback_claim);
+    if (gate_result == UCN_OK) {
+        result = owner->provider.protect_hop(owner->provider.context,
+                                             &workspace->hop_protect);
+        leave_result = ucn_i_callback_gate_leave(owner->provider_gate,
+                                                  &owner->callback_claim);
+        if (leave_result != UCN_OK) {
+            result = UCN_ERR_STATE;
+        }
+    } else {
+        result = gate_result;
+    }
+
+    gate_result = owner_lock(owner);
+    if (gate_result != UCN_OK) {
+        return gate_result;
+    }
+    slot = &owner->sessions[slot_index];
+    if (owner->callback_active == 0U ||
+        owner->callback_slot != slot_index ||
+        memcmp(&owner->callback_candidate, &workspace->candidate,
+               sizeof(workspace->candidate)) != 0 ||
+        slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        memcmp(&slot->candidate, &workspace->candidate,
+               sizeof(workspace->candidate)) != 0 ||
+        !current_facts_match(slot, facts)) {
+        clear_callback(owner);
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    if (result == UCN_OK) {
+        result = ucn_i_c0_encode(
+            &workspace->control_frame, owner->address_width,
+            UCN_I_CONTROL_H1, output, output_capacity, output_bytes);
+    }
+    clear_callback(owner);
+    owner_unlock(owner);
+    return result;
+}
+
+ucn_result_t ucn_i_security_c0_path_protect(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_c0_protect_request_t *origin_request,
+    ucn_i_security_handle_t hop_session,
+    const ucn_i_security_current_facts_t *hop_facts,
+    const uint8_t *plaintext,
+    size_t plaintext_bytes,
+    ucn_i_security_c0_path_workspace_t *workspace,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_bytes)
+{
+    size_t origin_packet_bytes = 0U;
+    ucn_result_t result;
+
+    if (owner == NULL || origin_request == NULL || hop_facts == NULL ||
+        workspace == NULL || output == NULL || output_capacity == 0U ||
+        output_bytes == NULL || (plaintext == NULL && plaintext_bytes != 0U) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), origin_request,
+                             sizeof(*origin_request)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), hop_facts,
+                             sizeof(*hop_facts)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), workspace,
+                             sizeof(*workspace)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), output,
+                             output_capacity) ||
+        (plaintext_bytes != 0U &&
+         (ucn_i_ranges_overlap(owner, sizeof(*owner), plaintext,
+                               plaintext_bytes) ||
+          ucn_i_ranges_overlap(plaintext, plaintext_bytes, workspace,
+                               sizeof(*workspace)) ||
+          ucn_i_ranges_overlap(plaintext, plaintext_bytes, output,
+                               output_capacity))) ||
+        ucn_i_ranges_overlap(workspace, sizeof(*workspace), output,
+                             output_capacity) ||
+        ucn_i_ranges_overlap(output, output_capacity, output_bytes,
+                             sizeof(*output_bytes))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(workspace, 0, sizeof(*workspace));
+    result = ucn_i_security_c0_protect(
+        owner, origin_request, plaintext, plaintext_bytes,
+        &workspace->packet, workspace->origin_packet,
+        sizeof(workspace->origin_packet), &origin_packet_bytes);
+    if (result != UCN_OK) {
+        return result;
+    }
+    return c0_hop_wrap_protected(
+        owner, hop_session, hop_facts, workspace->origin_packet,
+        origin_packet_bytes, &workspace->packet, output, output_capacity,
+        output_bytes);
+}
+
+ucn_result_t ucn_i_security_c0_path_open(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_control_access_request_t *origin_access,
+    const ucn_i_security_current_facts_t *origin_facts,
+    ucn_i_security_handle_t hop_session,
+    const ucn_i_security_current_facts_t *hop_facts,
+    const uint8_t *packet,
+    size_t packet_bytes,
+    ucn_i_security_c0_path_workspace_t *workspace,
+    uint8_t *plaintext_output,
+    size_t plaintext_capacity,
+    size_t *plaintext_bytes,
+    ucn_i_security_authenticated_control_t *fact_out,
+    ucn_i_security_hop_replay_handle_t *hop_replay_out)
+{
+    size_t origin_packet_bytes = 0U;
+    ucn_result_t result;
+    ucn_result_t abort_result;
+
+    if (owner == NULL || origin_access == NULL || origin_facts == NULL ||
+        hop_facts == NULL || packet == NULL || packet_bytes == 0U ||
+        workspace == NULL || plaintext_output == NULL ||
+        plaintext_capacity == 0U || plaintext_bytes == NULL ||
+        fact_out == NULL || hop_replay_out == NULL ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), workspace,
+                             sizeof(*workspace)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), packet, packet_bytes) ||
+        ucn_i_ranges_overlap(packet, packet_bytes, workspace,
+                             sizeof(*workspace)) ||
+        ucn_i_ranges_overlap(packet, packet_bytes, plaintext_output,
+                             plaintext_capacity) ||
+        ucn_i_ranges_overlap(workspace, sizeof(*workspace),
+                             plaintext_output, plaintext_capacity) ||
+        ucn_i_ranges_overlap(plaintext_output, plaintext_capacity,
+                             plaintext_bytes, sizeof(*plaintext_bytes)) ||
+        ucn_i_ranges_overlap(plaintext_output, plaintext_capacity,
+                             fact_out, sizeof(*fact_out)) ||
+        ucn_i_ranges_overlap(plaintext_output, plaintext_capacity,
+                             hop_replay_out, sizeof(*hop_replay_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(workspace, 0, sizeof(*workspace));
+    result = ucn_i_security_c0_hop_open(
+        owner, hop_session, hop_facts, packet, packet_bytes, workspace);
+    if (result != UCN_OK) {
+        return result;
+    }
+    workspace->packet.control_frame.hop_sequence = 0U;
+    workspace->packet.control_frame.hop_tag = NULL;
+    result = ucn_i_c0_encode(
+        &workspace->packet.control_frame, owner->address_width,
+        UCN_I_CONTROL_H0, workspace->origin_packet,
+        sizeof(workspace->origin_packet), &origin_packet_bytes);
+    if (result == UCN_OK) {
+        result = ucn_i_security_c0_open(
+            owner, origin_access, origin_facts, workspace->origin_packet,
+            origin_packet_bytes, &workspace->packet, plaintext_output,
+            plaintext_capacity, plaintext_bytes, fact_out);
+    }
+    if (result != UCN_OK) {
+        abort_result = ucn_i_security_hop_replay_abort(
+            owner, &(workspace->relay.replay));
+        return abort_result == UCN_OK ? result : UCN_ERR_IN_DOUBT;
+    }
+    *hop_replay_out = workspace->relay.replay;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_security_control_fact_validate(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_authenticated_control_t *fact,
+    const ucn_i_security_current_facts_t *current_facts,
+    ucn_i_security_control_validate_workspace_t *workspace)
+{
+    ucn_i_security_slot_t *slot;
+    size_t aad_bytes = 0U;
+    uint16_t session_slot;
+    uint16_t reservation_slot;
+    ucn_result_t result;
+
+    if (owner == NULL || fact == NULL || current_facts == NULL ||
+        workspace == NULL ||
+        (fact->body == NULL && fact->body_bytes != 0U) ||
+        fact->body_bytes > UCN_ADAPTER_FRAME_BYTES ||
+        fact->runtime_instance != owner->runtime_instance ||
+        fact->security_owner_instance != owner->owner_instance ||
+        fact->transaction_id == 0U || fact->protocol_opcode == 0U ||
+        fact->traffic_class >= UCN_TRAFFIC_CLASS_COUNT ||
+        fact->delivery_guarantee > UCN_DELIVERY_RELIABLE ||
+        fact->interaction_role > UCN_INTERACTION_ERROR ||
+        fact->payload_kind > UCN_I_PAYLOAD_DIAGNOSTIC ||
+        fact->origin_security == UCN_I_ORIGIN_O0 ||
+        fact->origin_security > UCN_I_ORIGIN_O2 ||
+        fact->hop_limit == 0U || fact->hop_limit > 63U ||
+        fact->direction != UCN_I_SECURITY_ACCESS_INBOUND ||
+        fact->reserved_zero != 0U ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), fact, sizeof(*fact)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), current_facts,
+                             sizeof(*current_facts)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), workspace,
+                             sizeof(*workspace)) ||
+        ucn_i_ranges_overlap(fact, sizeof(*fact), workspace,
+                             sizeof(*workspace)) ||
+        ucn_i_ranges_overlap(current_facts, sizeof(*current_facts),
+                             workspace, sizeof(*workspace)) ||
+        (fact->body_bytes != 0U &&
+         (ucn_i_ranges_overlap(owner, sizeof(*owner), fact->body,
+                               fact->body_bytes) ||
+          ucn_i_ranges_overlap(fact, sizeof(*fact), fact->body,
+                               fact->body_bytes) ||
+          ucn_i_ranges_overlap(current_facts, sizeof(*current_facts),
+                               fact->body, fact->body_bytes) ||
+          ucn_i_ranges_overlap(workspace, sizeof(*workspace), fact->body,
+                               fact->body_bytes)))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(workspace, 0, sizeof(*workspace));
+    result = UCN_I_DIGEST_CANONICAL("UCN6-PAYLOAD-V1", fact->body, fact->body_bytes,
+                              workspace->digest,
+                              &workspace->digest_workspace);
+    if (result != UCN_OK ||
+        memcmp(workspace->digest, fact->body_digest,
+               sizeof(workspace->digest)) != 0) {
+        return result == UCN_OK ? UCN_ERR_SECURITY : result;
+    }
+    memset(&workspace->canonical, 0, sizeof(workspace->canonical));
+    workspace->canonical.transaction_id = fact->transaction_id;
+    workspace->canonical.realm_id = fact->realm_id;
+    workspace->canonical.source_address = fact->source_address;
+    workspace->canonical.destination_address = fact->destination_address;
+    workspace->canonical.source_binding_generation =
+        fact->source_binding_generation;
+    workspace->canonical.destination_binding_generation =
+        fact->destination_binding_generation;
+    workspace->canonical.opcode = fact->protocol_opcode;
+    workspace->canonical.traffic_class = fact->traffic_class;
+    workspace->canonical.delivery_guarantee = fact->delivery_guarantee;
+    workspace->canonical.interaction_role = fact->interaction_role;
+    workspace->canonical.payload_kind = fact->payload_kind;
+    workspace->canonical.origin_security = fact->origin_security;
+    workspace->canonical.hop_limit = fact->hop_limit;
+    workspace->canonical.payload = fact->body;
+    workspace->canonical.payload_bytes = fact->body_bytes;
+    workspace->canonical.origin_tag = workspace->digest;
+    result = ucn_i_c0_origin_aad_build(
+        &workspace->canonical, owner->address_width, workspace->aad,
+        &aad_bytes);
+    if (result != UCN_OK) {
+        return result;
+    }
+    result = UCN_I_DIGEST_CANONICAL("UCN6-AAD-V1", workspace->aad, aad_bytes, workspace->digest,
+                              &workspace->digest_workspace);
+    if (result != UCN_OK) {
+        return result;
+    }
+    result = owner_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (owner->callback_active != 0U ||
+        !handle_matches(owner, fact->session, &session_slot)) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    slot = &owner->sessions[session_slot];
+    if (slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        !current_facts_match(slot, current_facts) ||
+        fact->realm_id != owner->realm_id ||
+        fact->source_address != slot->candidate.peer.address ||
+        fact->destination_address != slot->candidate.local.address ||
+        fact->source_binding_generation !=
+            slot->candidate.peer.binding_generation ||
+        fact->destination_binding_generation !=
+            slot->candidate.local.binding_generation ||
+        fact->origin_security != slot->candidate.origin_level ||
+        !ucn_i_protocol_opcode_valid(fact->protocol_opcode) ||
+        ((fact->payload_kind == UCN_I_PAYLOAD_DIAGNOSTIC) !=
+         ((fact->protocol_opcode >> 8U) == UCN_I_OPCODE_DIAGNOSTICS)) ||
+        fact->transaction_id != fact->replay.sequence ||
+        fact->replay.replay_domain != 1U ||
+        !replay_handle_matches(owner, slot, &(fact->replay),
+                               &reservation_slot) ||
+        memcmp(workspace->digest,
+               slot->origin_replay.reservations[reservation_slot].aad_digest,
+               sizeof(workspace->digest)) != 0 ||
+        !acl_rule_matches(owner, slot,
+                          slot->candidate.origin_fingerprint, 0U,
+                          fact->protocol_opcode, fact->direction)) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
     owner_unlock(owner);
     return UCN_OK;
 }
@@ -2234,29 +4277,34 @@ static void replay_reservation_clear(
     reservation->generation = generation;
 }
 
-static void replay_window_commit(ucn_i_security_replay_window_t *window,
-                                 uint64_t sequence)
+static void replay_bits_commit(uint64_t *highest, uint64_t *bitmap,
+                               uint64_t sequence)
 {
     uint64_t distance;
 
-    if (window->highest_committed == 0U ||
-        sequence > window->highest_committed) {
-        distance = window->highest_committed == 0U ? 64U :
-            sequence - window->highest_committed;
-        window->committed_bitmap = distance >= 64U ? 0U :
-            window->committed_bitmap << distance;
-        window->highest_committed = sequence;
-        window->committed_bitmap |= UINT64_C(1);
+    if (*highest == 0U || sequence > *highest) {
+        distance = *highest == 0U ? 64U : sequence - *highest;
+        *bitmap = distance >= 64U ? 0U : *bitmap << distance;
+        *highest = sequence;
+        *bitmap |= UINT64_C(1);
     } else {
-        distance = window->highest_committed - sequence;
-        window->committed_bitmap |= UINT64_C(1) << distance;
+        distance = *highest - sequence;
+        *bitmap |= UINT64_C(1) << distance;
     }
 }
 
-ucn_result_t ucn_i_security_replay_commit(
+static void replay_window_commit(ucn_i_security_replay_window_t *window,
+                                 uint64_t sequence)
+{
+    replay_bits_commit(&window->highest_committed,
+                        &window->committed_bitmap, sequence);
+}
+
+static ucn_result_t replay_commit_internal(
     ucn_i_security_owner_t *owner,
-    ucn_i_security_replay_handle_t handle,
-    const ucn_i_security_current_facts_t *facts)
+    const ucn_i_security_replay_handle_t *handle,
+    const ucn_i_security_current_facts_t *facts,
+    bool require_business_completion)
 {
     ucn_i_security_replay_reservation_t *reservation;
     ucn_i_security_slot_t *slot;
@@ -2275,7 +4323,7 @@ ucn_result_t ucn_i_security_replay_commit(
         return result;
     }
     if (owner->callback_active != 0U ||
-        !handle_matches(owner, handle.session, &session_slot)) {
+        !handle_matches(owner, handle->session, &session_slot)) {
         owner_unlock(owner);
         return UCN_ERR_STATE;
     }
@@ -2285,7 +4333,7 @@ ucn_result_t ucn_i_security_replay_commit(
         return UCN_ERR_STATE;
     }
     reservation = &slot->origin_replay.reservations[reservation_slot];
-    if (handle.has_hop != 0U &&
+    if (handle->has_hop != 0U &&
         !hop_replay_handle_matches(slot, handle, &hop_reservation_slot)) {
         owner_unlock(owner);
         return UCN_ERR_STATE;
@@ -2293,30 +4341,37 @@ ucn_result_t ucn_i_security_replay_commit(
     if (slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
         !current_facts_match(slot, facts) ||
         facts->now_us >= reservation->deadline_us ||
-        (handle.has_hop != 0U &&
+        (require_business_completion &&
+         reservation->business_completed == 0U) ||
+        (handle->has_hop != 0U &&
          facts->now_us >= slot->hop_replay
                               .reservations[hop_reservation_slot]
                               .deadline_us) ||
-        replay_is_committed(&slot->origin_replay, handle.sequence)) {
+        origin_is_committed(slot, handle->replay_domain, handle->sequence)) {
         replay_reservation_clear(reservation);
-        if (handle.has_hop != 0U) {
+        if (handle->has_hop != 0U) {
             replay_reservation_clear(
                 &slot->hop_replay.reservations[hop_reservation_slot]);
         }
         owner_unlock(owner);
         return UCN_ERR_STATE;
     }
-    if (handle.has_hop != 0U &&
-        replay_is_committed(&slot->hop_replay, handle.hop_sequence)) {
+    if (handle->has_hop != 0U &&
+        replay_is_committed(&slot->hop_replay, handle->hop_sequence)) {
         replay_reservation_clear(reservation);
         replay_reservation_clear(
             &slot->hop_replay.reservations[hop_reservation_slot]);
         owner_unlock(owner);
         return UCN_ERR_STATE;
     }
-    replay_window_commit(&slot->origin_replay, handle.sequence);
-    if (handle.has_hop != 0U) {
-        replay_window_commit(&slot->hop_replay, handle.hop_sequence);
+    if (handle->replay_domain == 0U) {
+        replay_window_commit(&slot->origin_replay, handle->sequence);
+    } else {
+        replay_bits_commit(&slot->c0_rx_highest_committed,
+                            &slot->c0_rx_committed_bitmap, handle->sequence);
+    }
+    if (handle->has_hop != 0U) {
+        replay_window_commit(&slot->hop_replay, handle->hop_sequence);
         replay_reservation_clear(
             &slot->hop_replay.reservations[hop_reservation_slot]);
     }
@@ -2325,10 +4380,95 @@ ucn_result_t ucn_i_security_replay_commit(
     return UCN_OK;
 }
 
+ucn_result_t ucn_i_security_replay_commit(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_replay_handle_t *handle,
+    const ucn_i_security_current_facts_t *facts)
+{
+    if(owner == NULL || handle == NULL ||
+       ucn_i_ranges_overlap(owner,sizeof(*owner),handle,sizeof(*handle)))
+        return UCN_ERR_ARGUMENT;
+
+    return replay_commit_internal(owner, handle, facts, false);
+}
+
+ucn_result_t ucn_i_security_control_replay_complete(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_replay_handle_t *handle,
+    const ucn_i_security_current_facts_t *facts)
+{
+    if(owner == NULL || handle == NULL ||
+       ucn_i_ranges_overlap(owner,sizeof(*owner),handle,sizeof(*handle)))
+        return UCN_ERR_ARGUMENT;
+
+    ucn_i_security_replay_reservation_t *reservation;
+    ucn_i_security_slot_t *slot;
+    uint16_t session_slot;
+    uint16_t reservation_slot;
+    uint16_t hop_reservation_slot = 0U;
+    ucn_result_t result;
+
+    if (facts == NULL || owner == NULL ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), facts,
+                             sizeof(*facts))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = owner_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (owner->callback_active != 0U ||
+        !handle_matches(owner, handle->session, &session_slot)) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    slot = &owner->sessions[session_slot];
+    if (!replay_handle_matches(owner, slot, handle, &reservation_slot) ||
+        (handle->has_hop != 0U &&
+         !hop_replay_handle_matches(slot, handle,
+                                    &hop_reservation_slot))) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    reservation = &slot->origin_replay.reservations[reservation_slot];
+    if (slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        !current_facts_match(slot, facts) ||
+        facts->now_us >= reservation->deadline_us ||
+        origin_is_committed(slot, handle->replay_domain, handle->sequence) ||
+        (handle->has_hop != 0U &&
+         (facts->now_us >= slot->hop_replay
+                               .reservations[hop_reservation_slot]
+                               .deadline_us ||
+          replay_is_committed(&slot->hop_replay,
+                              handle->hop_sequence)))) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    reservation->business_completed = 1U;
+    owner_unlock(owner);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_security_control_replay_commit(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_replay_handle_t *handle,
+    const ucn_i_security_current_facts_t *facts)
+{
+    if(owner == NULL || handle == NULL ||
+       ucn_i_ranges_overlap(owner,sizeof(*owner),handle,sizeof(*handle)))
+        return UCN_ERR_ARGUMENT;
+
+    return replay_commit_internal(owner, handle, facts, true);
+}
+
 ucn_result_t ucn_i_security_replay_abort(
     ucn_i_security_owner_t *owner,
-    ucn_i_security_replay_handle_t handle)
+    const ucn_i_security_replay_handle_t *handle)
 {
+    if(owner == NULL || handle == NULL ||
+       ucn_i_ranges_overlap(owner,sizeof(*owner),handle,sizeof(*handle)))
+        return UCN_ERR_ARGUMENT;
+
     ucn_i_security_slot_t *slot;
     uint16_t session_slot;
     uint16_t reservation_slot;
@@ -2339,7 +4479,7 @@ ucn_result_t ucn_i_security_replay_abort(
         return result;
     }
     if (owner->callback_active != 0U ||
-        !handle_matches(owner, handle.session, &session_slot)) {
+        !handle_matches(owner, handle->session, &session_slot)) {
         owner_unlock(owner);
         return UCN_ERR_STATE;
     }
@@ -2348,17 +4488,120 @@ ucn_result_t ucn_i_security_replay_abort(
         owner_unlock(owner);
         return UCN_ERR_STATE;
     }
-    if (handle.has_hop != 0U &&
+    if (handle->has_hop != 0U &&
         !hop_replay_handle_matches(slot, handle, &hop_reservation_slot)) {
         owner_unlock(owner);
         return UCN_ERR_STATE;
     }
     replay_reservation_clear(
         &slot->origin_replay.reservations[reservation_slot]);
-    if (handle.has_hop != 0U) {
+    if (handle->has_hop != 0U) {
         replay_reservation_clear(
             &slot->hop_replay.reservations[hop_reservation_slot]);
     }
+    owner_unlock(owner);
+    return UCN_OK;
+}
+
+static bool hop_only_handle_matches(
+    const ucn_i_security_slot_t *slot,
+    const ucn_i_security_hop_replay_handle_t *handle,
+    uint16_t *reservation_slot_out)
+{
+    const uint16_t index = handle->reservation_slot;
+
+    if (handle->reserved_zero != 0U || handle->hop_sequence == 0U ||
+        handle->reservation_generation == 0U ||
+        index >= UCN_I_SECURITY_REPLAY_RESERVATION_COUNT ||
+        slot->hop_replay.reservations[index].valid == 0U ||
+        slot->hop_replay.reservations[index].generation !=
+            handle->reservation_generation ||
+        slot->hop_replay.reservations[index].sequence !=
+            handle->hop_sequence) {
+        return false;
+    }
+    *reservation_slot_out = index;
+    return true;
+}
+
+ucn_result_t ucn_i_security_hop_replay_commit(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_hop_replay_handle_t *handle,
+    const ucn_i_security_current_facts_t *facts)
+{
+    if(owner == NULL || handle == NULL ||
+       ucn_i_ranges_overlap(owner,sizeof(*owner),handle,sizeof(*handle)))
+        return UCN_ERR_ARGUMENT;
+
+    ucn_i_security_slot_t *slot;
+    uint16_t session_slot;
+    uint16_t reservation_slot;
+    ucn_result_t result;
+
+    if (owner == NULL || facts == NULL ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), facts,
+                             sizeof(*facts))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = owner_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (owner->callback_active != 0U ||
+        !handle_matches(owner, handle->session, &session_slot)) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    slot = &owner->sessions[session_slot];
+    if (!hop_only_handle_matches(slot, handle, &reservation_slot)) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    if (slot->phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        !current_facts_match(slot, facts) ||
+        facts->now_us >=
+            slot->hop_replay.reservations[reservation_slot].deadline_us ||
+        replay_is_committed(&slot->hop_replay, handle->hop_sequence)) {
+        replay_reservation_clear(
+            &slot->hop_replay.reservations[reservation_slot]);
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    replay_window_commit(&slot->hop_replay, handle->hop_sequence);
+    replay_reservation_clear(
+        &slot->hop_replay.reservations[reservation_slot]);
+    owner_unlock(owner);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_security_hop_replay_abort(
+    ucn_i_security_owner_t *owner,
+    const ucn_i_security_hop_replay_handle_t *handle)
+{
+    if(owner == NULL || handle == NULL ||
+       ucn_i_ranges_overlap(owner,sizeof(*owner),handle,sizeof(*handle)))
+        return UCN_ERR_ARGUMENT;
+
+    ucn_i_security_slot_t *slot;
+    uint16_t session_slot;
+    uint16_t reservation_slot;
+    ucn_result_t result = owner_lock(owner);
+
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (owner->callback_active != 0U ||
+        !handle_matches(owner, handle->session, &session_slot)) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    slot = &owner->sessions[session_slot];
+    if (!hop_only_handle_matches(slot, handle, &reservation_slot)) {
+        owner_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    replay_reservation_clear(
+        &slot->hop_replay.reservations[reservation_slot]);
     owner_unlock(owner);
     return UCN_OK;
 }
@@ -2469,6 +4712,10 @@ ucn_result_t ucn_i_security_session_get(
     view.link_generation = slot->candidate.link_generation;
     view.session_generation = slot->candidate.session_generation;
     view.policy_generation = slot->candidate.policy_generation;
+    view.origin_tx_key_generation =
+        slot->candidate.origin_tx.key_generation;
+    view.origin_rx_key_generation =
+        slot->candidate.origin_rx.key_generation;
     view.origin_level = slot->candidate.origin_level;
     view.hop_profile = slot->candidate.hop_profile;
     view.phase = slot->phase;
@@ -2497,6 +4744,8 @@ ucn_result_t ucn_i_security_fence(
            sizeof(owner->sessions[slot_index].origin_tx_reservation));
     memset(&owner->sessions[slot_index].origin_replay, 0,
            sizeof(owner->sessions[slot_index].origin_replay));
+    owner->sessions[slot_index].c0_rx_highest_committed = 0U;
+    owner->sessions[slot_index].c0_rx_committed_bitmap = 0U;
     memset(&owner->sessions[slot_index].hop_replay, 0,
            sizeof(owner->sessions[slot_index].hop_replay));
     owner_unlock(owner);

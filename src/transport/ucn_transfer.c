@@ -255,7 +255,7 @@ static ucn_result_t transfer_tx_begin(
     if (result != UCN_OK) {
         return result;
     }
-    result = ucn_i_sha256_128(message, message_bytes, digest,
+    result = UCN_I_DIGEST_CANONICAL("UCN6-TRANSFER-MESSAGE-V1", message, message_bytes, digest,
                               &owner->hash_workspace);
     if (result != UCN_OK || memcmp(digest, setup->message_digest, 16U) != 0) {
         ucn_i_transport_p_unlock(owner);
@@ -581,6 +581,18 @@ static bool transfer_key_equal(
            left->transfer_id == right->transfer_id;
 }
 
+static bool wire_key_matches_setup(
+    const ucn_i_transport_transfer_key_t *key,
+    const ucn_i_transport_transfer_setup_t *setup)
+{
+    ucn_i_transport_transfer_key_t expected;
+
+    return key != NULL && setup != NULL &&
+           ucn_i_transport_transfer_key_from_setup(setup, &expected) ==
+               UCN_OK &&
+           memcmp(&expected, key, sizeof(expected)) == 0;
+}
+
 static ucn_result_t transfer_rx_setup(
     ucn_i_transport_owner_t *owner,
     ucn_handle_t parent,
@@ -650,11 +662,16 @@ static ucn_result_t transfer_rx_setup(
                 ucn_i_transport_p_unlock(owner);
                 return UCN_ERR_REPLAY;
             }
-            if (facts->security.origin_security != 0U &&
-                facts->security.authenticated_replay_candidate == 0U) {
-                ucn_i_transport_p_unlock(owner);
-                return UCN_ERR_REPLAY;
-            }
+            /* EN: Setup idempotence is keyed by the immutable Transfer key,
+             * not by reuse of the outer C0 transaction.  A sender may retry
+             * the exact Setup in a fresh authenticated C0 transaction; that
+             * must return the original obligation without refreshing its
+             * deadline.  Security still classifies an actual repeated C0
+             * frame before this layer.
+             * 中文：Setup 幂等由不可变 Transfer Key 判定，而不是要求复用外层
+             * C0 事务。发送端可用新的已认证 C0 事务重发完全相同的 Setup；此时
+             * 必须返回原 obligation 且不得刷新 deadline。真正的 C0 帧重放仍
+             * 由 Security 在进入本层前分类。 */
             if (record->phase == UCN_I_TRANSPORT_TRANSFER_DELIVERED) {
                 ucn_i_transport_terminal_receipt_record_t *receipt;
                 if (record->receipt_slot >=
@@ -974,7 +991,7 @@ ucn_result_t ucn_i_transport_transfer_rx_fragment(
     record->received_bytes += payload_bytes;
     *exact_duplicate_out = false;
     if (record->received_count == record->setup.fragment_count) {
-        result = ucn_i_sha256_128(record->message, record->setup.total_length,
+        result = UCN_I_DIGEST_CANONICAL("UCN6-TRANSFER-MESSAGE-V1", record->message, record->setup.total_length,
                                   message_digest, &owner->hash_workspace);
         if (result != UCN_OK ||
             memcmp(message_digest, record->setup.message_digest, 16U) != 0) {
@@ -1156,6 +1173,9 @@ ucn_result_t ucn_i_transport_transfer_view(
         view.setup = record->setup;
         view.deadline_us = record->deadline_us;
         view.completed_fragments = record->acknowledged_count;
+        view.terminal_result_code = record->terminal_result_code;
+        view.terminal_received = record->terminal_received;
+        view.terminal_state = record->terminal_state;
         view.phase = record->phase;
     } else if (handle.object_kind == UCN_I_TRANSPORT_TRANSFER_RX_KIND) {
         ucn_i_transport_transfer_rx_record_t *record =
@@ -1276,6 +1296,111 @@ ucn_result_t ucn_i_transport_transfer_abort(
         ucn_i_transport_p_unlock(owner);
         return UCN_ERR_ARGUMENT;
     }
+    ucn_i_transport_p_unlock(owner);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_transport_transfer_accept_abort(
+    ucn_i_transport_owner_t *owner,
+    ucn_handle_t handle,
+    const ucn_i_transport_transfer_key_t *key,
+    const ucn_i_transport_transfer_facts_t *response_facts,
+    uint64_t now_us)
+{
+    ucn_result_t result;
+
+    if (key == NULL || response_facts == NULL ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), key, sizeof(*key)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), response_facts,
+                             sizeof(*response_facts))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = ucn_i_transport_p_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    if (handle.object_kind == UCN_I_TRANSPORT_TRANSFER_TX_KIND) {
+        ucn_i_transport_transfer_tx_record_t *record =
+            ucn_i_transport_p_transfer_tx(owner, handle);
+        if (record == NULL ||
+            (record->phase != UCN_I_TRANSPORT_TRANSFER_SETUP_PENDING &&
+             record->phase != UCN_I_TRANSPORT_TRANSFER_SENDING) ||
+            !wire_key_matches_setup(key, &record->setup) ||
+            !response_facts_match(&record->facts, response_facts)) {
+            ucn_i_transport_p_unlock(owner);
+            return UCN_ERR_STATE;
+        }
+        if (ucn_i_deadline_expired_us(now_us, record->deadline_us)) {
+            record->phase = UCN_I_TRANSPORT_TRANSFER_FAILED;
+            ucn_i_transport_p_unlock(owner);
+            return UCN_ERR_TIMEOUT;
+        }
+        record->phase = UCN_I_TRANSPORT_TRANSFER_ABORTED;
+    } else if (handle.object_kind == UCN_I_TRANSPORT_TRANSFER_RX_KIND) {
+        ucn_i_transport_transfer_rx_record_t *record =
+            ucn_i_transport_p_transfer_rx(owner, handle);
+        if (record == NULL ||
+            record->phase != UCN_I_TRANSPORT_TRANSFER_RECEIVING ||
+            !wire_key_matches_setup(key, &record->setup) ||
+            !response_facts_match(&record->facts, response_facts)) {
+            ucn_i_transport_p_unlock(owner);
+            return UCN_ERR_STATE;
+        }
+        if (ucn_i_deadline_expired_us(now_us, record->deadline_us)) {
+            record->phase = UCN_I_TRANSPORT_TRANSFER_FAILED;
+            ucn_i_transport_p_unlock(owner);
+            return UCN_ERR_TIMEOUT;
+        }
+        record->phase = UCN_I_TRANSPORT_TRANSFER_ABORTED;
+    } else {
+        ucn_i_transport_p_unlock(owner);
+        return UCN_ERR_ARGUMENT;
+    }
+    ucn_i_transport_p_unlock(owner);
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_transport_transfer_tx_accept_terminal(
+    ucn_i_transport_owner_t *owner,
+    ucn_handle_t handle,
+    const ucn_i_transport_transfer_key_t *key,
+    const ucn_i_transport_transfer_facts_t *response_facts,
+    uint8_t terminal_state,
+    uint16_t result_code,
+    uint64_t now_us)
+{
+    ucn_i_transport_transfer_tx_record_t *record;
+    ucn_result_t result;
+
+    if (key == NULL || response_facts == NULL || terminal_state == 0U ||
+        now_us == 0U ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), key, sizeof(*key)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), response_facts,
+                             sizeof(*response_facts))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    result = ucn_i_transport_p_lock(owner);
+    if (result != UCN_OK) {
+        return result;
+    }
+    record = ucn_i_transport_p_transfer_tx(owner, handle);
+    if (record == NULL || record->phase != UCN_I_TRANSPORT_TRANSFER_COMPLETE ||
+        !wire_key_matches_setup(key, &record->setup) ||
+        !response_facts_match(&record->facts, response_facts)) {
+        ucn_i_transport_p_unlock(owner);
+        return UCN_ERR_STATE;
+    }
+    if (record->terminal_received != 0U) {
+        result = record->terminal_state == terminal_state &&
+                         record->terminal_result_code == result_code ?
+                     UCN_OK :
+                     UCN_ERR_REPLAY;
+        ucn_i_transport_p_unlock(owner);
+        return result;
+    }
+    record->terminal_received = 1U;
+    record->terminal_state = terminal_state;
+    record->terminal_result_code = result_code;
     ucn_i_transport_p_unlock(owner);
     return UCN_OK;
 }

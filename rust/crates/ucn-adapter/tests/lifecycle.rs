@@ -12,6 +12,42 @@ use ucn_types::Error;
 type Ingress = AdapterEventIngress<2, 2, 2, 64>;
 
 #[test]
+fn unknown_requires_late_exact_proof_but_contradiction_stays_quarantined() {
+    let ingress = Ingress::new(990).unwrap();
+    let mut owner = AdapterOwner::new(990, &ingress).unwrap();
+    let link = owner.open_link(0, 1, 64).unwrap();
+    let token = owner.tx_reserve(link, 1).unwrap();
+    let mut driver = ScriptDriver::new(&ingress, DriverSubmit::Unknown);
+    assert_eq!(
+        owner.tx_submit(token, &[1], &mut driver),
+        Err(Error::InDoubt)
+    );
+    assert!(owner.tx_retire(token).is_err());
+    ingress
+        .tx_complete(token, TerminalOutcome::Success)
+        .unwrap();
+    assert_eq!(owner.tx_view(token).unwrap().state, TxState::Completed);
+    owner.tx_retire(token).unwrap();
+    assert_eq!(owner.tx_reserve(link, 2), Err(Error::State)); // link remains fenced
+
+    let ingress = Ingress::new(991).unwrap();
+    let mut owner = AdapterOwner::new(991, &ingress).unwrap();
+    let link = owner.open_link(0, 1, 64).unwrap();
+    let token = owner.tx_reserve(link, 1).unwrap();
+    let mut driver = ScriptDriver::new(&ingress, DriverSubmit::NotSubmitted);
+    driver.submit_completion = Some(TerminalOutcome::Success);
+    assert_eq!(
+        owner.tx_submit(token, &[1], &mut driver),
+        Err(Error::InDoubt)
+    );
+    assert_eq!(owner.tx_view(token), Err(Error::InDoubt));
+    assert!(owner.tx_retire(token).is_err());
+    owner.reopen_link(link, 2, 64).unwrap();
+    assert_eq!(owner.tx_view(token), Err(Error::InDoubt));
+    assert_eq!(owner.tx_retire(token), Err(Error::InDoubt));
+}
+
+#[test]
 fn owner_storage_never_copies_caller_owned_frame_arrays() {
     type SmallIngress = AdapterEventIngress<1, 1, 1, 8>;
     type LargeIngress = AdapterEventIngress<1, 1, 1, 1024>;
@@ -177,15 +213,13 @@ fn contradictory_completion_fences_the_link_and_cannot_be_retired() {
 
     let reopened = owner.reopen_link(link, 5, 32).expect("recovery reopen");
     assert_ne!(reopened, link);
+    assert_eq!(owner.tx_view(token), Err(Error::InDoubt));
+    assert_eq!(owner.tx_retire(token), Err(Error::InDoubt));
     assert_eq!(
-        owner.tx_view(token).expect("old outcome sealed"),
-        ucn_adapter::TxView {
-            state: TxState::Completed,
-            terminal: Some(TerminalOutcome::Failure(Error::InDoubt)),
-            core_tx_slot: 1,
-        }
+        ingress.tx_complete(token, TerminalOutcome::Failure(Error::Timeout)),
+        Err(Error::InDoubt)
     );
-    owner.tx_retire(token).expect("retire sealed old token");
+    assert_eq!(owner.tx_retire(token), Err(Error::InDoubt));
     assert!(owner.tx_reserve(reopened, 2).is_ok());
 }
 
@@ -352,6 +386,11 @@ fn unknown_submit_is_fenced_and_late_proof_can_resolve_after_reopen() {
     let new_link = owner
         .reopen_link(old_link, 4, 32)
         .expect("invalidate old hardware instance");
+    assert_eq!(owner.tx_retire(token), Err(Error::InDoubt));
+    assert_eq!(
+        owner.tx_view(token).unwrap().terminal,
+        Some(TerminalOutcome::Failure(Error::InDoubt))
+    );
     ingress
         .tx_complete(token, TerminalOutcome::Failure(Error::Timeout))
         .expect("late exact proof replaces sealed unknown outcome");

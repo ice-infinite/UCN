@@ -128,8 +128,8 @@ static void test_manifest_and_record_golden(void)
     CHECK(ucn_i_persist_body_digest(&meta, body, digest, &workspace) == UCN_OK);
     CHECK(memcmp(digest, expected_body_digest, sizeof(digest)) == 0);
     CHECK(ucn_i_persist_record_encode(
-               &meta, expected_manifest, body, UCN_PERSIST_BODY_BYTES,
-               sizeof(slot), 0xFFU, slot, &workspace) == UCN_OK);
+               &(ucn_i_persist_record_encode_request_t){&meta, expected_manifest, body, UCN_PERSIST_BODY_BYTES,
+               sizeof(slot), 0xFFU, slot}, &workspace) == UCN_OK);
     CHECK(memcmp(slot, "UC6R\x00\x01\x00\x60", 8U) == 0);
     CHECK(slot[8] == 0U && slot[9] == UCN_PERSIST_DOMAIN_PRODUCT_CONFIG);
     CHECK(memcmp(&slot[16], expected_manifest, 16U) == 0);
@@ -141,8 +141,8 @@ static void test_manifest_and_record_golden(void)
         compact_manifest_digest[index] = (uint8_t)index;
     }
     CHECK(ucn_i_persist_record_encode(
-              &meta, compact_manifest_digest, body, sizeof(body),
-              sizeof(compact_slot), 0xFFU, compact_slot, &workspace) ==
+              &(ucn_i_persist_record_encode_request_t){&meta, compact_manifest_digest, body, sizeof(body),
+              sizeof(compact_slot), 0xFFU, compact_slot}, &workspace) ==
           UCN_OK);
     memcpy(&compact_slot[sizeof(compact_slot) - sizeof(marker)], marker,
            sizeof(marker));
@@ -233,8 +233,8 @@ static void test_codec_aliases_fail_before_write(void)
     meta.schema_version = 1U;
     meta.operation_kind = 1U;
     CHECK(ucn_i_persist_record_encode(
-               &meta, manifest_digest, body, UCN_PERSIST_BODY_BYTES,
-               sizeof(slot), 0xFFU, slot, &workspace) == UCN_OK);
+               &(ucn_i_persist_record_encode_request_t){&meta, manifest_digest, body, UCN_PERSIST_BODY_BYTES,
+               sizeof(slot), 0xFFU, slot}, &workspace) == UCN_OK);
     CHECK(ucn_i_persist_marker_encode(1U, marker) == UCN_OK);
     memcpy(&slot[sizeof(slot) - sizeof(marker)], marker, sizeof(marker));
     memset(&overlapping_outputs, 0xA5, sizeof(overlapping_outputs));
@@ -245,6 +245,42 @@ static void test_codec_aliases_fail_before_write(void)
            UCN_ERR_ARGUMENT);
     CHECK(overlapping_outputs.bytes[0] == 0xA5U);
     CHECK(overlapping_outputs.bytes[1] == 0xA5U);
+    {
+        ucn_i_persist_record_decode_request_t request, request_before;
+        ucn_i_persist_record_meta_t decoded, decoded_before;
+        uint8_t decoded_body = 0xA5U;
+        memset(&decoded,0xA5,sizeof(decoded)); decoded_before=decoded;
+        memset(&request,0,sizeof(request));
+        request.slot=slot; request.slot_bytes=sizeof(slot);
+        request.manifest=&entry; request.durable_manifest_digest=manifest_digest;
+        request.erased_value=0xFFU; request.meta_out=&decoded;
+        request.body_out=(uint8_t *)&request; request.body_capacity=1U;
+        request_before=request;
+        CHECK(ucn_i_persist_record_decode(&request,&workspace)==UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&request,&request_before,sizeof(request))==0);
+        CHECK(memcmp(&decoded,&decoded_before,sizeof(decoded))==0);
+        request.body_out=&decoded_body;
+        request.meta_out=(ucn_i_persist_record_meta_t *)&request;
+        request_before=request;
+        CHECK(ucn_i_persist_record_decode(&request,&workspace)==UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&request,&request_before,sizeof(request))==0 && decoded_body==0xA5U);
+    }
+    {
+        ucn_i_persist_codec_workspace_t before;
+        uint8_t slot_before[UCN_PERSIST_SLOT_BYTES];
+        ucn_i_persist_record_encode_request_t request = {
+            &meta, workspace.digest, body, UCN_PERSIST_BODY_BYTES,
+            sizeof(slot), 0xFFU, slot};
+        memset(&workspace,0xA5,sizeof(workspace)); before=workspace;
+        memcpy(slot_before,slot,sizeof(slot));
+        CHECK(ucn_i_persist_record_encode(&request,&workspace)==UCN_ERR_ARGUMENT);
+        CHECK(memcmp(slot,slot_before,sizeof(slot))==0);
+        CHECK(memcmp(&workspace,&before,sizeof(workspace))==0);
+        request.manifest_digest=manifest_digest;
+        request.slot_out=(uint8_t *)&workspace; request.slot_bytes=sizeof(workspace);
+        CHECK(ucn_i_persist_record_encode(&request,&workspace)==UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&workspace,&before,sizeof(workspace))==0);
+    }
 }
 
 static void test_record_field_negative_matrix(void)
@@ -299,8 +335,8 @@ static void test_record_field_negative_matrix(void)
     meta.schema_version = 1U;
     meta.operation_kind = 1U;
     CHECK(ucn_i_persist_record_encode(
-               &meta, manifest_digest, body, UCN_PERSIST_BODY_BYTES,
-               UCN_PERSIST_SLOT_BYTES, 0xFFU, slot, &workspace) == UCN_OK);
+               &(ucn_i_persist_record_encode_request_t){&meta, manifest_digest, body, UCN_PERSIST_BODY_BYTES,
+               UCN_PERSIST_SLOT_BYTES, 0xFFU, slot}, &workspace) == UCN_OK);
     CHECK(ucn_i_persist_marker_encode(1U, marker) == UCN_OK);
     memcpy(&slot[marker_offset], marker, sizeof(marker));
     memcpy(original, slot, sizeof(original));
@@ -498,9 +534,56 @@ static void test_manifest_workspace_aliases_fail_before_write(void)
     CHECK(digest[0] == 0xA5U);
 }
 
+static void test_blake2s_block_boundaries(void)
+{
+    static const size_t lengths[] = {0U,63U,64U,65U,127U,128U,129U};
+    static const char *const expected[] = {
+        "64550d6ffe2c0a01a14aba1eade0200c", "4006430a2d313751a9ece24fccb52de5",
+        "dc66ca8f03865801b0ffe06ed8a1a90e", "399d3e92ccfcedcdde9bf4c2be14cf8c",
+        "5d3541be0ce9b6d8f9315862ac0198c5", "7a3b3fa888b60095e7b305efcf3c3dbc",
+        "dd6146fb0f48a29aa4c813fe75d15941"};
+    static const char hex[] = "0123456789abcdef";
+    ucn_i_persist_hash_workspace_t workspace;
+    uint8_t input[129],digest[16];
+    char encoded[33];
+    size_t i,j;
+    for(i=0U;i<sizeof(input);++i) input[i]=(uint8_t)i;
+    for(i=0U;i<sizeof(lengths)/sizeof(lengths[0]);++i) {
+        ucn_i_persist_blake2s128(input,lengths[i],digest,&workspace);
+        for(j=0U;j<sizeof(digest);++j) {
+            encoded[2U*j]=hex[digest[j]>>4U];
+            encoded[2U*j+1U]=hex[digest[j]&15U];
+        }
+        encoded[32]='\0';
+        CHECK(strcmp(encoded,expected[i])==0);
+    }
+}
+
+static void test_encode_request_aliases(void)
+{
+    ucn_i_persist_codec_workspace_t workspace, before;
+    ucn_i_persist_record_encode_request_t request, request_before;
+    memset(&workspace,0xA5,sizeof(workspace));
+    before=workspace;
+    memset(&request,0,sizeof(request));
+    request.slot_out=(uint8_t *)&request;
+    request.slot_bytes=sizeof(request);
+    request_before=request;
+    CHECK(ucn_i_persist_record_encode(NULL,&workspace)==UCN_ERR_ARGUMENT);
+    CHECK(ucn_i_persist_record_encode(&request,NULL)==UCN_ERR_ARGUMENT);
+    CHECK(ucn_i_persist_record_encode(
+              (const ucn_i_persist_record_encode_request_t *)&workspace,
+              &workspace)==UCN_ERR_ARGUMENT);
+    CHECK(ucn_i_persist_record_encode(&request,&workspace)==UCN_ERR_ARGUMENT);
+    CHECK(memcmp(&workspace,&before,sizeof(workspace))==0);
+    CHECK(memcmp(&request,&request_before,sizeof(request))==0);
+}
+
 int main(void)
 {
     test_hash_and_crc_oracles();
+    test_blake2s_block_boundaries();
+    test_encode_request_aliases();
     test_manifest_and_record_golden();
     test_codec_aliases_fail_before_write();
     test_record_field_negative_matrix();

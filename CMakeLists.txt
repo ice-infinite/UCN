@@ -12,6 +12,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 add_compile_options($<$<C_COMPILER_ID:MSVC>:/utf-8>)
 
 option(UCN_BUILD_TESTS "Build UCN v6 unit and validation tests" ON)
+option(UCN_FEATURE_NATIVE "Build the optional static application Pub/Sub facade" OFF)
 option(UCN_FEATURE_REALTIME "Build the optional v6 Realtime module" ON)
 option(UCN_FEATURE_GROUP "Build the optional simplified Group module" ON)
 option(UCN_FEATURE_CLUSTER "Build the optional v6 Cluster module" ON)
@@ -136,13 +137,14 @@ target_include_directories(ucn_v6s_security_session PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(ucn_v6s_security_session PUBLIC
     UCN_PROFILE=${UCN_PROFILE_VALUE})
-target_link_libraries(ucn_v6s_security_session PRIVATE ucn_common)
+target_link_libraries(ucn_v6s_security_session PRIVATE ucn_common ucn_wire)
 
 # IMPL-04 keeps Dynamic Admission and Capability as two independent private
 # Owners. They exchange only immutable Coordinator-routed views and do not
 # link Security or Persistence Owner archives directly.
 add_library(ucn_v6s_admission STATIC EXCLUDE_FROM_ALL
-    src/admission/ucn_admission.c)
+    src/admission/ucn_admission.c
+    src/admission/ucn_admission_wire.c)
 ucn_target_defaults(ucn_v6s_admission)
 target_include_directories(ucn_v6s_admission PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -213,6 +215,7 @@ target_link_libraries(ucn_v6s_transport PRIVATE ucn_common)
 # references. Durable Operation and public Runtime wiring remain separate.
 add_library(ucn_v6s_service STATIC EXCLUDE_FROM_ALL
     src/service/ucn_service.c
+    src/service/ucn_service_control.c
     src/service/ucn_qos.c
     src/service/ucn_operation.c
     src/service/ucn_operation_id.c)
@@ -333,7 +336,9 @@ set(UCN_V6S_SCAFFOLD_TARGETS
     ucn_v6s_group_scaffold
     ucn_v6s_cluster_scaffold)
 
-add_library(ucn_wire STATIC src/wire/ucn_wire.c)
+add_library(ucn_wire STATIC
+    src/wire/ucn_wire.c
+    src/wire/ucn_control_wire.c)
 ucn_target_defaults(ucn_wire)
 target_include_directories(ucn_wire PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -347,7 +352,7 @@ target_include_directories(ucn_adapter PRIVATE
 target_compile_definitions(ucn_adapter PUBLIC UCN_PROFILE=${UCN_PROFILE_VALUE})
 target_link_libraries(ucn_adapter PRIVATE ucn_common)
 
-add_library(ucn_kernel STATIC src/runtime/ucn_node.c)
+add_library(ucn_kernel STATIC src/runtime/ucn_node.c src/runtime/ucn_tx.c)
 ucn_target_defaults(ucn_kernel)
 target_include_directories(ucn_kernel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -363,7 +368,8 @@ add_library(ucn_simplified STATIC
     src/core/ucn_owner.c
     src/wire/ucn_wire.c
     src/adapter/ucn_adapter.c
-    src/runtime/ucn_node.c)
+    src/runtime/ucn_node.c
+    src/runtime/ucn_tx.c)
 add_library(UCN::simplified ALIAS ucn_simplified)
 set_target_properties(ucn_simplified PROPERTIES EXPORT_NAME simplified)
 ucn_target_defaults(ucn_simplified)
@@ -381,6 +387,7 @@ endif()
 if(UCN_FEATURE_PERSISTENCE)
     add_library(ucn_persistence STATIC
         src/persistence/ucn_persistence_codec.c
+        src/persistence/ucn_persistence_record_header.c
         src/persistence/ucn_persistence.c)
     add_library(UCN::persistence ALIAS ucn_persistence)
     set_target_properties(ucn_persistence PROPERTIES EXPORT_NAME persistence)
@@ -473,6 +480,22 @@ set(UCN_EXPORT_TARGETS
     ucn_v6_transfer)
 if(UCN_FEATURE_PERSISTENCE)
     list(APPEND UCN_EXPORT_TARGETS ucn_persistence)
+endif()
+if(UCN_FEATURE_NATIVE)
+    add_library(ucn_native STATIC src/native/ucn_native.c)
+    add_library(UCN::native ALIAS ucn_native)
+    set_target_properties(ucn_native PROPERTIES EXPORT_NAME native)
+    ucn_target_defaults(ucn_native)
+    target_link_libraries(ucn_native PUBLIC ucn_simplified)
+    # Installed bilingual headers require the same deterministic source encoding
+    # as the in-tree tests; do not rely on the consumer's Windows ANSI codepage.
+    target_compile_options(ucn_native INTERFACE $<$<C_COMPILER_ID:MSVC>:/utf-8>)
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(ucn_native PRIVATE -fstack-usage)
+    endif()
+    list(APPEND UCN_EXPORT_TARGETS ucn_native)
+    install(FILES include/ucn/ucn_native.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ucn)
+    install(FILES include/ucn/ucn.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ucn)
 endif()
 
 if(UCN_FEATURE_REALTIME)
@@ -570,7 +593,8 @@ if(UCN_BUILD_TESTS AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
         target_compile_options(ucn_v6s_cluster PRIVATE
             -fstack-usage -fcallgraph-info=su)
     endif()
-    target_compile_options(ucn_v6s_composition PRIVATE -fstack-usage)
+    target_compile_options(ucn_v6s_composition PRIVATE
+        -fstack-usage -fcallgraph-info=su)
 endif()
 
 add_library(ucn INTERFACE)
@@ -674,6 +698,27 @@ if(UCN_BUILD_TESTS)
         target_link_libraries(${name} PRIVATE ${library})
         add_test(NAME ${name} COMMAND ${name})
     endfunction()
+    if(UCN_FEATURE_NATIVE)
+        ucn_add_test(ucn_native_tests tests/simplified/test_native.c ucn_native)
+        target_include_directories(ucn_native_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        ucn_add_test(ucn_native_health_example examples/native/static_health.c ucn_native)
+        enable_language(CXX)
+        add_executable(ucn_native_cpp_tests tests/simplified/test_native_cpp.cpp)
+        target_link_libraries(ucn_native_cpp_tests PRIVATE ucn_native)
+        target_compile_features(ucn_native_cpp_tests PRIVATE cxx_std_17)
+        target_compile_options(ucn_native_cpp_tests PRIVATE
+            $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror;-fno-exceptions;-fno-rtti>
+            $<$<CXX_COMPILER_ID:MSVC>:/W4;/WX>)
+        add_test(NAME ucn_native_cpp_tests COMMAND ucn_native_cpp_tests)
+        add_test(NAME ucn_native_boundary_gate COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_native_boundaries.py --root ${CMAKE_CURRENT_SOURCE_DIR})
+        if(UNIX)
+            find_package(Threads REQUIRED)
+            ucn_add_test(ucn_native_concurrency_tests tests/simplified/test_native_concurrency.c ucn_native)
+            target_include_directories(ucn_native_concurrency_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+            target_link_libraries(ucn_native_concurrency_tests PRIVATE Threads::Threads)
+        endif()
+    endif()
 
     add_test(NAME v6_source_boundary_gate
         COMMAND ${Python3_EXECUTABLE}
@@ -713,12 +758,22 @@ if(UCN_BUILD_TESTS)
         COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_init_overlap_guards.py
             --root ${CMAKE_CURRENT_SOURCE_DIR})
-    if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    add_test(NAME v6s_call_stack_checker_selftest
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/test_v6_call_stack.py)
+    # Sanitizer redzones are not the production task-stack ABI. Measure those
+    # unchanged limits in the separate non-instrumented configuration instead.
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU" AND NOT CMAKE_C_FLAGS MATCHES "-fsanitize=")
         add_test(NAME v6_stack_usage_gate
             COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
                 --build-dir ${CMAKE_CURRENT_BINARY_DIR}
                 --limit-bytes 3072)
+        if(TARGET ucn_native)
+            add_test(NAME ucn_native_stack_gate
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
+                    --build-dir ${CMAKE_CURRENT_BINARY_DIR} --limit-bytes 256 --source-prefix /src/native/)
+        endif()
         add_test(NAME v6s_common_stack_usage_gate
             COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
@@ -848,6 +903,11 @@ if(UCN_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
     ucn_add_test(ucn_manifest_contract_tests
         tests/simplified/test_manifest_contract.c ucn_simplified)
+    ucn_add_test(ucn_v6s_control_wire_tests
+        tests/simplified/test_control_wire.c ucn_wire)
+    target_include_directories(ucn_v6s_control_wire_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR})
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         ucn_add_test(ucn_common_short_enum_tests
             tests/simplified/test_common.c ucn_common)
@@ -1033,6 +1093,26 @@ if(UCN_BUILD_TESTS)
             ucn_v6s_composition)
         target_include_directories(
             ucn_v6s_composition_lifecycle_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        ucn_add_test(ucn_v6s_composition_static_c1_tests
+            tests/simplified/test_composition_static_c1.c
+            ucn_v6s_composition)
+        target_include_directories(
+            ucn_v6s_composition_static_c1_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        if(UCN_FEATURE_PERSISTENCE)
+            ucn_add_test(ucn_v6s_composition_advanced_use_tests
+                tests/simplified/test_composition_advanced_use.c
+                ucn_v6s_composition)
+            target_include_directories(
+                ucn_v6s_composition_advanced_use_tests PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        endif()
+        ucn_add_test(ucn_v6s_composition_optional_tests
+            tests/simplified/test_composition_optional.c
+            ucn_v6s_composition)
+        target_include_directories(
+            ucn_v6s_composition_optional_tests PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src)
     endif()
     if(UCN_FEATURE_REALTIME)
@@ -1609,6 +1689,9 @@ if(UCN_BUILD_TESTS)
             -DUCN_CONSUMER_WORK_DIR=${UCN_SIMPLIFIED_CONSUMER_WORK_DIR}
             -DUCN_TEST_GENERATOR=${CMAKE_GENERATOR}
             -DUCN_TEST_CONFIGURATION=$<CONFIG>
+            "-DUCN_TEST_C_FLAGS=${CMAKE_C_FLAGS}"
+            "-DUCN_TEST_CXX_FLAGS=${CMAKE_CXX_FLAGS}"
+            "-DUCN_TEST_EXE_LINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}"
             ${UCN_SIMPLIFIED_CONSUMER_COMPILER_ARGS}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/test_v6s_install_consumer.cmake)
     if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "GNU")

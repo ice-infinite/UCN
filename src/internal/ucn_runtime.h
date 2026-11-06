@@ -123,6 +123,19 @@ typedef struct ucn_i_callback_read_snapshot {
     uint8_t reserved_zero;
 } ucn_i_callback_read_snapshot_t;
 
+/* TX produces a small action; retirement runs after the worker returns.
+ * TX先产生小型事实，再在同一次Owner调度中退休，避免嵌套两套大型调用栈。 */
+typedef struct ucn_i_tx_action {
+    ucn_result_t result;
+    uint16_t slot;
+    uint8_t kind;
+} ucn_i_tx_action_t;
+
+/* Core-only phase: caller already owns the ucn_step API lease.
+ * 仅Core调度阶段使用；调用方必须已持有ucn_step门禁，不是新公共入口。 */
+bool ucn_i_node_tx_submit(ucn_node_t *node, uint16_t slot,
+                          ucn_i_tx_action_t *action);
+
 struct ucn_node {
     uint32_t magic;
     uint32_t runtime_instance;
@@ -150,6 +163,14 @@ struct ucn_node {
     uint8_t address_width;
     uint8_t lifecycle;
     uint8_t trusted_o0_network;
+    /* EN: A composed Runtime owns Wire demultiplexing above Foundation.  In
+     * that mode the C1 worker must never claim C0 or another Contract from
+     * the shared Adapter queue.  Standalone ucn_node_t keeps the legacy
+     * consume-and-drop behavior for unknown Contracts.
+     * 中文：组合 Runtime 在 Foundation 之上统一拥有 Wire 分流。启用后，
+     * C1 worker 绝不能从共享 Adapter 队列认领 C0 或其他 Contract；独立
+     * ucn_node_t 仍保留对未知 Contract 的消费丢弃行为。 */
+    uint8_t external_ingress_demux;
     uint8_t faulted;
     uint8_t time_initialized;
     uint8_t work_cursor;
@@ -159,6 +180,14 @@ struct ucn_node {
     ucn_i_lock_ops_t lock;
     ucn_i_callback_gate_t callback_gate;
     ucn_i_callback_read_snapshot_t callback_read_snapshot;
+    /* EN: Foundation links have no reopen operation in the simplified
+     * Runtime.  Cache their immutable handles at init so an Endpoint callback
+     * can build its read-only snapshot without nesting Adapter validation and
+     * locking on the MCU callback stack.
+     * 中文：简化 Runtime 的 Foundation Link 没有 reopen 操作，因此在 init
+     * 时缓存其不可变 Handle，让 Endpoint callback 构建只读快照时无需在 MCU
+     * 回调栈上再次嵌套 Adapter 校验与加锁。 */
+    ucn_link_handle_t link_handles[UCN_LINK_COUNT];
     ucn_i_binding_t bindings[UCN_BINDING_COUNT];
     ucn_i_endpoint_t endpoints[UCN_ENDPOINT_COUNT];
     ucn_i_static_path_t paths[UCN_STATIC_PATH_COUNT];
@@ -167,8 +196,43 @@ struct ucn_node {
     ucn_i_attempt_t attempts[UCN_ATTEMPT_COUNT];
     ucn_i_buffer_obligation_t buffers[UCN_BUFFER_OBLIGATION_COUNT];
     ucn_i_tx_slot_t tx_slots[UCN_TX_SLOT_COUNT];
+    /* EN: One gated receive transaction, not another RX queue. The Adapter
+     * retains the frame/token until retire; no concurrent Core API may reuse
+     * this scratch while decoding or inside the Endpoint callback.
+     * 中文：唯一受门控接收事务的工作区，不是新增队列；Adapter持有原帧/Token
+     * 直到退休，解码/Endpoint回调期间禁止其他Core入口复用。 */
+    struct {
+        ucn_i_adapter_rx_view_t view;
+        ucn_i_c1_frame_t frame;
+    } rx_staging;
     ucn_i_adapter_t adapter;
     ucn_stats_t stats;
 };
+
+/* EN: Composition owns the Core owner identity.  The public initializer keeps
+ * the standalone owner id, while the private initializer binds every handle
+ * emitted by the Foundation to the exact Composition registry record.
+ * 中文：Composition 拥有 Core Owner 身份。公共初始化仍使用独立运行时的固定
+ * Owner ID；私有初始化则把 Foundation 产生的所有句柄绑定到 Registry 中的精确
+ * Owner 记录。 */
+ucn_result_t ucn_i_node_init_with_owner_instance(
+    void *storage,
+    size_t storage_bytes,
+    const ucn_config_t *config,
+    const ucn_ports_t *ports,
+    uint16_t owner_instance,
+    ucn_node_t **out_node);
+
+/* EN: STOPPING has a narrow worker that cannot reach endpoint callbacks or
+ * ordinary TX scheduling.  Composition uses it so shutdown has an honest
+ * bounded MCU call chain instead of relying on a runtime branch in ucn_step.
+ * 中文：STOPPING 使用一条不可进入 Endpoint 回调或普通 TX 调度的窄工作路径。
+ * Composition 通过该入口获得真实有界的 MCU 关闭调用链，而不是依赖
+ * ucn_step 中的运行时分支。 */
+ucn_result_t ucn_i_node_stop_step(
+    ucn_node_t *node,
+    uint64_t now_us,
+    const ucn_step_budget_t *budget,
+    ucn_step_result_t *out_result);
 
 #endif

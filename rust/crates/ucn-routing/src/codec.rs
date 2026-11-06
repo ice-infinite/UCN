@@ -1,19 +1,19 @@
 use ucn_types::{Error, Result};
 
-/// RREQ 在 C0 Header 之后的冻结 Payload 长度。
+/// RREQ完整正文中的叶子字段长度，不是独立完整消息。
 pub const RREQ_PAYLOAD_BYTES: usize = 9;
-/// RREP 在 C0 Header 之后的冻结 Payload 长度。
+/// RREP完整正文中的叶子字段长度，不是独立完整消息。
 pub const RREP_PAYLOAD_BYTES: usize = 29;
 /// RERR 显式携带完整因果域的冻结 Payload 长度。
 pub const RERR_PAYLOAD_BYTES: usize = 99;
 
-/// RREQ 的 9 B 基础发现 Payload；Origin、Target 和 Transaction ID 由 C0 Header 承载。
+/// RREQ的9 B叶子字段；原始身份与发现ID由完整RouteControl正文承载，不从外层邻居头猜测。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RreqPayload {
     /// 已累计的保守路径成本。
     pub accumulated_cost: u32,
-    /// 已知路径上的最小业务 Payload Budget。
-    pub minimum_payload_budget: u16,
+    /// 要求的最小完整UCN帧MTU；业务端先按选定Contract/O/H把Payload长度换算成帧长。
+    pub minimum_frame_mtu: u16,
     /// 基础发现所需能力位。
     pub required_capability_bits: u16,
     /// 冻结发现标志；当前只允许低两位。
@@ -114,7 +114,7 @@ pub fn encode_rreq_payload(value: RreqPayload, output: &mut [u8]) -> Result<()> 
     }
     let mut encoded = [0_u8; RREQ_PAYLOAD_BYTES];
     encoded[0..4].copy_from_slice(&value.accumulated_cost.to_be_bytes());
-    encoded[4..6].copy_from_slice(&value.minimum_payload_budget.to_be_bytes());
+    encoded[4..6].copy_from_slice(&value.minimum_frame_mtu.to_be_bytes());
     encoded[6..8].copy_from_slice(&value.required_capability_bits.to_be_bytes());
     encoded[8] = value.flags;
     output.copy_from_slice(&encoded);
@@ -132,7 +132,7 @@ pub fn decode_rreq_payload(input: &[u8]) -> Result<RreqPayload> {
     }
     let value = RreqPayload {
         accumulated_cost: read_u32(input, 0),
-        minimum_payload_budget: read_u16(input, 4),
+        minimum_frame_mtu: read_u16(input, 4),
         required_capability_bits: read_u16(input, 6),
         flags: input[8],
     };
@@ -253,7 +253,7 @@ pub fn decode_rerr_payload(input: &[u8]) -> Result<RerrPayload> {
 }
 
 fn validate_rreq(value: RreqPayload) -> Result<()> {
-    if value.minimum_payload_budget == 0 || value.flags & !0x03 != 0 {
+    if value.minimum_frame_mtu == 0 || value.flags & !0x03 != 0 {
         return Err(Error::Argument);
     }
     Ok(())

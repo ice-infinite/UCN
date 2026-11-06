@@ -8,6 +8,10 @@
 #define UCN_I_ROUTE_RREQ_BYTES 9U
 #define UCN_I_ROUTE_RREP_BYTES 29U
 #define UCN_I_ROUTE_RERR_BYTES 99U
+#define UCN_I_ROUTE_CONTROL_REQUEST_BYTES 54U
+#define UCN_I_ROUTE_CONTROL_REPLY_BYTES 77U
+#define UCN_I_ROUTE_FRAGMENT_PREFIX_BYTES 14U
+#define UCN_I_ROUTE_FRAGMENT_CHUNK_BYTES 50U
 #define UCN_I_ROUTE_PRINCIPAL_BYTES 16U
 
 #if UCN_PROFILE == UCN_PROFILE_NANO
@@ -62,7 +66,9 @@ typedef struct ucn_i_route_discovery_key {
 
 typedef struct ucn_i_route_rreq_payload {
     uint32_t accumulated_cost;
-    uint16_t minimum_payload_budget;
+    /* Complete UCN frame bytes, never raw business payload bytes.
+     * 完整UCN帧字节数，不能直接填业务Payload长度。 */
+    uint16_t minimum_frame_mtu;
     uint16_t required_capability_bits;
     uint8_t flags;
     uint8_t reserved_zero[3];
@@ -118,6 +124,19 @@ typedef struct ucn_i_route_rrep_message {
     ucn_i_route_rrep_payload_t payload;
 } ucn_i_route_rrep_message_t;
 
+/* EN: Structural fragment only, not authentication evidence.
+ * 中文：仅结构分片，不构成认证凭据；最多四片，正文最多99字节。 */
+typedef struct ucn_i_route_fragment {
+    uint64_t bundle;
+    uint16_t opcode;
+    uint16_t total;
+    uint8_t index;
+    uint8_t count;
+    uint8_t length;
+    uint8_t reserved_zero;
+    uint8_t chunk[UCN_I_ROUTE_FRAGMENT_CHUNK_BYTES];
+} ucn_i_route_fragment_t;
+
 typedef struct ucn_i_route_soft_view {
     ucn_i_route_domain_t domain;
     ucn_i_route_link_ref_t next_hop;
@@ -159,6 +178,22 @@ typedef struct ucn_i_route_resolved {
     uint8_t kind;
     uint8_t reserved_zero[7];
 } ucn_i_route_resolved_t;
+
+/* EN: A relay sees compact Wire bindings, not endpoint Principals.  It may
+ * therefore reuse a dynamic route only when the complete compact tuple maps
+ * to one and only one live canonical RouteDomain.  Ambiguity is fail-closed;
+ * static destination fallback remains explicit.
+ * 中文：中继在线上只看到紧凑 Binding，看不到端点 Principal。只有完整紧凑
+ * 元组唯一映射到一条存活的 canonical RouteDomain 时才可复用动态路由；歧义
+ * 必须失败关闭，静态目标回退仍保持显式。 */
+typedef struct ucn_i_route_forward_key {
+    uint64_t now_us;
+    uint32_t realm;
+    uint32_t source_address;
+    uint32_t source_binding_generation;
+    uint32_t destination_address;
+    uint32_t destination_binding_generation;
+} ucn_i_route_forward_key_t;
 
 typedef uint8_t ucn_i_route_request_action_kind_t;
 enum {
@@ -250,8 +285,10 @@ typedef struct ucn_i_route_owner {
     ucn_i_route_reverse_record_t reverse[UCN_I_ROUTE_REVERSE_COUNT];
     struct {
         ucn_i_route_soft_view_t value;
+        uint32_t reporter_generation;
         uint8_t occupied;
-        uint8_t reserved_zero[7];
+        uint8_t reporter_bound;
+        uint8_t reserved_zero[2];
     } routes[UCN_I_ROUTE_DYNAMIC_COUNT];
     struct {
         ucn_i_route_static_entry_t value;
@@ -273,6 +310,29 @@ ucn_result_t ucn_i_route_rerr_encode(const ucn_i_route_rerr_payload_t *value,
 ucn_result_t ucn_i_route_rerr_decode(const uint8_t input[UCN_I_ROUTE_RERR_BYTES],
                                      ucn_i_route_rerr_payload_t *value_out);
 
+/* EN: Full per-neighbor control bodies. The inner discovery identity is not
+ * the immediate authenticated C0 sender; no runtime accepts the leaf-only
+ * 9/29-byte bodies as a complete route-control message.
+ * 中文：完整逐邻居控制正文。内层发现身份不等于外层认证邻居；9/29字节仅为
+ * 叶子字段编解码，不构成另一套可接收的运行时格式。失败不写输出。 */
+ucn_result_t ucn_i_route_control_request_encode(
+    const ucn_i_route_rreq_message_t *message, uint8_t address_width,
+    uint8_t output[UCN_I_ROUTE_CONTROL_REQUEST_BYTES]);
+ucn_result_t ucn_i_route_control_request_decode(
+    const uint8_t *input, size_t length, uint8_t address_width,
+    ucn_i_route_rreq_message_t *message_out);
+ucn_result_t ucn_i_route_control_reply_encode(
+    const ucn_i_route_rrep_message_t *message, uint32_t reporter_generation,
+    uint8_t address_width, uint8_t output[UCN_I_ROUTE_CONTROL_REPLY_BYTES]);
+ucn_result_t ucn_i_route_control_reply_decode(
+    const uint8_t *input, size_t length, uint8_t address_width,
+    ucn_i_route_rrep_message_t *message_out, uint32_t *reporter_generation_out);
+ucn_result_t ucn_i_route_fragment_encode(
+    const ucn_i_route_fragment_t *fragment, uint8_t *output,
+    size_t capacity, size_t *length_out);
+ucn_result_t ucn_i_route_fragment_decode(
+    const uint8_t *input, size_t length, ucn_i_route_fragment_t *fragment_out);
+
 ucn_result_t ucn_i_route_owner_init(ucn_i_route_owner_t *owner,
                                     const ucn_i_route_config_t *config,
                                     const ucn_i_lock_ops_t *state_lock);
@@ -282,7 +342,7 @@ ucn_result_t ucn_i_route_install_static(ucn_i_route_owner_t *owner,
 ucn_result_t ucn_i_route_ensure_discovery(ucn_i_route_owner_t *owner,
                                           uint32_t target_address,
                                           uint16_t required_capability_bits,
-                                          uint16_t minimum_payload_budget,
+                                          uint16_t minimum_frame_mtu,
                                           uint8_t flags,
                                           uint64_t now_us,
                                           ucn_handle_t *handle_out,
@@ -311,10 +371,23 @@ ucn_result_t ucn_i_route_on_rrep(ucn_i_route_owner_t *owner,
 ucn_result_t ucn_i_route_complete_rrep_forward(ucn_i_route_owner_t *owner,
                                                ucn_handle_t completion,
                                                uint8_t delivered);
+/* EN: Authenticated Wire dispatch atomically binds the reporter's namespace.
+ * 中文：认证Wire分派原子绑定报告方命名空间，不拿对端代际当本地代际。 */
+ucn_result_t ucn_i_route_on_control_rrep(
+    ucn_i_route_owner_t *owner, const ucn_i_route_rrep_message_t *reply,
+    uint32_t reporter_generation, const ucn_i_route_link_ref_t *ingress,
+    uint64_t now_us, ucn_i_route_reply_action_t *action_out);
+ucn_result_t ucn_i_route_on_wire_rerr(
+    ucn_i_route_owner_t *owner, const ucn_i_route_rerr_payload_t *payload,
+    uint8_t *invalidated_out);
 ucn_result_t ucn_i_route_resolve(ucn_i_route_owner_t *owner,
                                  const ucn_i_route_domain_t *domain,
                                  const ucn_i_route_use_facts_t *facts,
                                  ucn_i_route_resolved_t *resolved_out);
+ucn_result_t ucn_i_route_forward_resolve(
+    ucn_i_route_owner_t *owner,
+    const ucn_i_route_forward_key_t *key,
+    ucn_i_route_resolved_t *resolved_out);
 ucn_result_t ucn_i_route_invalidate_link(ucn_i_route_owner_t *owner,
                                          uint16_t link_id,
                                          uint32_t link_generation,
@@ -323,6 +396,12 @@ ucn_result_t ucn_i_route_make_rerr(ucn_i_route_owner_t *owner,
                                    const ucn_i_route_soft_view_t *route,
                                    ucn_i_route_rerr_reason_t reason,
                                    ucn_i_route_rerr_payload_t *payload_out);
+/* EN: Retire exact-peer dynamic/reverse history; reject pending RREP obligations.
+ * ZH: 退休精确邻居的动态/反向历史；仍有已接纳RREP义务时零写拒绝。 */
+ucn_result_t ucn_i_route_retire_peer_history(
+    ucn_i_route_owner_t *owner,
+    const ucn_i_route_link_ref_t *peer,
+    uint16_t *retired_out);
 ucn_result_t ucn_i_route_on_rerr(ucn_i_route_owner_t *owner,
                                  const ucn_i_route_rerr_payload_t *payload,
                                  uint8_t *invalidated_out);

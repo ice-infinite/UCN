@@ -49,6 +49,9 @@ execute_process(
             -B "${build_dir}" -G "${UCN_TEST_GENERATOR}"
             "-DCMAKE_PREFIX_PATH=${install_dir}"
             "-DCMAKE_BUILD_TYPE=${UCN_TEST_CONFIGURATION}"
+            "-DCMAKE_C_FLAGS=${UCN_TEST_C_FLAGS}"
+            "-DCMAKE_CXX_FLAGS=${UCN_TEST_CXX_FLAGS}"
+            "-DCMAKE_EXE_LINKER_FLAGS=${UCN_TEST_EXE_LINKER_FLAGS}"
             ${compiler_args}
     RESULT_VARIABLE configure_result)
 if(NOT configure_result EQUAL 0)

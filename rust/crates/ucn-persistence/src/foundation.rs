@@ -588,6 +588,26 @@ impl<'a, const DOMAINS: usize, const BODY: usize, const SLOT: usize>
     pub const fn lifecycle(&self) -> Lifecycle {
         self.lifecycle
     }
+    /// Check the actual installed consumer binding, not a copied `DomainView`.
+    /// 检查实际已安装消费者绑定，不依赖调用方复制的DomainView。
+    /// # Errors
+    /// Wrong Runtime/Owner/business consumer/domain rejects without I/O.
+    pub fn validate_consumer(
+        &self,
+        runtime: u32,
+        owner: u16,
+        domain: DomainKey,
+        consumer: u16,
+    ) -> Result<()> {
+        let index = self.find_domain(domain).ok_or(Error::Config)?;
+        if runtime != self.runtime_instance
+            || owner != self.owner_instance
+            || consumer != self.domains[index].business_owner_instance
+        {
+            return Err(Error::Config);
+        }
+        Ok(())
+    }
 
     /// 开始逐域恢复；不在本调用内访问 Provider。
     ///

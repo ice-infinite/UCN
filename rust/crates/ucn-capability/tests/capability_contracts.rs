@@ -6,9 +6,10 @@ use ucn_capability::{
     CAPABILITY_QUERY_BYTES, CAPABILITY_RECORD_BYTES, CAPABILITY_SUMMARY_BYTES, CapabilityQuery,
     CapabilityRecord, CapabilitySummary, ContractCandidate, ContractResolver, DependencyKind,
     EffectiveIntent, LinkCapability, MessageClass, PeerCapability, ProfileAck, ProfileRequirements,
-    ProfileSelect, ResolveResult, ResourceView, SecurityFloor, capability_digest,
+    ProfileSelect, ResolveResult, ResourceView, SecurityFloor, SelectContext, capability_digest,
     decode_capability_query, decode_capability_record, decode_capability_summary,
-    encode_capability_query, encode_capability_record, encode_capability_summary,
+    decode_profile_ack, decode_profile_select, encode_capability_query, encode_capability_record,
+    encode_capability_summary, encode_profile_ack, encode_profile_select, select_transcript,
 };
 use ucn_types::{Error, HeaderContract, HopProfile, OriginSecurity};
 
@@ -41,6 +42,113 @@ fn fixture(name: &str) -> Vec<u8> {
     }
     assert!(!bytes.is_empty(), "fixture {name} must exist");
     bytes
+}
+#[test]
+#[allow(clippy::too_many_lines)] // Explicit field-by-field negative and transcript coverage, test only.
+fn profile_codecs_exact_lengths_reserved_fields_zero_write_and_full_transcript() {
+    let local = record(1, 1);
+    let peer = record(7, 1);
+    let select = ProfileSelect::build(
+        local,
+        capability_digest(local).unwrap(),
+        peer,
+        capability_digest(peer).unwrap(),
+        ProfileRequirements {
+            required_feature_bits: 0x010b,
+            required_hop_suite_bits: 2,
+            required_e2e_suite_bits: 2,
+            minimum_message_class: MessageClass::T32,
+            minimum_rx_window: 1,
+            minimum_concurrent_transfers: 1,
+            required_realtime_mode_bits: 0,
+        },
+    )
+    .unwrap();
+    let mut bytes = [0; 59];
+    encode_profile_select(select, &mut bytes).unwrap();
+    assert_eq!(decode_profile_select(&bytes), Ok(select));
+    assert_eq!(select.reverse().reverse(), select);
+    for length in [58, 60] {
+        let mut out = vec![0xa5; length];
+        let before = out.clone();
+        assert_eq!(encode_profile_select(select, &mut out), Err(Error::NoSpace));
+        assert_eq!(out, before);
+        assert_eq!(decode_profile_select(&out), Err(Error::Malformed));
+    }
+    for offset in [0, 4, 8, 12, 16, 20, 22, 26, 27, 43] {
+        let mut bad = bytes;
+        match offset {
+            0 | 4 | 8 | 12 | 16 => bad[offset..offset + 4].fill(0),
+            20 | 22 => bad[offset..offset + 2].fill(0),
+            26 => bad[26] = 255,
+            27 | 43 => bad[offset..offset + 16].fill(0),
+            _ => unreachable!(),
+        }
+        assert!(decode_profile_select(&bad).is_err());
+    }
+    let binding = |id| ucn_security::Binding {
+        address: ucn_types::NodeAddress::new(id, ucn_types::AddressWidth::A1).unwrap(),
+        generation: ucn_types::BindingGeneration::active(1).unwrap(),
+        principal: [u8::try_from(id).unwrap(); 16],
+    };
+    let context = SelectContext {
+        realm: 1,
+        source: binding(1),
+        destination: binding(2),
+        session: 1,
+        key: 1,
+        policy: 1,
+        origin: OriginSecurity::O1,
+        fingerprint: [5; 16],
+        transaction: 1,
+        service: 0x40,
+    };
+    let base = select_transcript(context, select, &mut ucn_digest::DigestWorkspace::new()).unwrap();
+    for field in 0..12 {
+        let mut changed = context;
+        match field {
+            0 => changed.realm += 1,
+            1 => changed.source = binding(3),
+            2 => changed.destination = binding(4),
+            3 => changed.source.generation = ucn_types::BindingGeneration::active(2).unwrap(),
+            4 => changed.destination.generation = ucn_types::BindingGeneration::active(2).unwrap(),
+            5 => changed.session += 1,
+            6 => changed.key += 1,
+            7 => changed.policy += 1,
+            8 => changed.origin = OriginSecurity::O2,
+            9 => changed.fingerprint[0] ^= 1,
+            10 => changed.transaction += 1,
+            11 => changed.service += 1,
+            _ => unreachable!(),
+        }
+        assert_ne!(
+            select_transcript(changed, select, &mut ucn_digest::DigestWorkspace::new()).unwrap(),
+            base
+        );
+    }
+    let ack = ProfileAck {
+        selected: select,
+        transcript_digest: base,
+    };
+    let mut encoded = [0; 75];
+    encode_profile_ack(ack, &mut encoded).unwrap();
+    assert_eq!(decode_profile_ack(&encoded), Ok(ack));
+    assert!(ack.verify_exact(select.reverse(), base).is_err());
+    let before = [0xa5; 75];
+    let mut output = before;
+    assert_eq!(
+        encode_profile_ack(
+            ProfileAck {
+                transcript_digest: [0; 16],
+                ..ack
+            },
+            &mut output
+        ),
+        Err(Error::Argument)
+    );
+    assert_eq!(output, before);
+    encoded[59..].fill(0);
+    assert!(decode_profile_ack(&encoded).is_err());
 }
 
 fn record(generation: u32, link_generation: u32) -> CapabilityRecord {

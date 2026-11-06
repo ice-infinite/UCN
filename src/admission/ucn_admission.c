@@ -186,6 +186,7 @@ static bool cookie_challenge_valid(
     if (challenge == NULL ||
         challenge->transaction_id == 0U ||
         challenge->cookie_time_bucket == 0U ||
+        !link_valid(challenge->issuer_link) ||
         challenge->cookie_bytes == 0U ||
         challenge->cookie_bytes > UCN_I_ADMISSION_COOKIE_BYTES ||
         !bytes_zero(challenge->reserved_zero,
@@ -216,6 +217,8 @@ ucn_result_t ucn_i_admission_cookie_challenge_encode(
     put64(bytes, 4U, challenge->transaction_id);
     put32(bytes, 12U, challenge->cookie_time_bucket);
     memcpy(&bytes[16], challenge->cookie, 16U);
+    put16(bytes,32U,challenge->issuer_link.id);
+    put32(bytes,34U,challenge->issuer_link.generation);
     memcpy(output, bytes, sizeof(bytes));
     return UCN_OK;
 }
@@ -232,13 +235,15 @@ ucn_result_t ucn_i_admission_cookie_challenge_decode(
         return UCN_ERR_ARGUMENT;
     }
     if (input[0] != 1U || input[1] != 1U || input[3] != 0U ||
-        !bytes_zero(&input[32], 8U)) {
+        !bytes_zero(&input[38], 2U)) {
         return UCN_ERR_MALFORMED;
     }
     memset(&challenge, 0, sizeof(challenge));
     challenge.cookie_bytes = input[2];
     challenge.transaction_id = get64(input, 4U);
     challenge.cookie_time_bucket = get32(input, 12U);
+    challenge.issuer_link.id = get16(input,32U);
+    challenge.issuer_link.generation = get32(input,34U);
     memcpy(challenge.cookie, &input[16], 16U);
     if (!cookie_challenge_valid(&challenge)) {
         return UCN_ERR_MALFORMED;
@@ -253,7 +258,6 @@ ucn_result_t ucn_i_admission_hello_cookie_encode(
     size_t output_capacity,
     size_t *output_bytes)
 {
-    uint8_t bytes[UCN_I_ADMISSION_HELLO_COOKIE_MAX_BYTES];
     size_t length;
 
     if (!hello_cookie_valid(hello_cookie) || output == NULL ||
@@ -270,19 +274,20 @@ ucn_result_t ucn_i_admission_hello_cookie_encode(
         return output_capacity < length ? UCN_ERR_NO_SPACE :
                                           UCN_ERR_ARGUMENT;
     }
-    memset(bytes, 0, sizeof(bytes));
-    bytes[0] = 1U;
-    bytes[1] = 1U;
-    bytes[2] = hello_cookie->cookie_bytes;
-    memcpy(&bytes[4], hello_cookie->key.identity_digest, 16U);
-    put64(bytes, 20U, hello_cookie->device_nonce);
-    put64(bytes, 28U, hello_cookie->key.transaction_id);
-    put64(bytes, 36U, hello_cookie->lease_freshness_challenge_nonce);
-    put16(bytes, 44U, hello_cookie->key.link.id);
-    put32(bytes, 46U, hello_cookie->key.link.generation);
-    memcpy(&bytes[50], hello_cookie->prior_messages_hash, 32U);
-    memcpy(&bytes[82], hello_cookie->cookie, hello_cookie->cookie_bytes);
-    memcpy(output, bytes, length);
+    /* All fallible checks precede this publication; no full temporary packet.
+     * 所有可失败检查均已完成，直接生成最终正文，不再复制完整临时报文。 */
+    output[0] = 1U;
+    output[1] = 1U;
+    output[2] = hello_cookie->cookie_bytes;
+    output[3] = 0U;
+    memcpy(&output[4], hello_cookie->key.identity_digest, 16U);
+    put64(output, 20U, hello_cookie->device_nonce);
+    put64(output, 28U, hello_cookie->key.transaction_id);
+    put64(output, 36U, hello_cookie->lease_freshness_challenge_nonce);
+    put16(output, 44U, hello_cookie->key.link.id);
+    put32(output, 46U, hello_cookie->key.link.generation);
+    memcpy(&output[50], hello_cookie->prior_messages_hash, 32U);
+    memcpy(&output[82], hello_cookie->cookie, hello_cookie->cookie_bytes);
     *output_bytes = length;
     return UCN_OK;
 }
@@ -381,7 +386,7 @@ static bool transcript_base_valid(
            transcript->bootstrap_header_contract == 1U &&
            bytes_zero(transcript->reserved_zero,
                       sizeof(transcript->reserved_zero)) &&
-           bytes_nonzero(transcript->joining_device_identity_digest, 16U) &&
+           principal_valid(transcript->joining_device_identity_digest) &&
            transcript->device_nonce != 0U &&
            transcript->transaction_id != 0U &&
            transcript->lease_freshness_challenge_nonce != 0U &&
@@ -516,6 +521,12 @@ static bool transcript_phase_valid(
         return authority && device && address;
     }
     return false;
+}
+
+bool ucn_i_admission_transcript_valid(const ucn_i_admission_transcript_t *value,
+                                     ucn_i_admission_phase_t phase)
+{
+    return transcript_phase_valid(value, phase);
 }
 
 static bool common_equal(const ucn_i_admission_transcript_t *left,
@@ -778,7 +789,8 @@ static ucn_result_t call_provider(ucn_i_admission_owner_t *owner,
             owner->callback_cookie, &owner->callback_cookie_bytes);
     } else if (callback_kind == UCN_I_ADMISSION_CALLBACK_VERIFY) {
         result = owner->provider.verify_cookie(
-            owner->provider.context, &owner->callback_hello_cookie);
+            owner->provider.context, &owner->callback_hello_cookie,
+            owner->callback_now_us);
     } else {
         result = owner->provider.authorize_event(
             owner->provider.context, owner->callback_event,
@@ -929,6 +941,7 @@ ucn_result_t ucn_i_admission_issue_cookie(
     memset(&challenge, 0, sizeof(challenge));
     challenge.transaction_id = owner->callback_hello.transaction_id;
     challenge.cookie_time_bucket = owner->callback_cookie_bucket;
+    challenge.issuer_link = owner->callback_key.link;
     challenge.cookie_bytes = owner->callback_cookie_bytes;
     memcpy(challenge.cookie, owner->callback_cookie,
            sizeof(challenge.cookie));
@@ -991,6 +1004,7 @@ ucn_result_t ucn_i_admission_open_after_cookie(
     owner->callback_hello_cookie = *hello_cookie;
     owner->callback_key = hello_cookie->key;
     owner->callback_transcript = *transcript;
+    owner->callback_now_us = now_us;
     result = next_claim(owner, UCN_I_ADMISSION_CALLBACK_VERIFY);
     if (result != UCN_OK) {
         clear_callback(owner);
@@ -1015,7 +1029,7 @@ ucn_result_t ucn_i_admission_open_after_cookie(
                    sizeof(slot->key)) == 0) {
             if (memcmp(&slot->transcript, &owner->callback_transcript,
                        sizeof(owner->callback_transcript)) != 0 ||
-                now_us >= slot->deadline_us) {
+                now_us >= slot->deadline_us || now_us < slot->challenge_started_local_us) {
                 clear_callback(owner);
                 owner_unlock(owner);
                 return UCN_ERR_REPLAY;

@@ -13,12 +13,27 @@ SYMBOL = re.compile(r"\b(ucn_[A-Za-z0-9_]+)$")
 
 SIMPLIFIED_PUBLIC = {
     "ucn_storage_required", "ucn_init", "ucn_start", "ucn_step",
-    "ucn_stop", "ucn_deinit", "ucn_endpoint_add", "ucn_endpoint_remove",
+    "ucn_stop", "ucn_deinit", "ucn_endpoint_add", "ucn_endpoint_remove", "ucn_endpoint_install",
     "ucn_static_path_add", "ucn_static_path_remove", "ucn_link_get",
-    "ucn_publish", "ucn_send_query", "ucn_send_cancel", "ucn_send_forget",
-    "ucn_get_stats", "ucn_driver_rx_publish", "ucn_driver_tx_complete",
+    "ucn_send", "ucn_send_query", "ucn_send_cancel", "ucn_send_forget",
+    "ucn_get_stats", "ucn_get_node_view", "ucn_get_static_binding",
+    "ucn_driver_rx_publish", "ucn_driver_tx_complete",
     "ucn_driver_link_event", "ucn_callback_link_get",
     "ucn_callback_send_query", "ucn_callback_get_stats",
+}
+
+SIMPLIFIED_KERNEL_PRIVATE = {
+    "ucn_i_node_tx_submit",
+    "ucn_i_node_init_with_owner_instance",
+    "ucn_i_node_stop_step",
+}
+
+NATIVE_PUBLIC = {
+    "ucn_native_init", "ucn_native_start", "ucn_native_check_schema",
+    "ucn_publisher_create", "ucn_subscription_create", "ucn_publish",
+    "ucn_native_send", "ucn_publisher_close", "ucn_subscription_close",
+    "ucn_subscription_quiescent", "ucn_native_source_fence", "ucn_native_step",
+    "ucn_native_dispatch", "ucn_native_stop", "ucn_native_status", "ucn_native_deinit",
 }
 
 
@@ -36,13 +51,37 @@ def main() -> int:
     archives.extend(sorted(build_dir.rglob("ucn*.lib")))
     errors: list[str] = []
     composition_dependencies = {
-        "ucn_storage_required", "ucn_init", "ucn_start", "ucn_step",
+        "ucn_storage_required", "ucn_start", "ucn_step",
         "ucn_stop", "ucn_deinit", "ucn_persistence_init_in_place",
-        "ucn_persistence_deinit",
+        "ucn_persistence_deinit", "ucn_endpoint_add",
+        "ucn_endpoint_remove", "ucn_static_path_add",
+        "ucn_static_path_remove", "ucn_link_get", "ucn_send",
+        "ucn_send_query", "ucn_send_cancel", "ucn_send_forget",
+        "ucn_get_stats", "ucn_callback_link_get",
+        "ucn_callback_send_query", "ucn_callback_get_stats",
+        "ucn_driver_rx_publish", "ucn_driver_tx_complete",
+        "ucn_driver_link_event",
+    }
+    optional_forbidden_dependencies = {
+        "libucn_v6s_realtime.a": ("ucn_i_group_", "ucn_i_cluster_",
+                                    "ucn_i_flow_", "ucn_i_persistence_",
+                                    "ucn_persistence_"),
+        "ucn_v6s_realtime.lib": ("ucn_i_group_", "ucn_i_cluster_",
+                                   "ucn_i_flow_", "ucn_i_persistence_",
+                                   "ucn_persistence_"),
+        "libucn_v6s_group.a": ("ucn_i_realtime_", "ucn_i_cluster_",
+                                 "ucn_i_security_", "ucn_i_route_",
+                                 "ucn_i_persistence_", "ucn_persistence_"),
+        "ucn_v6s_group.lib": ("ucn_i_realtime_", "ucn_i_cluster_",
+                                "ucn_i_security_", "ucn_i_route_",
+                                "ucn_i_persistence_", "ucn_persistence_"),
+        "libucn_v6s_cluster.a": ("ucn_i_realtime_", "ucn_i_group_"),
+        "ucn_v6s_cluster.lib": ("ucn_i_realtime_", "ucn_i_group_"),
     }
     if not archives:
         errors.append("no UCN static archives found")
     for archive in archives:
+        is_native = archive.name in ("libucn_native.a", "ucn_native.lib")
         is_v6_module = (archive.name.startswith("libucn_v6_") or
                         archive.name.startswith("ucn_v6_"))
         is_simplified_common = archive.name in (
@@ -84,7 +123,7 @@ def main() -> int:
             "libucn_v6s_composition.a", "ucn_v6s_composition.lib")
         is_simplified_composition = archive.name in (
             "libucn_v6s_composition.a", "ucn_v6s_composition.lib")
-        if not (is_v6_module or is_simplified_common or is_simplified_kernel
+        if not (is_native or is_v6_module or is_simplified_common or is_simplified_kernel
                 or is_simplified_persistence or is_simplified_scaffold
                 or is_simplified_private_module):
             errors.append(f"legacy archive name: {archive.name}")
@@ -111,7 +150,9 @@ def main() -> int:
             match = SYMBOL.search(line.strip())
             if match:
                 symbol = match.group(1)
-                if is_v6_module:
+                if is_native:
+                    allowed = symbol in NATIVE_PUBLIC
+                elif is_v6_module:
                     allowed = symbol.startswith("ucn_v6_")
                 elif is_simplified_persistence:
                     allowed = (symbol.startswith("ucn_persistence_") or
@@ -127,6 +168,7 @@ def main() -> int:
                     # its private implementation symbols.  The test-only
                     # kernel owns only the facade and unresolved ucn_i_ calls.
                     allowed = (symbol in SIMPLIFIED_PUBLIC or
+                               symbol in SIMPLIFIED_KERNEL_PRIVATE or
                                (archive.name in (
                                    "libucn_simplified.a", "ucn_simplified.lib") and
                                 symbol.startswith("ucn_i_")))
@@ -161,7 +203,16 @@ def main() -> int:
             match = SYMBOL.search(line.strip())
             if match:
                 symbol = match.group(1)
-                if is_v6_module:
+                forbidden_prefixes = optional_forbidden_dependencies.get(
+                    archive.name, ())
+                if symbol.startswith(forbidden_prefixes):
+                    errors.append(
+                        f"optional-module dependency in {archive.name}: "
+                        f"{symbol}")
+                    continue
+                if is_native:
+                    allowed = symbol in SIMPLIFIED_PUBLIC
+                elif is_v6_module:
                     allowed = symbol.startswith("ucn_v6_")
                 elif is_simplified_persistence:
                     allowed = ((is_persistence_adapter and

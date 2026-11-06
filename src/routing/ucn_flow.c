@@ -93,6 +93,17 @@ static uint32_t get32(const uint8_t *bytes, size_t offset)
            ((uint32_t)bytes[offset + 2U] << 8U) | bytes[offset + 3U];
 }
 
+static uint64_t get64(const uint8_t *bytes, size_t offset)
+{
+    uint64_t value = 0U;
+    uint8_t index;
+
+    for (index = 0U; index < 8U; ++index) {
+        value = (value << 8U) | bytes[offset + index];
+    }
+    return value;
+}
+
 static bool binding_equal(const ucn_i_route_binding_t *left,
                           const ucn_i_route_binding_t *right)
 {
@@ -189,6 +200,237 @@ ucn_result_t ucn_i_flow_label_setup_decode(
     value.path_profile_id = get16(input, 10U);
     value.context_digest = get32(input, 12U);
     if (!label_setup_valid(&value)) {
+        return UCN_ERR_MALFORMED;
+    }
+    *value_out = value;
+    return UCN_OK;
+}
+
+static bool path_key_body_valid(const ucn_i_flow_path_key_body_t *value)
+{
+    return value != NULL && bytes_nonzero(value->proposal_digest, 16U) &&
+           value->candidate_id != 0U && value->candidate_id != UINT16_MAX &&
+           value->route_generation != 0U && value->reverse_label != 0U &&
+           value->reverse_label != UINT16_MAX &&
+           value->forward_label != 0U &&
+           value->forward_label != UINT16_MAX &&
+           value->forward_label != value->reverse_label &&
+           value->path_profile_id != 0U &&
+           value->path_profile_id != UINT16_MAX;
+}
+
+static void path_key_body_write(const ucn_i_flow_path_key_body_t *value,
+                                uint8_t *output)
+{
+    memcpy(output, value->proposal_digest, 16U);
+    put16(output, 16U, value->candidate_id);
+    put32(output, 18U, value->route_generation);
+    put16(output, 22U, value->reverse_label);
+    put16(output, 24U, value->forward_label);
+    put16(output, 26U, value->path_profile_id);
+}
+
+static void path_key_body_read(const uint8_t *input,
+                               ucn_i_flow_path_key_body_t *value)
+{
+    memset(value, 0, sizeof(*value));
+    memcpy(value->proposal_digest, input, 16U);
+    value->candidate_id = get16(input, 16U);
+    value->route_generation = get32(input, 18U);
+    value->reverse_label = get16(input, 22U);
+    value->forward_label = get16(input, 24U);
+    value->path_profile_id = get16(input, 26U);
+}
+
+ucn_result_t ucn_i_flow_path_key_encode(
+    const ucn_i_flow_path_key_body_t *value,
+    uint8_t output[UCN_I_FLOW_PATH_KEY_BYTES])
+{
+    uint8_t bytes[UCN_I_FLOW_PATH_KEY_BYTES];
+
+    if (!path_key_body_valid(value) || output == NULL ||
+        ucn_i_ranges_overlap(value, sizeof(*value), output, sizeof(bytes))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    path_key_body_write(value, bytes);
+    memcpy(output, bytes, sizeof(bytes));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_flow_path_key_decode(
+    const uint8_t input[UCN_I_FLOW_PATH_KEY_BYTES],
+    ucn_i_flow_path_key_body_t *value_out)
+{
+    ucn_i_flow_path_key_body_t value;
+
+    if (input == NULL || value_out == NULL ||
+        ucn_i_ranges_overlap(input, UCN_I_FLOW_PATH_KEY_BYTES,
+                             value_out, sizeof(*value_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    path_key_body_read(input, &value);
+    if (!path_key_body_valid(&value)) {
+        return UCN_ERR_MALFORMED;
+    }
+    *value_out = value;
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_flow_path_probe_encode(
+    const ucn_i_flow_path_probe_body_t *value,
+    uint8_t output[UCN_I_FLOW_PATH_PROBE_BYTES])
+{
+    uint8_t bytes[UCN_I_FLOW_PATH_PROBE_BYTES];
+
+    if (value == NULL || output == NULL || !path_key_body_valid(&value->key) ||
+        value->context_id == 0U || value->context_id == UINT16_MAX ||
+        value->payload_budget == 0U || value->path_frame_mtu == 0U ||
+        value->payload_budget > value->path_frame_mtu ||
+        value->flow_expires_at_us == 0U ||
+        ucn_i_ranges_overlap(value, sizeof(*value), output, sizeof(bytes))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    path_key_body_write(&value->key, bytes);
+    put16(bytes, 28U, value->context_id);
+    put16(bytes, 30U, value->payload_budget);
+    put16(bytes, 32U, value->path_frame_mtu);
+    put16(bytes, 34U, value->capability_bits);
+    put64(bytes, 36U, value->flow_expires_at_us);
+    memcpy(output, bytes, sizeof(bytes));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_flow_path_probe_decode(
+    const uint8_t input[UCN_I_FLOW_PATH_PROBE_BYTES],
+    ucn_i_flow_path_probe_body_t *value_out)
+{
+    ucn_i_flow_path_probe_body_t value;
+
+    if (input == NULL || value_out == NULL ||
+        ucn_i_ranges_overlap(input, UCN_I_FLOW_PATH_PROBE_BYTES,
+                             value_out, sizeof(*value_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(&value, 0, sizeof(value));
+    path_key_body_read(input, &value.key);
+    value.context_id = get16(input, 28U);
+    value.payload_budget = get16(input, 30U);
+    value.path_frame_mtu = get16(input, 32U);
+    value.capability_bits = get16(input, 34U);
+    value.flow_expires_at_us = get64(input, 36U);
+    if (!path_key_body_valid(&value.key) || value.context_id == 0U ||
+        value.context_id == UINT16_MAX || value.payload_budget == 0U ||
+        value.path_frame_mtu == 0U ||
+        value.payload_budget > value.path_frame_mtu ||
+        value.flow_expires_at_us == 0U) {
+        return UCN_ERR_MALFORMED;
+    }
+    *value_out = value;
+    return UCN_OK;
+}
+
+static bool probe_ack_valid(const ucn_i_flow_probe_ack_t *value)
+{
+    return value != NULL && bytes_nonzero(value->proposal_digest, 16U) &&
+           value->candidate_id != 0U && value->candidate_id != UINT16_MAX &&
+           value->route_generation != 0U && value->measured_rtt_us != 0U &&
+           value->path_frame_mtu != 0U;
+}
+
+ucn_result_t ucn_i_flow_path_probe_ack_encode(
+    const ucn_i_flow_probe_ack_t *value,
+    uint8_t output[UCN_I_FLOW_PATH_PROBE_ACK_BYTES])
+{
+    uint8_t bytes[UCN_I_FLOW_PATH_PROBE_ACK_BYTES];
+
+    if (!probe_ack_valid(value) || output == NULL ||
+        ucn_i_ranges_overlap(value, sizeof(*value), output, sizeof(bytes))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memcpy(bytes, value->proposal_digest, 16U);
+    put16(bytes, 16U, (uint16_t)value->candidate_id);
+    put32(bytes, 18U, value->route_generation);
+    put32(bytes, 22U, value->measured_rtt_us);
+    put16(bytes, 26U, value->path_frame_mtu);
+    put16(bytes, 28U, value->capability_bits);
+    memcpy(output, bytes, sizeof(bytes));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_flow_path_probe_ack_decode(
+    const uint8_t input[UCN_I_FLOW_PATH_PROBE_ACK_BYTES],
+    ucn_i_flow_probe_ack_t *value_out)
+{
+    ucn_i_flow_probe_ack_t value;
+
+    if (input == NULL || value_out == NULL ||
+        ucn_i_ranges_overlap(input, UCN_I_FLOW_PATH_PROBE_ACK_BYTES,
+                             value_out, sizeof(*value_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(&value, 0, sizeof(value));
+    memcpy(value.proposal_digest, input, 16U);
+    value.candidate_id = get16(input, 16U);
+    value.route_generation = get32(input, 18U);
+    value.measured_rtt_us = get32(input, 22U);
+    value.path_frame_mtu = get16(input, 26U);
+    value.capability_bits = get16(input, 28U);
+    if (!probe_ack_valid(&value)) {
+        return UCN_ERR_MALFORMED;
+    }
+    *value_out = value;
+    return UCN_OK;
+}
+
+static bool outcome_code_valid(uint8_t value, bool terminal_receipt)
+{
+    if (terminal_receipt) {
+        return value >= UCN_I_FLOW_TERMINAL_STAGED &&
+               value <= UCN_I_FLOW_TERMINAL_IN_DOUBT;
+    }
+    return value >= UCN_I_FLOW_ABORT_POLICY &&
+           value <= UCN_I_FLOW_ABORT_CONFLICT;
+}
+
+ucn_result_t ucn_i_flow_path_outcome_encode(
+    const ucn_i_flow_path_outcome_body_t *value,
+    bool terminal_receipt,
+    uint8_t output[UCN_I_FLOW_PATH_OUTCOME_BYTES])
+{
+    uint8_t bytes[UCN_I_FLOW_PATH_OUTCOME_BYTES];
+
+    if (value == NULL || output == NULL || !path_key_body_valid(&value->key) ||
+        !outcome_code_valid(value->phase_or_reason, terminal_receipt) ||
+        value->reserved_zero != 0U ||
+        ucn_i_ranges_overlap(value, sizeof(*value), output, sizeof(bytes))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    path_key_body_write(&value->key, bytes);
+    bytes[28] = value->phase_or_reason;
+    bytes[29] = 0U;
+    memcpy(output, bytes, sizeof(bytes));
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_flow_path_outcome_decode(
+    const uint8_t input[UCN_I_FLOW_PATH_OUTCOME_BYTES],
+    bool terminal_receipt,
+    ucn_i_flow_path_outcome_body_t *value_out)
+{
+    ucn_i_flow_path_outcome_body_t value;
+
+    if (input == NULL || value_out == NULL ||
+        ucn_i_ranges_overlap(input, UCN_I_FLOW_PATH_OUTCOME_BYTES,
+                             value_out, sizeof(*value_out))) {
+        return UCN_ERR_ARGUMENT;
+    }
+    memset(&value, 0, sizeof(value));
+    path_key_body_read(input, &value.key);
+    value.phase_or_reason = input[28];
+    value.reserved_zero = input[29];
+    if (!path_key_body_valid(&value.key) ||
+        !outcome_code_valid(value.phase_or_reason, terminal_receipt) ||
+        value.reserved_zero != 0U) {
         return UCN_ERR_MALFORMED;
     }
     *value_out = value;
@@ -713,7 +955,7 @@ ucn_result_t ucn_i_flow_begin_probe(ucn_i_flow_owner_t *owner,
                                     ucn_i_flow_proposal_t *proposal_out)
 {
     size_t index;
-    ucn_i_flow_candidate_record_t record;
+    ucn_i_flow_candidate_record_t *record;
     ucn_i_flow_proposal_t proposal;
     uint64_t local_deadline;
     uint64_t flow_deadline;
@@ -735,9 +977,9 @@ ucn_result_t ucn_i_flow_begin_probe(ucn_i_flow_owner_t *owner,
         goto done;
     }
     index = (size_t)candidate.slot - 1U;
-    record = owner->candidates[index];
-    if (record.occupied == 0U || record.generation != candidate.generation ||
-        record.phase != UCN_I_FLOW_CANDIDATE) {
+    record = &owner->candidates[index];
+    if (record->occupied == 0U || record->generation != candidate.generation ||
+        record->phase != UCN_I_FLOW_CANDIDATE) {
         result = UCN_ERR_STATE;
         goto done;
     }
@@ -756,11 +998,11 @@ ucn_result_t ucn_i_flow_begin_probe(ucn_i_flow_owner_t *owner,
         goto done;
     }
     local_deadline = minimum_deadline(
-        local_deadline, record.proposal.source_route.expires_at_us);
+        local_deadline, record->proposal.source_route.expires_at_us);
     local_deadline = minimum_deadline(
-        local_deadline, record.proposal.capability.expires_at_us);
+        local_deadline, record->proposal.capability.expires_at_us);
     local_deadline = minimum_deadline(
-        local_deadline, record.proposal.requirements.expires_at_us);
+        local_deadline, record->proposal.requirements.expires_at_us);
     result = ucn_i_deadline_from_duration_us(now_us,
                                              owner->flow_lifetime_us,
                                              &flow_deadline);
@@ -768,17 +1010,17 @@ ucn_result_t ucn_i_flow_begin_probe(ucn_i_flow_owner_t *owner,
         goto done;
     }
     flow_deadline = minimum_deadline(
-        flow_deadline, record.proposal.source_route.expires_at_us);
+        flow_deadline, record->proposal.source_route.expires_at_us);
     flow_deadline = minimum_deadline(
-        flow_deadline, record.proposal.capability.expires_at_us);
+        flow_deadline, record->proposal.capability.expires_at_us);
     flow_deadline = minimum_deadline(
-        flow_deadline, record.proposal.requirements.expires_at_us);
+        flow_deadline, record->proposal.requirements.expires_at_us);
     if (ucn_i_deadline_expired_us(now_us, local_deadline) ||
         ucn_i_deadline_expired_us(now_us, flow_deadline)) {
         result = UCN_ERR_TIMEOUT;
         goto done;
     }
-    proposal = record.proposal;
+    proposal = record->proposal;
     proposal.key.transaction_id = owner->next_transaction_id;
     proposal.key.route_generation = owner->next_route_generation;
     proposal.key.reverse_label = owner->next_label;
@@ -808,9 +1050,8 @@ ucn_result_t ucn_i_flow_begin_probe(ucn_i_flow_owner_t *owner,
             0U : (uint16_t)(owner->next_context_id + 1U);
     owner->next_label = forward_label >= UINT16_MAX - 1U ?
                             0U : (uint16_t)(forward_label + 1U);
-    record.proposal = proposal;
-    record.phase = UCN_I_FLOW_PROBING;
-    owner->candidates[index] = record;
+    record->proposal = proposal;
+    record->phase = UCN_I_FLOW_PROBING;
     *proposal_out = proposal;
     result = UCN_OK;
 done:
@@ -1399,7 +1640,9 @@ static ucn_i_flow_active_record_t *flow_from_handle(
 static bool request_matches(const ucn_i_flow_requirements_t *requirements,
                             const ucn_i_flow_tx_request_t *request)
 {
-    return request != NULL && request->contract == requirements->contract &&
+    return request != NULL &&
+           request->service_id == requirements->service_id &&
+           request->contract == requirements->contract &&
            request->traffic_class <= requirements->traffic_ceiling &&
            request->delivery == requirements->delivery &&
            request->interaction == requirements->interaction &&
@@ -1448,7 +1691,8 @@ ucn_result_t ucn_i_flow_use_preflight(
     }
     sequence = 0U;
     if (request->origin_security != 0U || request->contract != 3U) {
-        if (flow->next_sequence == 0U || flow->sequence_reserved != 0U) {
+        if (flow->next_sequence == 0U || flow->sequence_reserved != 0U ||
+            flow->reservation_generation == UINT32_MAX) {
             result = UCN_ERR_EXHAUSTED;
             goto done;
         }
@@ -1457,7 +1701,13 @@ ucn_result_t ucn_i_flow_use_preflight(
     memset(&plan, 0, sizeof(plan));
     plan.next_hop = flow->proposal.source_route.next_hop;
     memcpy(plan.flow_fingerprint, flow->fingerprint, 16U);
+    plan.expires_at_us =
+        flow->proposal.requirements.expires_at_us <
+                flow->proposal.flow_expires_at_us ?
+            flow->proposal.requirements.expires_at_us :
+            flow->proposal.flow_expires_at_us;
     plan.route_generation = flow->proposal.key.route_generation;
+    plan.flow_generation = flow->flow_generation;
     plan.sequence = sequence;
     plan.context_id = (uint16_t)flow->proposal.context_id;
     plan.forward_label = flow->proposal.key.forward_label;
@@ -1465,8 +1715,10 @@ ucn_result_t ucn_i_flow_use_preflight(
     plan.contract = request->contract;
     plan.hop_profile = flow->proposal.requirements.hop_profile;
     if (sequence != 0U) {
+        ++flow->reservation_generation;
         flow->reserved_sequence = sequence;
         flow->sequence_reserved = 1U;
+        plan.reservation_generation = flow->reservation_generation;
     }
     *plan_out = plan;
     result = UCN_OK;
@@ -1477,7 +1729,8 @@ done:
 
 ucn_result_t ucn_i_flow_sequence_commit(ucn_i_flow_owner_t *owner,
                                         ucn_handle_t flow_handle,
-                                        uint32_t sequence)
+                                        uint32_t sequence,
+                                        uint32_t reservation_generation)
 {
     ucn_i_flow_active_record_t *flow;
     ucn_result_t result = owner_lock(owner);
@@ -1488,7 +1741,9 @@ ucn_result_t ucn_i_flow_sequence_commit(ucn_i_flow_owner_t *owner,
     flow = flow_from_handle(owner, flow_handle);
     if (flow == NULL || flow->phase != UCN_I_FLOW_ACTIVE ||
         flow->sequence_reserved == 0U || sequence == 0U ||
+        reservation_generation == 0U ||
         flow->reserved_sequence != sequence ||
+        flow->reservation_generation != reservation_generation ||
         flow->next_sequence != sequence) {
         result = UCN_ERR_STATE;
         goto done;
@@ -1505,7 +1760,8 @@ done:
 
 ucn_result_t ucn_i_flow_sequence_abort(ucn_i_flow_owner_t *owner,
                                        ucn_handle_t flow_handle,
-                                       uint32_t sequence)
+                                       uint32_t sequence,
+                                       uint32_t reservation_generation)
 {
     ucn_i_flow_active_record_t *flow;
     ucn_result_t result = owner_lock(owner);
@@ -1516,7 +1772,9 @@ ucn_result_t ucn_i_flow_sequence_abort(ucn_i_flow_owner_t *owner,
     flow = flow_from_handle(owner, flow_handle);
     if (flow == NULL || flow->phase != UCN_I_FLOW_ACTIVE ||
         flow->sequence_reserved == 0U || sequence == 0U ||
-        flow->reserved_sequence != sequence) {
+        reservation_generation == 0U ||
+        flow->reserved_sequence != sequence ||
+        flow->reservation_generation != reservation_generation) {
         result = UCN_ERR_STATE;
         goto done;
     }

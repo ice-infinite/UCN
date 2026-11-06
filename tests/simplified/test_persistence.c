@@ -241,10 +241,10 @@ static void encode_store_record(fixture_t *fixture,
     meta.schema_version = fixture->entries[domain_index].schema_version;
     meta.operation_kind = 1U;
     CHECK(ucn_i_persist_record_encode(
-              &meta, fixture->manifest.expected_digest, &body_value,
+              &(ucn_i_persist_record_encode_request_t){&meta, fixture->manifest.expected_digest, &body_value,
               fixture->entries[domain_index].body_capacity_bytes,
               fixture->entries[domain_index].slot_capacity_bytes, 0xFFU,
-              fixture->fake.domains[domain_index].slots[slot_index],
+              fixture->fake.domains[domain_index].slots[slot_index]},
               &workspace) == UCN_OK);
     if (publish_marker) {
         CHECK(ucn_i_persist_marker_encode(generation, marker) == UCN_OK);
@@ -988,10 +988,10 @@ static void test_anti_rollback_failure_matrix(void)
         meta.schema_version = fixture.entries[0].schema_version;
         meta.operation_kind = 1U;
         CHECK(ucn_i_persist_record_encode(
-                   &meta, fixture.manifest.expected_digest, conflict_body,
+                   &(ucn_i_persist_record_encode_request_t){&meta, fixture.manifest.expected_digest, conflict_body,
                    fixture.entries[0].body_capacity_bytes,
                    fixture.entries[0].slot_capacity_bytes, 0xFFU,
-                   fixture.fake.domains[0].slots[1], &workspace) == UCN_OK);
+                   fixture.fake.domains[0].slots[1]}, &workspace) == UCN_OK);
         CHECK(ucn_i_persist_marker_encode(1U, marker) == UCN_OK);
         memcpy(&fixture.fake.domains[0].slots[1][
                    fixture.entries[0].slot_capacity_bytes - sizeof(marker)],
@@ -1027,10 +1027,10 @@ static void test_recovery_prefers_published_witness_successor(void)
     meta.schema_version = fixture.entries[0].schema_version;
     meta.operation_kind = 1U;
     CHECK(ucn_i_persist_record_encode(
-               &meta, fixture.manifest.expected_digest, second_body,
+               &(ucn_i_persist_record_encode_request_t){&meta, fixture.manifest.expected_digest, second_body,
                fixture.entries[0].body_capacity_bytes,
                fixture.entries[0].slot_capacity_bytes, 0xFFU,
-               fixture.fake.domains[0].slots[1], &workspace) == UCN_OK);
+               fixture.fake.domains[0].slots[1]}, &workspace) == UCN_OK);
     CHECK(ucn_i_persist_marker_encode(2U, marker) == UCN_OK);
     memcpy(&fixture.fake.domains[0].slots[1][
                fixture.entries[0].slot_capacity_bytes - sizeof(marker)],
