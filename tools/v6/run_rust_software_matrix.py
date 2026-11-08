@@ -24,6 +24,12 @@ def main()->None:
     parser=argparse.ArgumentParser();parser.add_argument("--cargo",default=shutil.which("cargo") or str(Path.home()/".cargo/bin/cargo.exe"));parser.add_argument("--skip-esp",action="store_true");args=parser.parse_args()
     commands=[("debug",[args.cargo,"test","--workspace","--locked"]),("release",[args.cargo,"test","--workspace","--release","--locked"]),("msrv-1.85",[args.cargo,"+1.85.0","test","--workspace","--locked"]),("clippy",[args.cargo,"clippy","--workspace","--all-targets","--","-D","warnings"]),("fmt",[args.cargo,"fmt","--all","--check"]),("cortex-soft",[args.cargo,"check","--workspace","--target","thumbv7em-none-eabi"]),("cortex-hard",[args.cargo,"check","--workspace","--target","thumbv7em-none-eabihf"]),("optional",[sys.executable,str(ROOT/"tools/v6/check_rust_optional_boundaries.py"),"--cargo",args.cargo]),("codec",[sys.executable,str(ROOT/"tools/v6/check_rust08_09_codec_oracle.py"),"--cargo",args.cargo]),("resources",[args.cargo,"run","--quiet","-p","ucn-runtime","--example","resources"])]
     commands.append(("admission-codec",[sys.executable,str(ROOT/"tools/v6/check_rust06_admission_capability_oracle.py")]))
+    for name,profile in (("native-auth-debug",[]),("native-auth-release",["--release"])):
+        commands.append((name,[args.cargo,"test","--workspace","--locked","--features","ucn-runtime/native-routed",*profile]))
+    commands.append(("native-auth-msrv",[args.cargo,"+1.85.0","test","--workspace","--locked","--features","ucn-runtime/native-routed"]))
+    commands.append(("native-auth-clippy",[args.cargo,"clippy","--workspace","--all-targets","--features","ucn-runtime/native-routed","--","-D","warnings"]))
+    for suffix,target in (("soft","thumbv7em-none-eabi"),("hard","thumbv7em-none-eabihf")):
+        commands.append(("native-auth-cortex-"+suffix,[args.cargo,"check","--workspace","--features","ucn-runtime/native-routed","--target",target]))
     if not args.skip_esp:commands.append(("esp32s3-compile-only",[args.cargo,"+esp","check","-Zbuild-std=core","--workspace","--target","xtensa-esp32s3-none-elf"]))
     environment=os.environ.copy();environment["CARGO_INCREMENTAL"]="0"
     destination=ROOT/"rust/target/software-validation";destination.mkdir(parents=True,exist_ok=True);results=[]

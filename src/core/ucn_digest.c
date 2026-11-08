@@ -1,4 +1,5 @@
 #include "internal/ucn_digest.h"
+#include "internal/ucn_stack.h"
 
 #include "internal/ucn_checked.h"
 
@@ -133,7 +134,7 @@ static void initialize(ucn_i_sha256_workspace_t *workspace)
     workspace->state[7] = UINT32_C(0x5BE0CD19);
 }
 
-static void update(ucn_i_sha256_workspace_t *workspace,
+static UCN_I_STACK_PHASE void update(ucn_i_sha256_workspace_t *workspace,
                    const uint8_t *bytes,
                    size_t length)
 {
@@ -154,7 +155,7 @@ static void update(ucn_i_sha256_workspace_t *workspace,
     }
 }
 
-static void finalize(ucn_i_sha256_workspace_t *workspace,
+static UCN_I_STACK_PHASE void finalize(ucn_i_sha256_workspace_t *workspace,
                      uint8_t *digest_out, size_t digest_bytes)
 {
     uint64_t total_bits = workspace->total_bytes * UINT64_C(8);

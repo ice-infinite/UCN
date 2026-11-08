@@ -2,12 +2,21 @@
 #![forbid(unsafe_code)]
 //! Coordinator owns cross-module ordering; business Owners never call one another.
 //! Coordinator持有跨模块顺序，业务Owner不互相调用。
+#[cfg(feature = "native-backend")]
+mod native_backend;
+#[cfg(feature = "native-backend")]
+pub use native_backend::NativeSessionBackend;
+#[cfg(feature = "native-routed")]
+mod native_routed;
+#[cfg(feature = "native-routed")]
+pub use native_routed::{NativeRoutedBackend, NativeRoutedResources, RoutedNativeEndpoint};
 #[cfg(any(
     feature = "journal-runtime",
     feature = "source-runtime",
     feature = "parent-control",
     feature = "capability-control",
-    feature = "bootstrap-runtime"
+    feature = "bootstrap-runtime",
+    feature = "native-backend"
 ))]
 mod runtime_common;
 #[cfg(any(
@@ -15,7 +24,8 @@ mod runtime_common;
     feature = "source-runtime",
     feature = "parent-control",
     feature = "capability-control",
-    feature = "bootstrap-runtime"
+    feature = "bootstrap-runtime",
+    feature = "native-backend"
 ))]
 pub use runtime_common::*;
 #[cfg(feature = "capability-control")]

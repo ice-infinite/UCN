@@ -22,12 +22,11 @@ static unsigned local_calls;
 static ucn_native_handle_t local_subscription;
 static void local_sample(void *ctx, const ucn_native_sample_t *s)
 {
-    uint8_t value = 6U;
     (void)ctx;
     assert(s->provenance == UCN_NATIVE_LOCAL);
     ++local_calls;
     assert(ucn_native_step(na, s->receive_time_us, 1U) == UCN_ERR_STATE);
-    if (local_calls == 1U) { assert(ucn_publish(na, publisher, &value, 1U) == UCN_OK); }
+    if (local_calls == 1U) { assert(ucn_publish(na, publisher, s->payload, s->payload_bytes) == UCN_OK); }
     else { assert(ucn_subscription_close(na, local_subscription) == UCN_OK); }
 }
 static void sample(void *ctx, const ucn_native_sample_t *s)
@@ -152,18 +151,24 @@ static void unknown_requires_real_late_completion_before_deinit(void)
     for (uint64_t t = 3U; t < 6U; ++t) { assert(ucn_native_step(root, t, 8U) == UCN_OK); }
     assert(ucn_native_status(root, &status) == UCN_OK && !status.core_quiescent);
     assert(ucn_native_deinit(root) == UCN_ERR_STATE);
-    /* C backend conservatively requires an old-instance physical fence for Unknown.
-     * This is a software Driver fact fixture, not a real hardware acceptance. */
-    assert(ucn_driver_tx_complete(core, fake.last_token, UCN_OK, NULL) == UCN_ERR_STATE);
+    /* Reopening is not physical retirement of the exact old token. */
     memset(&physical_fence, 0, sizeof(physical_fence)); physical_fence.struct_size = sizeof(physical_fence);
     physical_fence.api_version = UCN_API_VERSION; physical_fence.new_link_instance = 2U;
     assert(ucn_driver_link_event(core, link, UCN_DRIVER_LINK_REOPENED, &physical_fence) == UCN_OK);
+    assert(ucn_native_step(root, 6U, 8U) == UCN_OK);
+    assert(ucn_native_deinit(root) == UCN_ERR_STATE);
+    /* This fixture now supplies the real per-token Driver completion fact. */
+    assert(ucn_driver_tx_complete(core, fake.last_token, UCN_OK, NULL) == UCN_OK);
     for (uint64_t t = 6U; t < 11U; ++t) { assert(ucn_native_step(root, t, 8U) == UCN_OK); }
     assert(ucn_native_deinit(root) == UCN_OK);
 }
 
-int main(void)
+#ifndef UCN_NATIVE_TEST_MAIN
+#define UCN_NATIVE_TEST_MAIN main
+#endif
+int UCN_NATIVE_TEST_MAIN(void)
 {
+    assert(ucn_native_step(NULL, 1U, 1U) == UCN_ERR_ARGUMENT);
     unused_root_can_stop();
     initialization_lock_failures_never_publish_partial_callbacks();
     unknown_requires_real_late_completion_before_deinit();

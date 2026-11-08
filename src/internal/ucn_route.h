@@ -204,6 +204,8 @@ enum {
 
 typedef struct ucn_i_route_request_action {
     ucn_i_route_rreq_message_t forwarded;
+    /* Exact first-admission reverse deadline, never refreshed by duplicates. */
+    uint64_t reverse_expires_at_us;
     uint8_t kind;
     uint8_t reserved_zero[7];
 } ucn_i_route_request_action_t;
@@ -219,6 +221,8 @@ typedef struct ucn_i_route_reply_action {
     ucn_i_route_link_ref_t upstream;
     ucn_i_route_soft_view_t installed;
     ucn_handle_t completion;
+    /* Snapshot under the Route lock; applies only to FORWARD. */
+    uint64_t reverse_expires_at_us;
     uint8_t kind;
     uint8_t reserved_zero[7];
 } ucn_i_route_reply_action_t;
@@ -281,6 +285,8 @@ typedef struct ucn_i_route_owner {
     uint8_t discovery_max_attempts;
     uint8_t maximum_hops;
     uint8_t reserved_zero;
+    /* Locked temporary domain; zero again at every operation boundary. */
+    ucn_i_route_domain_t work_domain;
     ucn_i_route_discovery_record_t discoveries[UCN_I_ROUTE_DISCOVERY_COUNT];
     ucn_i_route_reverse_record_t reverse[UCN_I_ROUTE_REVERSE_COUNT];
     struct {
@@ -363,6 +369,11 @@ ucn_result_t ucn_i_route_make_rrep(ucn_i_route_owner_t *owner,
                                    uint16_t local_frame_mtu,
                                    uint64_t now_us,
                                    ucn_i_route_rrep_message_t *reply_out);
+/* Read-only preflight: exact live discovery key, no borrowed record pointer.
+ * Does not reserve a reverse obligation; on_control_rrep rechecks atomically. */
+ucn_result_t ucn_i_route_reverse_peek(ucn_i_route_owner_t *owner,
+    const ucn_i_route_discovery_key_t *key, uint64_t now_us,
+    ucn_i_route_link_ref_t *upstream_out);
 ucn_result_t ucn_i_route_on_rrep(ucn_i_route_owner_t *owner,
                                  const ucn_i_route_rrep_message_t *reply,
                                  const ucn_i_route_link_ref_t *ingress,
@@ -377,6 +388,13 @@ ucn_result_t ucn_i_route_on_control_rrep(
     ucn_i_route_owner_t *owner, const ucn_i_route_rrep_message_t *reply,
     uint32_t reporter_generation, const ucn_i_route_link_ref_t *ingress,
     uint64_t now_us, ucn_i_route_reply_action_t *action_out);
+/* Same locked core, without an extra forwarding stack frame. bind_reporter
+ * selects namespace bookkeeping, NEVER authenticates the input. Native calls
+ * it with true only after actual C0/H1 verification and current exact ACL. */
+ucn_result_t ucn_i_route_apply_reply(ucn_i_route_owner_t *owner,
+    const ucn_i_route_rrep_message_t *reply, const ucn_i_route_link_ref_t *ingress,
+    uint64_t now_us, ucn_i_route_reply_action_t *action_out,
+    bool bind_reporter, uint32_t reporter_generation);
 ucn_result_t ucn_i_route_on_wire_rerr(
     ucn_i_route_owner_t *owner, const ucn_i_route_rerr_payload_t *payload,
     uint8_t *invalidated_out);

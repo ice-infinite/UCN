@@ -8,6 +8,9 @@ import re
 
 def forbidden(source: str) -> list[str]:
     errors = []
+    # A compiler-only annotation is not an Owner dependency. Its contents are
+    # validated below; no other private include is exempt.
+    source = re.sub(r'^#include "internal/ucn_stack\.h"\s*$', '', source, flags=re.M)
     for pattern, reason in (
         (r'#\s*include\s*[<"](?:internal/|ucn/v6/)', "private Owner include"),
         (r'\bucn_i_[A-Za-z_]+\s*\(', "private Owner call"),
@@ -25,6 +28,17 @@ def main() -> None:
     root = args.root.resolve()
     native = (root / "src/native/ucn_native.c").read_text(encoding="utf-8")
     errors = forbidden(native)
+    annotation = (root/'src/internal/ucn_stack.h').read_text(encoding='utf-8')
+    annotation = re.sub(r'/\*[\s\S]*?\*/', '', annotation)
+    allowed = {
+        '#ifndef UCN_INTERNAL_STACK_H', '#define UCN_INTERNAL_STACK_H',
+        '#if defined(_MSC_VER)', '#elif defined(__GNUC__) || defined(__clang__)',
+        '#else', '#endif', '#define UCN_I_STACK_PHASE',
+        '#define UCN_I_STACK_PHASE __declspec(noinline)',
+        '#define UCN_I_STACK_PHASE __attribute__((noinline))',
+    }
+    if any(line.strip() not in allowed for line in annotation.splitlines() if line.strip()):
+        errors.append('stack annotation contains non-annotation code/dependency')
     for bad in ('#include "internal/ucn_security.h"', 'ucn_i_route_step();', 'malloc(4);'):
         if not forbidden(bad): errors.append("boundary mutation escaped")
     for path in (root / "src/internal/ucn_runtime.h", root / "src/runtime/ucn_node.c", root / "include/ucn/ucn_core.h"):

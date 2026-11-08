@@ -30,6 +30,33 @@ pub(crate) const HOP_AAD_FIXED_BYTES: usize = 35;
 
 const ORIGIN_DOMAIN: &[u8] = b"UCN6-ORIGIN-V1";
 const HOP_DOMAIN: &[u8] = b"UCN6-HOP-V1";
+#[cfg(test)]
+mod native_hop_vector {
+    use super::build_hop_aad;
+    use crate::Fingerprint;
+    #[test]
+    fn independent_c_rust_c1_hop_aad_matches_frozen_literal() {
+        let origin = [
+            0x61, 0x40, 0x43, 1, 4, 0x12, 1, 0, 0, 0, 1, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0,
+        ];
+        let fp = Fingerprint::new([
+            0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e,
+            0x5f, 0x60,
+        ])
+        .unwrap();
+        let expected = [
+            0x55, 0x43, 0x4e, 0x36, 0x2d, 0x48, 0x4f, 0x50, 0x2d, 0x56, 0x31, 0, 0, 0, 0x33, 0x61,
+            0x40, 0x43, 1, 4, 0x12, 1, 0, 0, 0, 1, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 1, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a,
+            0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60,
+        ];
+        let mut out = [0xa5; 80];
+        assert_eq!(build_hop_aad(&origin, 1, fp, &mut out).unwrap(), 66);
+        assert_eq!(&out[..66], &expected);
+        assert_eq!(&out[66..], &[0xa5; 14]);
+    }
+}
 const SEQUENCE_NONCE_DOMAIN: &[u8] = b"UCN6-NONCE-SEQ-V1";
 const C0_NONCE_DOMAIN: &[u8] = b"UCN6-NONCE-C0-V1";
 

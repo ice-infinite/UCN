@@ -4,8 +4,8 @@
 
 /* EN: Optional, static application facade. No Wire fields or hidden heap.
  * 中文：可选静态业务接口，不增加Wire字段，不隐式分配堆。 */
-#define UCN_NATIVE_API_VERSION UINT16_C(1)
-#define UCN_NATIVE_LAYOUT UINT16_C(1)
+#define UCN_NATIVE_API_VERSION UINT16_C(2)
+#define UCN_NATIVE_LAYOUT UINT16_C(2)
 #define UCN_NATIVE_PAYLOAD_BYTES 64U
 #if UCN_PROFILE == UCN_PROFILE_NANO
 #define UCN_NATIVE_CAPACITY 4U
@@ -40,6 +40,7 @@
 extern "C" {
 #endif
 typedef struct ucn_native ucn_native_t;
+typedef struct ucn_native_backend ucn_native_backend_t;
 typedef union ucn_native_storage {
     uint64_t alignment;
     unsigned char bytes[UCN_NATIVE_STORAGE_BYTES];
@@ -87,6 +88,9 @@ typedef struct ucn_native_sample {
     uint32_t origin_sequence;
     uint16_t channel_id, payload_bytes;
     uint8_t provenance;
+    /* Full authenticated Principal for protected samples; zero for O0/local.
+     * 保护样本的完整认证身份；O0/本地样本不伪造认证身份。 */
+    uint8_t principal[16];
     /* Borrowed only during callback. 借用仅在回调内有效。 */
     const uint8_t *payload;
 } ucn_native_sample_t;
@@ -101,6 +105,11 @@ typedef struct ucn_native_status {
  * 初始化必须独占，静态存储全零，Core尚未使用Endpoint。 */
 ucn_result_t ucn_native_init(void *storage, size_t storage_bytes, ucn_node_t *core,
                             const ucn_native_config_t *config, ucn_native_t **out_native);
+/* EN: Exclusive trusted product assembly; backend/storage/context outlive Root.
+ * ZH: 独占可信产品装配；后端、存储、context须保持到真实排空之后。 */
+ucn_result_t ucn_native_init_backend(void *storage, size_t storage_bytes,
+    const ucn_native_backend_t *backend, const ucn_native_config_t *config,
+    ucn_native_t **out_native);
 /* EN: Start the one underlying Core, once. 中文：仅启动底层唯一Core一次。 */
 ucn_result_t ucn_native_start(ucn_native_t *native, uint64_t now_us);
 /* EN: Exact typed Codec preflight, no entity allocation. 中文：精确核验Codec，不消耗实体槽。 */
@@ -127,8 +136,9 @@ ucn_result_t ucn_native_step(ucn_native_t *native, uint64_t now_us, uint16_t bud
 ucn_result_t ucn_native_dispatch(ucn_native_t *native, uint64_t now_us, uint16_t budget, uint16_t *out_delivered);
 ucn_result_t ucn_native_stop(ucn_native_t *native);
 ucn_result_t ucn_native_status(ucn_native_t *native, ucn_native_status_t *out_status);
-/* Deinit requires real Core quiescence; it never clears a live Driver token.
- * 必须真实排空Core，不得通过清内存伪造Driver退休。 */
+/* Deinit requires real quiescence; it never clears a live Driver token.
+ * Root storage and its lock remain valid until ALL concurrent callers finish.
+ * 必须真实排空，不得伪造Driver退休；Root和短锁须保持到所有并发调用者退出。 */
 ucn_result_t ucn_native_deinit(ucn_native_t *native);
 #ifdef __cplusplus
 }

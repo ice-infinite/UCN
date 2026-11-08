@@ -1,0 +1,674 @@
+{
+  "schema": 1,
+  "shared": {
+    "entries": [],
+    "external": {
+      "memcpy": "libc",
+      "memset": "libc",
+      "memcmp": "libc",
+      "memmove": "libc",
+      "__stack_chk_fail": "compiler-runtime"
+    },
+    "indirect": [
+      {
+        "source": "src/runtime/ucn_node.c",
+        "expression": "node->endpoints[endpoint_slot].receive",
+        "targets": [
+          "src/native/ucn_native.c:receive_frame"
+        ]
+      },
+      {
+        "source": "src/native/ucn_native.c",
+        "expression": "n->lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/native/ucn_native.c",
+        "expression": "n->lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/native/ucn_native.c",
+        "expression": "fn",
+        "boundary": "application",
+        "continuations": [
+          "src/native/ucn_native.c:ucn_publisher_create",
+          "src/native/ucn_native.c:ucn_subscription_create",
+          "src/native/ucn_native.c:ucn_native_check_schema",
+          "src/native/ucn_native.c:ucn_publish",
+          "src/native/ucn_native.c:ucn_native_send",
+          "src/native/ucn_native.c:ucn_publisher_close",
+          "src/native/ucn_native.c:ucn_subscription_close",
+          "src/native/ucn_native.c:ucn_subscription_quiescent",
+          "src/native/ucn_native.c:ucn_native_source_fence",
+          "src/native/ucn_native.c:ucn_native_stop",
+          "src/native/ucn_native.c:ucn_native_status"
+        ]
+      },
+      {
+        "source": "src/adapter/ucn_adapter.c",
+        "expression": "adapter->lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/adapter/ucn_adapter.c",
+        "expression": "adapter->lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/adapter/ucn_adapter.c",
+        "expression": "adapter->driver_callback_gate.enter",
+        "boundary": "driver-gate"
+      },
+      {
+        "source": "src/adapter/ucn_adapter.c",
+        "expression": "adapter->driver_callback_gate.leave",
+        "boundary": "driver-gate"
+      },
+      {
+        "source": "src/adapter/ucn_adapter.c",
+        "expression": "staging->submit",
+        "boundary": "driver",
+        "continuations": [
+          "src/adapter/ucn_adapter.c:ucn_i_adapter_tx_complete",
+          "src/adapter/ucn_adapter.c:ucn_i_adapter_rx_publish",
+          "src/adapter/ucn_adapter.c:ucn_i_adapter_link_event"
+        ]
+      },
+      {
+        "source": "src/adapter/ucn_adapter.c",
+        "expression": "staging->cancel",
+        "boundary": "driver",
+        "continuations": [
+          "src/adapter/ucn_adapter.c:ucn_i_adapter_tx_complete",
+          "src/adapter/ucn_adapter.c:ucn_i_adapter_rx_publish",
+          "src/adapter/ucn_adapter.c:ucn_i_adapter_link_event"
+        ]
+      },
+      {
+        "source": "src/core/ucn_owner.c",
+        "expression": "gate->lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/core/ucn_owner.c",
+        "expression": "gate->lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/core/ucn_owner.c",
+        "expression": "lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/core/ucn_owner.c",
+        "expression": "mailbox->lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/core/ucn_owner.c",
+        "expression": "mailbox->lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/security/ucn_security_session.c",
+        "expression": "owner->state_lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/security/ucn_security_session.c",
+        "expression": "owner->state_lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/security/ucn_security_session.c",
+        "expression": "config->state_lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/security/ucn_security_session.c",
+        "expression": "config->state_lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/security/ucn_security_session.c",
+        "expression": "owner->provider.verify_session",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/security/ucn_security_session.c",
+        "expression": "owner->provider.protect_origin",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/security/ucn_security_session.c",
+        "expression": "owner->provider.open_origin",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/security/ucn_security_session.c",
+        "expression": "owner->provider.protect_hop",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/security/ucn_security_session.c",
+        "expression": "owner->provider.verify_hop",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/security/ucn_security_session.c",
+        "expression": "o->provider.protect_hop",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/security/ucn_security_session.c",
+        "expression": "o->provider.verify_hop",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/routing/ucn_route.c",
+        "expression": "owner->state_lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/routing/ucn_route.c",
+        "expression": "owner->state_lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/runtime/ucn_node.c",
+        "expression": "node->lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/runtime/ucn_node.c",
+        "expression": "node->lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/runtime/ucn_node.c",
+        "expression": "mutable_node->lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/runtime/ucn_node.c",
+        "expression": "mutable_node->lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/runtime/ucn_node.c",
+        "expression": "completion",
+        "boundary": "application"
+      }
+    ],
+    "source_sha256": {
+      "CMakeLists.txt": "af4c8d085709cf3136a67bc90211cb41fc3c0619a499935a88de974751d8ad2e",
+      "include/ucn/ucn.h": "81ae9f4c4893b3b620d10688c39977065f2e5998c1d6532f054b2f962fd5bf05",
+      "include/ucn/ucn_config.h": "02162a4c493befd3b56f497b3a4ab732a71d20d7c4dc3cbc9f650355628f0963",
+      "include/ucn/ucn_core.h": "6e0a0adad33e880aad0b8d683082309ca068b9b7fdde0a7ba52395583dbb5325",
+      "include/ucn/ucn_driver.h": "df75b4de915946620c3fbb5f03f66352e53be6c4f4da52438b80bc06c1d8df69",
+      "include/ucn/ucn_native.h": "f842375097e9cccb556e1de90a1e6fe7b26ff1addc1c61a0ae71df96fabafe46",
+      "include/ucn/ucn_native_backend.h": "62d66c07af0b89914997c65e78786fca550f44cea705ca534fafb948a073128b",
+      "include/ucn/ucn_persistence.h": "e575c33a94c44c7217b32c93b2f5bd4c2afcb8fbf5d63cef550d34766ae3481d",
+      "include/ucn/ucn_product.h": "4922ee21446e3175bdaab4c3f7d93063a32d18fddf27d70e1725cede83e6e23b",
+      "include/ucn/ucn_simplified.h": "cb20023d0c4d739823bcae81f0476fd8e938c8db3c9efcb0b64a35c6886049e5",
+      "include/ucn/ucn_types.h": "3e3ccd81efcc2494513ef47326c4bd3ba5e87289561096723bd6de47ad7e595e",
+      "include/ucn/v6/adapters/ucn_v6_can.h": "817b218b64260b49d742d4699fa3fcf24adfb5762b798747df458ae713ed35c3",
+      "include/ucn/v6/adapters/ucn_v6_uart.h": "7c9f5d5ed5888a6b544c4b4bca5f3d32e08a25125f4f26b5258787870a48b06b",
+      "include/ucn/v6/adapters/ucn_v6_usb.h": "b72f56a7db3d097d80c27eea01c66231ddb2b272f9f7ce000608245c8276f309",
+      "include/ucn/v6/adapters/ucn_v6_wifi.h": "30a9c9e2e771fafdaf103c77c6975433ba4dbd3c354b8748f77735d687ad221b",
+      "include/ucn/v6/ports/ucn_v6_freertos.h": "bebb1b0fe82ecbef6aa14c6f12314b12940620748660cb0846c5849b836040f6",
+      "include/ucn/v6/reference/esp32s3/ucn_v6_esp32s3.h": "840687c7b8bb1ea90048e95f092657cf344c8277e7442db13fa0fb55fdcb23e8",
+      "include/ucn/v6/ucn_v6_adapter.h": "b3e722e3b15a0ac376e4e9708c7c257d79e9bf7a2a5cd610aa73b8a596adc18a",
+      "include/ucn/v6/ucn_v6_bootstrap.h": "9236d8ec2c3eb02b6a1aa3ef5182c4f0984ab744cf0be8a3b29f785616d66d61",
+      "include/ucn/v6/ucn_v6_capability.h": "f8cbcaebc0117440f4c16e2d034dcc3e4367f0a033e43343ac4adffe5ebae191",
+      "include/ucn/v6/ucn_v6_cluster.h": "937737e6b59760bbf08ebe137804e78d863f8a6ae2502d8fbbab5f4a5014a8ca",
+      "include/ucn/v6/ucn_v6_config.h": "19d5b06a25685aadc89c0e6f73d84fe292ae314b0269152cbd0a0364443c177e",
+      "include/ucn/v6/ucn_v6_identity.h": "2cb68878e3a305ab67d63af2a2fd339014c428e57ae273feaeddf9a663b9ab85",
+      "include/ucn/v6/ucn_v6_message.h": "38212dbda73281d3dd42c639f9ab49b0375f34658f8d037325ef055cd4da93c0",
+      "include/ucn/v6/ucn_v6_owner.h": "079ca9896a57a5e111f6611040ff49fecf0874ab8e3efff39bbdf732ee44c2b4",
+      "include/ucn/v6/ucn_v6_qos.h": "a771983d3a7eca59d48fef569eb6a8b0a8bc54c28846eecab346fe06ce5b2f66",
+      "include/ucn/v6/ucn_v6_realtime.h": "953d9ac082f2bc5e19b5dbf03a3f1df365492af49d5d9f3da41c5a2705e9a969",
+      "include/ucn/v6/ucn_v6_route.h": "d19dadb3ff0054f912a0327672c7190b25319c8b13ba345c0fee268c7655e914",
+      "include/ucn/v6/ucn_v6_runtime.h": "14e3470e3bfb19009bd4ae35110271693e0cd69832920c944381aea4538adf5b",
+      "include/ucn/v6/ucn_v6_security.h": "cbcdd949055eeeaca0b6359860cf06d5303ab93a69d6af921f64fc2f3bdede06",
+      "include/ucn/v6/ucn_v6_transfer.h": "c906603beae9fbb174bce8bcf3ed32d8db5d04aa1c8c4f1da3db4094f21c9f32",
+      "include/ucn/v6/ucn_v6_types.h": "63aa044b96b83df98a5bbeef012a69eabe18d3c989e199fd63ec334ce98340d1",
+      "include/ucn/v6/ucn_v6_wire.h": "acd3c740546c1e5a64849dfa1032a89b0863a15a17c040966f5a282ff646464b",
+      "src/adapter/ucn_adapter.c": "f0dc176e1115bdd882eca8180a45938d979760704e3129df04214e09349c3a87",
+      "src/admission/ucn_admission.c": "b80042b6af74ba71875621f4d1d43639cc987e988c18f15bdcd42b47a7bae333",
+      "src/admission/ucn_admission_scaffold.c": "c4c8ac3192f60777414f694f2f4781d92494e915896410764ed164e8e8a9b408",
+      "src/admission/ucn_admission_wire.c": "b9f0de4da8548d2fd213aed8ab3a151f669186cb59bb9719dcb14202bbda0a31",
+      "src/admission/ucn_identity_binding.c": "9f9cd81234336a684f09d41c102fdcbf616ebccbda8ea723c2319e2b60d974d5",
+      "src/capability/ucn_capability.c": "a413d6482a9f8c5e96fafaf79e3c1a80ab542da2a2be0ffbd4a50c8831275ba9",
+      "src/cluster/ucn_cluster.c": "51c852d0c735b978d4890c571e3e3b3c63c141db3e85a1f1c26660b43e3cfdca",
+      "src/cluster/ucn_cluster_config.c": "bedd8708f240aaf81f09f06a4c61b4cf23e186a5363021371f06f8d989f806a9",
+      "src/cluster/ucn_cluster_directory.c": "62979a75596ed03975919f002be5f9b6ee86b014c218a375885d31943b01ed62",
+      "src/cluster/ucn_cluster_lineage.c": "3bafff6bc92d7233fb2f6f6bf7f131439883f53a84b704b7639239e766de1942",
+      "src/cluster/ucn_cluster_persistence.c": "0a30917390609417b431d20709020a80023f06ad0466e42616bef6ab956c574c",
+      "src/cluster/ucn_cluster_scaffold.c": "0cef49df4e67e5e6d4fae2749dd88bda40a657155837f02471be37d7fba730f6",
+      "src/cluster/ucn_cluster_snapshot.c": "44cc54b9a292b9d6a8468953a1726585dac98fcb5ace72bb4c9727f57871b639",
+      "src/cluster/ucn_cluster_step.c": "2ff5b1d83edf60dcc7abc69f6da46765a60161ab5566612fd24821a6b9308a0a",
+      "src/cluster/ucn_cluster_transition.c": "3ba20c609f0d7af96e150038bef4ce0ac9361080aa19191f3846fbaba62f5150",
+      "src/core/ucn_checked.c": "5f17f7eb44d035c6747401e0e992c9c3f55732a7a55b81e7b3770c1122e3f709",
+      "src/core/ucn_coordinator.c": "d7d26f2cbecbcc373576596e8a047be0d96a8339cd38d533c1ffbe3151ccd174",
+      "src/core/ucn_digest.c": "09eb95a2d39c49fad28d78574b5a60e40d4e32f52a04983a3e10522b67a5bead",
+      "src/core/ucn_module_scaffold.c": "5ea94df6694cfd1cdacee66fce22d5b02b22af76244955d30dbb3af0e332b9b4",
+      "src/core/ucn_owner.c": "b8fcc236c573f928d813ce79167f7c50ff21e6fc36dd46d009640fde40d82bf3",
+      "src/group/ucn_group.c": "41a314ed542c58e51d770b9cbae41a9375dff5681ac1259f1f12c9ee1a14e3f0",
+      "src/group/ucn_group_receive.c": "c4c147492d0cc54da0f629216b82cbacdedcad3649ab2c9374e3afa39986c6ab",
+      "src/group/ucn_group_scaffold.c": "1a1a61f288d52ca0704b42ac81df1ae0d0f7cc82c2202d966819a529f18f2b32",
+      "src/group/ucn_group_send.c": "25f7f461c3ddbc3b49593cb7f65470c0d287c167be4a8c0613feeeec68f8337c",
+      "src/group/ucn_group_step.c": "1d1eae46552c3e7c0a8fdc1e4f256c1bcc03dcf6910fb51bbf8da50ef13a3655",
+      "src/internal/ucn_adapter.h": "fb4347ad743f770acf97757e64beb01fc369e06d9f271ef94b4340e4fd43e831",
+      "src/internal/ucn_admission.h": "99c0ddbcb74ae4a1c3d068b5d935083f90495ef47d11a0e9c484530399269483",
+      "src/internal/ucn_capability.h": "d5d5d4a25a7a3fe444211bdc18f1a7a6493560d8a3aa0421fe7831385e1b0e90",
+      "src/internal/ucn_checked.h": "0f9c98a9e22935ec39a8059b5ed96a1b2f68887d6ab3d27264bf8fe3209fb8de",
+      "src/internal/ucn_cluster.h": "2e7b356c6aeaca0ef18d830d73b07db0cebe3b260d9a5399579c3ed853fd681e",
+      "src/internal/ucn_composition.h": "cb771341e45ffa96f2a4bfcca538834084510180be1b2980d9b64acb08134740",
+      "src/internal/ucn_control_wire.h": "674b5daa0f8ef33067a170a4b76426cf78cbdf36add11ff31771e2639bb245dd",
+      "src/internal/ucn_coordinator.h": "9f592438e55c852f793d9bbb8f718ca5ffab2f020397778e09c096f82eb0836f",
+      "src/internal/ucn_digest.h": "334f1b724ad9e9abd7c110cf0e72332e89425776d67d726233e702a1e7258e91",
+      "src/internal/ucn_flow.h": "96137baaebf14bd7a7b93269cce2e1e8310c37f28bb751c95f1ee22b4c1be381",
+      "src/internal/ucn_group.h": "040f197343b0707f304100e639f467ab7865c208edbd65a73d365b3a2475aa65",
+      "src/internal/ucn_identity.h": "ee16955b0580523d12dd2b518ec43a30c16842368ccd7d532056c735ed476790",
+      "src/internal/ucn_module_scaffold.h": "f126daef26ef559d5fb0f0973957e99b5a6dcdec87600dfb0314822cb99c5dc2",
+      "src/internal/ucn_native_route_control.h": "40bd483f42238cbae8d3c1c0b2d0276b6abea2f70f7db24fd917acd1bebc860e",
+      "src/internal/ucn_native_routed.h": "316450b0e0b1f5598e134e651755a704e78bf4e46d7850f8928f89fc8c5e9334",
+      "src/internal/ucn_native_session.h": "b5db504cb9e7019a1744f82ca09596f0de5bdb0eca5503252fa82a36e44ab3fa",
+      "src/internal/ucn_operation_wire.h": "f401c9683e4ee240b7a4a570722fe9122834757bed44bc98be86650e5dddf683",
+      "src/internal/ucn_owner.h": "e4b19aa2607597cd2c91e327b65975607885daca7458d6cad2796f3651ed2422",
+      "src/internal/ucn_persistence.h": "870b4685217c8a762e8fd3c052e3b65039a7542ce0799c9470833b997a1450fa",
+      "src/internal/ucn_persistence_coordinator.h": "15af2b51b8d22fe27aa2890bf17bf4542fdba4eb422d532507ca16c14c9af426",
+      "src/internal/ucn_realtime.h": "906f12cdb8e9780aa1bd15947be3ef015bdde90a32be240061efe0fab14f9d7b",
+      "src/internal/ucn_route.h": "c77a9bd87f82033e5b5f2aa7451f5f7d94539e50e10a419e9029b959dfeca4d5",
+      "src/internal/ucn_runtime.h": "c03f2a42f54b966205a87d74bcdadb92b5bcd5540ac493fc29df0426d4faac3b",
+      "src/internal/ucn_security.h": "4a54628fa9b950afdcd4e67ff4b77393b83a28419b9376dbdacc154173f5034e",
+      "src/internal/ucn_service.h": "29e191af0fb632eb43b0fb17d77a1f95b0daf4b10d20c35ce9f28e67058436a1",
+      "src/internal/ucn_stack.h": "739e3685d6da860582dd62f9e74a91ae5d6f60ebce6c0e4570b47fd4007f8a5b",
+      "src/internal/ucn_transport.h": "86e227e6624e53e2323de9a6cf3cb2114d2f5c82f724de80c43cd559fd6ad028",
+      "src/internal/ucn_wire.h": "16cc34d3732426ee59c151bb8e18045afa62f2759e13e98d2a38ecc744bac6c9",
+      "src/native/ucn_native.c": "906a84d6520579ec197a8faba66c8e1bf1c9ec42a0255ac868ba86a3491071e2",
+      "src/persistence/ucn_persistence.c": "b624da76cda3083047bb768f535345faffd6a090f711f23e9cec377f1495e1ff",
+      "src/persistence/ucn_persistence_codec.c": "a98e81063f6785b8bea9b0e7188db1d1903dfdab409acb8372dceab60cf393be",
+      "src/persistence/ucn_persistence_coordinator.c": "6f388ce8916bc43fc51e854828c4a76548e3cce5ef66b5088c2f1e5fe3580236",
+      "src/persistence/ucn_persistence_record_header.c": "9e4c772fce619d24edc240a75ac4c0ceb4b930c53f5c41d81c59fd105e3bc669",
+      "src/realtime/ucn_realtime.c": "dbb0d3028a2f525e8361da151355ff7b7c4ba1dfff4c26bdd96449c94189d587",
+      "src/realtime/ucn_realtime_codec.c": "519319b791ba93f3b1834fffcb08b826878020d7612b9d0b3a95cd098516f18d",
+      "src/realtime/ucn_realtime_domain.c": "feaab86e482687fd7f63efa153db52d764b4e9d839503b8e10f535e04606255d",
+      "src/realtime/ucn_realtime_policy.c": "00e7eb49dff782dcf108b3fcf933fe8d11b66fc8b6bd5cef97449f7935a29a89",
+      "src/realtime/ucn_realtime_scaffold.c": "3f7695aada9000eba21cf11c4e5bee405445ce183aa224dcc27f569fb6bdc84b",
+      "src/realtime/ucn_realtime_sync.c": "f5a361ed8691fd23a497cf79a2a9c24750051aaedb7651c493805dc5af1206bc",
+      "src/routing/ucn_flow.c": "5ae95fb408e50edd7b920d3fbd0b4fc5add2a15bfc4a771d3b623257e1c9a1d9",
+      "src/routing/ucn_route.c": "b8da4db7f77d61d373a301499bc3004990eef1a98e2fdee5477349bcec3dcbd0",
+      "src/routing/ucn_routing_scaffold.c": "eaa4ab2220cc8729bd86509e4f4a0f9ad57e0e2f98aac0f5df6a92569e6c560d",
+      "src/runtime/ucn_composition.c": "295e9003f62dcb28544b6d324f9fbade576057b13bf87f89cce250707d6142f8",
+      "src/runtime/ucn_native_route_control.c": "b99859bab2f72445a24d7d07ee404baeae85d8e8171a7e14c10d4b0f425808ba",
+      "src/runtime/ucn_native_routed.c": "f66d1c0a3eb30b3c63079d4b87b4250cc75ab45bfd62111b03bb612ef374a561",
+      "src/runtime/ucn_native_session.c": "4fbe17c6651a6b236969b38635d073bf1960d5493dffc78fa1703c8b81761bab",
+      "src/runtime/ucn_node.c": "4880e6868ef173e8a1272a4934ef20f329eaeed5e17216d9ccc175bf7fa36b4c",
+      "src/runtime/ucn_tx.c": "78d45620c924061841506b1e2a63ebe01f83bd2bfe65157b8e1cf33738417738",
+      "src/security/ucn_security_scaffold.c": "e65e8e4ffe2f2fd8c99ba838ea69f7170a6990966ce677a25ca07067ae00553b",
+      "src/security/ucn_security_session.c": "f314c53404222e10fab17a8cb3d387b44e128eb6a008325d2ca8f776687fad35",
+      "src/service/ucn_operation.c": "0177f79781a5968050f5f9d7f21e8255aab252cce4adb530d4fae07bfd7dfccb",
+      "src/service/ucn_operation_id.c": "83c2e9d99d95a8cdbb53df33407170ec0968d3c7159105d816f2f9d630aff0ac",
+      "src/service/ucn_qos.c": "6199185fe223408a55be785a712a6a95c90ea52f8671aa93cf09d4bb4427c1a0",
+      "src/service/ucn_service.c": "031eed25c22c425b189d8bae1cf68274cfb978d1c93b11faa8a258533d2f0e32",
+      "src/service/ucn_service_control.c": "a185a858f37d83a8dd2aac53d6bd288b28fe3fb4e7d174de04fbfff3a7bc03d1",
+      "src/service/ucn_service_private.h": "dccd62015305e8f8720865538670b262e501fcedc2fb2e39742f04b788bf527e",
+      "src/service/ucn_service_scaffold.c": "bf22773ea7486f2a49ba78d46f0fa7245b7be9e09d6f75e066161c9d3523a208",
+      "src/transport/ucn_transfer.c": "40809535fa70cde441b7224101cdae6eb7302b3d07e431ba440e78ac07af317e",
+      "src/transport/ucn_transport.c": "5ffe2fd244d96d21c7ce1f21419317f7514c81a16b685e30e4c3fea4a36a0df4",
+      "src/transport/ucn_transport_codec.c": "900d731cbec7fba0e11cdd9e527bc996969fdffa9b403043000eab1a290165a5",
+      "src/transport/ucn_transport_parent.c": "5896646a4b2c1257f0dee3bba18e57ec998d7bc0e6aeff24f6bbbd99b80f31f7",
+      "src/transport/ucn_transport_private.h": "8a289db3bad81c043ae19b94ae3c9785fd862de84f64bb053b54a1fc59f76bf4",
+      "src/transport/ucn_transport_scaffold.c": "663dcad7e3a557ee6b303bf030f3a42d961f11b010891f120f5f10e752da0978",
+      "src/v6/adapter/ucn_v6_adapter.c": "a2027ff8b6f8c60d39eb47e130e1787a48ee27d6a83bc695089c46d6511b5812",
+      "src/v6/adapter/ucn_v6_can.c": "da2a474a5c5d69fd78e24444fc62f8cdcfcf369686746f2a6da4f41e194fe873",
+      "src/v6/adapter/ucn_v6_uart.c": "f09487c1fd0fdb8dae6a3257f64be3b1d8ed37159bc637c78c5e8dbd7c73b600",
+      "src/v6/adapter/ucn_v6_usb.c": "0d58e28ad0ee94f579fe4ea0e4e5b785027c122457ad2d387bbe20be5df782a4",
+      "src/v6/adapter/ucn_v6_wifi.c": "a6b8b552c4d41ae81e2a5c3d04c0b7275a41934a0a641de04b8a45093d042208",
+      "src/v6/capability/ucn_v6_capability.c": "f3e5f8a6d86920cad8a8e620b662a6834b7dabe85eb2fcf7a60267e7da737120",
+      "src/v6/cluster/ucn_v6_cluster.c": "99599343fdc425912e1c79c765bae2cd3bde6dee828040de9e37a1cc2fcac17b",
+      "src/v6/config/ucn_v6_config.c": "79cbbc475b3712d7a80e2e85131684648b6bce2672a2ca96ec78466971de6bc9",
+      "src/v6/identity/ucn_v6_bootstrap.c": "77cce4131384b605d608134d6ba581a8fca9ee8e94fb1e0b3bf18d335d3d1d0d",
+      "src/v6/identity/ucn_v6_identity.c": "fd91f0a4af866cb0808966d023087cd11214c7391c1b84edeb7a4e9b471dde04",
+      "src/v6/internal/ucn_v6_adapter_private.h": "9c8bbded5f5f1d87e0c712f45f266912b2c7c387b7f45e7f8f48f3f9177f0f87",
+      "src/v6/internal/ucn_v6_bootstrap_private.h": "10895dc2f9bf1400727fd88a346834f7ecf38d8126c41816d382f31ba4844be2",
+      "src/v6/internal/ucn_v6_capability_private.h": "50f97d8e289eae225a6bf5558b91d89cca0af3355a1df3c31fa767904a28b03a",
+      "src/v6/internal/ucn_v6_cluster_private.h": "1ae756d2d4813a8a2cb648cb0f92720c29f9ff9bafecb0c86f7765306c147174",
+      "src/v6/internal/ucn_v6_identity_private.h": "b42c3208f98a6471144a245923cadba89569d7846255e52b881b19f3a34617f1",
+      "src/v6/internal/ucn_v6_message_private.h": "9d3661fde969d4b2dc33217a42d46dae52617ed84e558b2fd3fcff4d68008126",
+      "src/v6/internal/ucn_v6_owner_private.h": "9b9b8676114b28c34144475b6ce93d6d45b7bde437e8dfce4707d741fd9fcbb1",
+      "src/v6/internal/ucn_v6_qos_private.h": "f4228896a6f5eff68f116fae84d900d84c2934c96fa55db2cbf8444f3539f6c2",
+      "src/v6/internal/ucn_v6_realtime_private.h": "3bf7e6342902a4319ae15b3a0395e4b24b96c805be8d6df68978b090423506c8",
+      "src/v6/internal/ucn_v6_route_private.h": "7d12b3a6ae8b5fd5f5c67669ccf9e26dde8055f7c0e8f07769e5e7caea967057",
+      "src/v6/internal/ucn_v6_runtime_private.h": "80810a74fd3f3d2a8f5b00b96391d4040b7920aa236ddf7996b062ca408c3565",
+      "src/v6/internal/ucn_v6_security_private.h": "bdc1ba925d37757e669217167303e08b2f74ff55eaefa60bd099ae4cd37697a1",
+      "src/v6/internal/ucn_v6_transfer_private.h": "c39a01cf397e49eced4e22b18f434fcbb8984c50ddea37eccdcf6539e50a0da6",
+      "src/v6/message/ucn_v6_message.c": "4208d216ce24f8d2d7cd25bbba207e02c7c78579f2504eac0e34317b2c5d0a28",
+      "src/v6/owner/ucn_v6_owner.c": "88515750b9f5f7b29e23ecf3ffeef73aa8698ba300432715a2790c08db0cf36b",
+      "src/v6/ports/ucn_v6_freertos.c": "04eb98daf4eb9196e4d8a16d34ce19746b8c409391e9b3c53a44577bc0a1f358",
+      "src/v6/qos/ucn_v6_metric.c": "32a614a3b017e6fcdffa54acdbf644c631ce1ea0ed769234996318196f8cd877",
+      "src/v6/qos/ucn_v6_qos.c": "ae4918fbd22476b55e40e6e8ce82311c2dfaf60f13823478dee4f59f34660fdd",
+      "src/v6/realtime/ucn_v6_realtime.c": "dafdba6ba633b79c72c7fd9fa301c38713f412f7c3832387078d16c9598185ee",
+      "src/v6/reference/esp32s3/ucn_v6_esp32s3.c": "ac52441e4e2ceeac042d884bf4982bb185243e3848940e94c6344f9b4679d34c",
+      "src/v6/route/ucn_v6_route.c": "2bde98dc060f463962714c440c5c11e1b02e67373852c511f15e943f4dd6fcd9",
+      "src/v6/runtime/ucn_v6_runtime.c": "a568d49d71a1d16cae4dcf83cd7828c53cd667d40c917faa5161b8f1951cd6ae",
+      "src/v6/security/ucn_v6_security.c": "3e0ee1d25895596a09c3eda5ba50904dc7cb9d238e440e341393c7d4bf31c44c",
+      "src/v6/transfer/ucn_v6_transfer.c": "c17c88284a10f7705070b2b76a3aee9b8407efbfb407d6385ae677801cc625e3",
+      "src/v6/transfer/ucn_v6_transfer_codec.c": "9e542f00020b22a0ba2f7deed83920fe52ee492cb2a03a9ee2ad0a98b87dc4ba",
+      "src/v6/wire/ucn_v6_wire.c": "2dede086ff716915151e8377888a4fd13887e96339575960881cd8659ab46367",
+      "src/wire/ucn_control_wire.c": "0a9e5f1b510eccc0b385a9bb2e69067993bed5d85baca2889230509cbeb6ea4e",
+      "src/wire/ucn_wire.c": "44aed5d56fa8bb09698ca495df8842a2d6b8432104ba1d766a8dddbc51688fbd"
+    },
+    "require_dependencies": true
+  },
+  "assemblies": {
+    "h0": {
+      "entries": [
+        "src/native/ucn_native.c:ucn_native_init",
+        "src/native/ucn_native.c:ucn_native_init_backend",
+        "src/native/ucn_native.c:ucn_publisher_create",
+        "src/native/ucn_native.c:ucn_native_check_schema",
+        "src/native/ucn_native.c:ucn_subscription_create",
+        "src/native/ucn_native.c:ucn_publish",
+        "src/native/ucn_native.c:ucn_native_send",
+        "src/native/ucn_native.c:ucn_publisher_close",
+        "src/native/ucn_native.c:ucn_subscription_close",
+        "src/native/ucn_native.c:ucn_subscription_quiescent",
+        "src/native/ucn_native.c:ucn_native_source_fence",
+        "src/native/ucn_native.c:ucn_native_start",
+        "src/native/ucn_native.c:ucn_native_step",
+        "src/native/ucn_native.c:ucn_native_dispatch",
+        "src/native/ucn_native.c:ucn_native_stop",
+        "src/native/ucn_native.c:ucn_native_status",
+        "src/native/ucn_native.c:ucn_native_deinit",
+        "src/runtime/ucn_native_session.c:ucn_i_native_session_init"
+      ],
+      "indirect": [
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "backend->binding",
+          "targets": [
+            "src/runtime/ucn_native_session.c:binding"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "backend->local_view",
+          "targets": [
+            "src/runtime/ucn_native_session.c:local_view"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "backend->preflight",
+          "targets": [
+            "src/runtime/ucn_native_session.c:preflight"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->local_view",
+          "targets": [
+            "src/runtime/ucn_native_session.c:local_view"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->poll",
+          "targets": [
+            "src/runtime/ucn_native_session.c:poll"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->send",
+          "targets": [
+            "src/runtime/ucn_native_session.c:send"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->start",
+          "targets": [
+            "src/runtime/ucn_native_session.c:start"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->step",
+          "targets": [
+            "src/runtime/ucn_native_session.c:step"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->stop",
+          "targets": [
+            "src/runtime/ucn_native_session.c:stop"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->validate",
+          "targets": [
+            "src/runtime/ucn_native_session.c:validate"
+          ]
+        }
+      ],
+      "bindings": [
+        {
+          "source": "src/runtime/ucn_native_session.c",
+          "object": "b->port",
+          "field": "binding",
+          "target": "binding"
+        },
+        {
+          "source": "src/runtime/ucn_native_session.c",
+          "object": "b->port",
+          "field": "local_view",
+          "target": "local_view"
+        },
+        {
+          "source": "src/runtime/ucn_native_session.c",
+          "object": "b->port",
+          "field": "poll",
+          "target": "poll"
+        },
+        {
+          "source": "src/runtime/ucn_native_session.c",
+          "object": "b->port",
+          "field": "preflight",
+          "target": "preflight"
+        },
+        {
+          "source": "src/runtime/ucn_native_session.c",
+          "object": "b->port",
+          "field": "send",
+          "target": "send"
+        },
+        {
+          "source": "src/runtime/ucn_native_session.c",
+          "object": "b->port",
+          "field": "start",
+          "target": "start"
+        },
+        {
+          "source": "src/runtime/ucn_native_session.c",
+          "object": "b->port",
+          "field": "step",
+          "target": "step"
+        },
+        {
+          "source": "src/runtime/ucn_native_session.c",
+          "object": "b->port",
+          "field": "stop",
+          "target": "stop"
+        },
+        {
+          "source": "src/runtime/ucn_native_session.c",
+          "object": "b->port",
+          "field": "validate",
+          "target": "validate"
+        }
+      ]
+    },
+    "h1": {
+      "entries": [
+        "src/native/ucn_native.c:ucn_native_init",
+        "src/native/ucn_native.c:ucn_native_init_backend",
+        "src/native/ucn_native.c:ucn_publisher_create",
+        "src/native/ucn_native.c:ucn_native_check_schema",
+        "src/native/ucn_native.c:ucn_subscription_create",
+        "src/native/ucn_native.c:ucn_publish",
+        "src/native/ucn_native.c:ucn_native_send",
+        "src/native/ucn_native.c:ucn_publisher_close",
+        "src/native/ucn_native.c:ucn_subscription_close",
+        "src/native/ucn_native.c:ucn_subscription_quiescent",
+        "src/native/ucn_native.c:ucn_native_source_fence",
+        "src/native/ucn_native.c:ucn_native_start",
+        "src/native/ucn_native.c:ucn_native_step",
+        "src/native/ucn_native.c:ucn_native_dispatch",
+        "src/native/ucn_native.c:ucn_native_stop",
+        "src/native/ucn_native.c:ucn_native_status",
+        "src/native/ucn_native.c:ucn_native_deinit",
+        "src/runtime/ucn_native_routed.c:ucn_i_native_routed_init"
+      ],
+      "indirect": [
+        {
+          "source": "src/runtime/ucn_native_route_control.c",
+          "expression": "b->control->reserve",
+          "boundary": "c0-counter"
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "backend->binding",
+          "targets": [
+            "src/runtime/ucn_native_routed.c:binding"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "backend->local_view",
+          "targets": [
+            "src/runtime/ucn_native_routed.c:local_view"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "backend->preflight",
+          "targets": [
+            "src/runtime/ucn_native_routed.c:preflight"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->local_view",
+          "targets": [
+            "src/runtime/ucn_native_routed.c:local_view"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->poll",
+          "targets": [
+            "src/runtime/ucn_native_routed.c:poll"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->send",
+          "targets": [
+            "src/runtime/ucn_native_routed.c:send"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->start",
+          "targets": [
+            "src/runtime/ucn_native_routed.c:start"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->step",
+          "targets": [
+            "src/runtime/ucn_native_routed.c:step"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->stop",
+          "targets": [
+            "src/runtime/ucn_native_routed.c:stop"
+          ]
+        },
+        {
+          "source": "src/native/ucn_native.c",
+          "expression": "n->backend->validate",
+          "targets": [
+            "src/runtime/ucn_native_routed.c:validate"
+          ]
+        }
+      ],
+      "bindings": [
+        {
+          "source": "src/runtime/ucn_native_routed.c",
+          "object": "b->port",
+          "field": "binding",
+          "target": "binding"
+        },
+        {
+          "source": "src/runtime/ucn_native_routed.c",
+          "object": "b->port",
+          "field": "local_view",
+          "target": "local_view"
+        },
+        {
+          "source": "src/runtime/ucn_native_routed.c",
+          "object": "b->port",
+          "field": "poll",
+          "target": "poll"
+        },
+        {
+          "source": "src/runtime/ucn_native_routed.c",
+          "object": "b->port",
+          "field": "preflight",
+          "target": "preflight"
+        },
+        {
+          "source": "src/runtime/ucn_native_routed.c",
+          "object": "b->port",
+          "field": "send",
+          "target": "send"
+        },
+        {
+          "source": "src/runtime/ucn_native_routed.c",
+          "object": "b->port",
+          "field": "start",
+          "target": "start"
+        },
+        {
+          "source": "src/runtime/ucn_native_routed.c",
+          "object": "b->port",
+          "field": "step",
+          "target": "step"
+        },
+        {
+          "source": "src/runtime/ucn_native_routed.c",
+          "object": "b->port",
+          "field": "stop",
+          "target": "stop"
+        },
+        {
+          "source": "src/runtime/ucn_native_routed.c",
+          "object": "b->port",
+          "field": "validate",
+          "target": "validate"
+        }
+      ]
+    }
+  }
+}

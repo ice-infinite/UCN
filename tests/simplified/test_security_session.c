@@ -1485,6 +1485,33 @@ static int run_c1_origin_projection(uint8_t level, uint8_t suite)
               output, sizeof(output), &opened, &replay) == UCN_ERR_STATE);
     CHECK(opened == SIZE_MAX && memcmp(&replay, &sentinel, sizeof(replay)) == 0);
     receive_access.context_fingerprint[0] ^= 1U;
+    {
+        ucn_i_security_c1_open_call_t call, before;
+        static ucn_i_security_owner_t owner_before;
+        ucn_i_security_packet_workspace_t work_before;
+        memset(&call, 0, sizeof(call));
+        call.session = receiver.handle; call.facts = &receiver.facts;
+        call.access = &receive_access; call.packet = packet; call.packet_bytes = bytes;
+        call.plaintext_output = output; call.plaintext_capacity = sizeof(output);
+        call.plaintext_bytes = &opened; call.replay_out = &replay; call.origin_only = 2U;
+        owner_before = receiver.owner; work_before = rw;
+        CHECK(ucn_i_security_c1_open_borrowed(&receiver.owner, &call, &rw) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_c1_open_borrowed(&receiver.owner, NULL, &rw) == UCN_ERR_ARGUMENT);
+        call.origin_only = 1U;
+        call.plaintext_output = (uint8_t *)&call + 1U;
+        before = call;
+        CHECK(ucn_i_security_c1_open_borrowed(&receiver.owner, &call, &rw) == UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&call, &before, sizeof(call)) == 0);
+        call.plaintext_output = output;
+        call.plaintext_bytes = (size_t *)&call;
+        before = call;
+        CHECK(ucn_i_security_c1_open_borrowed(&receiver.owner, &call, &rw) == UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&call, &before, sizeof(call)) == 0);
+        CHECK(memcmp(&receiver.owner, &owner_before, sizeof(owner_before)) == 0);
+        CHECK(memcmp(&rw, &work_before, sizeof(rw)) == 0);
+        CHECK(opened == SIZE_MAX && memcmp(&replay, &sentinel, sizeof(replay)) == 0);
+        CHECK(output[0] == 0xA5U && output[sizeof(output)-1U] == 0xA5U);
+    }
     packet[bytes - 1U] ^= 1U;
     CHECK(ucn_i_security_c1_origin_open(&receiver.owner, receiver.handle,
               &receiver.facts, &receive_access, packet, bytes, &rw,
@@ -1929,6 +1956,37 @@ static int run_c0_protect_roundtrip(uint8_t origin_level,
     CHECK(access.direction == UCN_I_SECURITY_ACCESS_INBOUND);
     CHECK(memcmp(&resolved_facts, &receiver.facts,
                  sizeof(resolved_facts)) == 0);
+    {
+        ucn_i_security_c0_open_call_t call, call_before;
+        static ucn_i_security_owner_t owner_before;
+        ucn_i_security_packet_workspace_t workspace_before;
+        ucn_i_security_authenticated_control_t fact_before;
+        size_t length_before = opened_bytes;
+        uint8_t output_before[sizeof(opened)];
+        memset(&fact, 0xA5, sizeof(fact)); fact_before = fact;
+        memset(&receiver_workspace, 0, sizeof(receiver_workspace));
+        memset(opened, 0x5A, sizeof(opened));
+        memcpy(output_before, opened, sizeof(opened));
+        memset(&call, 0, sizeof(call));
+        call.access = &access; call.facts = &resolved_facts;
+        call.packet = packet; call.packet_bytes = packet_bytes;
+        call.plaintext_output = (uint8_t *)&call + 1U;
+        call.plaintext_capacity = sizeof(opened); call.plaintext_bytes = &opened_bytes;
+        call.fact_out = &fact;
+        owner_before = receiver.owner; workspace_before = receiver_workspace;
+        call_before = call;
+        CHECK(ucn_i_security_c0_open_borrowed(&receiver.owner, NULL, &receiver_workspace) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_c0_open_borrowed(&receiver.owner, &call, &receiver_workspace) == UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&call, &call_before, sizeof(call)) == 0);
+        call.plaintext_output = opened; call.fact_out = (ucn_i_security_authenticated_control_t *)&call;
+        call_before = call;
+        CHECK(ucn_i_security_c0_open_borrowed(&receiver.owner, &call, &receiver_workspace) == UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&call, &call_before, sizeof(call)) == 0);
+        CHECK(memcmp(&receiver.owner, &owner_before, sizeof(owner_before)) == 0);
+        CHECK(memcmp(&receiver_workspace, &workspace_before, sizeof(workspace_before)) == 0);
+        CHECK(memcmp(&fact, &fact_before, sizeof(fact)) == 0 && opened_bytes == length_before);
+        CHECK(memcmp(opened, output_before, sizeof(opened)) == 0);
+    }
     CHECK(ucn_i_security_c0_open(
               &receiver.owner, &access, &resolved_facts, packet,
               packet_bytes, &receiver_workspace, opened, sizeof(opened),

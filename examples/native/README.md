@@ -1,6 +1,7 @@
-# 原生接口首轮：最小发送、静态发布订阅与只读健康消息
+# 原生接口：最小发送、发布订阅与可选认证后端
 
-这是可以编译运行的**首轮静态后端**，不是全部API方案或`rmw_ucn`的完成声明。
+这里的 `static_health` 示例使用**显式可信静态 O0 后端**。另外已有首个可选认证后端；
+两者的装配、安全和资源边界不同，不是全部API方案或`rmw_ucn`的完成声明。
 C99、C++17、Rust复用各自真实Core/Adapter。示例完全软件回环，不打开串口、无线设备或执行器。
 
 ## 1. 先选正确入口
@@ -10,10 +11,11 @@ C99、C++17、Rust复用各自真实Core/Adapter。示例完全软件回环，�
 | 最小点对点 | C `ucn_send(core,target,bytes,len,NULL,NULL)`；Rust `CoreNode::send` | 复制、BestEffort、OneWay、静态Path；C默认Q2/TTL1 |
 | 普通业务发布订阅 | C `ucn_publish(native,publisher,bytes,len)`；C++ `Publisher<Codec>`；Rust `Publisher<Message>` | 预配置通道/Schema、固定fanout、独立应用执行器 |
 | Callback中点对点 | C `ucn_native_send`；Rust `Inbox::send` | 只向通道已登记的目标复制deferred命令 |
-| 认证、加密、可靠传输、动态发现/路由、RPC、严格源年龄、ROS | 后续后端/阶段 | **没有在此接口闭环；不得把O0静默当作这些能力** |
+| 单个固定 Session 的认证/加密发布订阅 | C `ucn_native_init_backend`；Rust `NativeSessionBackend` | 已耐久ACTIVE的H0 Session、一个Service、O1/O2、单帧BE；见第7节 |
+| 可靠传输、动态发现/路由、RPC、严格源年龄、ROS | 后续后端/阶段 | **没有在此接口闭环；不得把O0静默当作这些能力** |
 
-本轮只有产品明确声明的隔离可信静态网络：`C1/O0/H0/BestEffort/OneWay`。
-`OriginAuth`、`Encrypted`的Native配置返回`Unsupported`；它们不是实现未准备好时的降级开关。
+静态示例只有产品明确声明的隔离可信网络：`C1/O0/H0/BestEffort/OneWay`。
+静态后端遇到`OriginAuth`、`Encrypted`仍返回`Unsupported`；只有显式装配认证后端才能满足它们。
 `STATIC_TRUSTED`及`principal_digest`只表示精确产品配置绑定，**不是密码认证事实**。
 已有高级Owner/crate没有被删除，也没有因新增外观就自动接入它。
 
@@ -66,7 +68,7 @@ Rust库为`no_std + forbid(unsafe_code)`，无`alloc`。Host示例为了创建�
 | source list | 精确address/binding/configured principal，不可区分的同地址别名拒绝 |
 | target list | 固定远端集合；本机订阅隐式交付，不把本机再配置成远端Target |
 | max local age | 本地RX/接纳到处理的半开寿命，不是跨节点采样年龄或时钟同步 |
-| security minimum | 本轮只允许显式StaticTrusted，其余保护要求拒绝 |
+| security minimum | 静态后端仅StaticTrusted；认证后端按实际Session支持OriginAuth/Encrypted，不允许降级 |
 
 静态Schema ID本轮没有上Wire，因此产品必须确保同Service的两端配置一致；接收方不能凭长度
 证明一个未认证发送者使用了正确Schema。动态Schema协商和认证能力仍属后续阶段。
@@ -153,5 +155,127 @@ C Native `accepted`=接纳的父Job数，`core_admitted`=逐目标Core接纳次�
 这是显式可裁剪的额外业务状态，不包含Core、Driver和产品context。Rust按`Inbox<4/8/16>`静态
 裁剪，实际布局不同，不声称与C字节数相同；资源数据见本轮报告。没有修改普通帧头、Opcode或Record。
 
-本轮不提供ROS Graph/GID/CDR、RMW/DDS替换、MAVLink动作代理、动态匹配、受保护Native后端、
+本轮不提供ROS Graph/GID/CDR、RMW/DDS替换、MAVLink动作代理、动态匹配、
 可靠/RPC/耐久业务、严格Timed控制或实机签字。这些沿用方案中的独立阶段，不因示例可运行而完成。
+
+## 7. 首个认证后端怎样接入
+
+这不是给应用增加一个`authenticated=true`开关。产品装配层必须先通过既有流程完成Session证明、
+耐久提交/reload和ACTIVE，再独占一个RX未启动且没有遗留TX/RX的Adapter。
+
+1. 固定一个H0 Peer Session、Service、地址宽度、Context fingerprint、完整Principal/Binding和ACL。
+2. C产品在仓内用私有`ucn_i_native_session_init`建立Coordinator后端，再将其`port`传给
+   `ucn_native_init_backend`；公开安装包只提供可信Backend SPI，没有导出完整高级装配factory。
+3. Rust启用`ucn-runtime/native-backend`，用`NativeSessionBackend::new`借用既有SecurityOwner、
+   唯一OriginSequenceOwner、Adapter、Driver和Provider，再交给`NativeRoot`。基础Native crate
+   不反向依赖Runtime，OFF时不带入认证后端。
+4. 业务仍使用相同Publisher/Subscription；保护通道的最低要求不得降级为StaticTrusted。
+   Source配置标签不等于密码身份，回调Sample中的完整Principal由当前Security授权投影。
+5. 协议step负责保护、原帧背压重试、认证/Replay和真实退休；每次应用回调前再次检查当前授权。
+   排队后撤权或到期不会继续交付。Stop后持续推进到整个Adapter排空，Unknown不能假退休。
+
+该后端不可在活跃Root内换Peer/Session/Service。后继Session必须先排空再用新的Root装配；
+不得重置同一Session的唯一序列Owner。保护通道的本地复制同样依赖该固定Session出站授权。
+接收时间晚于本次step快照的帧，本首版保守丢弃，后续用新step处理新到帧；不是跨时钟同步承诺。
+
+可运行的Host集成回归：
+
+```powershell
+ctest --test-dir build-native -R "ucn_native_(session|encrypted_session|backend)_tests" --output-on-failure
+cd rust
+cargo test -p ucn-runtime --features native-backend --test native_backend --test native_root_authenticated
+```
+
+测试通过实际Security/Adapter/NativeRoot，Driver/Flash/密码Provider仍是Host fixture。
+O2的可逆测试Provider只检验SPI接线，不是生产AES/ChaCha算法证明。
+既有普通头新增**0 B**；认证和加密均沿用既有16 B Origin Tag：A0健康16 B正文为
+`11+16+16=43 B`，不是O0示例的27 B。详情见
+[C/Rust共同合同](../../docs/10-理论与规划/建议方案/UCN_v6_C_Rust共用合同收口/23-原生发布订阅认证后端共同合同.md)。
+
+## 8. 多Peer、多跳认证后端怎样接入
+
+业务仍使用相同Channel、Publisher和Subscription，不需要在每次publish时选择密码或路由。
+产品装配层把**终点Endpoint**和**相邻Neighbor**分开：A发往C时，AC Session保护Origin，
+AB/BC Session分别保护Hop；B只转发不透明Origin，不持有AC密钥，也不能被当作样本原始Principal。
+
+### C：封存的Static产品装配
+
+仓内私有`ucn_i_native_routed_init()`接收唯一Adapter、实际Route Owner、共同回调Gate、
+固定Endpoint/Neighbor/ForwardDomain表和强制绝对到期。将生成的`port`交给
+`ucn_native_init_backend()`，其余业务调用不变。每类表最多4项、一个发送Holder，容量满拒绝；
+它们与Native应用队列分开计费，不能在栈上临时创建后立即释放。
+
+此工厂要求每Neighbor独占物理Link，Route逻辑Link ID为Adapter槽号加1；有来源鉴别值时精确匹配。
+`control=NULL`时仅消费实际Route Owner已发布的静态或已形成动态路由；现在也可以在该封存装配中
+启用独立、固定存储的认证动态发现控制面，见下面的产品接线。
+这里的NULL只裁掉控制池及运行时控制工作，不是一个额外的CMake/Flash裁剪开关。
+Static身份/能力装配在Root存活期间不可修改，Session/ACL/Link代际仍逐次复验；动态Parent变化、
+共享物理Link目的定位及热换Endpoint不在该工厂范围。变更必须先围栏、真实排空，再建立新Scope。
+安装包仍只发布可信Backend SPI，不冒充提供了完整公开产品factory。
+当前C工厂还限每Peer一个Service Endpoint；同Service全部登记Endpoint必须达到对应Channel的
+最低保护。未被某Channel引用的O1 Peer也会使该Service的Encrypted Channel预检拒绝。
+这是首版保守装配限制，不是Wire或Rust共同要求；不能把该拒绝误诊为丢包。
+
+### Rust：复用已有RoutedNode
+
+启用`ucn-runtime/native-routed`，用`NativeRoutedBackend::new()`借用已存在的RoutedNode，
+通过`NativeRoutedResources`显式借用Identity/Security/Capability/Adapter/Driver/计数器和工作区；
+用`RoutedNativeEndpoint`把真实Endpoint句柄映射到本地Source标签，再交给`NativeRoot`。
+自动认证RREQ/RREP、共享Link目的定位、物理提交/退休都由原RoutedNode执行，没有第二套FSM。
+Backend与Root保持永久借用，应用不能用Drop或重置借用对象代替物理排空。
+
+Rust这一产品支持集比当前C封存Static工厂更广：可复核现有动态Identity父域/Capability。
+共同的保护、Scope和退休语义统一，不等于两种产品装配已完全功能对齐。
+
+### 期限、保护与回归入口
+
+- 多Origin同Service不共享Latest高水位；每次回调前检查当前精确Endpoint授权，配置digest不是Principal。
+- Source期限跨本机发现/排队/重试不续期。普通帧不携带全网绝对Deadline；中继用原物理RX时间加
+  本机有界转发生命期，不能把它描述成端到端实时保证。严格Timed功能仍是独立模块。
+- C1普通头仍为11/13/15/17 B。H1使用已有16 B Hop Trailer；O1/O2已有16 B Origin Tag。
+  A0、16 B正文在H1路径上每帧为`11+16+16+16=59 B`，H0直连仍为43 B。
+  Topic/Schema/回调句柄/完整Principal均未增加到普通头。
+
+```powershell
+ctest --test-dir build-native -R "ucn_native_routed" --output-on-failure
+cd rust
+cargo test -p ucn-runtime --features native-routed --test bootstrap_runtime route_tests::native
+```
+
+这些回归经过实际认证Owner、Adapter和Native业务回调；Driver/Flash/O2密码仍是Host替身。
+共同线格式、原RX时间、原始Principal、别名和资源约束见
+[共同合同24](../../docs/10-理论与规划/建议方案/UCN_v6_C_Rust共用合同收口/24-原生多Peer与多跳认证后端共同合同.md)。
+
+## 9. C的认证自动发现控制装配
+
+业务Publisher/Subscription不变。产品Coordinator先提供封存的Endpoint/Neighbor及真实ACTIVE Session，
+再为路由控制提供独立caller-owned存储。仓内私有装配示意（不是安装包公开产品factory）：
+
+```c
+#include "internal/ucn_native_route_control.h"
+static ucn_i_native_route_control_t control; /* 全零，生命周期覆盖真实排空 */
+/* cfg的Adapter/Route/Gate、Endpoint/Neighbor、绝对期限等已完整配置。 */
+cfg.control = &control;
+cfg.reserve_c0 = product_reserve_c0; /* 精确SecurityOwner+Session的共享计数银行 */
+cfg.counter_context = &product_counter_bank;
+result = ucn_i_native_routed_init(&backend, &cfg);
+/* result==UCN_OK后才将backend.port交给ucn_native_init_backend()。 */
+```
+
+每个Neighbor另提供真实Session的`control_fingerprint`，ACL精确允许需要的0201/0202/0203及0206
+包装方向；业务Endpoint的Service ACL不能替代控制ACL。回调必须有界、不重入，不得初始化第二套C0计数器。
+Native缺路由时保留原命令与绝对Deadline；真实C0四类控制字节经唯一Adapter与同一串行Coordinator接收，
+只有Origin/Hop/Replay及当前ACL验证后才调用Route Owner。127 B MTU下使用已有局部分片合同。
+
+`NOT_SUBMITTED`退休token后复用同一保护帧，真正丢回复的逻辑重试使用新外层事务；C固定每个控制job
+全部分片合计16次物理提交机会，原发现期限不刷新。Unknown不能用到期、stop或reopen假退休。
+真正物理排空后Driver须按原精确token提交终态，之后才能释放被借用frame。
+
+```powershell
+ctest --test-dir build-native -R "ucn_native_(routed|route_control)_tests" --output-on-failure
+ctest --test-dir build-native -R "native_.*(call_stack|stack)|native_call_stack" --output-on-failure
+```
+
+完整协议链门禁包含真实Backend间接边、C0/C1、安全/路由/Adapter及允许的回调协议续链。
+产品Driver、密码、锁、libc、应用和计数回调仍须满足输出的**联合栈约束**，不只是各自上限；
+Host/ARM编译结果不能替代MCU任务/IRQ栈水位。该装配仍不支持动态身份热换和共享Link目的定位。

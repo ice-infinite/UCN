@@ -19,6 +19,11 @@ typedef uint8_t ucn_driver_link_event_t;
 enum {
     UCN_DRIVER_LINK_UP = 1,
     UCN_DRIVER_LINK_DOWN = 2,
+    /* Replaces the Link instance, but is not a terminal fact for old tokens.
+     * After a real hardware fence/drain, report each exact old token through
+     * tx_complete (its delivery result may still be IN_DOUBT). Until then its
+     * frame remains borrowed. Conflicting terminal facts cannot be repaired
+     * by reopening. No API/ABI or enum-value change is implied. */
     UCN_DRIVER_LINK_REOPENED = 3
 };
 

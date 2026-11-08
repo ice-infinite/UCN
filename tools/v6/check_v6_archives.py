@@ -29,7 +29,7 @@ SIMPLIFIED_KERNEL_PRIVATE = {
 }
 
 NATIVE_PUBLIC = {
-    "ucn_native_init", "ucn_native_start", "ucn_native_check_schema",
+    "ucn_native_init", "ucn_native_init_backend", "ucn_native_start", "ucn_native_check_schema",
     "ucn_publisher_create", "ucn_subscription_create", "ucn_publish",
     "ucn_native_send", "ucn_publisher_close", "ucn_subscription_close",
     "ucn_subscription_quiescent", "ucn_native_source_fence", "ucn_native_step",
@@ -82,6 +82,8 @@ def main() -> int:
         errors.append("no UCN static archives found")
     for archive in archives:
         is_native = archive.name in ("libucn_native.a", "ucn_native.lib")
+        is_native_session = archive.name in ("libucn_native_session.a", "ucn_native_session.lib")
+        is_native_routed = archive.name in ("libucn_native_routed.a", "ucn_native_routed.lib")
         is_v6_module = (archive.name.startswith("libucn_v6_") or
                         archive.name.startswith("ucn_v6_"))
         is_simplified_common = archive.name in (
@@ -123,7 +125,7 @@ def main() -> int:
             "libucn_v6s_composition.a", "ucn_v6s_composition.lib")
         is_simplified_composition = archive.name in (
             "libucn_v6s_composition.a", "ucn_v6s_composition.lib")
-        if not (is_native or is_v6_module or is_simplified_common or is_simplified_kernel
+        if not (is_native or is_native_session or is_native_routed or is_v6_module or is_simplified_common or is_simplified_kernel
                 or is_simplified_persistence or is_simplified_scaffold
                 or is_simplified_private_module):
             errors.append(f"legacy archive name: {archive.name}")
@@ -152,6 +154,11 @@ def main() -> int:
                 symbol = match.group(1)
                 if is_native:
                     allowed = symbol in NATIVE_PUBLIC
+                elif is_native_session:
+                    allowed = symbol == "ucn_i_native_session_init"
+                elif is_native_routed:
+                    allowed = (symbol == "ucn_i_native_routed_init" or
+                               symbol.startswith("ucn_i_native_route_control_"))
                 elif is_v6_module:
                     allowed = symbol.startswith("ucn_v6_")
                 elif is_simplified_persistence:

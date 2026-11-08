@@ -265,7 +265,7 @@ static ucn_result_t api_leave(ucn_node_t *node,
     return result;
 }
 
-static ucn_result_t callback_read_snapshot_begin(ucn_node_t *node,
+static UCN_I_NOINLINE ucn_result_t callback_read_snapshot_begin(ucn_node_t *node,
                                                  ucn_callback_scope_t *scope_out)
 {
     ucn_i_callback_read_snapshot_t *snapshot;
@@ -1976,10 +1976,10 @@ static bool binding_replay_accept(ucn_i_binding_t *binding,
 static UCN_I_NOINLINE ucn_endpoint_disposition_t invoke_endpoint_callback(
     ucn_node_t *node,
     uint16_t endpoint_slot,
-    uint16_t binding_slot,
-    const ucn_i_adapter_rx_view_t *rx,
-    const ucn_i_c1_frame_t *frame)
+    uint16_t binding_slot)
 {
+    const ucn_i_adapter_rx_view_t *rx = &node->rx_staging.view;
+    const ucn_i_c1_frame_t *frame = &node->rx_staging.frame;
     ucn_endpoint_message_t message;
     ucn_endpoint_disposition_t disposition;
 
@@ -2067,7 +2067,7 @@ static UCN_I_NOINLINE bool process_one_rx(ucn_node_t *node)
         increment_saturated(&node->stats.rx_dropped);
     } else {
         ucn_endpoint_disposition_t disposition = invoke_endpoint_callback(
-            node, endpoint_slot, binding_slot, rx, frame);
+            node, endpoint_slot, binding_slot);
         if (disposition == UCN_ENDPOINT_ACCEPT) {
             increment_saturated(&node->stats.rx_delivered);
         } else {

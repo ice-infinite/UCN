@@ -22,7 +22,11 @@ static bool bytes_nonzero(const uint8_t *bytes, size_t length)
 
 static bool bytes_zero(const uint8_t *bytes, size_t length)
 {
-    return !bytes_nonzero(bytes, length);
+    size_t index;
+    for (index = 0U; index < length; ++index) {
+        if (bytes[index] != 0U) { return false; }
+    }
+    return true;
 }
 
 static bool object_zero(const void *object, size_t bytes)
@@ -53,14 +57,6 @@ static void owner_unlock(ucn_i_route_owner_t *owner)
     owner->state_lock.leave(owner->state_lock.context);
 }
 
-static uint32_t address_limit(uint8_t address_width)
-{
-    if (address_width == 4U) {
-        return UINT32_MAX;
-    }
-    return (UINT32_C(1) << (address_width * 8U)) - UINT32_C(1);
-}
-
 static bool address_valid(uint32_t address, uint8_t address_width)
 {
     uint32_t limit;
@@ -68,7 +64,8 @@ static bool address_valid(uint32_t address, uint8_t address_width)
     if (address_width == 0U || address_width > 4U) {
         return false;
     }
-    limit = address_limit(address_width);
+    limit = address_width == 4U ? UINT32_MAX :
+        (UINT32_C(1) << (address_width * 8U)) - UINT32_C(1);
     return address != 0U && address < limit;
 }
 
@@ -84,10 +81,12 @@ static bool binding_valid(const ucn_i_route_binding_t *binding,
 static bool binding_equal(const ucn_i_route_binding_t *left,
                           const ucn_i_route_binding_t *right)
 {
-    return left->address == right->address &&
-           left->generation == right->generation &&
-           memcmp(left->principal, right->principal,
-                  sizeof(left->principal)) == 0;
+    size_t i;
+    if (left->address != right->address || left->generation != right->generation) { return false; }
+    for (i = 0U; i < sizeof(left->principal); ++i) {
+        if (left->principal[i] != right->principal[i]) { return false; }
+    }
+    return true;
 }
 
 static bool link_valid(const ucn_i_route_link_ref_t *link,
@@ -993,6 +992,24 @@ static int reverse_free(const ucn_i_route_owner_t *owner)
     return -1;
 }
 
+ucn_result_t ucn_i_route_reverse_peek(ucn_i_route_owner_t *owner,
+    const ucn_i_route_discovery_key_t *key, uint64_t now_us,
+    ucn_i_route_link_ref_t *upstream_out)
+{
+    int index; ucn_result_t result;
+    if (!key || !upstream_out ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), key, sizeof(*key)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), upstream_out, sizeof(*upstream_out)) ||
+        ucn_i_ranges_overlap(key, sizeof(*key), upstream_out, sizeof(*upstream_out))) { return UCN_ERR_ARGUMENT; }
+    result = owner_lock(owner); if (result != UCN_OK) { return result; }
+    index = key_valid(owner, key) ? reverse_find(owner, key) : -1;
+    if (index < 0) { result = UCN_ERR_NOT_FOUND; }
+    else if (now_us >= owner->reverse[index].expires_at_us ||
+        owner->reverse[index].reply_pending || owner->reverse[index].reply_completed) { result = UCN_ERR_STATE; }
+    else { *upstream_out = owner->reverse[index].upstream; result = UCN_OK; }
+    owner_unlock(owner); return result;
+}
+
 static void commit_route(ucn_i_route_owner_t *owner,
                          size_t index,
                          const ucn_i_route_domain_t *domain,
@@ -1005,21 +1022,22 @@ static void commit_route(ucn_i_route_owner_t *owner,
                          uint16_t capabilities,
                          uint64_t expires_at_us)
 {
-    ucn_i_route_soft_view_t value;
+    ucn_i_route_soft_view_t *value = &owner->routes[index].value;
 
-    memset(&value, 0, sizeof(value));
-    value.domain = *domain;
-    value.next_hop = *next_hop;
-    value.route_causal_id = causal_id;
-    value.expires_at_us = expires_at_us;
-    value.runtime_instance = owner->runtime_instance;
-    value.route_generation = generation;
-    value.cost = cost;
-    value.owner_instance = owner->owner_instance;
-    value.path_frame_mtu = mtu;
-    value.capability_bits = capabilities;
-    value.hop_count = hop_count;
-    owner->routes[index].value = value;
+    /* All validation precedes this locked commit. Build directly in the
+     * fixed route slot, not in a full automatic SoftView copy. */
+    memset(value, 0, sizeof(*value));
+    value->domain = *domain;
+    value->next_hop = *next_hop;
+    value->route_causal_id = causal_id;
+    value->expires_at_us = expires_at_us;
+    value->runtime_instance = owner->runtime_instance;
+    value->route_generation = generation;
+    value->cost = cost;
+    value->owner_instance = owner->owner_instance;
+    value->path_frame_mtu = mtu;
+    value->capability_bits = capabilities;
+    value->hop_count = hop_count;
     owner->routes[index].reporter_generation = 0U;
     owner->routes[index].reporter_bound = 0U;
     owner->routes[index].occupied = 1U;
@@ -1031,9 +1049,8 @@ ucn_result_t ucn_i_route_on_rreq(ucn_i_route_owner_t *owner,
                                  uint64_t now_us,
                                  ucn_i_route_request_action_t *action_out)
 {
-    ucn_i_route_request_action_t action;
-    ucn_i_route_reverse_record_t reverse;
-    ucn_i_route_domain_t return_domain;
+    ucn_i_route_reverse_record_t *reverse;
+    ucn_i_route_domain_t *return_domain;
     uint64_t reverse_deadline;
     uint64_t route_deadline;
     uint64_t retry_at;
@@ -1060,6 +1077,7 @@ ucn_result_t ucn_i_route_on_rreq(ucn_i_route_owner_t *owner,
     if (result != UCN_OK) {
         return result;
     }
+    return_domain = &owner->work_domain;
     if (!rreq_message_valid(owner, request) ||
         !link_valid(ingress, owner->address_width) ||
         binding_equal(&request->key.origin, &owner->local) ||
@@ -1070,50 +1088,50 @@ ucn_result_t ucn_i_route_on_rreq(ucn_i_route_owner_t *owner,
         result = UCN_ERR_ACCESS;
         goto done;
     }
-    memset(&action, 0, sizeof(action));
     reverse_index = reverse_find(owner, &request->key);
     if (reverse_index >= 0) {
-        reverse = owner->reverse[reverse_index];
-        if (!request_equal(&reverse.accepted_request, request) ||
-            !link_equal(&reverse.upstream, ingress)) {
+        reverse = &owner->reverse[reverse_index];
+        if (!request_equal(&reverse->accepted_request, request) ||
+            !link_equal(&reverse->upstream, ingress)) {
             result = UCN_ERR_SECURITY;
             goto done;
         }
-        if (ucn_i_deadline_expired_us(now_us, reverse.expires_at_us) ||
-            reverse.reply_pending != 0U) {
-            action.kind = UCN_I_ROUTE_REQUEST_DUPLICATE;
-            *action_out = action;
+        if (ucn_i_deadline_expired_us(now_us, reverse->expires_at_us) ||
+            reverse->reply_pending != 0U) {
+            memset(action_out, 0, sizeof(*action_out));
+            action_out->kind = UCN_I_ROUTE_REQUEST_DUPLICATE;
             result = UCN_OK;
             goto done;
         }
         result = ucn_i_deadline_from_duration_us(
-            reverse.last_action_us, owner->discovery_retry_us, &retry_at);
+            reverse->last_action_us, owner->discovery_retry_us, &retry_at);
         if (result != UCN_OK) {
             goto done;
         }
         if (now_us < retry_at) {
-            action.kind = UCN_I_ROUTE_REQUEST_DUPLICATE;
-            *action_out = action;
+            memset(action_out, 0, sizeof(*action_out));
+            action_out->kind = UCN_I_ROUTE_REQUEST_DUPLICATE;
             result = UCN_OK;
             goto done;
         }
         if (request->key.target_address == owner->local.address) {
-            action.kind = UCN_I_ROUTE_REQUEST_LOCAL_TARGET;
+            memset(action_out, 0, sizeof(*action_out));
+            action_out->kind = UCN_I_ROUTE_REQUEST_LOCAL_TARGET;
         } else if (request->remaining_hops <= 1U ||
                    UINT32_MAX - request->payload.accumulated_cost <
                        ingress->cost) {
             result = UCN_ERR_EXHAUSTED;
             goto done;
         } else {
-            action.kind = UCN_I_ROUTE_REQUEST_FORWARD;
-            action.forwarded = *request;
-            action.forwarded.remaining_hops--;
-            action.forwarded.payload.accumulated_cost += ingress->cost;
+            memset(action_out, 0, sizeof(*action_out));
+            action_out->kind = UCN_I_ROUTE_REQUEST_FORWARD;
+            action_out->forwarded = *request;
+            action_out->forwarded.remaining_hops--;
+            action_out->forwarded.payload.accumulated_cost += ingress->cost;
         }
-        reverse.last_action_us = now_us;
-        reverse.reply_completed = 0U;
-        owner->reverse[reverse_index] = reverse;
-        *action_out = action;
+        action_out->reverse_expires_at_us = reverse->expires_at_us;
+        reverse->last_action_us = now_us;
+        reverse->reply_completed = 0U;
         result = UCN_OK;
         goto done;
     }
@@ -1127,12 +1145,12 @@ ucn_result_t ucn_i_route_on_rreq(ucn_i_route_owner_t *owner,
         result = UCN_ERR_NO_SPACE;
         goto done;
     }
-    memset(&return_domain, 0, sizeof(return_domain));
-    return_domain.origin = owner->local;
-    return_domain.destination = request->key.origin;
-    return_domain.realm = owner->realm;
-    return_domain.origin_session_generation = owner->local_session_generation;
-    route_index = route_slot_for(owner, &return_domain);
+    memset(return_domain, 0, sizeof(*return_domain));
+    return_domain->origin = owner->local;
+    return_domain->destination = request->key.origin;
+    return_domain->realm = owner->realm;
+    return_domain->origin_session_generation = owner->local_session_generation;
+    route_index = route_slot_for(owner, return_domain);
     if (route_index < 0) {
         result = UCN_ERR_NO_SPACE;
         goto done;
@@ -1160,32 +1178,32 @@ ucn_result_t ucn_i_route_on_rreq(ucn_i_route_owner_t *owner,
     }
     cost = request->payload.accumulated_cost + ingress->cost;
     route_generation = owner->next_route_generation;
-    memset(&reverse, 0, sizeof(reverse));
-    reverse.accepted_request = *request;
-    reverse.upstream = *ingress;
-    reverse.expires_at_us = reverse_deadline;
-    reverse.last_action_us = now_us;
-    reverse.generation =
-        (uint16_t)(owner->reverse[reverse_index].generation + 1U);
-    reverse.occupied = 1U;
-    commit_route(owner, (size_t)route_index, &return_domain, ingress,
+    reverse = &owner->reverse[reverse_index];
+    ++reverse->generation;
+    reverse->accepted_request = *request;
+    reverse->upstream = *ingress;
+    reverse->expires_at_us = reverse_deadline;
+    reverse->last_action_us = now_us;
+    reverse->occupied = 1U;
+    commit_route(owner, (size_t)route_index, return_domain, ingress,
                  route_generation, request->key.transaction_id, 1U,
                  ingress->cost, ingress->frame_mtu,
                  request->payload.required_capability_bits, route_deadline);
     owner->next_route_generation =
         route_generation == UINT32_MAX ? 0U : route_generation + 1U;
-    owner->reverse[reverse_index] = reverse;
+    memset(action_out, 0, sizeof(*action_out));
+    action_out->reverse_expires_at_us = reverse_deadline;
     if (request->key.target_address == owner->local.address) {
-        action.kind = UCN_I_ROUTE_REQUEST_LOCAL_TARGET;
+        action_out->kind = UCN_I_ROUTE_REQUEST_LOCAL_TARGET;
     } else {
-        action.kind = UCN_I_ROUTE_REQUEST_FORWARD;
-        action.forwarded = *request;
-        action.forwarded.remaining_hops--;
-        action.forwarded.payload.accumulated_cost = cost;
+        action_out->kind = UCN_I_ROUTE_REQUEST_FORWARD;
+        action_out->forwarded = *request;
+        action_out->forwarded.remaining_hops--;
+        action_out->forwarded.payload.accumulated_cost = cost;
     }
-    *action_out = action;
     result = UCN_OK;
 done:
+    memset(return_domain, 0, sizeof(*return_domain));
     owner_unlock(owner);
     return result;
 }
@@ -1270,7 +1288,7 @@ static int discovery_find(const ucn_i_route_owner_t *owner,
     return -1;
 }
 
-static ucn_result_t route_on_rrep(ucn_i_route_owner_t *owner,
+ucn_result_t ucn_i_route_apply_reply(ucn_i_route_owner_t *owner,
                                  const ucn_i_route_rrep_message_t *reply,
                                  const ucn_i_route_link_ref_t *ingress,
                                  uint64_t now_us,
@@ -1278,10 +1296,8 @@ static ucn_result_t route_on_rrep(ucn_i_route_owner_t *owner,
                                  bool bind_reporter,
                                  uint32_t reporter_generation)
 {
-    ucn_i_route_reply_action_t action;
-    ucn_i_route_domain_t domain;
-    ucn_i_route_binding_t destination;
-    ucn_i_route_rreq_message_t accepted;
+    ucn_i_route_domain_t *domain;
+    const ucn_i_route_rreq_message_t *accepted;
     uint64_t route_deadline;
     uint32_t cost;
     uint32_t route_generation;
@@ -1313,6 +1329,7 @@ static ucn_result_t route_on_rrep(ucn_i_route_owner_t *owner,
     if (result != UCN_OK) {
         return result;
     }
+    domain = &owner->work_domain;
     if (!key_valid(owner, &reply->key) ||
         !rrep_payload_valid(&reply->payload) ||
         !link_valid(ingress, owner->address_width)) {
@@ -1335,7 +1352,7 @@ static ucn_result_t route_on_rrep(ucn_i_route_owner_t *owner,
             result = UCN_ERR_TIMEOUT;
             goto done;
         }
-        accepted = owner->discoveries[discovery_index].request;
+        accepted = &owner->discoveries[discovery_index].request;
     } else {
         if (ucn_i_deadline_expired_us(
                 now_us, owner->reverse[reverse_index].expires_at_us) ||
@@ -1344,23 +1361,21 @@ static ucn_result_t route_on_rrep(ucn_i_route_owner_t *owner,
             result = UCN_ERR_STATE;
             goto done;
         }
-        accepted = owner->reverse[reverse_index].accepted_request;
+        accepted = &owner->reverse[reverse_index].accepted_request;
     }
-    memset(&destination, 0, sizeof(destination));
-    destination.address = reply->key.target_address;
-    destination.generation = reply->payload.destination_binding_generation;
-    memcpy(destination.principal, reply->payload.destination_principal, 16U);
-    if (!binding_valid(&destination, owner->address_width)) {
+    memset(domain, 0, sizeof(*domain));
+    domain->destination.address = reply->key.target_address;
+    domain->destination.generation = reply->payload.destination_binding_generation;
+    memcpy(domain->destination.principal, reply->payload.destination_principal, 16U);
+    if (!binding_valid(&domain->destination, owner->address_width)) {
         result = UCN_ERR_MALFORMED;
         goto done;
     }
-    memset(&domain, 0, sizeof(domain));
-    domain.origin = reply->key.origin;
-    domain.destination = destination;
-    domain.realm = reply->key.realm;
-    domain.origin_session_generation =
+    domain->origin = reply->key.origin;
+    domain->realm = reply->key.realm;
+    domain->origin_session_generation =
         reply->key.origin_session_generation;
-    route_index = route_slot_for(owner, &domain);
+    route_index = route_slot_for(owner, domain);
     if (route_index < 0) {
         result = UCN_ERR_NO_SPACE;
         goto done;
@@ -1377,8 +1392,8 @@ static ucn_result_t route_on_rrep(ucn_i_route_owner_t *owner,
                    reply->payload.path_frame_mtu : ingress->frame_mtu;
     capability_bits =
         (uint16_t)(reply->payload.capability_bits & ingress->capability_bits);
-    if (path_mtu < accepted.payload.minimum_frame_mtu ||
-        (accepted.payload.required_capability_bits &
+    if (path_mtu < accepted->payload.minimum_frame_mtu ||
+        (accepted->payload.required_capability_bits &
          (uint16_t)~capability_bits) != 0U) {
         result = UCN_ERR_ACCESS;
         goto done;
@@ -1390,35 +1405,47 @@ static ucn_result_t route_on_rrep(ucn_i_route_owner_t *owner,
         goto done;
     }
     route_generation = owner->next_route_generation;
-    memset(&action, 0, sizeof(action));
-    commit_route(owner, (size_t)route_index, &domain, ingress,
-                 route_generation, reply->key.transaction_id, hop_count,
-                 cost, path_mtu, capability_bits, route_deadline);
+    memset(action_out, 0, sizeof(*action_out));
+    /* All rejection points have passed. The caller-owned action is the
+     * commit workspace, avoiding an eleven-argument stack staging call. */
+    action_out->installed.domain = *domain;
+    action_out->installed.next_hop = *ingress;
+    action_out->installed.route_causal_id = reply->key.transaction_id;
+    action_out->installed.expires_at_us = route_deadline;
+    action_out->installed.runtime_instance = owner->runtime_instance;
+    action_out->installed.route_generation = route_generation;
+    action_out->installed.cost = cost;
+    action_out->installed.owner_instance = owner->owner_instance;
+    action_out->installed.path_frame_mtu = path_mtu;
+    action_out->installed.capability_bits = capability_bits;
+    action_out->installed.hop_count = hop_count;
+    owner->routes[route_index].value = action_out->installed;
+    owner->routes[route_index].occupied = 1U;
     owner->routes[route_index].reporter_bound = bind_reporter ? 1U : 0U;
     owner->routes[route_index].reporter_generation = reporter_generation;
     owner->next_route_generation =
         route_generation == UINT32_MAX ? 0U : route_generation + 1U;
-    action.installed = owner->routes[route_index].value;
     if (local_origin) {
         clear_discovery_value(&owner->discoveries[discovery_index]);
-        action.kind = UCN_I_ROUTE_REPLY_REACHED_ORIGIN;
+        action_out->kind = UCN_I_ROUTE_REPLY_REACHED_ORIGIN;
     } else {
-        action.kind = UCN_I_ROUTE_REPLY_FORWARD;
-        action.forwarded = *reply;
-        action.forwarded.payload.hop_count = hop_count;
-        action.forwarded.payload.accumulated_cost = cost;
-        action.forwarded.payload.path_frame_mtu = path_mtu;
-        action.forwarded.payload.capability_bits = capability_bits;
-        action.upstream = owner->reverse[reverse_index].upstream;
+        action_out->kind = UCN_I_ROUTE_REPLY_FORWARD;
+        action_out->forwarded = *reply;
+        action_out->forwarded.payload.hop_count = hop_count;
+        action_out->forwarded.payload.accumulated_cost = cost;
+        action_out->forwarded.payload.path_frame_mtu = path_mtu;
+        action_out->forwarded.payload.capability_bits = capability_bits;
+        action_out->upstream = owner->reverse[reverse_index].upstream;
+        action_out->reverse_expires_at_us = owner->reverse[reverse_index].expires_at_us;
         owner->reverse[reverse_index].reply_pending = 1U;
-        action.completion = make_handle(
+        action_out->completion = make_handle(
             owner, (size_t)reverse_index,
             owner->reverse[reverse_index].generation,
             UCN_I_ROUTE_REPLY_KIND);
     }
-    *action_out = action;
     result = UCN_OK;
 done:
+    memset(domain, 0, sizeof(*domain));
     owner_unlock(owner);
     return result;
 }
@@ -1428,7 +1455,7 @@ ucn_result_t ucn_i_route_on_rrep(ucn_i_route_owner_t *owner,
     const ucn_i_route_link_ref_t *ingress, uint64_t now_us,
     ucn_i_route_reply_action_t *action_out)
 {
-    return route_on_rrep(owner, reply, ingress, now_us, action_out, false, 0U);
+    return ucn_i_route_apply_reply(owner, reply, ingress, now_us, action_out, false, 0U);
 }
 
 ucn_result_t ucn_i_route_on_control_rrep(ucn_i_route_owner_t *owner,
@@ -1436,7 +1463,7 @@ ucn_result_t ucn_i_route_on_control_rrep(ucn_i_route_owner_t *owner,
     const ucn_i_route_link_ref_t *ingress, uint64_t now_us,
     ucn_i_route_reply_action_t *action_out)
 {
-    return route_on_rrep(owner, reply, ingress, now_us, action_out,
+    return ucn_i_route_apply_reply(owner, reply, ingress, now_us, action_out,
                          true, reporter_generation);
 }
 
@@ -1551,7 +1578,6 @@ ucn_result_t ucn_i_route_forward_resolve(
     const ucn_i_route_forward_key_t *key,
     ucn_i_route_resolved_t *resolved_out)
 {
-    ucn_i_route_resolved_t resolved;
     size_t index;
     size_t match_index = SIZE_MAX;
     ucn_result_t result;
@@ -1600,11 +1626,10 @@ ucn_result_t ucn_i_route_forward_resolve(
         }
         match_index = index;
     }
-    memset(&resolved, 0, sizeof(resolved));
     if (match_index != SIZE_MAX) {
-        resolved.kind = UCN_I_ROUTE_RESOLVED_DYNAMIC;
-        resolved.dynamic = owner->routes[match_index].value;
-        *resolved_out = resolved;
+        memset(resolved_out, 0, sizeof(*resolved_out));
+        resolved_out->kind = UCN_I_ROUTE_RESOLVED_DYNAMIC;
+        resolved_out->dynamic = owner->routes[match_index].value;
         result = UCN_OK;
         goto done;
     }
@@ -1629,9 +1654,9 @@ ucn_result_t ucn_i_route_forward_resolve(
         result = UCN_ERR_NOT_FOUND;
         goto done;
     }
-    resolved.kind = UCN_I_ROUTE_RESOLVED_STATIC;
-    resolved.static_route = owner->static_routes[match_index].value;
-    *resolved_out = resolved;
+    memset(resolved_out, 0, sizeof(*resolved_out));
+    resolved_out->kind = UCN_I_ROUTE_RESOLVED_STATIC;
+    resolved_out->static_route = owner->static_routes[match_index].value;
     result = UCN_OK;
 done:
     owner_unlock(owner);

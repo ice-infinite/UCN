@@ -29,7 +29,7 @@ def main() -> int:
     heap_pattern = re.compile(r"\b(malloc|calloc|realloc|free|alloca)\s*\(")
     old_include = re.compile(
         r"#\s*include\s*[<\"]ucn/(?!v6/|"
-        r"ucn_(?:simplified|types|config|driver|product|core|persistence|native)\.h[>\"])")
+        r"ucn_(?:simplified|types|config|driver|product|core|persistence|native|native_backend)\.h[>\"])")
     for path in runtime_files + public_files:
         text = path.read_text(encoding="utf-8")
         relative = path.relative_to(root).as_posix()
@@ -115,7 +115,7 @@ def main() -> int:
         if (path.is_file() and path.name not in (
                 "ucn.h", "ucn_simplified.h", "ucn_types.h",
                 "ucn_config.h", "ucn_driver.h",
-                "ucn_product.h", "ucn_core.h", "ucn_persistence.h", "ucn_native.h", "ucn.hpp") and
+                "ucn_product.h", "ucn_core.h", "ucn_persistence.h", "ucn_native.h", "ucn_native_backend.h", "ucn.hpp") and
                 (root / "include" / "ucn" / "v6") not in path.parents):
             legacy_paths.append(path)
     for path in (root / "tests").rglob("*"):

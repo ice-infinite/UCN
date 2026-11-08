@@ -7,6 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 [features]
+native-backend = ["dep:ucn-native", "dep:ucn-core"]
+native-routed = ["native-backend", "route-data-runtime"]
 default = ["transfer", "parent-control", "transfer-sender", "capability-control", "bootstrap-runtime", "bootstrap-join", "peer-reauth", "service-control", "service-rpc", "durable-rpc", "operation-control", "realtime-control", "time-runtime", "journal-runtime", "source-runtime", "duplex-runtime", "route-runtime", "route-data-runtime"]
 transfer = ["ucn-transport/transfer"]
 parent-control = ["transfer", "dep:ucn-persistence", "dep:ucn-durable"]
@@ -27,6 +29,8 @@ peer-reauth = ["bootstrap-join"]
 route-runtime = ["capability-control", "dep:ucn-identity", "dep:ucn-routing"]
 route-data-runtime = ["route-runtime"]
 [dependencies]
+ucn-native = { path = "../ucn-native", optional = true }
+ucn-core = { path = "../ucn-core", optional = true }
 ucn-types = { path = "../ucn-types" }
 ucn-wire = { path = "../ucn-wire" }
 ucn-owner = { path = "../ucn-owner" }
@@ -54,3 +58,9 @@ ucn-cluster = { path = "../ucn-cluster" }
 ucn-service = { path = "../ucn-service" }
 [lints]
 workspace = true
+[[test]]
+name = "native_backend"
+required-features = ["native-backend"]
+[[test]]
+name = "native_root_authenticated"
+required-features = ["native-backend"]

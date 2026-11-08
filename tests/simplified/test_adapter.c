@@ -195,6 +195,18 @@ static void test_submit_lifecycle(void)
     CHECK(view.state == UCN_I_ADAPTER_TX_IN_DOUBT);
     CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_ERR_STATE);
 
+    /* Conflicting terminal facts cannot be revived by repeating either fact. */
+    CHECK(ucn_i_adapter_tx_complete(&adapter, token, UCN_OK, NULL) == UCN_ERR_STATE);
+    CHECK(ucn_i_adapter_tx_complete(&adapter, token, UCN_ERR_STATE, NULL) == UCN_ERR_STATE);
+    {
+        ucn_link_handle_t old; ucn_link_event_meta_t reopen = {0};
+        CHECK(ucn_i_adapter_link_handle(&adapter, 0U, &old) == UCN_OK);
+        reopen.struct_size = sizeof(reopen); reopen.api_version = UCN_API_VERSION; reopen.new_link_instance = 11U;
+        CHECK(ucn_i_adapter_link_event(&adapter, old, UCN_DRIVER_LINK_REOPENED, &reopen) == UCN_OK);
+        CHECK(ucn_i_adapter_tx_complete(&adapter, token, UCN_OK, NULL) == UCN_ERR_STATE);
+        CHECK(ucn_i_adapter_tx_retire(&adapter, &token) == UCN_ERR_STATE);
+    }
+
     memset(&adapter, 0, sizeof(adapter));
     memset(&fixture, 0, sizeof(fixture));
     fixture.adapter = &adapter;
@@ -271,9 +283,17 @@ static void test_submit_outcomes_and_link_fence(void)
                                    UCN_DRIVER_LINK_REOPENED, &reopen) ==
           UCN_OK);
     CHECK(ucn_i_adapter_tx_view(&adapter, &(token), &view) == UCN_OK);
-    CHECK(view.state == UCN_I_ADAPTER_TX_COMPLETED);
-    CHECK(view.terminal_result == UCN_ERR_IN_DOUBT);
+    CHECK(view.state == UCN_I_ADAPTER_TX_IN_DOUBT);
+    CHECK(view.terminal_latched == 0U);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_ERR_STATE);
+    {
+        ucn_driver_token_t wrong = token; ++wrong.generation;
+        CHECK(ucn_i_adapter_tx_complete(&adapter, wrong, UCN_OK, NULL) == UCN_ERR_STATE);
+    }
+    CHECK(ucn_i_adapter_tx_complete(&adapter, token, UCN_OK, NULL) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_complete(&adapter, token, UCN_OK, NULL) == UCN_OK);
     CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_complete(&adapter, token, UCN_OK, NULL) == UCN_ERR_STATE);
     CHECK(ucn_i_adapter_tx_retire(&adapter, &(reserved)) == UCN_OK);
 }
 
@@ -384,8 +404,10 @@ static void test_link_invalidation_during_submit_is_not_adapter_fault(void)
                                    UCN_DRIVER_LINK_REOPENED, &reopen) ==
           UCN_OK);
     CHECK(ucn_i_adapter_tx_view(&adapter, &(token), &view) == UCN_OK);
-    CHECK(view.state == UCN_I_ADAPTER_TX_COMPLETED);
-    CHECK(view.terminal_result == UCN_ERR_IN_DOUBT);
+    CHECK(view.state == UCN_I_ADAPTER_TX_IN_DOUBT);
+    CHECK(view.terminal_latched == 0U);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_ERR_STATE);
+    CHECK(ucn_i_adapter_tx_complete(&adapter, token, UCN_OK, NULL) == UCN_OK);
     CHECK(ucn_i_adapter_tx_retire(&adapter, &(token)) == UCN_OK);
 }
 

@@ -20,6 +20,11 @@ pub struct Crypto {
     expected: HandshakeCandidate,
 }
 impl Crypto {
+    /// Host-only constructor for independently allocated integration fixtures.
+    #[allow(dead_code)]
+    pub const fn for_candidate(expected: HandshakeCandidate) -> Self {
+        Self { expected }
+    }
     // Hostile-peer fixture only: deliberately bypass an honest Sender counter to
     // test receiver replay rejection. Never part of any production API.
     // 仅恶意Peer测试：故意绕过诚实发送端计数器，接收端仍须真实验签并拒绝重放。

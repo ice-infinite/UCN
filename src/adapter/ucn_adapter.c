@@ -617,7 +617,7 @@ ucn_result_t ucn_i_adapter_tx_complete(ucn_i_adapter_t *adapter,
     ucn_result_t lock_result;
 
     if (!adapter_header_is_valid(adapter) ||
-        !terminal_result_is_valid(result) ||
+        (!terminal_result_is_valid(result) && result != UCN_ERR_IN_DOUBT) ||
         (meta != NULL &&
          (meta->struct_size != sizeof(*meta) ||
           meta->api_version != UCN_API_VERSION || meta->reserved_zero != 0U ||
@@ -635,10 +635,7 @@ ucn_result_t ucn_i_adapter_tx_complete(ucn_i_adapter_t *adapter,
     }
     if (adapter->tx_tokens[slot].state == UCN_I_ADAPTER_TX_COMPLETED &&
         adapter->tx_tokens[slot].terminal_latched) {
-        if (adapter->tx_tokens[slot].link_slot >= adapter->link_count ||
-            adapter->tx_tokens[slot].link_instance_generation !=
-                adapter->links[adapter->tx_tokens[slot].link_slot]
-                    .instance_generation) {
+        if (adapter->tx_tokens[slot].link_slot >= adapter->link_count) {
             lock_leave(adapter);
             return UCN_ERR_NOT_FOUND;
         }
@@ -652,7 +649,9 @@ ucn_result_t ucn_i_adapter_tx_complete(ucn_i_adapter_t *adapter,
         return UCN_ERR_IN_DOUBT;
     }
     if (adapter->tx_tokens[slot].state != UCN_I_ADAPTER_TX_SUBMITTING &&
-        adapter->tx_tokens[slot].state != UCN_I_ADAPTER_TX_SUBMITTED) {
+        adapter->tx_tokens[slot].state != UCN_I_ADAPTER_TX_SUBMITTED &&
+        !(adapter->tx_tokens[slot].state == UCN_I_ADAPTER_TX_IN_DOUBT &&
+          !adapter->tx_tokens[slot].terminal_latched)) {
         lock_leave(adapter);
         return UCN_ERR_STATE;
     }
@@ -668,7 +667,8 @@ ucn_result_t ucn_i_adapter_tx_complete(ucn_i_adapter_t *adapter,
     }
     adapter->tx_tokens[slot].terminal_latched = 1U;
     adapter->tx_tokens[slot].terminal_result = result;
-    if (adapter->tx_tokens[slot].state == UCN_I_ADAPTER_TX_SUBMITTED) {
+    if (adapter->tx_tokens[slot].state == UCN_I_ADAPTER_TX_SUBMITTED ||
+        adapter->tx_tokens[slot].state == UCN_I_ADAPTER_TX_IN_DOUBT) {
         adapter->tx_tokens[slot].state = UCN_I_ADAPTER_TX_COMPLETED;
     }
     lock_leave(adapter);
@@ -1148,16 +1148,14 @@ ucn_result_t ucn_i_adapter_link_event(ucn_i_adapter_t *adapter,
                     UCN_I_ADAPTER_TX_RESERVED) {
                     adapter->tx_tokens[index].state =
                         UCN_I_ADAPTER_TX_NOT_SUBMITTED;
-                } else if (event == UCN_DRIVER_LINK_REOPENED) {
-                    adapter->tx_tokens[index].state =
-                        UCN_I_ADAPTER_TX_COMPLETED;
-                    adapter->tx_tokens[index].terminal_latched = 1U;
-                    adapter->tx_tokens[index].terminal_result =
-                        UCN_ERR_IN_DOUBT;
                 } else {
+                    /* A new Link instance is not a per-token terminal fact.
+                     * Keep its old immutable link_instance_generation until
+                     * the exact old token receives completion. Conflicting
+                     * latched terminals stay quarantined even after reopen. */
                     adapter->tx_tokens[index].state =
                         UCN_I_ADAPTER_TX_IN_DOUBT;
-                    adapter->links[slot].fenced = 1U;
+                    if (event != UCN_DRIVER_LINK_REOPENED) { adapter->links[slot].fenced = 1U; }
                 }
             }
         }
@@ -1244,6 +1242,24 @@ ucn_result_t ucn_i_adapter_faulted(ucn_i_adapter_t *adapter,
     return UCN_OK;
 }
 
+ucn_result_t ucn_i_adapter_quiescent(ucn_i_adapter_t *adapter, bool *out)
+{
+    uint16_t i;
+    bool quiet;
+    ucn_result_t r;
+    if (!adapter_header_is_valid(adapter) || out == NULL ||
+        ucn_i_ranges_overlap(adapter, sizeof(*adapter), out, sizeof(*out))) { return UCN_ERR_ARGUMENT; }
+    r = lock_enter(adapter);
+    if (r != UCN_OK) { return r; }
+    quiet = adapter->rx_enabled == 0U && adapter->driver_staging.active_kind == 0U;
+    for (i = 0U; i < UCN_ADAPTER_TX_SLOT_COUNT; ++i) {
+        if (adapter->tx_tokens[i].state != UCN_I_ADAPTER_TX_FREE) { quiet = false; }
+    }
+    for (i = 0U; i < UCN_ADAPTER_RX_SLOT_COUNT; ++i) {
+        if (adapter->rx_slots[i].state != 0U) { quiet = false; }
+    }
+    *out = quiet; lock_leave(adapter); return UCN_OK;
+}
 ucn_result_t ucn_i_adapter_destroy(ucn_i_adapter_t *adapter)
 {
     uint16_t index;

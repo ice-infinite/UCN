@@ -1,7 +1,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
-//! Optional static Pub/Sub over the existing trusted O0 Core, without new Wire fields.
-//! 可裁剪静态业务层；此后端不冒充密码认证，不支持的安全要求明确拒绝。
+//! Optional Pub/Sub over a trusted Core or an authenticated Coordinator backend.
+//! 可裁剪业务接口；保护事实只能来自可信后端，不增加普通Wire字段。
 
 use core::cell::RefCell;
 use core::marker::PhantomData;
@@ -98,7 +98,50 @@ pub struct Sample {
     pub payload_bytes: u16,
     /// True only for local, non-Wire delivery.
     pub local: bool,
+    /// Actual remote protection; local delivery never impersonates a crypto proof.
+    pub protection: Option<SecurityMinimum>,
+    /// Full verified Principal, never the configured 64-bit label.
+    pub principal: Option<[u8; 16]>,
     /// Bounded owned copy; only `payload_bytes` bytes are meaningful.
+    pub payload: [u8; PAYLOAD_BYTES],
+}
+/// Opaque registry reference issued by the trusted backend; never sent on Wire.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackendScope {
+    /// Nonzero Root instance for remote receipts.
+    pub instance: u32,
+    /// Immutable source/session registration generation.
+    pub generation: u32,
+    /// Exact source registry slot.
+    pub slot: u16,
+}
+impl BackendScope {
+    /// Local-only sentinel, not a remote authentication grant.
+    pub const LOCAL: Self = Self {
+        instance: 0,
+        generation: 0,
+        slot: 0,
+    };
+}
+/// Trusted Coordinator output after actual byte authentication and replay commit.
+pub struct BackendMessage {
+    /// Configured label; authorization uses the full backend Binding.
+    pub source: Source,
+    /// Immutable backend registration.
+    pub scope: BackendScope,
+    /// Original local RX capture.
+    pub receive_time_us: u64,
+    /// Existing Security-owned sequence.
+    pub origin_sequence: u32,
+    /// Existing Wire Service.
+    pub service: ServiceId,
+    /// Actual authenticated class.
+    pub traffic_class: TrafficClass,
+    /// Actual protection, not merely configured minimum.
+    pub protection: SecurityMinimum,
+    /// Copied prefix length.
+    pub payload_bytes: u16,
+    /// Bounded owned payload.
     pub payload: [u8; PAYLOAD_BYTES],
 }
 /// Read-only callback with a deferred command port; never borrows Core mutably.
@@ -225,6 +268,7 @@ struct Event {
     recipients: u32,
     order: u32,
     age_anchor: u64,
+    scope: Option<BackendScope>,
 }
 // Independent latches: stop is irreversible, dispatch and step are separately gated.
 #[expect(
@@ -375,6 +419,8 @@ impl<const N: usize> State<N> {
                     channel_id: c.id,
                     payload_bytes: c.payload_bytes,
                     local: true,
+                    protection: None,
+                    principal: None,
                     payload,
                 },
                 source: src,
@@ -382,6 +428,7 @@ impl<const N: usize> State<N> {
                 recipients: self.recipients(ch),
                 order: self.event_order,
                 age_anchor: self.now,
+                scope: None,
             });
         }
         Ok(())
@@ -514,6 +561,22 @@ impl<const N: usize> Inbox<N> {
     /// # Errors
     /// Zero budget, time rollback, reentry or concurrent protocol step.
     pub fn dispatch(&self, now: u64, budget: u16) -> Result<u16> {
+        if self
+            .state
+            .borrow()
+            .channels
+            .iter()
+            .flatten()
+            .any(|c| c.security != SecurityMinimum::StaticTrusted)
+        {
+            return Err(Error::Unsupported);
+        }
+        self.dispatch_validated(now, budget, |_, _, _, _| Err(Error::Unsupported))
+    }
+    fn dispatch_validated<F>(&self, now: u64, budget: u16, validate: F) -> Result<u16>
+    where
+        F: Fn(BackendScope, Source, &Channel, u64) -> Result<[u8; 16]>,
+    {
         {
             let mut s = self.state.try_borrow_mut().map_err(|_| Error::State)?;
             if budget == 0 || s.stepping || s.dispatching || now < s.now {
@@ -560,8 +623,12 @@ impl<const N: usize> Inbox<N> {
                             s.event_cursor = (at + 1) % N;
                             s.sub_cursor = (sub + 1) % N;
                             s.subs[sub].active = true;
-                            found =
-                                Some((ev.sample, sub, s.subs[sub].handler.ok_or(Error::State)?));
+                            found = Some((
+                                ev.sample,
+                                sub,
+                                s.subs[sub].handler.ok_or(Error::State)?,
+                                ev.scope,
+                            ));
                             break;
                         }
                     }
@@ -571,15 +638,112 @@ impl<const N: usize> Inbox<N> {
                 }
                 found
             };
-            let Some((sample, sub, handler)) = next else {
+            let Some((mut sample, sub, handler, scope)) = next else {
                 break;
             };
+            let channel = {
+                let s = self.state.borrow();
+                s.channels
+                    .iter()
+                    .flatten()
+                    .find(|c| c.id == sample.channel_id)
+                    .copied()
+                    .ok_or(Error::State)?
+            };
+            if channel.security != SecurityMinimum::StaticTrusted {
+                if let Ok(principal) = validate(
+                    scope.unwrap_or(BackendScope::LOCAL),
+                    sample.source,
+                    &channel,
+                    now,
+                ) {
+                    sample.principal = if sample.local { None } else { Some(principal) };
+                } else {
+                    self.state.borrow_mut().subs[sub].active = false;
+                    continue;
+                }
+            }
             handler.receive(&sample, self);
             self.state.borrow_mut().subs[sub].active = false;
             count += 1;
         }
         self.state.borrow_mut().dispatching = false;
         Ok(count)
+    }
+}
+impl<const N: usize> Inbox<N> {
+    fn ingest_authenticated(&self, m: &BackendMessage, principal: [u8; 16]) {
+        let Ok(mut s) = self.state.try_borrow_mut() else {
+            return;
+        };
+        if !s.running
+            || s.stopping
+            || m.origin_sequence == 0
+            || m.scope.instance == 0
+            || m.scope.generation == 0
+        {
+            return;
+        }
+        let Some(ch) = s
+            .channels
+            .iter()
+            .position(|c| c.is_some_and(|c| c.service == m.service))
+        else {
+            return;
+        };
+        let Some(c) = s.channels[ch] else { return };
+        if c.security == SecurityMinimum::StaticTrusted
+            || m.protection == SecurityMinimum::StaticTrusted
+            || (c.security == SecurityMinimum::Encrypted
+                && m.protection != SecurityMinimum::Encrypted)
+            || c.traffic_class != m.traffic_class
+            || c.payload_bytes != m.payload_bytes
+            || usize::from(m.payload_bytes) > PAYLOAD_BYTES
+        {
+            return;
+        }
+        let Some(src) = c
+            .sources
+            .iter()
+            .position(|source| *source == Some(m.source))
+        else {
+            return;
+        };
+        if s.fenced[ch][src]
+            || (c.queue == QueuePolicy::KeepLatest && m.origin_sequence <= s.high[ch][src])
+        {
+            return;
+        }
+        let Some(at) = s.event_slot(ch, src, false) else {
+            return;
+        };
+        let Some(order) = s.event_order.checked_add(1) else {
+            return;
+        };
+        s.high[ch][src] = s.high[ch][src].max(m.origin_sequence);
+        let recipients = s.recipients(ch);
+        if recipients != 0 {
+            s.event_order = order;
+            s.events[at] = Some(Event {
+                sample: Sample {
+                    source: m.source,
+                    received_us: m.receive_time_us,
+                    origin_sequence: m.origin_sequence,
+                    channel_id: c.id,
+                    payload_bytes: m.payload_bytes,
+                    local: false,
+                    protection: Some(m.protection),
+                    principal: Some(principal),
+                    payload: m.payload,
+                },
+                source: src,
+                channel: ch,
+                recipients,
+                order,
+                age_anchor: m.receive_time_us.min(s.now),
+                scope: Some(m.scope),
+            });
+        }
     }
 }
 impl<const N: usize> CommandPort for Inbox<N> {
@@ -617,7 +781,8 @@ impl<const N: usize> EndpointHandler for Inbox<N> {
         }
         for ch in 0..N {
             let Some(c) = s.channels[ch] else { continue };
-            if c.service != m.service_id
+            if c.security != SecurityMinimum::StaticTrusted
+                || c.service != m.service_id
                 || c.traffic_class != m.traffic_class
                 || usize::from(c.payload_bytes) != m.payload.len()
             {
@@ -656,6 +821,8 @@ impl<const N: usize> EndpointHandler for Inbox<N> {
                             channel_id: c.id,
                             payload_bytes: c.payload_bytes,
                             local: false,
+                            protection: Some(SecurityMinimum::StaticTrusted),
+                            principal: None,
                             payload,
                         },
                         source: src,
@@ -663,6 +830,7 @@ impl<const N: usize> EndpointHandler for Inbox<N> {
                         recipients,
                         order,
                         age_anchor: m.receive_timestamp_us.min(s.now),
+                        scope: None,
                     });
                 }
                 return EndpointDisposition::Accept;
@@ -674,6 +842,28 @@ impl<const N: usize> EndpointHandler for Inbox<N> {
 
 /// Public Core-only backend boundary. No private Security/Persistence Owner calls.
 pub trait Backend {
+    /// Trusted assembly capability, not a per-message authentication flag.
+    fn supports(&self, minimum: SecurityMinimum) -> bool {
+        minimum == SecurityMinimum::StaticTrusted && self.trusted()
+    }
+    /// Pull copied, authenticated bytes from the same real protocol ingress.
+    /// # Errors
+    /// Empty queue returns `NotFound`; no application can inject through Inbox.
+    fn poll(&mut self) -> Result<BackendMessage> {
+        Err(Error::NotFound)
+    }
+    /// Recheck exact immutable scope and current ACL immediately before callback.
+    /// # Errors
+    /// Expired, fenced, mismatched or insufficiently protected context rejects.
+    fn validate(
+        &self,
+        _scope: BackendScope,
+        _source: Source,
+        _channel: &Channel,
+        _now: u64,
+    ) -> Result<[u8; 16]> {
+        Err(Error::Unsupported)
+    }
     /// Immutable local identity.
     fn local(&self) -> Destination;
     /// Immutable configured binding.
@@ -699,7 +889,13 @@ pub trait Backend {
     /// Copy into the actual Core, not a second fake transport.
     /// # Errors
     /// Forward Core admission/route/capacity errors without consuming a sequence on failure.
-    fn send(&mut self, target: Target, payload: &[u8], options: SendOptions) -> Result<()>;
+    fn send(
+        &mut self,
+        target: Target,
+        payload: &[u8],
+        options: SendOptions,
+        now: u64,
+    ) -> Result<()>;
     /// Advance actual Core/Adapter/Driver obligations.
     /// # Errors
     /// Forward Core time, lifecycle and indeterminate-driver errors.
@@ -782,7 +978,7 @@ impl<
     fn start(&mut self, now: u64) -> Result<()> {
         self.core.start(now, self.adapter)
     }
-    fn send(&mut self, t: Target, p: &[u8], o: SendOptions) -> Result<()> {
+    fn send(&mut self, t: Target, p: &[u8], o: SendOptions, _now: u64) -> Result<()> {
         self.core.send(t, p, o, self.adapter).map(|_| ())
     }
     fn step(&mut self, now: u64, b: u16) -> Result<()> {
@@ -822,14 +1018,11 @@ impl<const N: usize> NativeRoot<N> {
         if !matches!(N, 4 | 8 | 16) || instance == 0 || channels.is_empty() || channels.len() > N {
             return Err(Error::Config);
         }
-        if backend.lifecycle() != Lifecycle::Initialized
-            || !backend.trusted()
-            || inbox.state.borrow().instance != 0
-        {
+        if backend.lifecycle() != Lifecycle::Initialized || inbox.state.borrow().instance != 0 {
             return Err(Error::State);
         }
         for (i, c) in channels.iter().enumerate() {
-            if c.security != SecurityMinimum::StaticTrusted {
+            if !backend.supports(c.security) {
                 return Err(Error::Unsupported);
             }
             if c.id == 0
@@ -1018,6 +1211,7 @@ impl<const N: usize> NativeRoot<N> {
                 },
                 &job.payload[..usize::from(c.payload_bytes)],
                 options,
+                now,
             );
             if !matches!(admission, Err(Error::NoSpace | Error::State)) {
                 job.next_target += 1;
@@ -1027,13 +1221,41 @@ impl<const N: usize> NativeRoot<N> {
         if self.backend.lifecycle() != Lifecycle::Quiescent {
             self.backend.step(now, budget)?;
         }
+        for _ in 0..budget {
+            match self.backend.poll() {
+                Ok(message) => {
+                    let channel = self
+                        .inbox
+                        .state
+                        .borrow()
+                        .channels
+                        .iter()
+                        .flatten()
+                        .find(|c| c.service == message.service)
+                        .copied();
+                    if let Some(c) = channel {
+                        if let Ok(principal) =
+                            self.backend
+                                .validate(message.scope, message.source, &c, now)
+                        {
+                            self.inbox.ingest_authenticated(&message, principal);
+                        }
+                    }
+                }
+                Err(Error::NotFound) => break,
+                Err(_) => {}
+            }
+        }
         Ok(())
     }
     /// Run the application executor outside the protocol runtime.
     /// # Errors
     /// Same as `Inbox::dispatch`.
     pub fn dispatch(&self, now: u64, budget: u16) -> Result<u16> {
-        self.inbox.dispatch(now, budget)
+        self.inbox
+            .dispatch_validated(now, budget, |scope, source, channel, now| {
+                self.backend.validate(scope, source, channel, now)
+            })
     }
     #[must_use]
     /// True only after real Core physical retirement and all facade jobs/callbacks finish.

@@ -46,6 +46,15 @@ pub(super) struct ReauthCrypto {
     pub(super) expected: HandshakeCandidate,
     pub(super) record: Option<PeerReauthRecord>,
 }
+#[cfg(feature = "native-routed")]
+impl ReauthCrypto {
+    pub(super) const fn for_candidate(expected: HandshakeCandidate) -> Self {
+        Self {
+            expected,
+            record: None,
+        }
+    }
+}
 impl CryptoProvider for ReauthCrypto {
     fn verify_session_proof(&mut self, c: &HandshakeCandidate, proof: &[u8]) -> Result<()> {
         if *c != self.expected {

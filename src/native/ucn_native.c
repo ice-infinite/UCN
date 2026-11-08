@@ -1,7 +1,8 @@
-#include "ucn/ucn_native.h"
+#include "ucn/ucn_native_backend.h"
+#include "internal/ucn_stack.h"
 #include <string.h>
 
-#define MAGIC UINT32_C(0x4e415431)
+#define MAGIC UINT32_C(0x4e415432)
 #define PUB 1U
 #define SUB 2U
 typedef struct entity {
@@ -25,12 +26,16 @@ typedef struct event {
     uint32_t sequence, recipients;
     uint32_t order;
     uint16_t channel, source;
-    uint8_t local, valid;
+    uint8_t local, valid, protection;
+    ucn_native_scope_t scope;
     uint8_t payload[UCN_NATIVE_PAYLOAD_BYTES];
 } event_t;
 struct ucn_native {
     uint32_t magic, instance;
     ucn_node_t *core;
+    const ucn_native_backend_t *backend;
+    const void *backend_context;
+    size_t backend_context_bytes;
     ucn_lock_ops_t lock;
     ucn_node_view_t core_view;
     ucn_native_channel_t channels[UCN_NATIVE_CAPACITY];
@@ -45,7 +50,15 @@ struct ucn_native {
     ucn_native_status_t stats;
     uint64_t now;
     uint16_t channel_count, command_cursor, event_cursor, sub_cursor;
-    uint8_t running, stepping, dispatching, stopping, stop_applied;
+    uint8_t running, stepping, dispatching, stopping, stop_applied, dead, in_callback;
+    /* EN: Mutually exclusive actor phases share one bounded workspace.
+     * ZH: 互斥的Actor阶段共享单份有界工作区，不把副本压入任务栈。 */
+    union {
+        struct { ucn_native_sample_t sample; uint8_t payload[UCN_NATIVE_PAYLOAD_BYTES]; } app;
+        struct { ucn_native_backend_message_t message; uint8_t payload[UCN_NATIVE_PAYLOAD_BYTES]; } rx;
+        struct { ucn_target_t target; ucn_send_options_t options; ucn_native_target_t native_target; } send;
+        struct { ucn_step_budget_t budget; ucn_step_result_t result; } core;
+    } work;
 };
 UCN_STATIC_ASSERT(sizeof(ucn_native_t) <= UCN_NATIVE_STORAGE_BYTES, native_storage);
 UCN_STATIC_ASSERT(UCN_NATIVE_CAPACITY <= 32U, native_recipient_mask);
@@ -59,14 +72,21 @@ static bool overlap(const void *a, size_t an, const void *b, size_t bn)
 }
 static ucn_result_t enter(ucn_native_t *n)
 {
+    ucn_result_t r;
     if (n == NULL || n->magic != MAGIC) { return UCN_ERR_ARGUMENT; }
-    return n->lock.enter(n->lock.context);
+    r = n->lock.enter(n->lock.context);
+    if (r != UCN_OK) { return r; }
+    if (n->dead) { n->lock.leave(n->lock.context); return UCN_ERR_STATE; }
+    return UCN_OK;
 }
 static ucn_result_t leave(ucn_native_t *n, ucn_result_t r)
 { n->lock.leave(n->lock.context); return r; }
 static bool external_output(const ucn_native_t *n, const void *out, size_t bytes)
 {
-    return n != NULL && out != NULL && !overlap(n, UCN_NATIVE_STORAGE_BYTES, out, bytes) &&
+    return n != NULL && n->magic == MAGIC && out != NULL && !overlap(n, UCN_NATIVE_STORAGE_BYTES, out, bytes) &&
+        !overlap(n->lock.context, n->lock.context != NULL ? 1U : 0U, out, bytes) &&
+        (n->backend == NULL || (!overlap(n->backend, sizeof(*n->backend), out, bytes) &&
+        !overlap(n->backend_context, n->backend_context_bytes, out, bytes))) &&
         !overlap(n->core, ucn_storage_required(), out, bytes);
 }
 static uint16_t find_channel(const ucn_native_t *n, uint16_t id)
@@ -85,7 +105,7 @@ static uint32_t recipients(const ucn_native_t *n, uint16_t ch)
     }
     return mask;
 }
-static uint16_t event_slot(const ucn_native_t *n, uint16_t ch, uint16_t src, bool local)
+static UCN_I_STACK_PHASE uint16_t event_slot(const ucn_native_t *n, uint16_t ch, uint16_t src, bool local)
 {
     uint16_t i, free_slot = UINT16_MAX;
     for (i = 0U; i < UCN_NATIVE_CAPACITY; ++i) {
@@ -95,68 +115,85 @@ static uint16_t event_slot(const ucn_native_t *n, uint16_t ch, uint16_t src, boo
     }
     return free_slot;
 }
-static void queue_event(ucn_native_t *n, uint16_t at, uint16_t ch, uint16_t src,
-                        uint32_t seq, uint64_t time, bool local, const void *bytes)
+static UCN_I_STACK_PHASE void queue_event(ucn_native_t *n, uint16_t at, const void *bytes)
 {
     event_t *e = &n->events[at];
-    e->received = time; e->sequence = seq; e->channel = ch; e->source = src;
-    e->age_anchor = time < n->now ? time : n->now;
-    e->local = local ? 1U : 0U; e->recipients = recipients(n, ch);
+    /* The locked caller stages metadata directly in the selected fixed slot.
+     * The completed slot becomes observable only after the caller unlocks. */
+    e->age_anchor = e->received < n->now ? e->received : n->now;
+    e->recipients = recipients(n, e->channel);
+    e->protection = e->local ? UCN_NATIVE_LOCAL : UCN_NATIVE_STATIC_TRUSTED;
+    memset(&e->scope, 0, sizeof(e->scope));
     ++n->event_order; e->order = n->event_order;
     e->valid = e->recipients != 0U ? 1U : 0U;
-    memcpy(e->payload, bytes, n->channels[ch].payload_bytes);
+    memcpy(e->payload, bytes, n->channels[e->channel].payload_bytes);
 }
-static ucn_endpoint_disposition_t receive_frame(void *ctx, const ucn_endpoint_message_t *m)
+static UCN_I_STACK_PHASE ucn_endpoint_disposition_t receive_frame(void *ctx, const ucn_endpoint_message_t *m)
 {
     ucn_native_t *n = (ucn_native_t *)ctx;
     uint16_t ch, src, at;
     if (enter(n) != UCN_OK) { return UCN_ENDPOINT_DROP; }
-    if (!n->running || n->stopping || m->origin_sequence == 0U) { leave(n, UCN_OK); return UCN_ENDPOINT_DROP; }
+    if (!n->running || n->stopping || m->origin_sequence == 0U) { n->lock.leave(n->lock.context); return UCN_ENDPOINT_DROP; }
     for (ch = 0U; ch < n->channel_count; ++ch) {
         ucn_native_channel_t *c = &n->channels[ch];
-        if (c->service_id != m->service_id || c->payload_bytes != m->payload_bytes || c->traffic_class != m->traffic_class) { continue; }
+        if (c->security_minimum != UCN_NATIVE_STATIC_TRUSTED || c->service_id != m->service_id || c->payload_bytes != m->payload_bytes || c->traffic_class != m->traffic_class) { continue; }
         for (src = 0U; src < c->source_count; ++src) {
-            ucn_native_source_t actual;
-            actual.address = m->source_address; actual.binding_generation = m->source_binding_generation;
-            actual.principal_digest = m->configured_principal_digest;
-            if (!source_equal(c->sources[src], actual) || n->fenced[ch][src] ||
+            const ucn_native_source_t *actual = &c->sources[src];
+            if (actual->address != m->source_address ||
+                actual->binding_generation != m->source_binding_generation ||
+                actual->principal_digest != m->configured_principal_digest || n->fenced[ch][src] ||
                 (c->queue_policy == UCN_NATIVE_KEEP_LATEST && m->origin_sequence <= n->source_high[ch][src])) { continue; }
-            if (n->event_order == UINT32_MAX) { leave(n, UCN_OK); return UCN_ENDPOINT_DROP; }
+            if (n->event_order == UINT32_MAX) { n->lock.leave(n->lock.context); return UCN_ENDPOINT_DROP; }
             at = event_slot(n, ch, src, false);
-            if (at == UINT16_MAX) { ++n->stats.dropped; leave(n, UCN_OK); return UCN_ENDPOINT_DROP; }
+            if (at == UINT16_MAX) { ++n->stats.dropped; n->lock.leave(n->lock.context); return UCN_ENDPOINT_DROP; }
             if (m->origin_sequence > n->source_high[ch][src]) { n->source_high[ch][src] = m->origin_sequence; }
-            queue_event(n, at, ch, src, m->origin_sequence, m->receive_timestamp_us, false, m->payload);
-            leave(n, UCN_OK); return UCN_ENDPOINT_ACCEPT;
+            n->events[at].received = m->receive_timestamp_us; n->events[at].sequence = m->origin_sequence;
+            n->events[at].channel = ch; n->events[at].source = src; n->events[at].local = 0U;
+            queue_event(n, at, m->payload);
+            n->lock.leave(n->lock.context); return UCN_ENDPOINT_ACCEPT;
         }
     }
-    ++n->stats.dropped; leave(n, UCN_OK); return UCN_ENDPOINT_DROP;
+    ++n->stats.dropped; n->lock.leave(n->lock.context); return UCN_ENDPOINT_DROP;
 }
 
-static ucn_result_t validate_channels(ucn_node_t *core, const ucn_native_config_t *cfg, uint32_t local_address)
+static ucn_result_t validate_channels(ucn_node_t *core, const ucn_native_backend_t *backend, const ucn_native_config_t *cfg, uint32_t local_address)
 {
     ucn_static_binding_t binding;
     uint16_t i, j, k;
     ucn_result_t r;
     for (i = 0U; i < cfg->channel_count; ++i) {
         const ucn_native_channel_t *c = &cfg->channels[i];
-        if (c->security_minimum != UCN_NATIVE_STATIC_TRUSTED) { return UCN_ERR_UNSUPPORTED; }
+        if ((backend == NULL && c->security_minimum != UCN_NATIVE_STATIC_TRUSTED) ||
+            (backend != NULL && c->security_minimum != UCN_NATIVE_ORIGIN_AUTH && c->security_minimum != UCN_NATIVE_ENCRYPTED)) { return UCN_ERR_UNSUPPORTED; }
         if (!c->id || !c->service_id || c->service_id == UINT16_MAX || !c->schema_id || !c->schema_revision ||
             !c->payload_bytes || c->payload_bytes > UCN_NATIVE_PAYLOAD_BYTES || c->reserved_zero ||
             c->traffic_class < UCN_TRAFFIC_Q1 || c->traffic_class > UCN_TRAFFIC_Q3 ||
             (c->queue_policy != UCN_NATIVE_FIFO && c->queue_policy != UCN_NATIVE_KEEP_LATEST) ||
             !c->max_local_age_us || c->source_count == 0U || c->source_count > UCN_NATIVE_SOURCES || c->target_count > UCN_NATIVE_TARGETS) { return UCN_ERR_CONFIG; }
+        if (backend != NULL) {
+            r = backend->preflight(backend->context, c);
+            if (r != UCN_OK) { return r; }
+        }
         for (j = 0U; j < i; ++j) {
             /* Unique service avoids ambiguous schema aliases in this first subset. */
             if (cfg->channels[j].id == c->id || cfg->channels[j].service_id == c->service_id) { return UCN_ERR_CONFIG; }
         }
         for (j = 0U; j < c->source_count; ++j) {
-            r = ucn_get_static_binding(core, c->sources[j].address, &binding);
+            if (backend != NULL) {
+                ucn_native_source_t source = {0U, 0U, 0U};
+                r = backend->binding(backend->context, c->sources[j].address, &source);
+                binding.binding_generation = source.binding_generation; binding.principal_digest = source.principal_digest;
+            } else { r = ucn_get_static_binding(core, c->sources[j].address, &binding); }
             if (r != UCN_OK || binding.binding_generation != c->sources[j].binding_generation || binding.principal_digest != c->sources[j].principal_digest) { return UCN_ERR_CONFIG; }
             for (k = 0U; k < j; ++k) { if (source_equal(c->sources[j], c->sources[k])) { return UCN_ERR_CONFIG; } }
         }
         for (j = 0U; j < c->target_count; ++j) {
             if (c->targets[j].address == local_address) { return UCN_ERR_CONFIG; }
-            r = ucn_get_static_binding(core, c->targets[j].address, &binding);
+            if (backend != NULL) {
+                ucn_native_source_t source = {0U, 0U, 0U};
+                r = backend->binding(backend->context, c->targets[j].address, &source);
+                binding.binding_generation = source.binding_generation;
+            } else { r = ucn_get_static_binding(core, c->targets[j].address, &binding); }
             if (r != UCN_OK || binding.binding_generation != c->targets[j].binding_generation) { return UCN_ERR_CONFIG; }
             for (k = 0U; k < j; ++k) { if (c->targets[k].address == c->targets[j].address) { return UCN_ERR_CONFIG; } }
         }
@@ -164,8 +201,8 @@ static ucn_result_t validate_channels(ucn_node_t *core, const ucn_native_config_
     return UCN_OK;
 }
 
-ucn_result_t ucn_native_init(void *storage, size_t bytes, ucn_node_t *core,
-                            const ucn_native_config_t *cfg, ucn_native_t **out)
+static ucn_result_t init(void *storage, size_t bytes, ucn_node_t *core,
+    const ucn_native_backend_t *backend, const ucn_native_config_t *cfg, ucn_native_t **out)
 {
     ucn_node_view_t view;
     ucn_native_t *n = (ucn_native_t *)storage;
@@ -174,7 +211,7 @@ ucn_result_t ucn_native_init(void *storage, size_t bytes, ucn_node_t *core,
     uint16_t services[UCN_NATIVE_CAPACITY];
     size_t b;
     ucn_result_t r;
-    if (storage == NULL || cfg == NULL || out == NULL || core == NULL || bytes < UCN_NATIVE_STORAGE_BYTES ||
+    if (storage == NULL || cfg == NULL || out == NULL || (core == NULL && backend == NULL) || bytes < UCN_NATIVE_STORAGE_BYTES ||
         (uintptr_t)storage % sizeof(uint64_t) != 0U ||
         overlap(storage, bytes, cfg, sizeof(*cfg)) || overlap(storage, bytes, out, sizeof(*out)) ||
         overlap(storage, bytes, core, ucn_storage_required()) || overlap(cfg, sizeof(*cfg), out, sizeof(*out)) ||
@@ -191,21 +228,38 @@ ucn_result_t ucn_native_init(void *storage, size_t bytes, ucn_node_t *core,
     if (cfg->lock.context != NULL && (overlap(storage, bytes, cfg->lock.context, 1U) ||
         overlap(core, ucn_storage_required(), cfg->lock.context, 1U) || overlap(out, sizeof(*out), cfg->lock.context, 1U))) { return UCN_ERR_ARGUMENT; }
     for (b = 0U; b < UCN_NATIVE_STORAGE_BYTES; ++b) { if (raw[b] != 0U) { return UCN_ERR_STATE; } }
-    r = ucn_get_node_view(core, &view);
+    r = backend != NULL ? backend->local_view(backend->context, &view) : ucn_get_node_view(core, &view);
     if (r != UCN_OK) { return r; }
     if (view.lifecycle != UCN_LIFECYCLE_INITIALIZED || view.endpoint_generation_high_water != 0U || view.endpoint_count != 0U ||
-        cfg->channel_count > UCN_ENDPOINT_COUNT || !view.trusted_o0_network) { return UCN_ERR_STATE; }
-    r = validate_channels(core, cfg, view.local_address);
+        cfg->channel_count > UCN_ENDPOINT_COUNT || (backend == NULL && !view.trusted_o0_network)) { return UCN_ERR_STATE; }
+    r = validate_channels(core, backend, cfg, view.local_address);
     if (r != UCN_OK) { return r; }
-    memset(n, 0, sizeof(*n)); n->magic = MAGIC; n->core = core; n->lock = cfg->lock;
+    memset(n, 0, sizeof(*n)); n->magic = MAGIC; n->core = core; n->backend = backend; n->lock = cfg->lock;
+    if (backend != NULL) { n->backend_context = backend->context; n->backend_context_bytes = backend->context_bytes; }
     n->instance = cfg->instance; n->core_view = view; n->channel_count = cfg->channel_count;
     memcpy(n->channels, cfg->channels, cfg->channel_count * sizeof(*cfg->channels));
     for (i = 0U; i < n->channel_count; ++i) {
         services[i] = n->channels[i].service_id;
     }
-    r = ucn_endpoint_install(core, services, n->channel_count, receive_frame, n, n->endpoints);
+    r = backend != NULL ? UCN_OK : ucn_endpoint_install(core, services, n->channel_count, receive_frame, n, n->endpoints);
     if (r != UCN_OK) { memset(n, 0, sizeof(*n)); return r; }
     *out = n; return UCN_OK;
+}
+ucn_result_t ucn_native_init(void *storage, size_t bytes, ucn_node_t *core,
+    const ucn_native_config_t *cfg, ucn_native_t **out)
+{ return init(storage, bytes, core, NULL, cfg, out); }
+ucn_result_t ucn_native_init_backend(void *storage, size_t bytes,
+    const ucn_native_backend_t *b, const ucn_native_config_t *cfg, ucn_native_t **out)
+{
+    if (b == NULL || b->struct_size != sizeof(*b) || b->api_version != UCN_NATIVE_API_VERSION ||
+        b->local_view == NULL || b->binding == NULL || b->start == NULL || b->stop == NULL || b->preflight == NULL ||
+        b->step == NULL || b->send == NULL || b->poll == NULL || b->validate == NULL ||
+        ((b->context == NULL) != (b->context_bytes == 0U)) ||
+        overlap(storage, bytes, b, sizeof(*b)) || overlap(out, sizeof(*out), b, sizeof(*b)) ||
+        overlap(storage, bytes, b->context, b->context_bytes) || overlap(out, sizeof(*out), b->context, b->context_bytes) ||
+        overlap(cfg, sizeof(*cfg), b->context, b->context_bytes) ||
+        (cfg != NULL && overlap(cfg->channels, cfg->channel_count * sizeof(*cfg->channels), b->context, b->context_bytes))) { return UCN_ERR_ARGUMENT; }
+    return init(storage, bytes, NULL, b, cfg, out);
 }
 
 static ucn_result_t create(ucn_native_t *n, uint16_t id, uint8_t kind,
@@ -252,9 +306,13 @@ static bool handle_valid(ucn_native_t *n, ucn_native_handle_t h, uint8_t kind)
 static ucn_result_t enqueue(ucn_native_t *n, uint16_t ch, const void *p, size_t bytes, const ucn_native_target_t *target)
 {
     uint16_t i, src = UINT16_MAX, at = UINT16_MAX;
+    bool borrowed_sample;
     ucn_native_channel_t *c = &n->channels[ch];
     if (!n->running || n->stopping || n->stepping) { return UCN_ERR_STATE; }
-    if (p == NULL || bytes != c->payload_bytes || overlap(n, UCN_NATIVE_STORAGE_BYTES, p, bytes) || overlap(n->core, ucn_storage_required(), p, bytes)) { return UCN_ERR_ARGUMENT; }
+    borrowed_sample = n->in_callback && (uintptr_t)p >= (uintptr_t)n->work.app.payload &&
+        bytes <= n->work.app.sample.payload_bytes &&
+        (uintptr_t)p - (uintptr_t)n->work.app.payload <= n->work.app.sample.payload_bytes - bytes;
+    if (p == NULL || bytes != c->payload_bytes || (!borrowed_sample && !external_output(n, p, bytes))) { return UCN_ERR_ARGUMENT; }
     if (UINT64_MAX - n->now < c->max_local_age_us) { return UCN_ERR_EXHAUSTED; }
     if (n->command_order == UINT32_MAX) { return UCN_ERR_EXHAUSTED; }
     for (i = 0U; i < c->source_count; ++i) {
@@ -275,7 +333,12 @@ static ucn_result_t enqueue(ucn_native_t *n, uint16_t ch, const void *p, size_t 
     n->commands[i].unicast = target != NULL ? 1U : 0U;
     if (target != NULL) { n->commands[i].target = *target; }
     memcpy(n->commands[i].payload, p, bytes);
-    if (at != UINT16_MAX) { ++n->local_sequence; queue_event(n, at, ch, src, n->local_sequence, n->now, true, p); }
+    if (at != UINT16_MAX) {
+        ++n->local_sequence;
+        n->events[at].received = n->now; n->events[at].sequence = n->local_sequence;
+        n->events[at].channel = ch; n->events[at].source = src; n->events[at].local = 1U;
+        queue_event(n, at, p);
+    }
     ++n->stats.accepted; return UCN_OK;
 }
 ucn_result_t ucn_publish(ucn_native_t *n, ucn_native_handle_t h, const void *p, size_t bytes)
@@ -341,7 +404,7 @@ ucn_result_t ucn_native_start(ucn_native_t *n, uint64_t now)
     ucn_result_t r = enter(n); if (r != UCN_OK) { return r; }
     if (n->running || n->stepping || n->stopping) { return leave(n, UCN_ERR_STATE); }
     n->stepping = 1U; leave(n, UCN_OK);
-    r = ucn_start(n->core, now);
+    r = n->backend != NULL ? n->backend->start(n->backend->context, now) : ucn_start(n->core, now);
     if (enter(n) != UCN_OK) { return UCN_ERR_STATE; }
     n->stepping = 0U;
     if (r == UCN_OK) { n->running = 1U; n->now = now; }
@@ -349,53 +412,116 @@ ucn_result_t ucn_native_start(ucn_native_t *n, uint64_t now)
 }
 /* Only step owns commands. It drops the Native lock before every Core call.
  * 仅step改动已接纳命令；每次Core调用前释放Native短锁。 */
-static void process_command(ucn_native_t *n, uint16_t i)
+static UCN_I_STACK_PHASE bool prepare_command(ucn_native_t *n, uint16_t i)
 {
     command_t *cmd = &n->commands[i];
     ucn_native_channel_t *c = &n->channels[cmd->channel];
-    ucn_result_t r;
     uint16_t older;
     bool source_blocked = true;
     for (older = 0U; older < c->source_count; ++older) {
         if (c->sources[older].address == n->core_view.local_address && !n->fenced[cmd->channel][older]) { source_blocked = false; }
     }
     for (older = 0U; older < UCN_NATIVE_CAPACITY; ++older) {
-        if (n->commands[older].valid && n->commands[older].channel == cmd->channel && n->commands[older].order < cmd->order) { return; }
+        if (n->commands[older].valid && n->commands[older].channel == cmd->channel && n->commands[older].order < cmd->order) { return false; }
     }
-    if (cmd->next_target >= (cmd->unicast ? 1U : c->target_count)) { cmd->valid = 0U; return; }
+    if (cmd->next_target >= (cmd->unicast ? 1U : c->target_count)) { cmd->valid = 0U; return false; }
     if (source_blocked || n->stopping || n->now >= cmd->deadline) {
         n->stats.failed += (cmd->unicast ? 1U : c->target_count) - cmd->next_target;
-        cmd->valid = 0U; return;
+        cmd->valid = 0U; return false;
     }
     {
-        ucn_native_target_t t = cmd->unicast ? cmd->target : c->targets[cmd->next_target];
-        ucn_target_t target; ucn_send_options_t opt;
-        memset(&target, 0, sizeof(target)); target.struct_size = sizeof(target); target.api_version = UCN_API_VERSION;
-        target.address = t.address; target.binding_generation = t.binding_generation; target.service_id = c->service_id;
-        memset(&opt, 0, sizeof(opt)); opt.struct_size = sizeof(opt); opt.api_version = UCN_API_VERSION;
-        opt.copy_payload = 1U; opt.hop_limit = 4U; opt.traffic_class = c->traffic_class; opt.absolute_deadline_us = cmd->deadline;
-        r = ucn_send(n->core, &target, cmd->payload, c->payload_bytes, &opt, NULL);
-        if (r == UCN_OK) { ++cmd->next_target; ++n->stats.core_admitted; }
-        else if (r != UCN_ERR_NO_SPACE && r != UCN_ERR_STATE) { ++n->stats.failed; ++cmd->next_target; }
+        ucn_target_t *target = &n->work.send.target;
+        ucn_send_options_t *opt = &n->work.send.options;
+        n->work.send.native_target = cmd->unicast ? cmd->target : c->targets[cmd->next_target];
+        memset(target, 0, sizeof(*target)); target->struct_size = sizeof(*target); target->api_version = UCN_API_VERSION;
+        target->address = n->work.send.native_target.address;
+        target->binding_generation = n->work.send.native_target.binding_generation; target->service_id = c->service_id;
+        memset(opt, 0, sizeof(*opt)); opt->struct_size = sizeof(*opt); opt->api_version = UCN_API_VERSION;
+        opt->copy_payload = 1U; opt->hop_limit = 4U; opt->traffic_class = c->traffic_class; opt->absolute_deadline_us = cmd->deadline;
+        return true;
     }
+}
+/* Preparation has returned before this synchronous submission. The actor
+ * never carries table-scan temporaries across Core/Backend/Driver calls.
+ * 准备阶段已返回，不将扫描临时量压在Core/Backend/Driver调用链之上。 */
+static UCN_I_STACK_PHASE void send_prepared(ucn_native_t *n, uint16_t i)
+{
+    command_t *cmd = &n->commands[i];
+    const ucn_native_channel_t *channel = &n->channels[cmd->channel];
+    ucn_result_t r = n->backend != NULL ? n->backend->send(n->backend->context, channel,
+        n->work.send.native_target, cmd->payload, n->now, cmd->deadline) :
+        ucn_send(n->core, &n->work.send.target, cmd->payload, channel->payload_bytes,
+                 &n->work.send.options, NULL);
+    if (r == UCN_OK) { ++cmd->next_target; ++n->stats.core_admitted; }
+    else if (r != UCN_ERR_NO_SPACE && r != UCN_ERR_STATE) { ++n->stats.failed; ++cmd->next_target; }
+}
+
+/* EN: Backend already verified bytes/replay. Native additionally binds channel
+ * and exact live scope; it never accepts an application 'authenticated' flag.
+ * ZH: 后端已验证字节和Replay；Facade另核验通道和当前Scope。 */
+static UCN_I_STACK_PHASE void poll_backend(ucn_native_t *n)
+{
+    ucn_native_backend_message_t *m = &n->work.rx.message;
+    uint16_t ch, src, at;
+    uint8_t principal[16];
+    if (enter(n) != UCN_OK) { return; }
+    for (ch = 0U; ch < n->channel_count; ++ch) {
+        const ucn_native_channel_t *c = &n->channels[ch];
+        if (c->service_id != m->service_id || c->payload_bytes != m->payload_bytes || c->traffic_class != m->traffic_class ||
+            m->protection < c->security_minimum || m->protection > UCN_NATIVE_ENCRYPTED || !m->origin_sequence ||
+            !m->scope.instance || !m->scope.generation || m->scope.reserved_zero) { continue; }
+        for (src = 0U; src < c->source_count; ++src) {
+            if (!source_equal(c->sources[src], m->source) || n->fenced[ch][src] || n->stopping ||
+                (c->queue_policy == UCN_NATIVE_KEEP_LATEST && m->origin_sequence <= n->source_high[ch][src])) { continue; }
+            leave(n, UCN_OK);
+            if (n->backend->validate(n->backend->context, &m->scope, &m->source, c->service_id,
+                c->security_minimum, n->now, principal) != UCN_OK) { return; }
+            if (enter(n) != UCN_OK) { return; }
+            at = event_slot(n, ch, src, false);
+            if (at == UINT16_MAX || n->event_order == UINT32_MAX) { ++n->stats.dropped; leave(n, UCN_OK); return; }
+            if (m->origin_sequence > n->source_high[ch][src]) { n->source_high[ch][src] = m->origin_sequence; }
+            n->events[at].received = m->receive_time_us; n->events[at].sequence = m->origin_sequence;
+            n->events[at].channel = ch; n->events[at].source = src; n->events[at].local = 0U;
+            queue_event(n, at, n->work.rx.payload);
+            n->events[at].scope = m->scope;
+            n->events[at].protection = m->protection;
+            leave(n, UCN_OK); return;
+        }
+    }
+    ++n->stats.dropped; leave(n, UCN_OK);
 }
 ucn_result_t ucn_native_step(ucn_native_t *n, uint64_t now, uint16_t budget)
 {
     uint16_t k, i; ucn_result_t r;
-    ucn_step_budget_t b; ucn_step_result_t v;
     r = enter(n); if (r != UCN_OK) { return r; }
     if (!budget || n->stepping || n->dispatching || (!n->running && !n->stopping) || now < n->now) { return leave(n, UCN_ERR_STATE); }
     n->stepping = 1U; n->now = now; leave(n, UCN_OK);
     if (n->stopping && !n->stop_applied) {
-        r = ucn_stop(n->core); if (r == UCN_OK) { n->stop_applied = 1U; }
+        r = n->backend != NULL ? n->backend->stop(n->backend->context) : ucn_stop(n->core); if (r == UCN_OK) { n->stop_applied = 1U; }
     }
     for (k = 0U; k < budget; ++k) {
         i = n->command_cursor; n->command_cursor = (uint16_t)((i + 1U) % UCN_NATIVE_CAPACITY);
-        if (n->commands[i].valid) { process_command(n, i); }
+        if (n->commands[i].valid && prepare_command(n, i)) {
+            send_prepared(n, i);
+        }
     }
-    memset(&b, 0, sizeof(b)); b.struct_size = sizeof(b); b.api_version = UCN_API_VERSION; b.max_work = budget;
-    r = ucn_get_node_view(n->core, &n->core_view);
-    if (r == UCN_OK && n->core_view.lifecycle != UCN_LIFECYCLE_QUIESCENT) { r = ucn_step(n->core, now, &b, &v); }
+    memset(&n->work.core.budget, 0, sizeof(n->work.core.budget));
+    n->work.core.budget.struct_size = sizeof(n->work.core.budget);
+    n->work.core.budget.api_version = UCN_API_VERSION; n->work.core.budget.max_work = budget;
+    r = n->backend != NULL ? n->backend->local_view(n->backend->context, &n->core_view) : ucn_get_node_view(n->core, &n->core_view);
+    if (r == UCN_OK && n->core_view.lifecycle != UCN_LIFECYCLE_QUIESCENT) {
+        r = n->backend != NULL ? n->backend->step(n->backend->context, n->now, budget) :
+            ucn_step(n->core, n->now, &n->work.core.budget, &n->work.core.result);
+        if (r == UCN_OK && n->backend != NULL && !n->stopping) {
+            for (k = 0U; k < budget; ++k) {
+                /* Authenticate/pull and application admission are disjoint
+                 * phases: no admission-frame spills above the crypto stack.
+                 * 认证拉取与应用接纳分阶段，不让接纳帧叠在密码调用链上。 */
+                if (n->backend->poll(n->backend->context, &n->work.rx.message,
+                    n->work.rx.payload, sizeof(n->work.rx.payload)) == UCN_OK) { poll_backend(n); }
+            }
+        }
+    }
     if (enter(n) != UCN_OK) { return UCN_ERR_STATE; }
     n->stepping = 0U;
     if (r != UCN_OK) {
@@ -414,7 +540,8 @@ ucn_result_t ucn_native_dispatch(ucn_native_t *n, uint64_t now, uint16_t budget,
     n->dispatching = 1U; n->now = now;
     for (work = 0U; work < budget; ++work) {
         uint16_t scan, at = UINT16_MAX, sub = UINT16_MAX, j;
-        uint8_t payload[UCN_NATIVE_PAYLOAD_BYTES]; ucn_native_sample_t sample;
+        ucn_native_sample_t *sample = &n->work.app.sample;
+        uint32_t subscription_generation;
         ucn_native_receive_fn fn; void *ctx;
         for (scan = 0U; scan < UCN_NATIVE_CAPACITY; ++scan) {
             uint16_t e = (uint16_t)((n->event_cursor + scan) % UCN_NATIVE_CAPACITY);
@@ -443,17 +570,33 @@ ucn_result_t ucn_native_dispatch(ucn_native_t *n, uint64_t now, uint16_t budget,
         if (at == UINT16_MAX) { break; }
         {
             event_t *e = &n->events[at];
-            sample.source = n->channels[e->channel].sources[e->source]; sample.receive_time_us = e->received;
-            sample.origin_sequence = e->sequence; sample.channel_id = n->channels[e->channel].id;
-            sample.payload_bytes = n->channels[e->channel].payload_bytes;
-            sample.provenance = e->local ? UCN_NATIVE_LOCAL : UCN_NATIVE_STATIC_TRUSTED;
-            memcpy(payload, e->payload, sample.payload_bytes); sample.payload = payload;
+            subscription_generation = n->subs[sub].generation;
+            sample->source = n->channels[e->channel].sources[e->source]; sample->receive_time_us = e->received;
+            sample->origin_sequence = e->sequence; sample->channel_id = n->channels[e->channel].id;
+            sample->payload_bytes = n->channels[e->channel].payload_bytes;
+            sample->provenance = e->protection;
+            memset(sample->principal, 0, sizeof(sample->principal));
+            if (n->backend != NULL) {
+                leave(n, UCN_OK);
+                r = n->backend->validate(n->backend->context, &e->scope, &sample->source,
+                    n->channels[e->channel].service_id, n->channels[e->channel].security_minimum,
+                    now, sample->principal);
+                if (enter(n) != UCN_OK) { return UCN_ERR_STATE; }
+                if (r != UCN_OK || !e->valid || n->stopping || n->fenced[e->channel][e->source]) {
+                    e->valid = 0U; ++n->stats.dropped; continue;
+                }
+                if (!n->subs[sub].open || n->subs[sub].generation != subscription_generation ||
+                    !(e->recipients & (UINT32_C(1) << sub))) { continue; }
+            }
+            memcpy(n->work.app.payload, e->payload, sample->payload_bytes); sample->payload = n->work.app.payload;
             e->recipients &= ~(UINT32_C(1) << sub); if (!e->recipients) { e->valid = 0U; }
         }
         n->event_cursor = (uint16_t)((at + 1U) % UCN_NATIVE_CAPACITY); n->sub_cursor = (uint16_t)((sub + 1U) % UCN_NATIVE_CAPACITY);
         fn = n->subs[sub].receive; ctx = n->subs[sub].context; n->subs[sub].active = 1U;
-        leave(n, UCN_OK); fn(ctx, &sample);
+        n->in_callback = 1U;
+        leave(n, UCN_OK); fn(ctx, sample);
         if (enter(n) != UCN_OK) { return UCN_ERR_STATE; }
+        n->in_callback = 0U;
         n->subs[sub].active = 0U; ++n->stats.delivered; ++count;
     }
     n->dispatching = 0U; *out = count; return leave(n, UCN_OK);
@@ -485,6 +628,10 @@ ucn_result_t ucn_native_deinit(ucn_native_t *n)
     if (n->stepping || n->dispatching || !n->stop_applied || n->core_view.lifecycle != UCN_LIFECYCLE_QUIESCENT) { return leave(n, UCN_ERR_STATE); }
     for (i = 0U; i < UCN_NATIVE_CAPACITY; ++i) { if (n->commands[i].valid || n->subs[i].active) { return leave(n, UCN_ERR_STATE); } }
     n->stepping = 1U; leave(n, UCN_OK);
+    if (n->backend != NULL) {
+        if (enter(n) != UCN_OK) { return UCN_ERR_STATE; }
+        n->running = 0U; n->stepping = 0U; n->dead = 1U; return leave(n, UCN_OK);
+    }
     for (i = 0U; i < n->channel_count; ++i) {
         r = ucn_endpoint_remove(n->core, n->endpoints[i]); if (r != UCN_OK) {
             if (enter(n) != UCN_OK) { return UCN_ERR_STATE; }
@@ -497,6 +644,6 @@ ucn_result_t ucn_native_deinit(ucn_native_t *n)
     }
     /* Retain fence/magic: this Root cannot be reset to resurrect old handles. */
     if (enter(n) != UCN_OK) { return UCN_ERR_STATE; }
-    n->running = 0U; n->stepping = 0U;
+    n->running = 0U; n->stepping = 0U; n->dead = 1U;
     return leave(n, UCN_OK);
 }

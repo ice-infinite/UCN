@@ -31,6 +31,7 @@ def main()->None:
     for name in ("ucn-transport","ucn-service","ucn-realtime","ucn-group"):
         cargo(args.cargo,"check","-p",name,"--no-default-features")
     runtime_features=("","transfer","parent-control","transfer-sender","service-control","service-rpc","durable-rpc","operation-control","realtime-control","time-runtime","journal-runtime","source-runtime","duplex-runtime","capability-control","bootstrap-runtime","bootstrap-join","bootstrap-join,capability-control","peer-reauth","peer-reauth,capability-control","route-runtime","route-runtime,peer-reauth","route-data-runtime","route-data-runtime,peer-reauth")
+    runtime_features += ("native-backend", "native-backend,route-data-runtime", "native-routed", "native-routed,bootstrap-join")
     for features in runtime_features:
         tree=cargo(args.cargo,"tree","-p","ucn-runtime","--no-default-features","--features",features,"--edges","normal")
         forbidden={"ucn-group","ucn-cluster"}

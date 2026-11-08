@@ -1167,6 +1167,20 @@ impl<const DISCOVERIES: usize, const REVERSE: usize, const ROUTES: usize, const 
     pub const fn config(&self) -> RouteConfig {
         self.config
     }
+    /// Original nonrenewing expiry of the exact reverse discovery record.
+    /// 精确反向发现首次接纳的期限；重答和上游转发不可另起寿命。
+    /// # Errors
+    /// Invalid discovery domain, absent or expired record rejects.
+    pub fn reverse_deadline(&self, key: DiscoveryKey, now: u64) -> Result<u64> {
+        self.validate_discovery_key(key)?;
+        self.reverse
+            .iter()
+            .filter_map(|slot| slot.value)
+            .find(|record| record.key == key && now < record.expires_at_us)
+            .map(|record| record.expires_at_us)
+            .ok_or(Error::NotFound)
+    }
+
     /// Read-only upstream preflight before authenticated dispatch mutates a route.
     /// 认证分派修改路由前的只读上游预检。
     /// # Errors

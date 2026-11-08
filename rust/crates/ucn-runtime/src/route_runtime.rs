@@ -874,7 +874,9 @@ impl<'g, const P: usize, const Q: usize, const B: usize> RouteRuntime<'g, P, Q, 
                     } else if self.free() < fanout.iter().flatten().count() {
                         return Err(Error::NoSpace);
                     }
-                    match routes.on_rreq(r, peer.link, now)? {
+                    let action = routes.on_rreq(r, peer.link, now)?;
+                    let deadline = deadline.min(routes.reverse_deadline(r.key, now)?);
+                    match action {
                         RequestAction::Duplicate => {}
                         RequestAction::LocalTarget => {
                             let reply = routes.make_rrep(
@@ -916,6 +918,11 @@ impl<'g, const P: usize, const Q: usize, const B: usize> RouteRuntime<'g, P, Q, 
                         .reply_upstream(r.key, now)?
                         .map(|l| self.peer_link(l))
                         .transpose()?;
+                    let deadline = if upstream.is_some() {
+                        deadline.min(routes.reverse_deadline(r.key, now)?)
+                    } else {
+                        deadline
+                    };
                     if let Some(h) = upstream {
                         if self.free() == 0 {
                             return Err(Error::NoSpace);
@@ -1213,16 +1220,6 @@ impl<'g, const P: usize, const Q: usize, const B: usize> RouteRuntime<'g, P, Q, 
                 scratch,
                 &mut self.jobs[slot].packet,
             )?;
-        } else {
-            security.refresh_c0_hop(
-                crypto,
-                peer.peer.session,
-                peer.peer.facts,
-                access,
-                hop,
-                scratch,
-                &mut self.jobs[slot].packet[..job.length],
-            )?;
         }
         if job.length > usize::from(peer.link.frame_mtu()) {
             return Err(Error::NoSpace);
@@ -1320,11 +1317,14 @@ impl<'g, const P: usize, const Q: usize, const B: usize> RouteRuntime<'g, P, Q, 
                     j.bundle = 0;
                 }
             }
-            // A new route-control attempt is a new per-peer C0 transaction;
-            // only the inner discovery key is stable. A receiver deliberately
-            // does not expose plaintext for a committed Origin replay.
-            // 路由重试使用新逐邻居C0事务，内层发现键不变；不绕过Origin重放门禁。
-            j.length = 0;
+            // Definitive NOT_SUBMITTED never reached the link: retry the exact
+            // protected frame without spending Origin/Hop counters. Other
+            // terminal outcomes start a new logical C0 attempt, so a receiver's
+            // committed Origin replay is never used to expose plaintext again.
+            // 明确未提交时复用原帧；真正物理终态后的逻辑重试才分配新C0/Hop。
+            if v.state != TxState::NotSubmitted {
+                j.length = 0;
+            }
             self.jobs[index].value = Some(j);
         }
         if ending || j.retire {

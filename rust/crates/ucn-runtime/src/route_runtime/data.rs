@@ -94,6 +94,35 @@ pub struct DatagramEndpointHandle {
     slot: usize,
     generation: u32,
 }
+impl DatagramEndpointHandle {
+    /// Process-local owner; not an on-wire authorization credential.
+    #[must_use]
+    pub const fn owner_instance(self) -> u32 {
+        self.owner
+    }
+    /// Exact immutable registration generation.
+    #[must_use]
+    pub const fn generation(self) -> u32 {
+        self.generation
+    }
+    /// Bounded local registry index.
+    #[must_use]
+    pub const fn slot(self) -> usize {
+        self.slot
+    }
+}
+/// Current validated Endpoint metadata, never a caller-issued authentication fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DatagramEndpointView {
+    /// Exact local Binding.
+    pub local: Binding,
+    /// Authenticated remote Origin, not the adjacent forwarding Peer.
+    pub remote: Binding,
+    /// Fixed local Service policy.
+    pub policy: DatagramEndpointPolicy,
+    /// Actual current Origin protection.
+    pub protection: OriginSecurity,
+}
 #[derive(Clone, Copy)]
 struct Endpoint {
     session: SessionHandle,
@@ -181,6 +210,7 @@ struct AppMessage {
     service: ServiceId,
     traffic: TrafficClass,
     sequence: u32,
+    received: u64,
     bytes: usize,
     deadline: u64,
     order: u64,
@@ -198,6 +228,12 @@ impl<const B: usize> AppSlot<B> {
 /// A single successfully pulled application message. 一次成功取出的业务消息。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DatagramReceived {
+    /// Exact Origin Endpoint registration used for authentication.
+    pub endpoint: DatagramEndpointHandle,
+    /// Original physical RX capture, not the later pull time.
+    pub receive_time_us: u64,
+    /// Actual Origin protection, independent of the forwarding Hop.
+    pub protection: OriginSecurity,
     /// Authenticated original Binding, not the neighbour; 原始认证Binding，不是邻居。
     pub origin: Binding,
     /// Exact Service; 精确服务。
@@ -395,6 +431,39 @@ impl<
             protocol_opcode: 0,
             direction,
         }
+    }
+    /// Read the fixed local Binding without manufacturing a remote grant.
+    #[must_use]
+    pub const fn local_binding(&self) -> Binding {
+        self.routes.config().local
+    }
+    /// Product cap for one locally accepted datagram; a facade may only shorten deadlines.
+    #[must_use]
+    pub const fn maximum_local_lifetime_us(&self) -> u64 {
+        self.config.lifetime_us
+    }
+    /// Revalidate exact Endpoint parents, Session and the chosen current ACL.
+    /// # Errors
+    /// Stopped, expired, fenced, wrong generation, parent or ACL rejects.
+    pub fn authorize_endpoint<const N: usize, const S: usize, const R: usize>(
+        &self,
+        handle: DatagramEndpointHandle,
+        identity: &IdentityOwner<'_, N>,
+        security: &SecurityOwner<'_, S, R>,
+        direction: AccessDirection,
+        now: u64,
+    ) -> Result<DatagramEndpointView> {
+        if self.stopped || self.control.gate.is_active() || now == 0 || now < self.last_now {
+            return Err(Error::State);
+        }
+        let e = self.endpoint_now(handle, identity, security, now)?;
+        security.authorize(Self::endpoint_access(&e, direction), e.facts)?;
+        Ok(DatagramEndpointView {
+            local: e.facts.local,
+            remote: e.facts.peer,
+            policy: e.policy,
+            protection: e.protection,
+        })
     }
     /// Register an actual authenticated adjacent peer. 登记实际认证邻居。
     /// # Errors
@@ -1004,7 +1073,9 @@ impl<
         )?;
         let mut pending = Some(hop);
         let result = (|| {
-            let deadline = now
+            let deadline = claim
+                .meta
+                .timestamp_us
                 .checked_add(self.config.lifetime_us)
                 .ok_or(Error::Exhausted)?;
             if destination == self.routes.config().local.address {
@@ -1085,6 +1156,7 @@ impl<
                     service,
                     traffic: header.traffic_class,
                     sequence: sequence.get(),
+                    received: claim.meta.timestamp_us,
                     bytes: opened.payload_bytes,
                     deadline,
                     order: self.next_order,
@@ -1508,6 +1580,9 @@ impl<
         self.app[i].bytes.fill(0);
         self.stats.app_pulled = self.stats.app_pulled.saturating_add(1);
         Ok(DatagramReceived {
+            endpoint: a.endpoint,
+            receive_time_us: a.received,
+            protection: e.protection,
             origin: a.origin,
             service: a.service,
             traffic_class: a.traffic,

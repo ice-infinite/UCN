@@ -6,7 +6,7 @@ mod neighbors;
 mod renewal;
 
 type Root<'g> = RoutedNode<'g, 3, 12, 6, 2, 2, 256, 2, 4, 8, 2>;
-fn root<'g>(node: &mut Node<'g>) -> (Root<'g>, Option<DatagramEndpointHandle>) {
+pub(super) fn root<'g>(node: &mut Node<'g>) -> (Root<'g>, Option<DatagramEndpointHandle>) {
     root_hops(node, 8)
 }
 fn root_hops<'g>(node: &mut Node<'g>, hops: u8) -> (Root<'g>, Option<DatagramEndpointHandle>) {
@@ -146,6 +146,7 @@ fn exchange(mtu: usize, backpressure: usize) {
         let mut origin_packets = Vec::new();
         let mut rejected_packets = Vec::new();
         let mut relay_packets = Vec::new();
+        let mut final_capture = None;
         let mut delivered = false;
         for now in 22..1300 {
             a.driver.data_submit = Some(if rejected < backpressure {
@@ -178,8 +179,9 @@ fn exchange(mtu: usize, backpressure: usize) {
                         == HeaderContract::C1
                     {
                         relay_packets.push(packet.clone());
+                        final_capture = Some(now - 1);
                     }
-                    deliver(c, 1, &packet, now);
+                    deliver(c, 1, &packet, now - 1);
                     tick(&mut cr, c, now);
                 }
             }
@@ -200,6 +202,7 @@ fn exchange(mtu: usize, backpressure: usize) {
                     assert_eq!(&out[..message.bytes], b"automatic mesh");
                     assert_eq!(message.origin, fixed_binding(0));
                     assert_eq!(message.origin_sequence, 1);
+                    assert_eq!(Some(message.receive_time_us), final_capture);
                     delivered = true;
                     break;
                 }

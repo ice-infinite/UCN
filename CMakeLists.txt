@@ -482,10 +482,24 @@ if(UCN_FEATURE_PERSISTENCE)
     list(APPEND UCN_EXPORT_TARGETS ucn_persistence)
 endif()
 if(UCN_FEATURE_NATIVE)
+    add_library(ucn_native_session STATIC EXCLUDE_FROM_ALL src/runtime/ucn_native_session.c)
+    ucn_target_defaults(ucn_native_session)
+    target_include_directories(ucn_native_session PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(ucn_native_session PRIVATE ucn_v6s_security_session ucn_adapter)
+    add_library(ucn_native_routed STATIC EXCLUDE_FROM_ALL
+        src/runtime/ucn_native_routed.c src/runtime/ucn_native_route_control.c)
+    ucn_target_defaults(ucn_native_routed)
+    target_include_directories(ucn_native_routed PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(ucn_native_routed PRIVATE ucn_v6s_security_session ucn_adapter ucn_v6s_route)
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(ucn_native_session PRIVATE -fstack-usage)
+        target_compile_options(ucn_native_routed PRIVATE -fstack-usage)
+    endif()
     add_library(ucn_native STATIC src/native/ucn_native.c)
     add_library(UCN::native ALIAS ucn_native)
     set_target_properties(ucn_native PROPERTIES EXPORT_NAME native)
     ucn_target_defaults(ucn_native)
+    target_include_directories(ucn_native PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(ucn_native PUBLIC ucn_simplified)
     # Installed bilingual headers require the same deterministic source encoding
     # as the in-tree tests; do not rely on the consumer's Windows ANSI codepage.
@@ -495,6 +509,7 @@ if(UCN_FEATURE_NATIVE)
     endif()
     list(APPEND UCN_EXPORT_TARGETS ucn_native)
     install(FILES include/ucn/ucn_native.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ucn)
+    install(FILES include/ucn/ucn_native_backend.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ucn)
     install(FILES include/ucn/ucn.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ucn)
 endif()
 
@@ -571,13 +586,20 @@ if(UCN_BUILD_TESTS AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
             -fcallgraph-info=su)
     endif()
     foreach(ucn_scaffold_target IN LISTS UCN_V6S_SCAFFOLD_TARGETS)
-        target_compile_options(${ucn_scaffold_target} PRIVATE -fstack-usage)
+        target_compile_options(${ucn_scaffold_target} PRIVATE -fstack-usage -fcallgraph-info=su)
     endforeach()
+    if(TARGET ucn_native)
+        foreach(ucn_native_graph_target ucn_native ucn_native_session ucn_native_routed)
+            target_compile_options(${ucn_native_graph_target} PRIVATE -fcallgraph-info=su)
+        endforeach()
+    endif()
     target_compile_options(ucn_v6s_security_session PRIVATE -fstack-usage)
+    target_compile_options(ucn_v6s_security_session PRIVATE -fcallgraph-info=su)
     target_compile_options(ucn_v6s_admission PRIVATE -fstack-usage)
     target_compile_options(ucn_v6s_identity_binding PRIVATE -fstack-usage)
     target_compile_options(ucn_v6s_capability PRIVATE -fstack-usage)
     target_compile_options(ucn_v6s_route PRIVATE -fstack-usage)
+    target_compile_options(ucn_v6s_route PRIVATE -fcallgraph-info=su)
     target_compile_options(ucn_v6s_flow PRIVATE -fstack-usage)
     target_compile_options(ucn_v6s_transport PRIVATE -fstack-usage)
     target_compile_options(ucn_v6s_service PRIVATE -fstack-usage)
@@ -700,6 +722,21 @@ if(UCN_BUILD_TESTS)
     endfunction()
     if(UCN_FEATURE_NATIVE)
         ucn_add_test(ucn_native_tests tests/simplified/test_native.c ucn_native)
+        ucn_add_test(ucn_native_backend_tests tests/simplified/test_native_backend.c ucn_native)
+        ucn_add_test(ucn_native_session_tests tests/simplified/test_native_session.c ucn_native)
+        target_link_libraries(ucn_native_session_tests PRIVATE ucn_native_session)
+        ucn_add_test(ucn_native_routed_tests tests/simplified/test_native_routed.c ucn_native)
+        target_link_libraries(ucn_native_routed_tests PRIVATE ucn_native_routed)
+        target_include_directories(ucn_native_routed_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        ucn_add_test(ucn_native_route_control_tests tests/simplified/test_native_route_control.c ucn_native)
+        target_link_libraries(ucn_native_route_control_tests PRIVATE ucn_native_routed)
+        target_include_directories(ucn_native_route_control_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        ucn_add_test(ucn_native_encrypted_session_tests tests/simplified/test_native_session.c ucn_native)
+        target_link_libraries(ucn_native_encrypted_session_tests PRIVATE ucn_native_session)
+        target_include_directories(ucn_native_encrypted_session_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_definitions(ucn_native_encrypted_session_tests PRIVATE UCN_NATIVE_ENCRYPTED_TEST=1)
+        target_include_directories(ucn_native_session_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_include_directories(ucn_native_backend_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
         target_include_directories(ucn_native_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
         ucn_add_test(ucn_native_health_example examples/native/static_health.c ucn_native)
         enable_language(CXX)
@@ -761,6 +798,12 @@ if(UCN_BUILD_TESTS)
     add_test(NAME v6s_call_stack_checker_selftest
         COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/test_v6_call_stack.py)
+    add_test(NAME v6s_native_call_stack_checker_selftest
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/test_native_call_stack.py)
+    add_test(NAME v6s_native_call_stack_policy_gate
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/generate_native_call_stack_policy.py --check)
     # Sanitizer redzones are not the production task-stack ABI. Measure those
     # unchanged limits in the separate non-instrumented configuration instead.
     if(CMAKE_C_COMPILER_ID STREQUAL "GNU" AND NOT CMAKE_C_FLAGS MATCHES "-fsanitize=")
@@ -770,6 +813,12 @@ if(UCN_BUILD_TESTS)
                 --build-dir ${CMAKE_CURRENT_BINARY_DIR}
                 --limit-bytes 3072)
         if(TARGET ucn_native)
+            add_test(NAME ucn_native_session_stack_gate
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
+                    --build-dir ${CMAKE_CURRENT_BINARY_DIR} --limit-bytes 256 --source-prefix /src/runtime/ucn_native_session.c)
+            add_test(NAME ucn_native_routed_stack_gate
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
+                    --build-dir ${CMAKE_CURRENT_BINARY_DIR} --limit-bytes 256 --source-prefix /src/runtime/ucn_native_routed.c)
             add_test(NAME ucn_native_stack_gate
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_v6_stack_usage.py
                     --build-dir ${CMAKE_CURRENT_BINARY_DIR} --limit-bytes 256 --source-prefix /src/native/)
@@ -801,6 +850,18 @@ if(UCN_BUILD_TESTS)
             set(UCN_SIMPLIFIED_CALL_STACK_LIMIT 1536)
         else()
             set(UCN_SIMPLIFIED_CALL_STACK_LIMIT 3072)
+        endif()
+        if(TARGET ucn_native)
+            foreach(UCN_NATIVE_ASSEMBLY h0 h1)
+                add_test(NAME v6s_native_${UCN_NATIVE_ASSEMBLY}_call_stack_gate
+                    COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/check_native_call_stack.py
+                        --build-dir ${CMAKE_CURRENT_BINARY_DIR}
+                        --source-root ${CMAKE_CURRENT_SOURCE_DIR}
+                        --policy ${CMAKE_CURRENT_SOURCE_DIR}/tools/v6/native_call_stack_policy.json
+                        --assembly ${UCN_NATIVE_ASSEMBLY}
+                        --limit-bytes ${UCN_SIMPLIFIED_CALL_STACK_LIMIT})
+            endforeach()
         endif()
         add_test(NAME v6s_kernel_call_stack_gate
             COMMAND ${Python3_EXECUTABLE}

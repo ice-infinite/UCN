@@ -72,8 +72,13 @@ Route Generation，不能伪造一个非零RERR来删除它。中继向上游报
 ## 5. 重试、组装与停止
 
 每个逻辑路由尝试使用新的外层C0事务和H1序号，内层发现键/正文、原绝对期限不变。
+明确`NOT_SUBMITTED`不属于新逻辑尝试：退休该次Adapter token后逐字节复用原保护帧，
+不再分配Origin/C0/Hop计数。实际已发送而回复丢失后的逻辑重试才重新保护。
 计数器由调用方按精确Session共享，不能在Capability→Route交接时从1重新计数。
 提交不确定时不能发起下一尝试；已接受Token不因超时、停止或重开而消失。
+反向记录的期限在首次RREQ接纳时固定；重复RREQ、迟到RREP或分片不能重新从接收时刻续期。
+本地新控制提交的deadline不得晚于该精确反向记录原期限；已接纳的Unknown物理义务可以越期保留，
+但不因此取得继续发送权限。C由Route锁内Action携带原期限，Rust沿用原Reverse句柄期限。
 
 整条正文放不进帧才局部分片，RREQ必须整帧可容纳。只允许77 B RREP和99 B RERR，
 2～4片，均分步长`ceil(total/count)`，单块最多50 B。精确计算：
@@ -117,7 +122,9 @@ InDoubt均需真实迟到完成事实，重开本身不是退休证明。调用�
   不伪称C自动分片/多Peer Root完成。
 - Rust：固定已知多Peer Coordinator；实际耐久Identity/Security、实际受保护Capability输入、
   原子Adapter帧及Driver提交/退休的三节点Host模拟，包含共享物理Link与127 B帧。
-- 待继续的软件：C自动多邻居Root；C/Rust统一多跳业务交付、独立Origin/Hop上下文、完整
+- C新增封存身份/专用Link产品中的可选认证控制Coordinator，可自动形成多跳业务路由；
+  并非动态身份Admission或共享Link定位。详细范围及实现验收见[合同25](25-C动态发现控制与可选后端完整栈合同.md)。
+- 后续产品化仍须验证C/Rust统一多跳业务交付、独立Origin/Hop上下文、完整
   Flow激活，以及与既有业务/Group/Cluster的唯一Ingress编排。不得用本段绿灯覆盖这些工作。
 - 实机、生产密码Provider、Flash掉电、MCU栈/WCET、物理时间戳、独立外审均未放行。
 

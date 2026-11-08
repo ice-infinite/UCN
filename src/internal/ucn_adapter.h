@@ -204,5 +204,8 @@ bool ucn_i_adapter_has_runnable_work(ucn_i_adapter_t *adapter);
 ucn_result_t ucn_i_adapter_faulted(ucn_i_adapter_t *adapter,
                                    bool *faulted_out);
 ucn_result_t ucn_i_adapter_destroy(ucn_i_adapter_t *adapter);
+/* EN: Locked whole-Adapter retirement view, including claimed RX and disabled ingress.
+ * ZH: 锁内核验整个Adapter，包含已认领RX和入口关闭，不以NOT_FOUND冒充排空。 */
+ucn_result_t ucn_i_adapter_quiescent(ucn_i_adapter_t *adapter, bool *out_quiescent);
 
 #endif

@@ -106,6 +106,8 @@ def main() -> int:
         "src/runtime/ucn_tx.c",
     }
     impl09_sources = {"src/runtime/ucn_composition.c"}
+    native_session_sources = {"src/runtime/ucn_native_session.c"}
+    native_routed_sources = {"src/runtime/ucn_native_routed.c", "src/runtime/ucn_native_route_control.c"}
     persistence_sources = {
         "src/persistence/ucn_persistence.c",
         "src/persistence/ucn_persistence_codec.c",
@@ -142,6 +144,10 @@ def main() -> int:
         "src/internal/ucn_group.h",
         "src/internal/ucn_cluster.h",
         "src/internal/ucn_composition.h",
+        "src/internal/ucn_native_session.h",
+        "src/internal/ucn_native_routed.h",
+        "src/internal/ucn_native_route_control.h",
+        "src/internal/ucn_stack.h",
     }
     actual_core_sources = {
         path.relative_to(root).as_posix()
@@ -158,7 +164,7 @@ def main() -> int:
         for directory in ("wire", "adapter", "runtime")
         for path in (root / "src" / directory).glob("*.c")
     }
-    if actual_impl01_sources != impl01_sources | impl09_sources:
+    if actual_impl01_sources != impl01_sources | impl09_sources | native_session_sources | native_routed_sources:
         errors.append("IMPL-01/09 runtime source inventory differs from registry")
     actual_persistence_sources = {
         path.relative_to(root).as_posix()
@@ -210,7 +216,7 @@ def main() -> int:
                            impl01_sources | impl04_sources | impl05_sources |
                            impl06_sources | impl07_sources |
                            impl08_realtime_sources | impl08_group_sources |
-                           impl08_cluster_sources | impl09_sources |
+                           impl08_cluster_sources | impl09_sources | native_session_sources | native_routed_sources |
                            persistence_sources |
                            internal_headers):
         path = root / relative
@@ -231,6 +237,8 @@ def main() -> int:
         "include/ucn/ucn_product.h",
         "include/ucn/ucn_core.h",
         "include/ucn/ucn_persistence.h",
+        "include/ucn/ucn_native.h",
+        "include/ucn/ucn_native_backend.h",
     }
     for relative in sorted(public_headers):
         public_header = root / relative
@@ -243,6 +251,10 @@ def main() -> int:
 
     cmake_path = root / "CMakeLists.txt"
     cmake = cmake_path.read_text(encoding="utf-8")
+    if source_set(cmake_block(cmake, "add_library", "ucn_native_session")) != native_session_sources:
+        errors.append("Native Session Coordinator target source differs from registry")
+    if source_set(cmake_block(cmake, "add_library", "ucn_native_routed")) != native_routed_sources:
+        errors.append("Native Routed Coordinator target source differs from registry")
     common_block = cmake_block(cmake, "add_library", "ucn_common")
     coordinator_block = cmake_block(cmake, "add_library", "ucn_coordinator")
     module_scaffold_block = cmake_block(

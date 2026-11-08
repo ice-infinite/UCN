@@ -983,6 +983,12 @@ static void test_in_doubt_requires_link_generation_fence(void)
     CHECK(ucn_step(node, 4U, &budget, &step) == UCN_OK);
     CHECK(step.lifecycle == UCN_LIFECYCLE_STOPPING);
     CHECK(ucn_send_query(node, send, &view) == UCN_OK);
+    CHECK(view.buffer_released == 0U);
+    CHECK(ucn_deinit(node) == UCN_ERR_STATE);
+    /* Physical fence is reported per exact old token, not inferred from reopen. */
+    CHECK(ucn_driver_tx_complete(node, link.last_token, UCN_ERR_IN_DOUBT, NULL) == UCN_OK);
+    CHECK(ucn_step(node, 4U, &budget, &step) == UCN_OK);
+    CHECK(ucn_send_query(node, send, &view) == UCN_OK);
     CHECK(view.terminal_result == UCN_ERR_IN_DOUBT);
     CHECK(view.buffer_released == 1U);
     CHECK(ucn_send_forget(node, send) == UCN_OK);

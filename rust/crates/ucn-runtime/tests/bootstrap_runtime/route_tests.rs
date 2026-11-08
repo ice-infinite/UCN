@@ -14,6 +14,8 @@ use ucn_routing::{ResolvedRoute, RouteConfig, RouteDomain, RouteOwner, RouteUseF
 mod c1_path;
 #[cfg(feature = "route-data-runtime")]
 mod data_node;
+#[cfg(feature = "native-routed")]
+mod native;
 
 const DOMAINS: [DomainKey; 7] = [
     AUTH,
@@ -1685,14 +1687,24 @@ fn backpressure_then_success_preserves_work_and_unknown_stop_keeps_holder() {
             )
             .unwrap();
         a.driver.submit = DriverSubmit::NotSubmitted;
+        let mut not_submitted = None;
         for t in [22, 122, 222] {
-            drive_node(a, t).unwrap();
+            let packet = drive_node(a, t).unwrap();
+            if let Some(first) = &not_submitted {
+                assert_eq!(
+                    &packet, first,
+                    "NOT_SUBMITTED must retain both Origin and Hop bytes"
+                );
+            } else {
+                not_submitted = Some(packet);
+            }
             retired(a, t + 1);
             assert_eq!(a.root.counts().1, 1);
             assert_eq!(a.root.counts().2, 0);
         }
         a.driver.submit = DriverSubmit::Complete(TerminalOutcome::Success);
         let packet = drive_node(a, 322).unwrap();
+        assert_eq!(Some(&packet), not_submitted.as_ref());
         deliver_route(0, b, &packet, 323).unwrap();
         retired(a, 324);
         a.driver.submit = DriverSubmit::Unknown;
@@ -1784,6 +1796,84 @@ fn reverse_timeout_cannot_erase_outstanding_reply_driver_obligation() {
         }
         assert_eq!(b.routes.counts().1, 0);
     });
+}
+
+#[test]
+fn delayed_reply_cannot_extend_the_original_reverse_send_deadline() {
+    with_mesh(|a, b, c| {
+        register(a);
+        register(b);
+        register(c);
+        a.root
+            .discover(
+                &mut a.routes,
+                &a.identity,
+                &a.security,
+                &a.caps,
+                &a.adapter,
+                fixed_binding(2).address,
+                1,
+                100,
+                21,
+            )
+            .unwrap();
+        let ab = drive_node(a, 22).unwrap();
+        deliver_route(0, b, &ab, 23).unwrap(); // B's original reverse expires at 1023.
+        retired(a, 24);
+        let bc = drive_node(b, 25).unwrap();
+        deliver_route(1, c, &bc, 26).unwrap();
+        retired(b, 27);
+        let cb = drive_node(c, 28).unwrap();
+        retired(c, 30);
+        deliver_route(2, b, &cb, 1021).unwrap();
+        b.driver.submit = DriverSubmit::NotSubmitted;
+        assert!(drive_node(b, 1022).is_some());
+        retired(b, 1023);
+        assert!(
+            drive_node(b, 1122).is_none(),
+            "late RREP must not renew Reverse expiry"
+        );
+        assert_eq!(b.root.counts().2, 0);
+    });
+}
+
+#[test]
+fn duplicate_rreq_cannot_renew_target_or_relay_control_jobs() {
+    for destination in [1, 2] {
+        with_mesh(|a, b, c| {
+            register(a);
+            register(b);
+            register(c);
+            a.root
+                .discover(
+                    &mut a.routes,
+                    &a.identity,
+                    &a.security,
+                    &a.caps,
+                    &a.adapter,
+                    fixed_binding(destination).address,
+                    1,
+                    100,
+                    21,
+                )
+                .unwrap();
+            let first = drive_node(a, 22).unwrap();
+            deliver_route(0, b, &first, 23).unwrap();
+            retired(a, 24);
+            b.driver.submit = DriverSubmit::NotSubmitted;
+            assert!(drive_node(b, 25).is_some());
+            retired(b, 26);
+            let retry = drive_node(a, 1020).unwrap();
+            deliver_route(0, b, &retry, 1021).unwrap();
+            assert!(drive_node(b, 1022).is_some());
+            retired(b, 1023);
+            assert!(
+                drive_node(b, 1122).is_none(),
+                "duplicate RREQ must not renew original Reverse expiry"
+            );
+            assert_eq!(b.root.counts().2, 0);
+        });
+    }
 }
 
 #[test]

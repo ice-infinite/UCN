@@ -687,6 +687,13 @@ ucn_result_t ucn_i_security_tx_commit(
 ucn_result_t ucn_i_security_tx_abort(
     ucn_i_security_owner_t *owner,
     ucn_i_security_tx_handle_t handle);
+/* Direct synchronous layer SPI avoids a forwarding frame in bounded actors.
+ * origin_only selects the existing separate Origin layer, never O0 fallback.
+ * 直接同步分层入口，省去转发调用帧；仅选原Origin层，不是降级开关。 */
+ucn_result_t ucn_i_security_c1_seal_layer(bool origin_only,
+    ucn_i_security_owner_t *, ucn_i_security_tx_handle_t,
+    const ucn_i_security_c1_origin_material_t *, const uint8_t *,
+    ucn_i_security_packet_workspace_t *, uint8_t *, size_t, size_t *);
 ucn_result_t ucn_i_security_c1_protect(
     ucn_i_security_owner_t *owner,
     ucn_i_security_tx_handle_t tx,
@@ -696,6 +703,25 @@ ucn_result_t ucn_i_security_c1_protect(
     uint8_t *output,
     size_t output_capacity,
     size_t *output_bytes);
+/* Borrowed synchronous C1 call descriptor. Caller keeps it immutable until
+ * return; it may share storage with a mutually exclusive send material, not
+ * with packet/workspace/outputs. No descriptor pointer escapes this call.
+ * 同步借用描述符，调用返回前保持不变，可与互斥发送阶段共用静态union。 */
+typedef struct ucn_i_security_c1_open_call {
+    ucn_i_security_handle_t session;
+    const ucn_i_security_current_facts_t *facts;
+    const ucn_i_security_access_request_t *access;
+    const uint8_t *packet;
+    size_t packet_bytes;
+    uint8_t *plaintext_output;
+    size_t plaintext_capacity;
+    size_t *plaintext_bytes;
+    ucn_i_security_replay_handle_t *replay_out;
+    uint8_t origin_only;
+} ucn_i_security_c1_open_call_t;
+ucn_result_t ucn_i_security_c1_open_borrowed(
+    ucn_i_security_owner_t *, const ucn_i_security_c1_open_call_t *,
+    ucn_i_security_packet_workspace_t *);
 ucn_result_t ucn_i_security_c1_open(
     ucn_i_security_owner_t *owner,
     ucn_i_security_handle_t session,
@@ -734,6 +760,21 @@ ucn_result_t ucn_i_security_c1_origin_open(
     size_t plaintext_capacity,
     size_t *plaintext_bytes,
     ucn_i_security_replay_handle_t *replay_out);
+/* EN: Borrowed descriptor for the outlined RX phase; it must not alias any
+ * input, output, Owner or workspace. The original convenience API is retained.
+ * ZH: 独立RX阶段借用描述符，禁止与输入/输出/Owner/工作区别名；保留原便捷API。 */
+typedef struct ucn_i_security_c0_open_call {
+    const ucn_i_security_control_access_request_t *access;
+    const ucn_i_security_current_facts_t *facts;
+    const uint8_t *packet;
+    size_t packet_bytes;
+    uint8_t *plaintext_output;
+    size_t plaintext_capacity;
+    size_t *plaintext_bytes;
+    ucn_i_security_authenticated_control_t *fact_out;
+} ucn_i_security_c0_open_call_t;
+ucn_result_t ucn_i_security_c0_open_borrowed(ucn_i_security_owner_t *,
+    const ucn_i_security_c0_open_call_t *, ucn_i_security_packet_workspace_t *);
 ucn_result_t ucn_i_security_c0_open(
     ucn_i_security_owner_t *owner,
     const ucn_i_security_control_access_request_t *access,
@@ -745,6 +786,11 @@ ucn_result_t ucn_i_security_c0_open(
     size_t plaintext_capacity,
     size_t *plaintext_bytes,
     ucn_i_security_authenticated_control_t *fact_out);
+/* Side-effect-free exact C0 ACL preflight, including current ACTIVE facts.
+ * Neither authenticates a packet nor consumes any sequence/replay state. */
+ucn_result_t ucn_i_security_control_authorize(ucn_i_security_owner_t *owner,
+    const ucn_i_security_control_access_request_t *request,
+    const ucn_i_security_current_facts_t *facts);
 ucn_result_t ucn_i_security_c0_hop_open(
     ucn_i_security_owner_t *owner,
     ucn_i_security_handle_t inbound_session,
@@ -752,6 +798,25 @@ ucn_result_t ucn_i_security_c0_hop_open(
     const uint8_t *packet,
     size_t packet_bytes,
     ucn_i_security_c0_path_workspace_t *workspace);
+/* C1 independent Hop layer. wrap consumes an already protected Origin packet;
+ * open verifies only the physical neighbor and reserves its Hop replay. The
+ * trusted Coordinator must commit/abort replay and independently open Origin
+ * at the destination. Relay TTL adjustment precedes wrap, after verified Hop.
+ * No C0 semantics or endpoint identity are inferred from a Hop Session. */
+ucn_result_t ucn_i_security_c1_hop_wrap(ucn_i_security_owner_t *,
+    ucn_i_security_handle_t, const ucn_i_security_current_facts_t *,
+    const uint8_t *, size_t, ucn_i_security_packet_workspace_t *,
+    uint8_t *, size_t, size_t *);
+ucn_result_t ucn_i_security_c1_hop_open(ucn_i_security_owner_t *,
+    ucn_i_security_handle_t, const ucn_i_security_current_facts_t *,
+    const uint8_t *, size_t, ucn_i_security_packet_workspace_t *,
+    ucn_i_security_hop_replay_handle_t *);
+/* Exact immutable Session context check, not a generic ACL fingerprint match.
+ * At least one fingerprint is required; NULL selects no check for that layer.
+ * No counters, callbacks, or outputs are changed. */
+ucn_result_t ucn_i_security_c1_context_check(ucn_i_security_owner_t *,
+    ucn_i_security_handle_t, const ucn_i_security_current_facts_t *,
+    const uint8_t *origin_fingerprint, const uint8_t *hop_fingerprint);
 ucn_result_t ucn_i_security_c0_hop_seal(
     ucn_i_security_owner_t *owner,
     ucn_i_security_handle_t outbound_session,
