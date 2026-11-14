@@ -207,5 +207,8 @@ ucn_result_t ucn_i_adapter_destroy(ucn_i_adapter_t *adapter);
 /* EN: Locked whole-Adapter retirement view, including claimed RX and disabled ingress.
  * ZH: 锁内核验整个Adapter，包含已认领RX和入口关闭，不以NOT_FOUND冒充排空。 */
 ucn_result_t ucn_i_adapter_quiescent(ucn_i_adapter_t *adapter, bool *out_quiescent);
+/* EN: Exact holder view for an RX ownership handoff; does not disable ingress.
+ * ZH: RX所有权交接的精确Holder视图，不把入口关闭冒充排空。 */
+ucn_result_t ucn_i_adapter_obligations_drained(ucn_i_adapter_t *adapter, bool *out_drained);
 
 #endif

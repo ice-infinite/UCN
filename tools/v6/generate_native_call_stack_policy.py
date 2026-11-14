@@ -15,6 +15,22 @@ ROOT = Path(__file__).resolve().parents[2]
 POLICY = ROOT/'tools/v6/native_call_stack_policy.json'
 SOURCES = {'h0': 'src/runtime/ucn_native_session.c', 'h1': 'src/runtime/ucn_native_routed.c'}
 FIELDS = {'binding', 'local_view', 'preflight', 'start', 'stop', 'step', 'send', 'poll', 'validate'}
+DYNAMIC_SOURCES = ('ucn_native_join.c', 'ucn_native_join_durability.c',
+    'ucn_native_reauth.c', 'ucn_native_reauth_durability.c',
+    'ucn_native_capability.c', 'ucn_native_dynamic.c')
+DYNAMIC_SUPPORT_SOURCES = ('src/persistence/ucn_persistence.c',)
+REAUTH_WRAPPER = {'source': 'src/security/ucn_security_session.c',
+    'expression': 'call->verify_identity', 'replaces_boundary': 'crypto',
+    'targets': ['src/runtime/ucn_native_reauth_durability.c:verify_with_budget']}
+REAUTH_BINDING = {'source': 'src/runtime/ucn_native_reauth_durability.c',
+    'object': 'call', 'member': '->', 'field': 'verify_identity', 'target': 'verify_with_budget'}
+
+
+def exported(source):
+    code = (ROOT/source).read_text(encoding='utf-8')
+    return {source+':'+n for n in re.findall(
+        r'^(?:ucn_result_t|bool|void)\s+(ucn_\w+)\(', code, re.M)}
+
 CALLBACK_APIS = ('ucn_publisher_create', 'ucn_subscription_create', 'ucn_native_check_schema',
     'ucn_publish', 'ucn_native_send', 'ucn_publisher_close', 'ucn_subscription_close',
     'ucn_subscription_quiescent', 'ucn_native_source_fence', 'ucn_native_stop', 'ucn_native_status')
@@ -27,7 +43,7 @@ def expected(policy):
     for assembly, source in SOURCES.items():
         selected = policy['assemblies'][assembly]
         entries = set(selected['entries'])
-        wanted = public | {source+':ucn_i_native_'+('session' if assembly == 'h0' else 'routed')+'_init'}
+        wanted = public | exported(source)
         if entries != wanted:
             raise ValueError('Native entry inventory changed: '+assembly)
         bindings = {}
@@ -51,6 +67,18 @@ def expected(policy):
                 raise ValueError('factory no longer implements declared field: '+field)
         selected['bindings'] = [{'source': source, 'object': 'b->port', 'field': field, 'target': target}
                                 for field, target in sorted(bindings.items())]
+    dynamic = policy['assemblies']['dynamic']
+    wanted = set().union(*(exported(s) for s in
+        tuple('src/runtime/'+s for s in DYNAMIC_SOURCES)+DYNAMIC_SUPPORT_SOURCES))
+    if dynamic.get('inherits') != 'h1' or set(dynamic['entries']) != wanted:
+        raise ValueError('Native entry inventory changed: dynamic')
+    if dynamic.get('bindings') != [REAUTH_BINDING] or dynamic.get('indirect') != [REAUTH_WRAPPER]:
+        raise ValueError('dynamic must inherit the reviewed h1 Backend without replacement')
+    # The specialized Security verifier is bound by this Root to a protocol
+    # budget wrapper, not directly to an opaque product crypto callback.
+    code = (ROOT/REAUTH_BINDING['source']).read_text(encoding='utf-8')
+    if re.findall(r'call->verify_identity\s*=\s*(\w+)\s*;', code) != ['verify_with_budget']:
+        raise ValueError('Reauth verifier wrapper factory binding changed')
     # These are the documented callback-safe Native APIs. They are protocol
     # continuations, not hidden in an external application's stack allowance.
     for mapping in policy['shared']['indirect']:

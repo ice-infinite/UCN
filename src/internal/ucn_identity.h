@@ -278,6 +278,11 @@ ucn_result_t ucn_i_identity_activate_binding(
     const ucn_i_identity_authority_view_t *authority,
     uint64_t now_us,
     ucn_i_identity_binding_view_t *view_out);
+/* Consume an exact successful reload only to fence a stopped candidate.
+ * No live View is published and no preceding permission is restored. */
+ucn_result_t ucn_i_identity_discard_durable_binding(
+    ucn_i_identity_owner_t *owner, ucn_i_identity_handle_t handle,
+    const ucn_i_identity_durability_proof_t *proof);
 ucn_result_t ucn_i_identity_abort_unsubmitted(
     ucn_i_identity_owner_t *owner,
     ucn_i_identity_handle_t handle);

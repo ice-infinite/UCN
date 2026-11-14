@@ -3,6 +3,10 @@
 > 用户授权：2026-10-13，允许统一 C/Rust 共用合同后继续 Rust，实机另行通知。
 > 当前为实施/自审候选，不冒充已获外部审计冻结。
 
+本轮C动态Native接线见[合同26](26-C动态接入原生后端与受控热续接合同.md)：真实首次JOIN、
+耐久Session、认证Capability及同Root热更新。显式区分原地Profile重协商、Rust固定借用
+Native Backend和默认Nano动态Unsupported边界，不把合同统一写成所有高级工厂完成度相同。
+
 ## 1. 权威与不变边界
 
 `protocol/contracts/v6-shared-v1.json` 登记机器可核对的标量、长度与执行位；本目录冻结其

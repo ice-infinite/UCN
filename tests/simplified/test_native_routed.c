@@ -30,6 +30,9 @@ static ucn_i_route_owner_t routes[3];
 static test_lock_t alocks[3], dlocks[3], rlocks[3], nlocks[3];
 static ucn_native_storage_t nstorage[3];
 static ucn_native_t *native[3];
+#ifdef UCN_NATIVE_HANDOFF_TEST
+static ucn_native_lifecycle_storage_t hot_storage[3];
+#endif
 static ucn_i_native_endpoint_t eps[3][2];
 static ucn_i_native_neighbor_t neighbors[3][2];
 static ucn_i_route_domain_t flow;
@@ -55,6 +58,10 @@ static ucn_driver_submit_result_t routed_submit(void *ctx, ucn_link_handle_t lin
             0x1201U, UCN_NATIVE_ORIGIN_AUTH, nodes[0].now, principal) == UCN_ERR_STATE);
         assert(principal[0] == 0xA5U);
         assert(nodes[0].port.stop(&nodes[0]) == UCN_ERR_STATE);
+#ifdef UCN_NATIVE_HANDOFF_TEST
+        assert(ucn_i_native_routed_fence_session(&nodes[0], native[0], &ab.owner,
+            ab.handle, nodes[0].now) == UCN_ERR_STATE);
+#endif
     }
     if (i == 0U && captured_count[i] == 0U) { memcpy(retry_first, p, n); }
     memcpy(capture[i], p, n); capture_bytes[i] = n; capture_link[i] = link.slot;
@@ -272,6 +279,9 @@ static int routed_roundtrip(void)
         if (i == 2U) { channel.target_count = 0U; }
         nc.instance = 301U + i; nc.lock.context = &nlocks[i];
         assert(ucn_native_init_backend(&nstorage[i], sizeof(nstorage[i]), &nodes[i].port, &nc, &native[i]) == UCN_OK);
+#ifdef UCN_NATIVE_HANDOFF_TEST
+        assert(ucn_native_backend_enable_lifecycle(native[i], &hot_storage[i], sizeof(hot_storage[i])) == UCN_OK);
+#endif
         if (i) { assert(ucn_subscription_create(native[i], 1U, received_sample, (void *)(uintptr_t)i, &sub) == UCN_OK); }
         assert(ucn_native_start(native[i], 1500U) == UCN_OK); channel.target_count = 0U;
     }
@@ -376,7 +386,18 @@ static int routed_roundtrip(void)
     assert(ucn_native_step(native[1], 1614U, 2U) == UCN_OK);
     inject(2, 0, 1, 2U, 1614U);
     assert(ucn_native_step(native[2], 1615U, 2U) == UCN_OK);
+#ifdef UCN_NATIVE_HANDOFF_TEST
+    {
+        bool drained = true;
+        assert(ucn_i_native_routed_fence_session(&nodes[2], native[1], &ca.owner, ca.handle, 1615U) == UCN_ERR_STATE);
+        assert(ucn_i_native_routed_fence_session(&nodes[2], native[2], &ca.owner, ca.handle, 1615U) == UCN_OK);
+        assert(ucn_i_native_routed_session_drained(&nodes[2], native[2], &ca.owner, ca.handle, &drained) == UCN_OK && drained);
+        /* Barrier removes the queued old sample without closing Subscription. */
+        assert(ucn_i_native_routed_fence_session(&nodes[2], native[2], &ca.owner, ca.handle, 1615U) == UCN_OK);
+    }
+#else
     assert(ucn_i_security_fence(&ca.owner, ca.handle) == UCN_OK);
+#endif
     assert(ucn_native_dispatch(native[2], 1616U, 2U, &delivered) == UCN_OK && delivered == 0U);
     /* Absolute Static assembly expiry is never extended by poll/dispatch. */
     {
@@ -392,6 +413,14 @@ static int routed_roundtrip(void)
     assert(nodes[0].port.send(&nodes[0], &channel, channel.targets[0], payload, 1620U, 1621U) == UCN_OK);
     assert(nodes[0].port.step(&nodes[0], 1620U, 2U) == UCN_OK);
     assert(nodes[0].tx_live && nodes[0].frame_bytes == 47U);
+#ifdef UCN_NATIVE_HANDOFF_TEST
+    {
+        bool drained = true;
+        assert(ucn_i_native_routed_fence_session(&nodes[0], native[0], &ab.owner, ab.handle, 1620U) == UCN_OK);
+        assert(ucn_i_native_routed_session_drained(&nodes[0], native[0], &ab.owner, ab.handle, &drained) == UCN_OK && !drained);
+        assert(ucn_i_native_routed_session_drained(&nodes[0], native[0], &ab.owner, ab.handle, (bool *)native[0]) == UCN_ERR_ARGUMENT);
+    }
+#endif
     memcpy(retry_first, nodes[0].frame, 47U);
     assert(ucn_native_stop(native[0]) == UCN_OK);
     assert(ucn_native_step(native[0], 3001U, UCN_NATIVE_CAPACITY) == UCN_OK);

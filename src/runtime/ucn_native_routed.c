@@ -2,6 +2,9 @@
 #include "internal/ucn_stack.h"
 #include "internal/ucn_native_route_control.h"
 #include "internal/ucn_checked.h"
+#if UCN_FEATURE_NATIVE_DYNAMIC_ENABLED
+#include "internal/ucn_native_dynamic.h"
+#endif
 #include <string.h>
 
 static uint32_t address_read(const uint8_t *p, uint8_t width)
@@ -31,6 +34,9 @@ static UCN_I_STACK_PHASE bool gate_idle(const ucn_i_native_routed_t *b)
 static bool output_safe(const ucn_i_native_routed_t *b, const void *out, size_t n)
 {
     uint16_t i;
+#if UCN_FEATURE_NATIVE_DYNAMIC_ENABLED
+    if (b->dynamic && !ucn_i_native_dynamic_output_safe(b->dynamic,out,n)) return false;
+#endif
     if (!out || !n || ucn_i_ranges_overlap(b, sizeof(*b), out, n) ||
         ucn_i_ranges_overlap(b->adapter, sizeof(*b->adapter), out, n) ||
         ucn_i_ranges_overlap(b->routes, sizeof(*b->routes), out, n) ||
@@ -50,9 +56,12 @@ static UCN_I_STACK_PHASE ucn_result_t endpoint_current(ucn_i_native_routed_t *b,
 {
     const ucn_i_native_endpoint_t *e = &b->endpoints[slot];
     ucn_result_t r;
-    if (!live(b, now)) { return UCN_ERR_STATE; }
+    if (!live(b, now) || b->endpoint_fenced[slot]) { return UCN_ERR_STATE; }
+#if UCN_FEATURE_NATIVE_DYNAMIC_ENABLED
+    if (b->dynamic) { r=ucn_i_native_dynamic_endpoint(b->dynamic,slot,now); if(r!=UCN_OK) return r; }
+#endif
     b->current_facts = e->facts; b->current_facts.now_us = now;
-    r = ucn_i_security_c1_context_check(e->security, e->session, &b->current_facts, e->fingerprint, NULL);
+    r = ucn_i_security_c1_context_check(e->security, &e->session, &b->current_facts, e->fingerprint, NULL);
     if (r != UCN_OK) { return r; }
     memset(&b->access, 0, sizeof(b->access));
     b->access.session = e->session; b->access.service_id = e->service;
@@ -69,12 +78,15 @@ static ucn_result_t neighbor_current(ucn_i_native_routed_t *b, uint16_t slot,
     const ucn_i_native_neighbor_t *n = &b->neighbors[slot];
     uint32_t generation; uint16_t mtu; bool ready;
     ucn_result_t r;
-    if (!live(b, b->now)) { return UCN_ERR_STATE; }
+    if (!live(b, b->now) || b->neighbor_fenced[slot]) { return UCN_ERR_STATE; }
+#if UCN_FEATURE_NATIVE_DYNAMIC_ENABLED
+    if (b->dynamic) { r=ucn_i_native_dynamic_neighbor(b->dynamic,slot,bytes,b->now); if(r!=UCN_OK) return r; }
+#endif
     r = ucn_i_adapter_link_snapshot(b->adapter, n->link_slot, &generation, &mtu, &ready);
     if (r != UCN_OK || !ready || generation != n->facts.link_generation) { return UCN_ERR_STATE; }
     if (bytes > mtu) { return UCN_ERR_NO_SPACE; }
     b->current_facts = n->facts; b->current_facts.now_us = b->now;
-    r = ucn_i_security_c1_context_check(n->security, n->session, &b->current_facts, NULL, n->fingerprint);
+    r = ucn_i_security_c1_context_check(n->security, &n->session, &b->current_facts, NULL, n->fingerprint);
     if (r != UCN_OK) { return r; }
     memset(&b->access, 0, sizeof(b->access));
     b->access.session = n->session; b->access.service_id = service; b->access.direction = direction;
@@ -184,8 +196,9 @@ static ucn_result_t validate(void *ctx, const ucn_native_scope_t *scope,
         }
         return UCN_ERR_ACCESS;
     }
-    if (scope->instance != b->instance || scope->generation != 1U || !scope->slot || scope->slot > b->endpoint_count) { return UCN_ERR_ACCESS; }
+    if (scope->instance != b->instance || !scope->slot || scope->slot > b->endpoint_count) { return UCN_ERR_ACCESS; }
     i = (uint16_t)(scope->slot - 1U);
+    if (scope->generation != b->endpoint_generation[i]) { return UCN_ERR_ACCESS; }
     if (service != b->endpoints[i].service || memcmp(source, &b->endpoints[i].source, sizeof(*source)) != 0) { return UCN_ERR_ACCESS; }
     r = endpoint_current(b, i, UCN_I_SECURITY_ACCESS_INBOUND, now);
     if (r != UCN_OK) { return r; }
@@ -268,6 +281,9 @@ static UCN_I_STACK_PHASE ucn_result_t drain(ucn_i_native_routed_t *b, uint16_t b
         b->rx_live = 0U; b->rx_ready = 0U;
     }
     if (!b->tx_live && ucn_i_native_route_control_quiet(b) &&
+#if UCN_FEATURE_NATIVE_DYNAMIC_ENABLED
+        (!b->dynamic || ucn_i_native_dynamic_quiet(b->dynamic)) &&
+#endif
         ucn_i_adapter_quiescent(b->adapter, &quiet) == UCN_OK && quiet) { b->lifecycle = UCN_LIFECYCLE_QUIESCENT; }
     return UCN_OK;
 }
@@ -277,6 +293,9 @@ static ucn_result_t step(void *ctx, uint64_t now, uint16_t budget)
     if (!gate_idle(b)) { return UCN_ERR_STATE; }
     if (!budget || now < b->now) { return UCN_ERR_STATE; }
     b->now = now;
+#if UCN_FEATURE_NATIVE_DYNAMIC_ENABLED
+    if(b->dynamic) { r=ucn_i_native_dynamic_step(b->dynamic); if(r!=UCN_OK) return r; }
+#endif
     if (b->tx_pending) {
         b->tx_pending = 0U;
         if (tx_current(b) && endpoint_current(b, b->tx_endpoint, UCN_I_SECURITY_ACCESS_OUTBOUND, now) == UCN_OK) {
@@ -335,6 +354,9 @@ static ucn_result_t send(void *ctx, const ucn_native_channel_t *c,
     if (i == b->endpoint_count) { return UCN_ERR_ACCESS; }
     b->now = now; e = &b->endpoints[i];
     r = endpoint_current(b, i, UCN_I_SECURITY_ACCESS_OUTBOUND, now); if (r != UCN_OK) { return r; }
+#if UCN_FEATURE_NATIVE_DYNAMIC_ENABLED
+    if(b->dynamic) { r=ucn_i_native_dynamic_message(b->dynamic,i,c->payload_bytes,now); if(r!=UCN_OK) return r; }
+#endif
     if (b->session_view.origin_level + 1U < c->security_minimum) { return UCN_ERR_SECURITY; }
     memset(&b->domain, 0, sizeof(b->domain)); binding_copy(&b->domain.origin, &e->facts.local);
     binding_copy(&b->domain.destination, &e->facts.peer); b->domain.realm = e->security->realm_id;
@@ -368,6 +390,9 @@ static UCN_I_STACK_PHASE ucn_result_t receive_endpoint(ucn_i_native_routed_t *b,
     if (i == b->endpoint_count) { return UCN_ERR_ACCESS; }
     e = &b->endpoints[i];
     r = endpoint_current(b, i, UCN_I_SECURITY_ACCESS_INBOUND, b->now); if (r != UCN_OK) { return r; }
+#if UCN_FEATURE_NATIVE_DYNAMIC_ENABLED
+    if(b->dynamic) { r=ucn_i_native_dynamic_message(b->dynamic,i,b->rx.frame_bytes-9U-2U*b->width-32U,b->now); if(r!=UCN_OK) return r; }
+#endif
     memset(&b->open_work.open, 0, sizeof(b->open_work.open));
     b->open_work.open.session = e->session; b->open_work.open.facts = &b->current_facts;
     b->open_work.open.access = &b->access; b->open_work.open.packet = b->rx.frame;
@@ -380,7 +405,7 @@ static UCN_I_STACK_PHASE ucn_result_t receive_endpoint(ucn_i_native_routed_t *b,
     r = ucn_i_security_replay_commit(e->security, &b->origin_replay, &b->current_facts);
     if (r != UCN_OK) { (void)ucn_i_security_replay_abort(e->security, &b->origin_replay); return r; }
     memset(&b->received, 0, sizeof(b->received)); b->received.source = e->source;
-    b->received.scope.instance = b->instance; b->received.scope.generation = 1U; b->received.scope.slot = (uint16_t)(i + 1U);
+    b->received.scope.instance = b->instance; b->received.scope.generation = b->endpoint_generation[i]; b->received.scope.slot = (uint16_t)(i + 1U);
     b->received.receive_time_us = b->rx.meta.timestamp_us;
     b->received.origin_sequence = address_read(b->rx.frame + 5U + 2U * b->width, 4U);
     b->received.service_id = service; b->received.payload_bytes = (uint16_t)b->plaintext_bytes;
@@ -450,11 +475,19 @@ static ucn_result_t poll(void *ctx, ucn_native_backend_message_t *out, uint8_t *
     if (!b->rx_live) {
         r = ucn_i_adapter_rx_claim(b->adapter, &b->rx); if (r != UCN_OK) { return r; }
         b->rx_live = 1U; b->rx_ready = 0U; b->rx_endpoint_pending = 0U;
-        if (b->control && b->rx.frame_bytes && b->rx.frame[0] == 0x60U) {
+        if (b->rx.frame_bytes && b->rx.frame[0] == 0x60U) {
+#if UCN_FEATURE_NATIVE_DYNAMIC_ENABLED
+            r=b->dynamic?ucn_i_native_dynamic_receive(b->dynamic):UCN_ERR_NOT_FOUND;
+            if(r==UCN_ERR_NOT_FOUND && b->control)
+#else
+            if(b->control)
+#endif
+            {
             if (ucn_i_native_route_control_receive_context(b) == UCN_OK) {
                 if (ucn_i_native_route_control_receive(b) == UCN_OK) {
                     (void)ucn_i_native_route_control_receive_finish(b);
                 }
+            }
             }
         } else { (void)receive(b); }
         if (b->rx_endpoint_pending) {
@@ -552,7 +585,7 @@ static bool assembly_valid(ucn_i_native_routed_t *b)
             b->session_view.phase != UCN_I_SECURITY_SESSION_ACTIVE || b->session_view.hop_profile != UCN_I_HOP_PROFILE_H1 ||
             memcmp(&b->session_view.peer, &n->facts.peer, sizeof(n->facts.peer)) != 0) { return false; }
         b->current_facts = n->facts; b->current_facts.now_us = b->now;
-        if (ucn_i_security_c1_context_check(n->security, n->session, &b->current_facts, NULL, n->fingerprint) != UCN_OK) { return false; }
+        if (ucn_i_security_c1_context_check(n->security, &n->session, &b->current_facts, NULL, n->fingerprint) != UCN_OK) { return false; }
         for (j = 0U; j < i; ++j) {
             if (n->link_slot == b->neighbors[j].link_slot || n->facts.peer.address == b->neighbors[j].facts.peer.address) { return false; }
         }
@@ -587,6 +620,7 @@ ucn_result_t ucn_i_native_routed_init(ucn_i_native_routed_t *b, const ucn_i_nati
     b->width = c->routes->address_width; b->instance = c->adapter->runtime_instance;
     b->hop_limit = c->hop_limit; b->endpoint_count = c->endpoint_count; b->neighbor_count = c->neighbor_count; b->forward_count = c->forward_count;
     if (c->endpoint_count) { memcpy(b->endpoints, c->endpoints, c->endpoint_count * sizeof(*c->endpoints)); }
+    for (i = 0U; i < c->endpoint_count; ++i) { b->endpoint_generation[i] = 1U; }
     memcpy(b->neighbors, c->neighbors, c->neighbor_count * sizeof(*c->neighbors));
     if (c->forward_count) { memcpy(b->forward_domains, c->forward_domains, c->forward_count * sizeof(*c->forward_domains)); }
     if (!gate_idle(b) || !assembly_valid(b)) { memset(b, 0, sizeof(*b)); return UCN_ERR_STATE; }
@@ -596,5 +630,103 @@ ucn_result_t ucn_i_native_routed_init(ucn_i_native_routed_t *b, const ucn_i_nati
     b->port.context = b; b->port.context_bytes = sizeof(*b); b->port.preflight = preflight;
     b->port.local_view = local_view; b->port.binding = binding; b->port.start = start; b->port.stop = stop;
     b->port.step = step; b->port.send = send; b->port.poll = poll; b->port.validate = validate;
+    return UCN_OK;
+}
+
+static bool session_is(ucn_i_security_owner_t *a, ucn_i_security_handle_t ah,
+    ucn_i_security_owner_t *b, ucn_i_security_handle_t bh)
+{ return a == b && memcmp(&ah, &bh, sizeof(ah)) == 0; }
+
+ucn_result_t ucn_i_native_routed_fence_session(ucn_i_native_routed_t *b,
+    ucn_native_t *native, ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t session, uint64_t now)
+{
+    uint16_t i, invalidated;
+    bool found = false, quiet;
+    ucn_result_t r;
+    ucn_native_scope_t scope = {0};
+    if (!b || b->port.context != b || !native || !owner) { return UCN_ERR_ARGUMENT; }
+    if (!gate_idle(b) || b->lifecycle != UCN_LIFECYCLE_RUNNING || now < b->now) { return UCN_ERR_STATE; }
+    r = ucn_native_backend_check_binding(native, &b->port);
+    if (r != UCN_OK) { return r; }
+    /* Preflight Native's actor gate before irreversible Security revocation.
+     * 先预检Facade调用域，再不可逆撤权；回调/step内零写拒绝。 */
+    for (i = 0U; i < b->endpoint_count; ++i) {
+        scope.instance = b->instance; scope.slot = (uint16_t)(i + 1U);
+        scope.generation = b->endpoint_generation[i];
+        r = ucn_native_backend_peer_quiescent(native, b->endpoints[i].source, scope, &quiet);
+        if (r != UCN_OK && r != UCN_ERR_NOT_FOUND) { return r; }
+        if (session_is(b->endpoints[i].security, b->endpoints[i].session, owner, session)) { found = true; }
+    }
+    for (i = 0U; i < b->neighbor_count; ++i) {
+        if (session_is(b->neighbors[i].security, b->neighbors[i].session, owner, session)) { found = true; }
+    }
+    if (!found) { return UCN_ERR_NOT_FOUND; }
+    r = ucn_i_security_fence(owner, session);
+    if (r != UCN_OK) { return r; }
+    b->now = now;
+    for (i = 0U; i < b->endpoint_count; ++i) {
+        if (!session_is(b->endpoints[i].security, b->endpoints[i].session, owner, session)) { continue; }
+        b->endpoint_fenced[i] = 1U;
+        scope.instance = b->instance; scope.slot = (uint16_t)(i + 1U);
+        scope.generation = b->endpoint_generation[i];
+        r = ucn_native_backend_retire_peer(native, b->endpoints[i].source, scope);
+        if (r != UCN_OK && r != UCN_ERR_NOT_FOUND) { b->lifecycle = UCN_LIFECYCLE_FAULT; return r; }
+        if (b->tx_endpoint == i) { b->tx_pending = 0U; b->tx_prepared = 0U; }
+        if (b->rx_ready && b->received.scope.slot == i + 1U) { b->rx_ready = 0U; }
+    }
+#if UCN_FEATURE_NATIVE_DYNAMIC_ENABLED
+    if(b->dynamic) ucn_i_native_dynamic_stop_session(b->dynamic,owner,session,now);
+#endif
+    for (i = 0U; i < b->neighbor_count; ++i) {
+        const ucn_i_native_neighbor_t *peer = &b->neighbors[i];
+        if (!session_is(peer->security, peer->session, owner, session)) { continue; }
+        b->neighbor_fenced[i] = 1U;
+        if (b->tx_neighbor == i) { b->tx_pending = 0U; b->tx_prepared = 0U; }
+        if (b->control) {
+            b->control->jobs[i].deadline = now;
+            memset(&b->control->rx[i], 0, sizeof(b->control->rx[i]));
+            memset(&b->control->input[i], 0, sizeof(b->control->input[i]));
+        }
+        r = ucn_i_route_invalidate_link(b->routes, (uint16_t)(peer->link_slot + 1U),
+            peer->facts.link_generation, &invalidated);
+        if (r != UCN_OK) { b->lifecycle = UCN_LIFECYCLE_FAULT; return r; }
+    }
+    return UCN_OK;
+}
+
+ucn_result_t ucn_i_native_routed_session_drained(ucn_i_native_routed_t *b,
+    ucn_native_t *native, ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t session, bool *out)
+{
+    uint16_t i;
+    bool found = false, drained = true, app;
+    ucn_native_scope_t scope = {0};
+    ucn_result_t r;
+    if (!b || b->port.context != b || !native || !owner || !output_safe(b, out, sizeof(*out)) ||
+        ucn_i_ranges_overlap(native, UCN_NATIVE_STORAGE_BYTES, out, sizeof(*out))) { return UCN_ERR_ARGUMENT; }
+    if (!gate_idle(b)) { return UCN_ERR_STATE; }
+    r = ucn_native_backend_check_binding(native, &b->port);
+    if (r != UCN_OK) { return r; }
+    for (i = 0U; i < b->endpoint_count; ++i) {
+        if (!session_is(b->endpoints[i].security, b->endpoints[i].session, owner, session)) { continue; }
+        found = true;
+        if (!b->endpoint_fenced[i] || b->rx_live ||
+            ((b->tx_live || b->tx_pending || b->tx_prepared) && b->tx_endpoint == i)) { drained = false; }
+        scope.instance = b->instance; scope.slot = (uint16_t)(i + 1U);
+        scope.generation = b->endpoint_generation[i];
+        r = ucn_native_backend_peer_quiescent(native, b->endpoints[i].source, scope, &app);
+        if (r != UCN_OK && r != UCN_ERR_NOT_FOUND) { return r; }
+        if (r == UCN_OK && !app) { drained = false; }
+    }
+    for (i = 0U; i < b->neighbor_count; ++i) {
+        if (!session_is(b->neighbors[i].security, b->neighbors[i].session, owner, session)) { continue; }
+        found = true;
+        if (!b->neighbor_fenced[i] || ((b->tx_live || b->tx_pending || b->tx_prepared) && b->tx_neighbor == i) ||
+            (b->rx_live && b->rx.link_slot == b->neighbors[i].link_slot)) { drained = false; }
+        if (b->control && (b->control->jobs[i].occupied || b->control->input[i].length || b->control->rx[i].mask)) { drained = false; }
+    }
+    if (!found) { return UCN_ERR_NOT_FOUND; }
+    *out = drained;
     return UCN_OK;
 }

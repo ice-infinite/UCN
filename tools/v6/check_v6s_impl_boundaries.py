@@ -108,6 +108,14 @@ def main() -> int:
     impl09_sources = {"src/runtime/ucn_composition.c"}
     native_session_sources = {"src/runtime/ucn_native_session.c"}
     native_routed_sources = {"src/runtime/ucn_native_routed.c", "src/runtime/ucn_native_route_control.c"}
+    native_dynamic_sources = {"src/runtime/ucn_native_dynamic.c"}
+    native_leaf_targets = {
+        "ucn_native_join": {"src/runtime/ucn_native_join.c", "src/runtime/ucn_native_join_durability.c"},
+        "ucn_native_capability": {"src/runtime/ucn_native_capability.c"},
+        "ucn_native_reauth": {"src/runtime/ucn_native_reauth.c", "src/runtime/ucn_native_reauth_durability.c"},
+    }
+    native_sources = (native_session_sources | native_routed_sources | native_dynamic_sources |
+                      set().union(*native_leaf_targets.values()))
     persistence_sources = {
         "src/persistence/ucn_persistence.c",
         "src/persistence/ucn_persistence_codec.c",
@@ -147,6 +155,10 @@ def main() -> int:
         "src/internal/ucn_native_session.h",
         "src/internal/ucn_native_routed.h",
         "src/internal/ucn_native_route_control.h",
+        "src/internal/ucn_native_dynamic.h",
+        "src/internal/ucn_native_join.h",
+        "src/internal/ucn_native_capability.h",
+        "src/internal/ucn_native_reauth.h",
         "src/internal/ucn_stack.h",
     }
     actual_core_sources = {
@@ -164,7 +176,7 @@ def main() -> int:
         for directory in ("wire", "adapter", "runtime")
         for path in (root / "src" / directory).glob("*.c")
     }
-    if actual_impl01_sources != impl01_sources | impl09_sources | native_session_sources | native_routed_sources:
+    if actual_impl01_sources != impl01_sources | impl09_sources | native_sources:
         errors.append("IMPL-01/09 runtime source inventory differs from registry")
     actual_persistence_sources = {
         path.relative_to(root).as_posix()
@@ -216,7 +228,7 @@ def main() -> int:
                            impl01_sources | impl04_sources | impl05_sources |
                            impl06_sources | impl07_sources |
                            impl08_realtime_sources | impl08_group_sources |
-                           impl08_cluster_sources | impl09_sources | native_session_sources | native_routed_sources |
+                           impl08_cluster_sources | impl09_sources | native_sources |
                            persistence_sources |
                            internal_headers):
         path = root / relative
@@ -255,6 +267,11 @@ def main() -> int:
         errors.append("Native Session Coordinator target source differs from registry")
     if source_set(cmake_block(cmake, "add_library", "ucn_native_routed")) != native_routed_sources:
         errors.append("Native Routed Coordinator target source differs from registry")
+    for target, sources in native_leaf_targets.items():
+        if source_set(cmake_block(cmake, "add_library", target)) != sources:
+            errors.append(f"Native leaf target source differs from registry: {target}")
+    if source_set(cmake_block(cmake, "target_sources", "ucn_native_routed")) != native_dynamic_sources:
+        errors.append("Native dynamic Coordinator target source differs from registry")
     common_block = cmake_block(cmake, "add_library", "ucn_common")
     coordinator_block = cmake_block(cmake, "add_library", "ucn_coordinator")
     module_scaffold_block = cmake_block(
@@ -458,6 +475,7 @@ def main() -> int:
         "ucn_v6s_capability", "ucn_v6s_route", "ucn_v6s_flow",
         "ucn_v6s_transport", "ucn_v6s_service", "ucn_v6s_realtime",
         "ucn_v6s_group", "ucn_v6s_cluster", "ucn_v6s_composition",
+        "ucn_native_session", "ucn_native_routed", *native_leaf_targets,
     ):
         if export_block is not None and re.search(rf"\b{target}\b", export_block):
             errors.append(f"internal target leaked into install export list: {target}")

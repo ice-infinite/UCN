@@ -5,7 +5,7 @@
 /* EN: Optional, static application facade. No Wire fields or hidden heap.
  * 中文：可选静态业务接口，不增加Wire字段，不隐式分配堆。 */
 #define UCN_NATIVE_API_VERSION UINT16_C(2)
-#define UCN_NATIVE_LAYOUT UINT16_C(2)
+#define UCN_NATIVE_LAYOUT UINT16_C(3)
 #define UCN_NATIVE_PAYLOAD_BYTES 64U
 #if UCN_PROFILE == UCN_PROFILE_NANO
 #define UCN_NATIVE_CAPACITY 4U

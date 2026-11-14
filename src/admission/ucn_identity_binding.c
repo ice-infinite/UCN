@@ -833,6 +833,36 @@ ucn_result_t ucn_i_identity_activate_binding(
     return UCN_OK;
 }
 
+ucn_result_t ucn_i_identity_discard_durable_binding(
+    ucn_i_identity_owner_t *owner, ucn_i_identity_handle_t handle,
+    const ucn_i_identity_durability_proof_t *proof)
+{
+    uint16_t slot_index;
+    ucn_i_identity_slot_t *slot;
+    ucn_result_t result;
+    if (owner == NULL || proof == NULL ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), proof, sizeof(*proof)))
+        return UCN_ERR_ARGUMENT;
+    result = owner_lock(owner);
+    if (result != UCN_OK) return result;
+    if (!handle_matches(owner, handle, &slot_index)) {
+        owner_unlock(owner); return UCN_ERR_STATE;
+    }
+    slot = &owner->bindings[slot_index];
+    if ((slot->phase != UCN_I_IDENTITY_BINDING_AWAITING_DURABILITY &&
+         slot->phase != UCN_I_IDENTITY_BINDING_FENCED) ||
+        !durability_proof_matches(owner, slot, proof)) {
+        owner_unlock(owner); return UCN_ERR_STATE;
+    }
+    /* Preserve canonical durable body and generation high water. */
+    memset(&slot->previous_view, 0, sizeof(slot->previous_view));
+    memset(&slot->persistence_handle, 0, sizeof(slot->persistence_handle));
+    memset(slot->expected_published_digest, 0, sizeof(slot->expected_published_digest));
+    slot->has_previous = 0U; slot->persistence_bound = 0U;
+    slot->phase = UCN_I_IDENTITY_BINDING_FENCED;
+    owner_unlock(owner); return UCN_OK;
+}
+
 ucn_result_t ucn_i_identity_abort_unsubmitted(
     ucn_i_identity_owner_t *owner,
     ucn_i_identity_handle_t handle)

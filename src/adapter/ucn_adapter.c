@@ -1260,6 +1260,27 @@ ucn_result_t ucn_i_adapter_quiescent(ucn_i_adapter_t *adapter, bool *out)
     }
     *out = quiet; lock_leave(adapter); return UCN_OK;
 }
+ucn_result_t ucn_i_adapter_obligations_drained(ucn_i_adapter_t *adapter, bool *out)
+{
+    uint16_t i;
+    bool empty;
+    ucn_result_t r;
+    if (!adapter_header_is_valid(adapter) || out == NULL ||
+        ucn_i_ranges_overlap(adapter, sizeof(*adapter), out, sizeof(*out))) { return UCN_ERR_ARGUMENT; }
+    r = lock_enter(adapter);
+    if (r != UCN_OK) { return r; }
+    empty = adapter->driver_staging.active_kind == 0U;
+    for (i = 0U; i < UCN_ADAPTER_TX_SLOT_COUNT; ++i) {
+        if (adapter->tx_tokens[i].state != UCN_I_ADAPTER_TX_FREE) { empty = false; }
+    }
+    for (i = 0U; i < UCN_ADAPTER_RX_SLOT_COUNT; ++i) {
+        if (adapter->rx_slots[i].state != 0U) { empty = false; }
+    }
+    *out = empty;
+    lock_leave(adapter);
+    return UCN_OK;
+}
+
 ucn_result_t ucn_i_adapter_destroy(ucn_i_adapter_t *adapter)
 {
     uint16_t index;

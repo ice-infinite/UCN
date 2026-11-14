@@ -35,6 +35,20 @@ NATIVE_PUBLIC = {
     "ucn_subscription_quiescent", "ucn_native_source_fence", "ucn_native_step",
     "ucn_native_dispatch", "ucn_native_stop", "ucn_native_status", "ucn_native_deinit",
 }
+NATIVE_BACKEND_PUBLIC = {
+    "ucn_native_backend_check_binding", "ucn_native_backend_enable_lifecycle",
+    "ucn_native_backend_lifecycle_range", "ucn_native_backend_peer_quiescent",
+    "ucn_native_backend_retire_peer",
+}
+NATIVE_LEAF_PREFIXES = {
+    name: "ucn_i_native_" + leaf + "_"
+    for leaf in ("join", "capability", "reauth")
+    for name in (f"libucn_native_{leaf}.a", f"ucn_native_{leaf}.lib")
+}
+NATIVE_PRIVATE_PREFIXES = tuple(NATIVE_LEAF_PREFIXES.values()) + (
+    "ucn_i_native_dynamic_", "ucn_i_native_route_control_",
+    "ucn_i_native_routed_", "ucn_i_native_session_",
+)
 
 
 def main() -> int:
@@ -84,6 +98,7 @@ def main() -> int:
         is_native = archive.name in ("libucn_native.a", "ucn_native.lib")
         is_native_session = archive.name in ("libucn_native_session.a", "ucn_native_session.lib")
         is_native_routed = archive.name in ("libucn_native_routed.a", "ucn_native_routed.lib")
+        native_leaf = NATIVE_LEAF_PREFIXES.get(archive.name)
         is_v6_module = (archive.name.startswith("libucn_v6_") or
                         archive.name.startswith("ucn_v6_"))
         is_simplified_common = archive.name in (
@@ -125,7 +140,7 @@ def main() -> int:
             "libucn_v6s_composition.a", "ucn_v6s_composition.lib")
         is_simplified_composition = archive.name in (
             "libucn_v6s_composition.a", "ucn_v6s_composition.lib")
-        if not (is_native or is_native_session or is_native_routed or is_v6_module or is_simplified_common or is_simplified_kernel
+        if not (is_native or is_native_session or is_native_routed or native_leaf or is_v6_module or is_simplified_common or is_simplified_kernel
                 or is_simplified_persistence or is_simplified_scaffold
                 or is_simplified_private_module):
             errors.append(f"legacy archive name: {archive.name}")
@@ -153,12 +168,15 @@ def main() -> int:
             if match:
                 symbol = match.group(1)
                 if is_native:
-                    allowed = symbol in NATIVE_PUBLIC
+                    allowed = symbol in NATIVE_PUBLIC | NATIVE_BACKEND_PUBLIC
                 elif is_native_session:
                     allowed = symbol == "ucn_i_native_session_init"
+                elif native_leaf:
+                    allowed = symbol.startswith(native_leaf)
                 elif is_native_routed:
-                    allowed = (symbol == "ucn_i_native_routed_init" or
-                               symbol.startswith("ucn_i_native_route_control_"))
+                    allowed = (symbol in {"ucn_i_native_routed_init", "ucn_i_native_routed_fence_session",
+                                          "ucn_i_native_routed_session_drained"} or
+                               symbol.startswith(("ucn_i_native_route_control_", "ucn_i_native_dynamic_")))
                 elif is_v6_module:
                     allowed = symbol.startswith("ucn_v6_")
                 elif is_simplified_persistence:
@@ -181,7 +199,7 @@ def main() -> int:
                                 symbol.startswith("ucn_i_")))
                 else:
                     allowed = symbol.startswith("ucn_i_")
-                if not allowed:
+                if not allowed or (is_simplified_kernel and symbol.startswith(NATIVE_PRIVATE_PREFIXES)):
                     errors.append(
                         f"legacy symbol in {archive.name}: {symbol}")
         if tool_name.startswith("dumpbin"):
@@ -219,6 +237,8 @@ def main() -> int:
                     continue
                 if is_native:
                     allowed = symbol in SIMPLIFIED_PUBLIC
+                elif is_native_routed:
+                    allowed = symbol.startswith("ucn_i_") or symbol in NATIVE_BACKEND_PUBLIC
                 elif is_v6_module:
                     allowed = symbol.startswith("ucn_v6_")
                 elif is_simplified_persistence:
@@ -236,7 +256,7 @@ def main() -> int:
                     allowed = symbol.startswith("ucn_i_")
                 else:
                     allowed = symbol.startswith("ucn_i_")
-                if not allowed:
+                if not allowed or (is_simplified_kernel and symbol.startswith(NATIVE_PRIVATE_PREFIXES)):
                     errors.append(
                         f"foreign UCN dependency in {archive.name}: {symbol}"
                     )

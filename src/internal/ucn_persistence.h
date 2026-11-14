@@ -57,6 +57,7 @@ typedef struct ucn_persistence_domain_view {
     uint16_t api_version;
     ucn_persist_domain_key_t domain;
     uint64_t record_generation;
+    uint64_t current_transaction_id; /* Exact committed history, not generation. */
     uint32_t body_bytes;
     uint16_t schema_id;
     uint16_t schema_version;

@@ -15,6 +15,7 @@
 #define UCN_I_SECURITY_PRINCIPAL_BYTES 16U
 #define UCN_I_SECURITY_FINGERPRINT_BYTES 16U
 #define UCN_I_SECURITY_TRANSCRIPT_BYTES 32U
+#define UCN_I_SECURITY_SESSION_ACL_MAX 64U
 #define UCN_I_PEER_REAUTH_RECORD_BYTES 208U
 /* EN: Canonical structural bytes only, never an authenticated peer or Session.
  * 中文：仅规范结构字节，不是已认证邻居或Session。 */
@@ -449,6 +450,8 @@ typedef struct ucn_i_security_config {
 } ucn_i_security_config_t;
 
 typedef struct ucn_i_security_slot {
+    const ucn_i_security_acl_rule_t *session_acl;
+    uint16_t session_acl_count;
     ucn_i_security_candidate_t candidate;
     ucn_i_security_durability_base_t durability;
     uint8_t body[UCN_I_SECURITY_RECORD_BYTES];
@@ -507,6 +510,33 @@ typedef struct ucn_i_security_owner {
 typedef struct ucn_i_security_codec_workspace {
     ucn_i_security_candidate_t candidate;
 } ucn_i_security_codec_workspace_t;
+
+#define UCN_I_SECURITY_REAUTH_MESSAGE_BYTES 227U
+typedef ucn_result_t (*ucn_i_security_reauth_verify_fn)(void *, const uint8_t[16],
+    const uint8_t[UCN_I_SECURITY_REAUTH_MESSAGE_BYTES], const uint8_t *, uint8_t);
+/* Exact Foundation body and its decoded candidate are borrowed together.
+ * This descriptor is trusted Coordinator custody, never a remote proof DTO.
+ * Each identity proof has the same 16..64-byte configured size. Both are
+ * independently verified under the Owner callback gate, followed by the
+ * Owner verify_session provider's exact candidate/key installation check. */
+typedef struct ucn_i_security_reauth_call {
+    const ucn_i_security_candidate_t *candidate, *previous;
+    const uint8_t *local_record; /* Exactly UCN_I_SECURITY_RECORD_BYTES. */
+    const ucn_i_security_durability_base_t *durability;
+    const ucn_i_peer_reauth_record_t *record; /* Final stage 2 canonical Record208. */
+    const uint8_t *challenge_proof, *response_proof;
+    void *verify_context;
+    ucn_i_security_reauth_verify_fn verify_identity;
+    uint64_t started_us, parent_deadline_us, now_us;
+    uint8_t initiator, challenge_proof_bytes, response_proof_bytes;
+    uint8_t reserved_zero[5];
+} ucn_i_security_reauth_call_t;
+typedef struct ucn_i_security_reauth_workspace {
+    ucn_i_sha256_workspace_t hash;
+    uint8_t message[UCN_I_SECURITY_REAUTH_MESSAGE_BYTES];
+    uint8_t digest[32];
+    uint8_t proof[UCN_I_SECURITY_PROOF_BYTES];
+} ucn_i_security_reauth_workspace_t;
 
 /* EN: Context resolution may decode a complete C0 header and stage both
  * result DTOs.  Keep that bounded storage caller-owned so MCU task stacks do
@@ -649,6 +679,41 @@ ucn_result_t ucn_i_security_prepare_static_session(
     const ucn_i_security_durability_base_t *durability,
     uint64_t now_us,
     ucn_i_security_handle_t *handle_out);
+/* Signed max-history successor only; generic static prepare remains prior+1.
+ * The caller retains immutable inputs and exclusive workspace through all
+ * callbacks. Workspace/output are disjoint from one another, the Owner and
+ * every borrowed input; inputs must also be outside the Owner. */
+ucn_result_t ucn_i_security_prepare_reauth_session(ucn_i_security_owner_t *owner,
+    const ucn_i_security_reauth_call_t *call, ucn_i_security_reauth_workspace_t *workspace,
+    ucn_i_security_handle_t *handle_out);
+ucn_result_t ucn_i_security_peer_is_fenced(ucn_i_security_owner_t *owner,
+    const ucn_i_security_binding_t *local, const ucn_i_security_binding_t *peer, bool *out);
+/* Trusted product policy, not network authentication: bind immutable borrowed
+ * exact rules once before activation. Rules remain alive until Session retirement.
+ * Explicit rules replace, never union with, the Owner's default ACL. */
+ucn_result_t ucn_i_security_bind_session_acl(ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t session, const ucn_i_security_acl_rule_t *rules,
+    uint16_t count);
+/* Locked range-only preflight for Coordinator output. Protect every occupied
+ * Session's borrowed ACL, including pending/fenced successors after handoff,
+ * plus default ACL/domain tables and Owner storage. No internal pointer escapes.
+ * Rust's immutable lifetime borrowing prevents the equivalent mutable alias. */
+ucn_result_t ucn_i_security_borrowed_output_check(ucn_i_security_owner_t *owner,
+    const void *output, size_t bytes);
+/* Locked ACTIVE snapshot, including exact selectors/transcript/expiry. */
+ucn_result_t ucn_i_security_session_candidate_get(ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t session, ucn_i_security_candidate_t *candidate_out);
+/* Local H1 C0 retry only: immutable Origin prefix, fresh shared Hop sequence.
+ * Trusted Coordinator exclusively owns the original protected frame for this
+ * exact Session; this is not authentication of arbitrary caller bytes and does
+ * not verify the old tag. Receiver must independently authenticate Origin.
+ * Input/output/workspace must be disjoint; no Origin reseal or nonce reuse. */
+ucn_result_t ucn_i_security_c0_refresh_hop(ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t session, const ucn_i_security_current_facts_t *facts,
+    const uint8_t *packet, size_t packet_bytes,
+    ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *output, size_t capacity, size_t *written);
+
 ucn_result_t ucn_i_security_requirement_get(
     ucn_i_security_owner_t *owner,
     ucn_i_security_handle_t handle,
@@ -815,7 +880,7 @@ ucn_result_t ucn_i_security_c1_hop_open(ucn_i_security_owner_t *,
  * At least one fingerprint is required; NULL selects no check for that layer.
  * No counters, callbacks, or outputs are changed. */
 ucn_result_t ucn_i_security_c1_context_check(ucn_i_security_owner_t *,
-    ucn_i_security_handle_t, const ucn_i_security_current_facts_t *,
+    const ucn_i_security_handle_t *, const ucn_i_security_current_facts_t *,
     const uint8_t *origin_fingerprint, const uint8_t *hop_fingerprint);
 ucn_result_t ucn_i_security_c0_hop_seal(
     ucn_i_security_owner_t *owner,
@@ -826,6 +891,9 @@ ucn_result_t ucn_i_security_c0_hop_seal(
     uint8_t *output,
     size_t output_capacity,
     size_t *output_bytes);
+/* Split multi-hop only: Origin Session MUST be H0; Hop Session MUST be H1.
+ * Direct H1 uses c0_protect/open and its single combined replay handle.
+ * H1 Origin misuse rejects before nonce/replay reservation or workspace writes. */
 ucn_result_t ucn_i_security_c0_path_protect(
     ucn_i_security_owner_t *owner,
     const ucn_i_security_c0_protect_request_t *origin_request,

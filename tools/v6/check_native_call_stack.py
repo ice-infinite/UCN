@@ -146,7 +146,10 @@ def analyze(build: Path, root: Path, policy: dict, limit: int) -> list[str]:
     for binding in policy.get('bindings', []):
         code = (root/binding['source']).read_text(encoding='utf-8')
         clean = COMMENTS.sub('', code)
-        assignments = re.findall(re.escape(binding['object'])+r'\s*\.\s*'+
+        member = binding.get('member', '.')
+        if member not in ('.', '->'):
+            raise ValueError('invalid binding member operator')
+        assignments = re.findall(re.escape(binding['object'])+r'\s*'+re.escape(member)+r'\s*'+
                                  re.escape(binding['field'])+r'\s*=\s*(\w+)\s*;', clean)
         if assignments != [binding['target']]:
             raise ValueError('stale/noncanonical backend binding: '+binding['field'])
@@ -295,6 +298,39 @@ def analyze(build: Path, root: Path, policy: dict, limit: int) -> list[str]:
     return output
 
 
+def resolve_assembly(policy: dict, name: str) -> dict:
+    """Compose reviewed assemblies without losing their real backend edges."""
+    visiting = set()
+    def collect(current):
+        if current in visiting:
+            raise ValueError('assembly inheritance cycle: '+current)
+        visiting.add(current)
+        selected = policy['assemblies'][current]
+        parent = collect(selected['inherits']) if selected.get('inherits') else {}
+        result = {**parent, **selected}
+        for field in ('entries', 'indirect', 'bindings'):
+            result[field] = parent.get(field, [])+selected.get(field, [])
+        visiting.remove(current)
+        return result
+    selected = collect(name)
+    shared = policy['shared']
+    if not shared.get('source_sha256') or not selected.get('bindings'):
+        raise ValueError('assembly requires frozen sources and actual Backend bindings')
+    mappings = list(shared['indirect'])
+    for mapping in selected['indirect']:
+        if 'replaces_boundary' in mapping:
+            matches = [m for m in mappings if all(m.get(k) == mapping.get(k)
+                for k in ('source', 'expression', 'caller'))]
+            if (len(matches) != 1 or matches[0].get('boundary') != mapping['replaces_boundary']
+                    or not mapping.get('targets') or mapping.get('boundary')):
+                raise ValueError('invalid exact boundary replacement: '+mapping['expression'])
+            mappings.remove(matches[0])
+        mappings.append(mapping)
+    return {**shared, **selected, 'schema': policy['schema'],
+            'entries': shared.get('entries', [])+selected['entries'],
+            'indirect': mappings}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--build-dir', required=True, type=Path)
@@ -306,13 +342,7 @@ def main() -> int:
     try:
         policy = json.loads(args.policy.read_text(encoding='utf-8'))
         if args.assembly:
-            shared = policy['shared']
-            selected = policy['assemblies'][args.assembly]
-            if not shared.get('source_sha256') or not selected.get('bindings'):
-                raise ValueError('assembly requires frozen sources and actual Backend bindings')
-            policy = {**shared, **selected, 'schema': policy['schema'],
-                      'entries': shared.get('entries', [])+selected['entries'],
-                      'indirect': shared['indirect']+selected.get('indirect', [])}
+            policy = resolve_assembly(policy, args.assembly)
         print('\n'.join(analyze(args.build_dir, args.source_root, policy, args.limit_bytes)))
         return 0
     except (ValueError, KeyError, IndexError, TypeError, OSError, UnicodeError, subprocess.SubprocessError) as error:

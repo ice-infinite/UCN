@@ -123,6 +123,102 @@ impl BackendScope {
         slot: 0,
     };
 }
+struct LifecycleState<const N: usize> {
+    source: [[BackendScope; 16]; N],
+    retired_source: [[bool; 16]; N],
+    retired_target: [[BackendScope; 8]; N],
+    cancelled: [u32; N],
+    attached: bool,
+}
+fn target_peer(target: Destination, source: Source) -> bool {
+    target.address == source.address && target.binding == source.binding
+}
+fn scope_namespace(a: BackendScope, b: BackendScope) -> bool {
+    a.instance == b.instance && a.slot == b.slot
+}
+impl<const N: usize> LifecycleState<N> {
+    fn check(&self, state: &State<N>, source: Source, scope: BackendScope) -> Result<()> {
+        if scope.instance == 0 || scope.generation == 0 {
+            return Err(Error::Argument);
+        }
+        if state.stepping || state.dispatching {
+            return Err(Error::State);
+        }
+        let (mut address, mut exact, mut target) = (false, false, false);
+        for (ch, channel) in state.channels.iter().enumerate() {
+            let Some(c) = channel else {
+                continue;
+            };
+            for (i, configured) in c.sources.iter().enumerate() {
+                let Some(configured) = configured else {
+                    continue;
+                };
+                address |=
+                    configured.address == source.address && configured.binding == source.binding;
+                if *configured == source {
+                    exact = true;
+                    let prior = self.source[ch][i];
+                    if prior.instance != 0 && !scope_namespace(prior, scope) {
+                        return Err(Error::Access);
+                    }
+                }
+            }
+            for (i, configured) in c.targets.iter().flatten().enumerate() {
+                if target_peer(*configured, source) {
+                    target = true;
+                    let prior = self.retired_target[ch][i];
+                    if prior.instance != 0 && !scope_namespace(prior, scope) {
+                        return Err(Error::Access);
+                    }
+                }
+            }
+        }
+        if exact || (!address && target) {
+            Ok(())
+        } else {
+            Err(Error::NotFound)
+        }
+    }
+    fn newer(&self, state: &State<N>, source: Source, scope: BackendScope) -> bool {
+        state.channels.iter().enumerate().any(|(ch, c)| {
+            c.is_some_and(|c| {
+                c.sources.iter().enumerate().any(|(i, s)| {
+                    *s == Some(source) && self.source[ch][i].generation > scope.generation
+                })
+            })
+        })
+    }
+}
+/// Optional permanent hot-lifecycle tables. Ordinary roots do not reserve these arrays.
+/// Only the trusted Root can attach or mutate this single-task, non-Sync storage.
+///
+/// ```compile_fail
+/// fn require_sync<T: Sync>() {}
+/// require_sync::<ucn_native::LifecycleStorage<4>>();
+/// ```
+pub struct LifecycleStorage<const N: usize = 4> {
+    state: RefCell<LifecycleState<N>>,
+}
+impl<const N: usize> LifecycleStorage<N> {
+    /// Empty, statically allocated lifecycle storage; attachment is one-way.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            state: RefCell::new(LifecycleState {
+                source: [[BackendScope::LOCAL; 16]; N],
+                retired_source: [[false; 16]; N],
+                retired_target: [[BackendScope::LOCAL; 8]; N],
+                cancelled: [0; N],
+                attached: false,
+            }),
+        }
+    }
+}
+impl<const N: usize> Default for LifecycleStorage<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 /// Trusted Coordinator output after actual byte authentication and replay commit.
 pub struct BackendMessage {
     /// Configured label; authorization uses the full backend Binding.
@@ -277,6 +373,7 @@ struct Event {
 )]
 struct State<const N: usize> {
     instance: u32,
+    lifecycle: Option<&'static LifecycleStorage<N>>,
     channels: [Option<Channel>; N],
     pubs: [Entity; N],
     subs: [Entity; N],
@@ -301,6 +398,7 @@ impl<const N: usize> State<N> {
     const fn new() -> Self {
         Self {
             instance: 0,
+            lifecycle: None,
             channels: [None; N],
             pubs: [Entity::EMPTY; N],
             subs: [Entity::EMPTY; N],
@@ -407,6 +505,9 @@ impl<const N: usize> State<N> {
             target,
             payload,
         });
+        if let Some(lifecycle) = self.lifecycle {
+            lifecycle.state.borrow_mut().cancelled[slot] = 0;
+        }
         self.order = order;
         if let Some((at, seq)) = event {
             self.local_sequence = seq;
@@ -604,7 +705,14 @@ impl<const N: usize> Inbox<N> {
                     {
                         continue;
                     }
+                    let stale_scope = !ev.sample.local
+                        && s.lifecycle.is_some_and(|l| {
+                            let l = l.state.borrow();
+                            l.retired_source[ev.channel][ev.source]
+                                || Some(l.source[ev.channel][ev.source]) != ev.scope
+                        });
                     if s.stopping
+                        || stale_scope
                         || s.fenced[ev.channel][ev.source]
                         || now < ev.age_anchor
                         || now - ev.age_anchor >= c.max_local_age_us
@@ -709,9 +817,27 @@ impl<const N: usize> Inbox<N> {
         else {
             return;
         };
-        if s.fenced[ch][src]
-            || (c.queue == QueuePolicy::KeepLatest && m.origin_sequence <= s.high[ch][src])
-        {
+        if s.fenced[ch][src] {
+            return;
+        }
+        if let Some(lifecycle) = s.lifecycle {
+            let mut l = lifecycle.state.borrow_mut();
+            let prior = l.source[ch][src];
+            if prior.instance != 0
+                && (prior.instance != m.scope.instance
+                    || prior.slot != m.scope.slot
+                    || m.scope.generation < prior.generation
+                    || (prior == m.scope && l.retired_source[ch][src]))
+            {
+                return;
+            }
+            if prior != m.scope {
+                l.source[ch][src] = m.scope;
+                l.retired_source[ch][src] = false;
+                s.high[ch][src] = 0;
+            }
+        }
+        if c.queue == QueuePolicy::KeepLatest && m.origin_sequence <= s.high[ch][src] {
             return;
         }
         let Some(at) = s.event_slot(ch, src, false) else {
@@ -1093,6 +1219,122 @@ impl<const N: usize> NativeRoot<N> {
     pub const fn commands(&self) -> &'static Inbox<N> {
         self.inbox
     }
+    /// Attach optional permanent lifecycle storage before start. Never grants authentication.
+    /// # Errors
+    /// Running/stopping/reentrant Root, reused storage, or a static-trusted backend.
+    pub fn enable_lifecycle(&mut self, storage: &'static LifecycleStorage<N>) -> Result<()> {
+        let mut s = self
+            .inbox
+            .state
+            .try_borrow_mut()
+            .map_err(|_| Error::State)?;
+        let mut l = storage.state.try_borrow_mut().map_err(|_| Error::State)?;
+        if self.backend.trusted()
+            || s.running
+            || s.stopping
+            || s.stepping
+            || s.dispatching
+            || s.lifecycle.is_some()
+            || l.attached
+        {
+            return Err(Error::State);
+        }
+        l.attached = true;
+        s.lifecycle = Some(storage);
+        Ok(())
+    }
+    /// Retire queued obligations, not physical Driver work.
+    /// # Errors
+    /// Invalid scope or inactive lifecycle management.
+    pub fn retire_peer(&mut self, source: Source, scope: BackendScope) -> Result<()> {
+        let mut s = self
+            .inbox
+            .state
+            .try_borrow_mut()
+            .map_err(|_| Error::State)?;
+        let storage = s.lifecycle.ok_or(Error::State)?;
+        let mut l = storage.state.try_borrow_mut().map_err(|_| Error::State)?;
+        l.check(&s, source, scope)?;
+        let newer = l.newer(&s, source, scope);
+        for ch in 0..N {
+            let Some(c) = s.channels[ch] else {
+                continue;
+            };
+            for (i, configured) in c.sources.iter().enumerate() {
+                if *configured == Some(source) {
+                    if l.source[ch][i].generation <= scope.generation {
+                        l.source[ch][i] = scope;
+                        l.retired_source[ch][i] = true;
+                    }
+                    for event in &mut s.events {
+                        if event.is_some_and(|e| {
+                            e.channel == ch && e.source == i && e.scope == Some(scope)
+                        }) {
+                            *event = None;
+                        }
+                    }
+                }
+            }
+            for (i, configured) in c.targets.iter().flatten().enumerate() {
+                if !target_peer(*configured, source)
+                    || newer
+                    || l.retired_target[ch][i].generation >= scope.generation
+                {
+                    continue;
+                }
+                l.retired_target[ch][i] = scope;
+                for (j, job) in s.jobs.iter().enumerate() {
+                    if let Some(job) = job {
+                        let bit = if job.target.is_some() { 0 } else { i };
+                        if job.channel == ch
+                            && job.next_target <= bit
+                            && job.target.is_none_or(|t| target_peer(t, source))
+                        {
+                            l.cancelled[j] |= 1 << bit;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Query application obligations, not physical Driver work.
+    /// # Errors
+    /// Invalid scope or inactive lifecycle management.
+    pub fn peer_quiescent(&self, source: Source, scope: BackendScope) -> Result<bool> {
+        let s = self.inbox.state.try_borrow().map_err(|_| Error::State)?;
+        let storage = s.lifecycle.ok_or(Error::State)?;
+        let l = storage.state.try_borrow().map_err(|_| Error::State)?;
+        l.check(&s, source, scope)?;
+        if s.events
+            .iter()
+            .flatten()
+            .any(|e| e.sample.source == source && e.scope == Some(scope))
+        {
+            return Ok(false);
+        }
+        if l.newer(&s, source, scope) {
+            return Ok(true);
+        }
+        for (j, job) in s.jobs.iter().enumerate() {
+            let Some(job) = job else {
+                continue;
+            };
+            let c = s.channels[job.channel].ok_or(Error::State)?;
+            for (i, configured) in c.targets.iter().flatten().enumerate() {
+                let bit = if job.target.is_some() { 0 } else { i };
+                if target_peer(*configured, source)
+                    && l.retired_target[job.channel][i].generation < scope.generation
+                    && job.next_target <= bit
+                    && job.target.is_none_or(|t| target_peer(t, source))
+                    && l.cancelled[j] & (1 << bit) == 0
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
     /// Start once. Closed/fenced objects cannot be resurrected by restart.
     /// # Errors
     /// Already running/stopping, invalid time or actual Core start failure.
@@ -1188,6 +1430,13 @@ impl<const N: usize> NativeRoot<N> {
                 .any(|j| j.channel == job.channel && j.order < job.order)
             {
                 continue;
+            }
+            let cancelled = {
+                let s = self.inbox.state.borrow();
+                s.lifecycle.map_or(0, |l| l.state.borrow().cancelled[i])
+            };
+            while job.next_target < 8 && cancelled & (1 << job.next_target) != 0 {
+                job.next_target += 1;
             }
             let destination = if let Some(t) = job.target {
                 if job.next_target == 0 { Some(t) } else { None }

@@ -9,15 +9,18 @@
 #define UCN_I_NATIVE_NEIGHBORS 4U
 #define UCN_I_NATIVE_FORWARD_DOMAINS 4U
 struct ucn_i_native_route_control;
+struct ucn_i_native_dynamic;
 typedef ucn_result_t (*ucn_i_native_c0_reserve_fn)(void *,
     ucn_i_security_owner_t *, ucn_i_security_handle_t, uint64_t *);
-/* Sealed Static identity assembly only: no mutable Parent, no hot replacement.
+/* Default: sealed Static identity assembly. Optional dynamic Coordinator may
+ * fence/drain and replace an exact Session/Capability under unchanged Bindings.
  * Product must fence/drain all borrowers before replacing any binding. All
  * Owners remain borrowed and share ONE provider gate until physical drain.
  * One serialized Coordinator is the exclusive Adapter RX/retirement owner.
  * Adapter runtime_instance is its immutable Scope namespace: never reuse it
  * for a successor Coordinator or initialize competing roots on that Adapter.
- * The fixed endpoint slot generation is 1 because this assembly has no reuse.
+ * Static endpoint slot generation is 1; controlled hot replacement increments
+ * it without wrap only after actual Native/Adapter/Control holders drain.
  * Each Neighbor requires a dedicated Link: Route link_id = Adapter slot + 1.
  * sender_discriminator must match RX exactly (use 0 for a dedicated transport
  * which has no discriminator); no shared-Link destination guessing is allowed.
@@ -68,6 +71,7 @@ typedef struct ucn_i_native_routed {
     ucn_i_callback_gate_t *gate;
     struct ucn_i_native_route_control *control;
     ucn_native_source_t local;
+    struct ucn_i_native_dynamic *dynamic;
     uint64_t now, expires_at, relay_lifetime, tx_deadline;
     uint32_t instance;
     uint16_t endpoint_count, neighbor_count, forward_count;
@@ -103,8 +107,17 @@ typedef struct ucn_i_native_routed {
     uint32_t rx_source;
     uint16_t rx_service;
     uint8_t rx_endpoint_pending;
+    uint32_t endpoint_generation[UCN_I_NATIVE_ENDPOINTS];
+    uint8_t endpoint_fenced[UCN_I_NATIVE_ENDPOINTS];
+    uint8_t neighbor_fenced[UCN_I_NATIVE_NEIGHBORS];
 } ucn_i_native_routed_t;
 
 ucn_result_t ucn_i_native_routed_init(ucn_i_native_routed_t *,
     const ucn_i_native_routed_config_t *);
+/* EN: Serialized Coordinator management; Native retirement storage is required.
+ * ZH: 串行协调器管理操作，必须显式启用Native退休存储；不清除物理Holder。 */
+ucn_result_t ucn_i_native_routed_fence_session(ucn_i_native_routed_t *,
+    ucn_native_t *, ucn_i_security_owner_t *, ucn_i_security_handle_t, uint64_t);
+ucn_result_t ucn_i_native_routed_session_drained(ucn_i_native_routed_t *,
+    ucn_native_t *, ucn_i_security_owner_t *, ucn_i_security_handle_t, bool *);
 #endif

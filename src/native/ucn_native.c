@@ -30,10 +30,19 @@ typedef struct event {
     ucn_native_scope_t scope;
     uint8_t payload[UCN_NATIVE_PAYLOAD_BYTES];
 } event_t;
+typedef struct lifecycle {
+    uint32_t owner_instance, layout;
+    ucn_native_scope_t source[UCN_NATIVE_CAPACITY][UCN_NATIVE_SOURCES];
+    ucn_native_scope_t retired_target[UCN_NATIVE_CAPACITY][UCN_NATIVE_TARGETS];
+    uint32_t cancelled[UCN_NATIVE_CAPACITY];
+    uint8_t retired_source[UCN_NATIVE_CAPACITY][UCN_NATIVE_SOURCES];
+} lifecycle_t;
+UCN_STATIC_ASSERT(sizeof(lifecycle_t) <= UCN_NATIVE_LIFECYCLE_STORAGE_BYTES, native_lifecycle_storage);
 struct ucn_native {
     uint32_t magic, instance;
     ucn_node_t *core;
     const ucn_native_backend_t *backend;
+    lifecycle_t *lifecycle;
     const void *backend_context;
     size_t backend_context_bytes;
     ucn_lock_ops_t lock;
@@ -87,6 +96,7 @@ static bool external_output(const ucn_native_t *n, const void *out, size_t bytes
         !overlap(n->lock.context, n->lock.context != NULL ? 1U : 0U, out, bytes) &&
         (n->backend == NULL || (!overlap(n->backend, sizeof(*n->backend), out, bytes) &&
         !overlap(n->backend_context, n->backend_context_bytes, out, bytes))) &&
+        !overlap(n->lifecycle, n->lifecycle != NULL ? UCN_NATIVE_LIFECYCLE_STORAGE_BYTES : 0U, out, bytes) &&
         !overlap(n->core, ucn_storage_required(), out, bytes);
 }
 static uint16_t find_channel(const ucn_native_t *n, uint16_t id)
@@ -97,6 +107,142 @@ static uint16_t find_channel(const ucn_native_t *n, uint16_t id)
 }
 static bool source_equal(ucn_native_source_t a, ucn_native_source_t b)
 { return a.address == b.address && a.binding_generation == b.binding_generation && a.principal_digest == b.principal_digest; }
+static bool scope_equal(ucn_native_scope_t a, ucn_native_scope_t b)
+{ return a.instance == b.instance && a.generation == b.generation && a.slot == b.slot; }
+static bool scope_namespace(ucn_native_scope_t a, ucn_native_scope_t b)
+{ return a.instance == b.instance && a.slot == b.slot; }
+ucn_result_t ucn_native_backend_enable_lifecycle(ucn_native_t *n,
+    ucn_native_lifecycle_storage_t *storage, size_t bytes)
+{
+    size_t i; ucn_result_t r;
+    if (bytes != sizeof(*storage) || !external_output(n, storage, bytes) ||
+        (uintptr_t)storage % sizeof(uint64_t) != 0U) { return UCN_ERR_ARGUMENT; }
+    r = enter(n); if (r != UCN_OK) { return r; }
+    if (n->backend == NULL || n->running || n->stopping || n->stepping || n->dispatching || n->lifecycle != NULL) {
+        return leave(n, UCN_ERR_STATE);
+    }
+    for (i = 0U; i < bytes; ++i) { if (storage->bytes[i] != 0U) { return leave(n, UCN_ERR_ARGUMENT); } }
+    n->lifecycle = (lifecycle_t *)storage;
+    n->lifecycle->owner_instance = n->instance; n->lifecycle->layout = UCN_NATIVE_LAYOUT;
+    return leave(n, UCN_OK);
+}
+ucn_result_t ucn_native_backend_lifecycle_range(ucn_native_t *n,
+    ucn_native_borrowed_range_t *range_out)
+{
+    ucn_result_t r;
+    if (!external_output(n, range_out, sizeof(*range_out))) { return UCN_ERR_ARGUMENT; }
+    r = enter(n); if (r != UCN_OK) { return r; }
+    if (n->backend == NULL || n->lifecycle == NULL || n->running || n->stopping ||
+        n->stepping || n->dispatching || n->in_callback) { return leave(n, UCN_ERR_STATE); }
+    range_out->address = n->lifecycle;
+    range_out->bytes = UCN_NATIVE_LIFECYCLE_STORAGE_BYTES;
+    return leave(n, UCN_OK);
+}
+static bool target_peer(ucn_native_target_t target, ucn_native_source_t source)
+{ return target.address == source.address && target.binding_generation == source.binding_generation; }
+ucn_result_t ucn_native_backend_check_binding(ucn_native_t *n,
+    const ucn_native_backend_t *backend)
+{
+    ucn_result_t r;
+    if (backend == NULL) { return UCN_ERR_ARGUMENT; }
+    r = enter(n);
+    if (r != UCN_OK) { return r; }
+    if (n->backend != backend || n->backend_context != backend->context ||
+        n->backend_context_bytes != backend->context_bytes ||
+        n->stepping || n->dispatching || n->in_callback) { return leave(n, UCN_ERR_STATE); }
+    return leave(n, UCN_OK);
+}
+/* Validate the complete operation before touching any source, event or command. */
+static ucn_result_t peer_check(const ucn_native_t *n, const ucn_native_source_t *source, const ucn_native_scope_t *scope)
+{
+    uint16_t ch, i; bool source_address = false, exact_source = false, target = false;
+    if (!scope->instance || !scope->generation || scope->reserved_zero || !source->address || !source->binding_generation) { return UCN_ERR_ARGUMENT; }
+    if (n->backend == NULL || n->lifecycle == NULL || n->stepping || n->dispatching || n->in_callback) { return UCN_ERR_STATE; }
+    for (ch = 0U; ch < n->channel_count; ++ch) {
+        const ucn_native_channel_t *c = &n->channels[ch];
+        for (i = 0U; i < c->source_count; ++i) {
+            if (c->sources[i].address == source->address && c->sources[i].binding_generation == source->binding_generation) { source_address = true; }
+            if (source_equal(c->sources[i], *source)) {
+                const ucn_native_scope_t prior = n->lifecycle->source[ch][i];
+                exact_source = true;
+                if (prior.instance != 0U && !scope_namespace(prior, *scope)) { return UCN_ERR_ACCESS; }
+            }
+        }
+        for (i = 0U; i < c->target_count; ++i) {
+            if (target_peer(c->targets[i], *source)) {
+                const ucn_native_scope_t prior = n->lifecycle->retired_target[ch][i];
+                target = true;
+                if (prior.instance != 0U && !scope_namespace(prior, *scope)) { return UCN_ERR_ACCESS; }
+            }
+        }
+    }
+    return (exact_source || (!source_address && target)) ? UCN_OK : UCN_ERR_NOT_FOUND;
+}
+static bool peer_newer(const ucn_native_t *n, const ucn_native_source_t *source, uint32_t generation)
+{
+    uint16_t ch, i;
+    for (ch = 0U; ch < n->channel_count; ++ch) {
+        for (i = 0U; i < n->channels[ch].source_count; ++i) {
+            if (source_equal(n->channels[ch].sources[i], *source) && n->lifecycle->source[ch][i].generation > generation) { return true; }
+        }
+    }
+    return false;
+}
+ucn_result_t ucn_native_backend_retire_peer(ucn_native_t *n, ucn_native_source_t source, ucn_native_scope_t scope)
+{
+    uint16_t ch, i, j; bool newer; ucn_result_t r = enter(n); if (r != UCN_OK) { return r; }
+    r = peer_check(n, &source, &scope); if (r != UCN_OK) { return leave(n, r); }
+    newer = peer_newer(n, &source, scope.generation);
+    for (ch = 0U; ch < n->channel_count; ++ch) {
+        const ucn_native_channel_t *c = &n->channels[ch];
+        for (i = 0U; i < c->source_count; ++i) {
+            if (source_equal(c->sources[i], source)) {
+                if (n->lifecycle->source[ch][i].generation <= scope.generation) {
+                    n->lifecycle->source[ch][i] = scope; n->lifecycle->retired_source[ch][i] = 1U;
+                }
+                for (j = 0U; j < UCN_NATIVE_CAPACITY; ++j) {
+                    event_t *e = &n->events[j];
+                    if (e->valid && e->channel == ch && e->source == i && scope_equal(e->scope, scope)) { e->valid = 0U; }
+                }
+            }
+        }
+        for (i = 0U; i < c->target_count; ++i) {
+            ucn_native_scope_t *prior = &n->lifecycle->retired_target[ch][i];
+            if (!target_peer(c->targets[i], source) || newer || prior->generation >= scope.generation) { continue; }
+            *prior = scope;
+            for (j = 0U; j < UCN_NATIVE_CAPACITY; ++j) {
+                const command_t *cmd = &n->commands[j];
+                uint16_t bit = cmd->unicast ? 0U : i;
+                if (cmd->valid && cmd->channel == ch && cmd->next_target <= bit &&
+                    (!cmd->unicast || target_peer(cmd->target, source)) && !(n->lifecycle->cancelled[j] & (UINT32_C(1) << bit))) {
+                    n->lifecycle->cancelled[j] |= UINT32_C(1) << bit; ++n->stats.failed;
+                }
+            }
+        }
+    }
+    return leave(n, UCN_OK);
+}
+ucn_result_t ucn_native_backend_peer_quiescent(ucn_native_t *n, ucn_native_source_t source, ucn_native_scope_t scope, bool *out)
+{
+    uint16_t i, j; bool quiet = true, newer; ucn_result_t r;
+    if (!external_output(n, out, sizeof(*out))) { return UCN_ERR_ARGUMENT; }
+    r = enter(n); if (r != UCN_OK) { return r; }
+    r = peer_check(n, &source, &scope); if (r != UCN_OK) { return leave(n, r); }
+    newer = peer_newer(n, &source, scope.generation);
+    for (i = 0U; i < UCN_NATIVE_CAPACITY; ++i) {
+        const event_t *e = &n->events[i]; const command_t *cmd = &n->commands[i];
+        if (e->valid && source_equal(n->channels[e->channel].sources[e->source], source) && scope_equal(e->scope, scope)) { quiet = false; }
+        if (!cmd->valid || newer) { continue; }
+        for (j = 0U; j < n->channels[cmd->channel].target_count; ++j) {
+            uint16_t bit = cmd->unicast ? 0U : j;
+            if (target_peer(n->channels[cmd->channel].targets[j], source) &&
+                n->lifecycle->retired_target[cmd->channel][j].generation < scope.generation &&
+                cmd->next_target <= bit && (!cmd->unicast || target_peer(cmd->target, source)) &&
+                !(n->lifecycle->cancelled[i] & (UINT32_C(1) << bit))) { quiet = false; }
+        }
+    }
+    *out = quiet; return leave(n, UCN_OK);
+}
 static uint32_t recipients(const ucn_native_t *n, uint16_t ch)
 {
     uint16_t i; uint32_t mask = 0U;
@@ -327,6 +473,7 @@ static ucn_result_t enqueue(ucn_native_t *n, uint16_t ch, const void *p, size_t 
         if (n->local_sequence == UINT32_MAX || n->event_order == UINT32_MAX) { return UCN_ERR_EXHAUSTED; }
     }
     memset(&n->commands[i], 0, sizeof(n->commands[i]));
+    if (n->lifecycle != NULL) { n->lifecycle->cancelled[i] = 0U; }
     n->commands[i].valid = 1U; n->commands[i].channel = ch;
     ++n->command_order; n->commands[i].order = n->command_order;
     n->commands[i].deadline = n->now + c->max_local_age_us;
@@ -424,9 +571,13 @@ static UCN_I_STACK_PHASE bool prepare_command(ucn_native_t *n, uint16_t i)
     for (older = 0U; older < UCN_NATIVE_CAPACITY; ++older) {
         if (n->commands[older].valid && n->commands[older].channel == cmd->channel && n->commands[older].order < cmd->order) { return false; }
     }
+    while (cmd->next_target < (cmd->unicast ? 1U : c->target_count) && n->lifecycle != NULL &&
+        (n->lifecycle->cancelled[i] & (UINT32_C(1) << cmd->next_target))) { ++cmd->next_target; }
     if (cmd->next_target >= (cmd->unicast ? 1U : c->target_count)) { cmd->valid = 0U; return false; }
     if (source_blocked || n->stopping || n->now >= cmd->deadline) {
-        n->stats.failed += (cmd->unicast ? 1U : c->target_count) - cmd->next_target;
+        for (older = cmd->next_target; older < (cmd->unicast ? 1U : c->target_count); ++older) {
+            if (n->lifecycle == NULL || !(n->lifecycle->cancelled[i] & (UINT32_C(1) << older))) { ++n->stats.failed; }
+        }
         cmd->valid = 0U; return false;
     }
     {
@@ -471,12 +622,26 @@ static UCN_I_STACK_PHASE void poll_backend(ucn_native_t *n)
             m->protection < c->security_minimum || m->protection > UCN_NATIVE_ENCRYPTED || !m->origin_sequence ||
             !m->scope.instance || !m->scope.generation || m->scope.reserved_zero) { continue; }
         for (src = 0U; src < c->source_count; ++src) {
-            if (!source_equal(c->sources[src], m->source) || n->fenced[ch][src] || n->stopping ||
-                (c->queue_policy == UCN_NATIVE_KEEP_LATEST && m->origin_sequence <= n->source_high[ch][src])) { continue; }
+            if (!source_equal(c->sources[src], m->source) || n->fenced[ch][src] || n->stopping) { continue; }
             leave(n, UCN_OK);
             if (n->backend->validate(n->backend->context, &m->scope, &m->source, c->service_id,
                 c->security_minimum, n->now, principal) != UCN_OK) { return; }
             if (enter(n) != UCN_OK) { return; }
+            if (n->lifecycle != NULL) {
+                ucn_native_scope_t *prior = &n->lifecycle->source[ch][src];
+                if (prior->instance != 0U && (!scope_namespace(*prior, m->scope) ||
+                    m->scope.generation < prior->generation ||
+                    (scope_equal(*prior, m->scope) && n->lifecycle->retired_source[ch][src]))) {
+                    leave(n, UCN_OK); return;
+                }
+                if (!scope_equal(*prior, m->scope)) {
+                    *prior = m->scope; n->source_high[ch][src] = 0U;
+                    n->lifecycle->retired_source[ch][src] = 0U;
+                }
+            }
+            if (c->queue_policy == UCN_NATIVE_KEEP_LATEST && m->origin_sequence <= n->source_high[ch][src]) {
+                leave(n, UCN_OK); return;
+            }
             at = event_slot(n, ch, src, false);
             if (at == UINT16_MAX || n->event_order == UINT32_MAX) { ++n->stats.dropped; leave(n, UCN_OK); return; }
             if (m->origin_sequence > n->source_high[ch][src]) { n->source_high[ch][src] = m->origin_sequence; }
@@ -556,7 +721,10 @@ ucn_result_t ucn_native_dispatch(ucn_native_t *n, uint64_t now, uint16_t budget,
                 }
                 if (blocked) { continue; }
             }
-            if (n->stopping || n->fenced[ev->channel][ev->source] || now < ev->age_anchor ||
+            if ((!ev->local && n->lifecycle != NULL &&
+                (n->lifecycle->retired_source[ev->channel][ev->source] ||
+                !scope_equal(n->lifecycle->source[ev->channel][ev->source], ev->scope))) ||
+                n->stopping || n->fenced[ev->channel][ev->source] || now < ev->age_anchor ||
                 now - ev->age_anchor >= n->channels[ev->channel].max_local_age_us) { ev->valid = 0U; ++n->stats.dropped; continue; }
             /* IRQ capture may occur after step's clock snapshot. Do not deliver
              * before capture, and never extend lifetime past local admission. */

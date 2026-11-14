@@ -607,7 +607,10 @@ pub struct SecurityConfig<'a> {
     pub acl: &'a [AclRule],
 }
 
-struct SessionSlot<const REPLAY_SLOTS: usize> {
+const SESSION_ACL_MAX_RULES: usize = 64;
+
+struct SessionSlot<'a, const REPLAY_SLOTS: usize> {
+    acl: Option<&'a [AclRule]>,
     occupied: bool,
     slot_generation: u32,
     phase: SessionPhase,
@@ -622,8 +625,9 @@ struct SessionSlot<const REPLAY_SLOTS: usize> {
     hop_tx_consumed: u32,
 }
 
-impl<const REPLAY_SLOTS: usize> SessionSlot<REPLAY_SLOTS> {
+impl<const REPLAY_SLOTS: usize> SessionSlot<'_, REPLAY_SLOTS> {
     const EMPTY: Self = Self {
+        acl: None,
         occupied: false,
         slot_generation: 0,
         phase: SessionPhase::Empty,
@@ -645,7 +649,7 @@ pub struct SecurityOwner<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize> {
     next_operation_id: u32,
     replay_maintenance_cursor: usize,
     codec: CodecWorkspace,
-    sessions: [SessionSlot<REPLAY_SLOTS>; SESSIONS],
+    sessions: [SessionSlot<'a, REPLAY_SLOTS>; SESSIONS],
 }
 
 /// Nano Profile：2 个 Peer Session，每 Session 2 个并发 Replay reservation。
@@ -937,6 +941,47 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         Ok((handle, requirement))
     }
 
+    /// Bind explicit immutable product ACL before activation, replacing the default ACL.
+    /// Between 1 and 64 exact rules are borrowed for the Owner lifetime; no successor inherits the grant.
+    ///
+    /// ```compile_fail
+    /// use ucn_security::{AclRule, SecurityOwner, SessionHandle};
+    /// fn temporary<'a>(owner: &mut SecurityOwner<'a, 2, 2>, session: SessionHandle, rule: AclRule) {
+    ///     let rules = [rule];
+    ///     owner.bind_session_acl(session, &rules).unwrap();
+    /// }
+    /// ```
+    /// # Errors
+    /// Invalid rules, non-pending/foreign Session or attempted rebinding.
+    pub fn bind_session_acl(&mut self, session: SessionHandle, rules: &'a [AclRule]) -> Result<()> {
+        if rules.is_empty() || rules.len() > SESSION_ACL_MAX_RULES {
+            return Err(Error::Argument);
+        }
+        if self.config.provider_gate.is_active() {
+            return Err(Error::State);
+        }
+        let slot = self.slot_mut(session)?;
+        if slot.phase != SessionPhase::AwaitingDurability || slot.acl.is_some() {
+            return Err(Error::State);
+        }
+        let candidate = slot.candidate.ok_or(Error::State)?;
+        for (i, rule) in rules.iter().enumerate() {
+            if rule.peer_principal != candidate.peer.principal
+                || rule.peer_binding_generation != candidate.peer.generation
+                || (rule.context_fingerprint != candidate.origin_fingerprint
+                    && (!matches!(candidate.hop_profile, HopProfile::H1 | HopProfile::H3)
+                        || rule.context_fingerprint != candidate.hop_fingerprint))
+                || (rule.protocol_opcode != 0
+                    && ProtocolOpcode::try_from(rule.protocol_opcode).is_err())
+                || rules[..i].contains(rule)
+            {
+                return Err(Error::Argument);
+            }
+        }
+        slot.acl = Some(rules);
+        Ok(())
+    }
+
     /// 绑定 Coordinator 实际提交得到的精确 Persistence Handle。
     ///
     /// # Errors
@@ -1076,6 +1121,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         slot.occupied = false;
         slot.phase = SessionPhase::Empty;
         slot.candidate = None;
+        slot.acl = None;
         Ok(())
     }
 
@@ -1229,7 +1275,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         {
             return Err(Error::Argument);
         }
-        if self.config.acl.iter().any(|rule| {
+        if slot.acl.unwrap_or(self.config.acl).iter().any(|rule| {
             rule.peer_principal == candidate.peer.principal
                 && rule.peer_binding_generation == candidate.peer.generation
                 && rule.context_fingerprint == request.context_fingerprint
@@ -1616,7 +1662,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         leave_result
     }
 
-    fn slot(&self, handle: SessionHandle) -> Result<&SessionSlot<REPLAY_SLOTS>> {
+    fn slot(&self, handle: SessionHandle) -> Result<&SessionSlot<'a, REPLAY_SLOTS>> {
         let index = self.slot_index(handle)?;
         let slot = &self.sessions[index];
         if !slot.occupied
@@ -1629,7 +1675,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
         Ok(slot)
     }
 
-    fn slot_mut(&mut self, handle: SessionHandle) -> Result<&mut SessionSlot<REPLAY_SLOTS>> {
+    fn slot_mut(&mut self, handle: SessionHandle) -> Result<&mut SessionSlot<'a, REPLAY_SLOTS>> {
         let index = self.slot_index(handle)?;
         let slot = &mut self.sessions[index];
         if !slot.occupied
@@ -1655,7 +1701,7 @@ impl<'a, const SESSIONS: usize, const REPLAY_SLOTS: usize>
 }
 
 fn validate_active_slot<const REPLAY_SLOTS: usize>(
-    slot: &SessionSlot<REPLAY_SLOTS>,
+    slot: &SessionSlot<'_, REPLAY_SLOTS>,
     candidate: HandshakeCandidate,
     facts: CurrentFacts,
 ) -> Result<()> {

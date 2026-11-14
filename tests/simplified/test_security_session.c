@@ -29,7 +29,12 @@ typedef struct test_provider {
     uint8_t reentry_checked;
     uint8_t reinit_checked;
     uint8_t corrupt_o1_payload;
+    const ucn_i_peer_reauth_record_t *reauth_record;
+    const ucn_i_security_candidate_t *reauth_candidate;
+    uint32_t reauth_verify_calls;
 } test_provider_t;
+
+static ucn_result_t reauth_identity_verify(void *, const uint8_t[16], const uint8_t[227], const uint8_t *, uint8_t);
 
 static ucn_result_t lock_enter(void *context)
 {
@@ -61,6 +66,7 @@ static ucn_result_t verify_session(
 
     provider->calls++;
     if (provider->owner != NULL) {
+        ucn_i_security_acl_rule_t rule;
         memset(&sentinel, 0xA5, sizeof(sentinel));
         before = sentinel;
         if (ucn_i_security_session_get(provider->owner,
@@ -70,6 +76,14 @@ static ucn_result_t verify_session(
             return UCN_ERR_STATE;
         }
         provider->reentry_checked = 1U;
+        if (candidate != NULL) {
+            memset(&rule, 0, sizeof(rule));
+            memcpy(rule.peer_principal, candidate->peer.principal, 16U);
+            memcpy(rule.context_fingerprint, candidate->origin_fingerprint, 16U);
+            rule.peer_binding_generation = candidate->peer.binding_generation;
+            rule.service_id = 0x1201U; rule.direction = UCN_I_SECURITY_ACCESS_OUTBOUND;
+            if (ucn_i_security_bind_session_acl(provider->owner, provider->invalid_handle, &rule, 1U) != UCN_ERR_STATE) { return UCN_ERR_STATE; }
+        }
         if (provider->reinit_config != NULL) {
             if (ucn_i_security_owner_init(provider->owner,
                                           provider->reinit_config) !=
@@ -78,6 +92,17 @@ static ucn_result_t verify_session(
             }
             provider->reinit_checked = 1U;
         }
+    }
+    if (provider->reauth_record != NULL) {
+        uint8_t message[227];
+        if (candidate == NULL || provider->reauth_candidate == NULL || proof == NULL || proof_bytes != 32U ||
+            memcmp(candidate, provider->reauth_candidate, sizeof(*candidate)) != 0) { return UCN_ERR_SECURITY; }
+        memcpy(message, "UCN6-PEER-REAUTH-V2", 19U);
+        memcpy(message + 19U, provider->reauth_record->canonical, 208U);
+        message[20] = 1U;
+        if (reauth_identity_verify(NULL, message + 59U, message, proof, 16U) != UCN_OK) { return UCN_ERR_SECURITY; }
+        message[20] = 2U;
+        return reauth_identity_verify(NULL, message + 35U, message, proof + 16U, 16U);
     }
     if (candidate == NULL || proof == NULL || proof_bytes != 1U ||
         proof[0] != provider->expect_proof) {
@@ -107,6 +132,33 @@ static void test_tag(const ucn_i_security_key_selector_t *selector,
         value = value * UINT32_C(1664525) + UINT32_C(1013904223);
         tag[index] = (uint8_t)(value >> 24U);
     }
+}
+
+static ucn_result_t reauth_identity_verify(void *context, const uint8_t principal[16],
+    const uint8_t message[227], const uint8_t *proof, uint8_t bytes)
+{
+    uint8_t expected[16];
+    ucn_i_security_key_selector_t identity_key;
+    test_provider_t *provider = context;
+    memset(&identity_key, 0, sizeof(identity_key)); identity_key.suite_id = 1U;
+    identity_key.key_id = (uint16_t)(principal[0] + 1U); identity_key.key_generation = 1U;
+    if (provider != NULL) {
+        bool active = false, fenced = false;
+        ucn_i_callback_claim_t claim;
+        ++provider->reauth_verify_calls;
+        if (ucn_i_callback_gate_view(provider->owner->provider_gate, &active, &claim) != UCN_OK || !active ||
+            ucn_i_security_peer_is_fenced(provider->owner, &provider->reauth_candidate->local,
+                &provider->reauth_candidate->peer, &fenced) != UCN_ERR_STATE || fenced) { return UCN_ERR_STATE; }
+    }
+    test_tag(&identity_key, message, 227U, principal, 16U, expected);
+    return bytes == 16U && memcmp(expected, proof, 16U) == 0 ? UCN_OK : UCN_ERR_SECURITY;
+}
+static void reauth_identity_sign(const uint8_t principal[16], const uint8_t message[227], uint8_t proof[16])
+{
+    ucn_i_security_key_selector_t identity_key;
+    memset(&identity_key, 0, sizeof(identity_key)); identity_key.suite_id = 1U;
+    identity_key.key_id = (uint16_t)(principal[0] + 1U); identity_key.key_generation = 1U;
+    test_tag(&identity_key, message, 227U, principal, 16U, proof);
 }
 
 static void test_write_be(uint8_t *output, uint64_t value, uint8_t bytes)
@@ -505,14 +557,62 @@ typedef struct session_fixture {
     ucn_i_security_current_facts_t facts;
 } session_fixture_t;
 
-static int fixture_activate_profile(session_fixture_t *fixture,
+static int pending_policy_rejects_invalid_without_writes(session_fixture_t *f,
+    const ucn_i_security_acl_rule_t *grant)
+{
+    static ucn_i_security_owner_t before;
+    ucn_i_security_acl_rule_t bad[2];
+    ucn_i_security_handle_t foreign = f->handle;
+    ucn_i_security_candidate_t output, output_before;
+    unsigned i;
+    before = f->owner; foreign.owner_instance++;
+    {
+        const ucn_i_callback_claim_t claim = {99U, 100U, 1U, 1U};
+        CHECK(ucn_i_callback_gate_enter(&f->gate, &claim) == UCN_OK);
+        CHECK(ucn_i_security_bind_session_acl(&f->owner, f->handle, grant, 1U) == UCN_ERR_STATE);
+        CHECK(ucn_i_callback_gate_leave(&f->gate, &claim) == UCN_OK);
+        CHECK(memcmp(&f->owner, &before, sizeof(before)) == 0);
+    }
+    CHECK(ucn_i_security_bind_session_acl(&f->owner, foreign, grant, 1U) == UCN_ERR_STATE);
+    CHECK(ucn_i_security_bind_session_acl(&f->owner, f->handle, NULL, 1U) == UCN_ERR_ARGUMENT);
+    CHECK(ucn_i_security_bind_session_acl(&f->owner, f->handle, grant, 0U) == UCN_ERR_ARGUMENT);
+    CHECK(ucn_i_security_bind_session_acl(&f->owner, f->handle, grant, UCN_I_SECURITY_SESSION_ACL_MAX + 1U) == UCN_ERR_ARGUMENT);
+    CHECK(ucn_i_security_bind_session_acl(&f->owner, f->handle, (const ucn_i_security_acl_rule_t *)&f->owner, 1U) == UCN_ERR_ARGUMENT);
+    for (i = 0U; i < 8U; ++i) {
+        bad[0] = *grant;
+        switch (i) {
+        case 0U: bad[0].peer_principal[0] ^= 1U; break;
+        case 1U: ++bad[0].peer_binding_generation; break;
+        case 2U: bad[0].context_fingerprint[0] ^= 1U; break;
+        case 3U: bad[0].protocol_opcode = UINT16_MAX; break;
+        case 4U: bad[0].direction = 3U; break;
+        case 5U: bad[0].reserved_zero[0] = 1U; break;
+        case 6U: bad[0].service_id = UINT16_MAX; break;
+        default: bad[0].service_id = 0U; bad[0].protocol_opcode = 0U; break;
+        }
+        CHECK(ucn_i_security_bind_session_acl(&f->owner, f->handle, bad, 1U) == UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&f->owner, &before, sizeof(before)) == 0);
+    }
+    bad[0] = bad[1] = *grant;
+    CHECK(ucn_i_security_bind_session_acl(&f->owner, f->handle, bad, 2U) == UCN_ERR_ARGUMENT);
+    memset(&output, 0xA5, sizeof(output)); output_before = output;
+    CHECK(ucn_i_security_session_candidate_get(&f->owner, f->handle, &output) == UCN_ERR_STATE);
+    CHECK(memcmp(&output, &output_before, sizeof(output)) == 0);
+    CHECK(memcmp(&f->owner, &before, sizeof(before)) == 0);
+    return 0;
+}
+
+static int fixture_activate_profile_policy(session_fixture_t *fixture,
                             const ucn_i_security_candidate_t *candidate,
                             uint8_t direction,
                             uint32_t runtime_instance,
                             uint16_t gate_owner,
                             uint16_t service_id,
                             uint16_t protocol_opcode,
-                            uint32_t realm_id, uint8_t address_width)
+                            uint32_t realm_id, uint8_t address_width,
+                            const ucn_i_security_acl_rule_t *session_acl,
+                            uint16_t session_acl_count,
+                            const ucn_i_security_acl_rule_t *initial_acl)
 {
     ucn_i_security_durability_base_t durability =
         durability_make(0x8001U, candidate->session_generation);
@@ -532,7 +632,9 @@ static int fixture_activate_profile(session_fixture_t *fixture,
     fixture->acl = acl_make(candidate, direction);
     fixture->acl.service_id = service_id;
     fixture->acl.protocol_opcode = protocol_opcode;
-    gate_ops = lock_ops(&fixture->gate_lock);
+    if (initial_acl != NULL) { fixture->acl = *initial_acl; }
+    /* Exercise the supported shared non-recursive lock arrangement for hot policy. */
+    gate_ops = lock_ops(session_acl != NULL ? &fixture->state_lock : &fixture->gate_lock);
     CHECK(ucn_i_callback_gate_init(&fixture->gate, gate_owner,
                                    &gate_ops) == UCN_OK);
     fixture->config = config_make(&fixture->state_lock, &fixture->gate,
@@ -547,6 +649,16 @@ static int fixture_activate_profile(session_fixture_t *fixture,
     CHECK(ucn_i_security_prepare_static_session(
               &fixture->owner, &fixture->candidate, &session_proof, 1U,
               &durability, 1000U, &fixture->handle) == UCN_OK);
+    if (session_acl != NULL) {
+        static ucn_i_security_owner_t before;
+        CHECK(pending_policy_rejects_invalid_without_writes(fixture, session_acl) == 0);
+        CHECK(ucn_i_security_bind_session_acl(&fixture->owner, fixture->handle,
+            session_acl, session_acl_count) == UCN_OK);
+        before = fixture->owner;
+        CHECK(ucn_i_security_bind_session_acl(&fixture->owner, fixture->handle,
+            session_acl, session_acl_count) == UCN_ERR_STATE);
+        CHECK(memcmp(&fixture->owner, &before, sizeof(before)) == 0);
+    }
     CHECK(ucn_i_security_requirement_get(&fixture->owner, fixture->handle,
                                          &requirement) == UCN_OK);
     memset(&persistence_handle, 0, sizeof(persistence_handle));
@@ -585,6 +697,16 @@ static int fixture_activate_profile(session_fixture_t *fixture,
     CHECK(ucn_i_security_activate(&fixture->owner, fixture->handle,
                                   &proof, &fixture->facts) == UCN_OK);
     return 0;
+}
+
+static int fixture_activate_profile(session_fixture_t *fixture,
+    const ucn_i_security_candidate_t *candidate, uint8_t direction,
+    uint32_t runtime_instance, uint16_t gate_owner, uint16_t service_id,
+    uint16_t protocol_opcode, uint32_t realm_id, uint8_t address_width)
+{
+    return fixture_activate_profile_policy(fixture, candidate, direction,
+        runtime_instance, gate_owner, service_id, protocol_opcode,
+        realm_id, address_width, NULL, 0U, NULL);
 }
 
 static int fixture_activate(session_fixture_t *fixture,
@@ -1908,6 +2030,17 @@ static int run_c0_protect_roundtrip(uint8_t origin_level,
     request.hop_limit = 2U;
     request.direction = UCN_I_SECURITY_ACCESS_OUTBOUND;
     memset(packet, 0xA5, sizeof(packet));
+    if (hop_profile == UCN_I_HOP_PROFILE_H1) {
+        static ucn_i_security_c0_path_workspace_t path, prior_path;
+        static ucn_i_security_owner_t prior_owner;
+        memset(&path, 0xA5, sizeof(path)); prior_path = path; prior_owner = sender.owner;
+        provider_calls = sender.provider.calls;
+        CHECK(ucn_i_security_c0_path_protect(&sender.owner, &request, sender.handle, &sender.facts,
+            plaintext, sizeof(plaintext), &path, packet, sizeof(packet), &packet_bytes) == UCN_ERR_STATE);
+        CHECK(memcmp(&sender.owner, &prior_owner, sizeof(prior_owner)) == 0);
+        CHECK(memcmp(&path, &prior_path, sizeof(path)) == 0 && packet[0] == 0xA5U && packet_bytes == SIZE_MAX);
+        CHECK(sender.provider.calls == provider_calls);
+    }
     CHECK(ucn_i_security_c0_protect(
               &sender.owner, &request, plaintext, sizeof(plaintext),
               &sender_workspace, packet, 1U, &packet_bytes) ==
@@ -1956,6 +2089,23 @@ static int run_c0_protect_roundtrip(uint8_t origin_level,
     CHECK(access.direction == UCN_I_SECURITY_ACCESS_INBOUND);
     CHECK(memcmp(&resolved_facts, &receiver.facts,
                  sizeof(resolved_facts)) == 0);
+    if (hop_profile == UCN_I_HOP_PROFILE_H1) {
+        static ucn_i_security_c0_path_workspace_t path, prior_path;
+        static ucn_i_security_owner_t prior_owner;
+        ucn_i_security_hop_replay_handle_t hop, prior_hop;
+        ucn_i_security_authenticated_control_t prior_fact;
+        memset(&path, 0xA5, sizeof(path)); prior_path = path; prior_owner = receiver.owner;
+        memset(&hop, 0x5A, sizeof(hop)); prior_hop = hop;
+        memset(&fact, 0xA5, sizeof(fact)); prior_fact = fact; memset(opened, 0xA5, sizeof(opened));
+        provider_calls = receiver.provider.calls;
+        CHECK(ucn_i_security_c0_path_open(&receiver.owner, &access, &resolved_facts,
+            receiver.handle, &receiver.facts, packet, packet_bytes, &path, opened, sizeof(opened),
+            &opened_bytes, &fact, &hop) == UCN_ERR_STATE);
+        CHECK(memcmp(&receiver.owner, &prior_owner, sizeof(prior_owner)) == 0);
+        CHECK(memcmp(&path, &prior_path, sizeof(path)) == 0 && opened[0] == 0xA5U && opened_bytes == SIZE_MAX);
+        CHECK(memcmp(&hop, &prior_hop, sizeof(hop)) == 0 && memcmp(&fact, &prior_fact, sizeof(fact)) == 0);
+        CHECK(receiver.provider.calls == provider_calls);
+    }
     {
         ucn_i_security_c0_open_call_t call, call_before;
         static ucn_i_security_owner_t owner_before;
@@ -2298,8 +2448,413 @@ static int test_peer_reauth_codec(void)
     return 0;
 }
 
+/* EN: A fenced predecessor is not a reason to resurrect it or reset history.
+ * ZH: 围栏后允许准备精确后继，但不复活前驱或绕过耐久激活门。 */
+static int test_fenced_successor_requires_exact_prior(void)
+{
+    static session_fixture_t f;
+    static ucn_i_security_owner_t before;
+    ucn_i_security_candidate_t next;
+    ucn_i_security_durability_base_t base;
+    ucn_i_security_handle_t successor, sentinel;
+    ucn_i_security_session_view_t view;
+    const uint8_t proof = 0xC3U;
+    next = candidate_make(0x20U, 1U);
+    CHECK(fixture_activate(&f, &next, UCN_I_SECURITY_ACCESS_OUTBOUND,
+        88U, 89U, 0x1201U, 0U) == 0);
+    CHECK(ucn_i_security_fence(&f.owner, f.handle) == UCN_OK);
+    next = f.candidate;
+    next.session_generation = 2U;
+    next.origin_tx.key_generation = next.origin_rx.key_generation = 2U;
+    next.origin_fingerprint[0] ^= 0x40U;
+    next.transcript_digest[0] ^= 0x40U;
+    base = durability_make(f.rule.domain_id, 2U);
+    memset(&successor, 0xA5, sizeof(successor)); sentinel = successor;
+    before = f.owner;
+    /* A fabricated later history is not a successor of the fenced slot. */
+    base.prior_session_generation = 2U; next.session_generation = 3U;
+    CHECK(ucn_i_security_prepare_static_session(&f.owner, &next, &proof, 1U,
+        &base, 1500U, &successor) == UCN_ERR_STATE);
+    CHECK(memcmp(&f.owner, &before, sizeof(before)) == 0);
+    CHECK(memcmp(&successor, &sentinel, sizeof(sentinel)) == 0);
+    base.prior_session_generation = 1U; next.session_generation = 2U;
+    CHECK(ucn_i_security_prepare_static_session(&f.owner, &next, &proof, 1U,
+        &base, 1500U, &successor) == UCN_OK);
+    CHECK(ucn_i_security_session_get(&f.owner, successor, &view) == UCN_OK);
+    CHECK(view.phase == UCN_I_SECURITY_SESSION_AWAITING_DURABILITY);
+    CHECK(ucn_i_security_session_get(&f.owner, f.handle, &view) == UCN_OK);
+    CHECK(view.phase == UCN_I_SECURITY_SESSION_FENCED);
+    CHECK(ucn_i_security_fence(&f.owner, successor) == UCN_OK);
+    CHECK(ucn_i_security_retire_fenced(&f.owner, successor) == UCN_OK);
+    CHECK(fixture_destroy(&f) == 0);
+    return 0;
+}
+
+static int test_explicit_pending_session_policy_replaces_defaults(void)
+{
+    static session_fixture_t f;
+    static ucn_i_security_owner_t owner_before;
+    static union {
+        ucn_i_security_candidate_t candidate_sized;
+        ucn_i_security_acl_rule_t rule;
+    } borrowed_policy;
+    ucn_i_security_candidate_t candidate = candidate_make(0x20U, 1U);
+    ucn_i_security_acl_rule_t grant = acl_make(&candidate, UCN_I_SECURITY_ACCESS_OUTBOUND);
+    ucn_i_security_acl_rule_t old_default = grant;
+    ucn_i_security_access_request_t access;
+    grant.service_id = 0x1202U;
+    memset(&borrowed_policy, 0, sizeof(borrowed_policy)); borrowed_policy.rule = grant;
+    old_default.context_fingerprint[0] ^= 0x80U;
+    CHECK(fixture_activate_profile_policy(&f, &candidate, UCN_I_SECURITY_ACCESS_OUTBOUND,
+        88U, 89U, 0x1201U, 0U, UINT32_C(0x12345678), 1U, &borrowed_policy.rule, 1U, &old_default) == 0);
+    {
+        ucn_i_security_candidate_t snapshot;
+        ucn_i_security_candidate_t sentinel;
+        ucn_i_security_handle_t foreign = f.handle;
+        memset(&snapshot, 0xA5, sizeof(snapshot));
+        CHECK(ucn_i_security_session_candidate_get(&f.owner, f.handle, &snapshot) == UCN_OK);
+        CHECK(memcmp(&snapshot, &candidate, sizeof(candidate)) == 0);
+        owner_before = f.owner;
+        CHECK(ucn_i_security_session_candidate_get(&f.owner, f.handle,
+            &borrowed_policy.candidate_sized) == UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&borrowed_policy.rule, &grant, sizeof(grant)) == 0);
+        CHECK(ucn_i_security_peer_is_fenced(&f.owner, &candidate.local, &candidate.peer,
+            (bool *)(void *)&borrowed_policy.rule) == UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&borrowed_policy.rule, &grant, sizeof(grant)) == 0);
+        CHECK(ucn_i_security_peer_is_fenced(&f.owner, &candidate.local, &candidate.peer,
+            (bool *)(void *)&f.acl) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_peer_is_fenced(&f.owner, &candidate.local, &candidate.peer,
+            (bool *)(void *)&f.rule) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_session_candidate_get(&f.owner, f.handle,
+            &f.owner.sessions[f.handle.slot].candidate) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_bind_session_acl(&f.owner, f.handle, &grant, 1U) == UCN_ERR_STATE);
+        CHECK(memcmp(&f.owner, &owner_before, sizeof(owner_before)) == 0);
+        memset(&snapshot, 0xA5, sizeof(snapshot)); sentinel = snapshot; foreign.slot_generation++;
+        CHECK(ucn_i_security_session_candidate_get(&f.owner, foreign, &snapshot) == UCN_ERR_STATE);
+        CHECK(memcmp(&snapshot, &sentinel, sizeof(snapshot)) == 0);
+    }
+    memset(&access, 0, sizeof(access)); access.session = f.handle;
+    memcpy(access.context_fingerprint, candidate.origin_fingerprint, 16U);
+    access.service_id = 0x1202U; access.direction = UCN_I_SECURITY_ACCESS_OUTBOUND;
+    CHECK(ucn_i_security_authorize(&f.owner, &access, &f.facts) == UCN_OK);
+    access.service_id = 0x1201U;
+    memcpy(access.context_fingerprint, old_default.context_fingerprint, 16U);
+    CHECK(ucn_i_security_authorize(&f.owner, &access, &f.facts) == UCN_ERR_ACCESS);
+    access.service_id = 0x1202U; memcpy(access.context_fingerprint, candidate.origin_fingerprint, 16U); access.context_fingerprint[0] ^= 1U;
+    CHECK(ucn_i_security_authorize(&f.owner, &access, &f.facts) == UCN_ERR_ACCESS);
+    CHECK(ucn_i_security_fence(&f.owner, f.handle) == UCN_OK);
+    {
+        ucn_i_security_candidate_t snapshot, sentinel;
+        memset(&snapshot, 0xA5, sizeof(snapshot)); sentinel = snapshot;
+        CHECK(ucn_i_security_session_candidate_get(&f.owner, f.handle, &snapshot) == UCN_ERR_STATE);
+        CHECK(memcmp(&snapshot, &sentinel, sizeof(snapshot)) == 0);
+    }
+    owner_before = f.owner;
+    CHECK(ucn_i_security_bind_session_acl(&f.owner, f.handle, &grant, 1U) == UCN_ERR_STATE);
+    CHECK(memcmp(&f.owner, &owner_before, sizeof(owner_before)) == 0);
+    {
+        ucn_i_security_candidate_t next = candidate;
+        ucn_i_security_durability_base_t base = durability_make(f.rule.domain_id, 2U);
+        ucn_i_security_handle_t successor;
+        ucn_i_security_acl_rule_t new_grant = grant;
+        ucn_i_security_acl_rule_t maximum[UCN_I_SECURITY_SESSION_ACL_MAX];
+        uint16_t i;
+        const uint8_t proof = 0xC3U;
+        next.session_generation = 2U; ++next.origin_tx.key_generation; ++next.origin_rx.key_generation;
+        next.origin_fingerprint[0] ^= 0x40U; next.transcript_digest[0] ^= 0x40U;
+        CHECK(ucn_i_security_prepare_static_session(&f.owner, &next, &proof, 1U, &base, 1500U, &successor) == UCN_OK);
+        CHECK(f.owner.sessions[successor.slot].session_acl == NULL);
+        CHECK(f.owner.sessions[successor.slot].session_acl_count == 0U);
+        owner_before = f.owner;
+        CHECK(ucn_i_security_bind_session_acl(&f.owner, successor, &grant, 1U) == UCN_ERR_ARGUMENT);
+        CHECK(memcmp(&f.owner, &owner_before, sizeof(owner_before)) == 0);
+        memcpy(new_grant.context_fingerprint, next.origin_fingerprint, 16U);
+        for (i = 0U; i < UCN_I_SECURITY_SESSION_ACL_MAX; ++i) { maximum[i] = new_grant; maximum[i].service_id = (uint16_t)(i + 1U); }
+        CHECK(ucn_i_security_bind_session_acl(&f.owner, successor, maximum, UCN_I_SECURITY_SESSION_ACL_MAX) == UCN_OK);
+        owner_before = f.owner;
+        CHECK(ucn_i_security_borrowed_output_check(&f.owner, maximum, sizeof(maximum)) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_borrowed_output_check(&f.owner, &maximum[63].direction, 1U) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_borrowed_output_check(&f.owner, &f.acl, sizeof(f.acl)) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_borrowed_output_check(&f.owner, &f.rule, sizeof(f.rule)) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_borrowed_output_check(&f.owner, &f.owner, 1U) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_borrowed_output_check(&f.owner, NULL, 1U) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_borrowed_output_check(&f.owner, &i, 0U) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_borrowed_output_check(&f.owner, &i, sizeof(i)) == UCN_OK);
+        CHECK(memcmp(&f.owner, &owner_before, sizeof(owner_before)) == 0);
+        CHECK(ucn_i_security_fence(&f.owner, successor) == UCN_OK);
+        CHECK(ucn_i_security_borrowed_output_check(&f.owner, maximum, sizeof(maximum)) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_retire_fenced(&f.owner, successor) == UCN_OK);
+        CHECK(ucn_i_security_borrowed_output_check(&f.owner, maximum, sizeof(maximum)) == UCN_OK);
+    }
+    CHECK(fixture_destroy(&f) == 0);
+    CHECK(fixture_activate_profile_policy(&f, &candidate, UCN_I_SECURITY_ACCESS_OUTBOUND,
+        90U, 91U, 0x1201U, 0U, UINT32_C(0x12345678), 1U, NULL, 0U, &old_default) == 0);
+    access.session = f.handle; access.service_id = 0x1201U;
+    memcpy(access.context_fingerprint, candidate.origin_fingerprint, 16U);
+    CHECK(ucn_i_security_authorize(&f.owner, &access, &f.facts) == UCN_ERR_ACCESS);
+    CHECK(fixture_destroy(&f) == 0);
+    return 0;
+}
+
+static int test_local_c0_retry_refresh_preserves_origin(void)
+{
+    static session_fixture_t f;
+    static ucn_i_security_packet_workspace_t workspace;
+    static ucn_i_security_owner_t before;
+    ucn_i_security_candidate_t candidate = candidate_make(0x20U, 1U);
+    ucn_i_security_acl_rule_t grants[2];
+    ucn_i_security_c0_protect_request_t request;
+    ucn_i_c0_frame_t frame;
+    uint8_t packet[UCN_ADAPTER_FRAME_BYTES], output[UCN_ADAPTER_FRAME_BYTES];
+    const uint8_t plaintext[3] = {1U, 2U, 3U};
+    size_t bytes = 0U, written = SIZE_MAX;
+    unsigned origin_calls;
+    candidate.hop_profile = UCN_I_HOP_PROFILE_H1;
+    candidate.hop_tx.suite_id = candidate.hop_rx.suite_id = 16U;
+    candidate.hop_tx.key_id = 11U; candidate.hop_rx.key_id = 12U;
+    candidate.hop_tx.key_generation = 41U; candidate.hop_rx.key_generation = 42U;
+    grants[0] = acl_make(&candidate, UCN_I_SECURITY_ACCESS_OUTBOUND);
+    grants[0].service_id = 0U; grants[0].protocol_opcode = UCN_I_OPCODE_DIAGNOSTIC_PING;
+    grants[1] = grants[0]; memcpy(grants[1].context_fingerprint, candidate.hop_fingerprint, 16U);
+    CHECK(fixture_activate_profile_policy(&f, &candidate, UCN_I_SECURITY_ACCESS_OUTBOUND,
+        88U, 89U, 0U, UCN_I_OPCODE_DIAGNOSTIC_PING, UINT32_C(0x12345678), 1U, grants, 2U, NULL) == 0);
+    memset(&request, 0, sizeof(request)); request.session = f.handle; request.facts = f.facts;
+    memcpy(request.context_fingerprint, candidate.origin_fingerprint, 16U);
+    request.transaction_id = 100U; request.protocol_opcode = UCN_I_OPCODE_DIAGNOSTIC_PING;
+    request.traffic_class = UCN_TRAFFIC_Q0; request.delivery_guarantee = UCN_DELIVERY_RELIABLE;
+    request.interaction_role = UCN_INTERACTION_REQUEST; request.payload_kind = UCN_I_PAYLOAD_DIAGNOSTIC;
+    request.hop_limit = 2U; request.direction = UCN_I_SECURITY_ACCESS_OUTBOUND;
+    CHECK(ucn_i_security_c0_protect(&f.owner, &request, plaintext, sizeof(plaintext),
+        &workspace, packet, sizeof(packet), &bytes) == UCN_OK);
+    {
+        ucn_i_security_acl_rule_t prior_grants[2]; unsigned calls = f.provider.calls;
+        memcpy(prior_grants, grants, sizeof(grants)); before = f.owner;
+        CHECK(ucn_i_security_c0_refresh_hop(&f.owner, f.handle, &f.facts, packet, bytes,
+            &workspace, (uint8_t *)grants, sizeof(grants), &written) == UCN_ERR_ARGUMENT);
+        CHECK(memcmp(grants, prior_grants, sizeof(grants)) == 0 && written == SIZE_MAX);
+        CHECK(memcmp(&f.owner, &before, sizeof(before)) == 0 && f.provider.calls == calls);
+        CHECK(ucn_i_security_c0_refresh_hop(&f.owner, f.handle, &f.facts, packet, bytes,
+            &workspace, output, sizeof(output), (size_t *)(void *)grants[0].context_fingerprint) == UCN_ERR_ARGUMENT);
+        CHECK(memcmp(grants, prior_grants, sizeof(grants)) == 0);
+        CHECK(memcmp(&f.owner, &before, sizeof(before)) == 0 && f.provider.calls == calls);
+    }
+    origin_calls = f.provider.protect_origin_calls;
+    CHECK(ucn_i_security_c0_refresh_hop(&f.owner, f.handle, &f.facts, packet, bytes,
+        &workspace, output, sizeof(output), &written) == UCN_OK);
+    CHECK(written == bytes && memcmp(packet, output, bytes - UCN_I_SECURITY_HOP_TRAILER_BYTES) == 0);
+    CHECK(f.provider.protect_origin_calls == origin_calls);
+    CHECK(ucn_i_c0_decode(output, written, 1U, UCN_I_CONTROL_H1, &frame) == UCN_OK);
+    CHECK(frame.hop_sequence == 2U);
+    {
+        uint8_t tampered[UCN_ADAPTER_FRAME_BYTES];
+        ucn_i_c0_frame_t original, bad;
+        ucn_i_security_current_facts_t wrong_facts = f.facts;
+        ucn_i_security_handle_t foreign = f.handle;
+        size_t tampered_bytes; unsigned i;
+        CHECK(ucn_i_c0_decode(packet, bytes, 1U, UCN_I_CONTROL_H1, &original) == UCN_OK);
+        for (i = 0U; i < 9U; ++i) {
+            bad = original;
+            switch (i) {
+            case 0U: ++bad.realm_id; break;
+            case 1U: ++bad.source_address; break;
+            case 2U: ++bad.destination_address; break;
+            case 3U: ++bad.source_binding_generation; break;
+            case 4U: ++bad.destination_binding_generation; break;
+            case 5U: bad.opcode = UCN_I_OPCODE_DIAGNOSTIC_PONG; break;
+            case 6U: ++bad.transaction_id; break;
+            case 7U: bad.hop_sequence = 99U; break;
+            default: bad.origin_security = UCN_I_ORIGIN_O2; break;
+            }
+            CHECK(ucn_i_c0_encode(&bad, 1U, UCN_I_CONTROL_H1, tampered, sizeof(tampered), &tampered_bytes) == UCN_OK);
+            memset(output, 0xA5, sizeof(output)); written = SIZE_MAX; before = f.owner;
+            CHECK(ucn_i_security_c0_refresh_hop(&f.owner, f.handle, &f.facts, tampered, tampered_bytes,
+                &workspace, output, sizeof(output), &written) != UCN_OK);
+            CHECK(memcmp(&f.owner, &before, sizeof(before)) == 0 && written == SIZE_MAX);
+            CHECK(output[0] == 0xA5U && output[sizeof(output) - 1U] == 0xA5U);
+        }
+        ++wrong_facts.link_generation; ++foreign.slot_generation;
+        CHECK(ucn_i_security_c0_refresh_hop(&f.owner, f.handle, &wrong_facts, packet, bytes,
+            &workspace, output, sizeof(output), &written) == UCN_ERR_STATE);
+        CHECK(ucn_i_security_c0_refresh_hop(&f.owner, foreign, &f.facts, packet, bytes,
+            &workspace, output, sizeof(output), &written) == UCN_ERR_STATE);
+        CHECK(ucn_i_security_c0_refresh_hop(&f.owner, f.handle, &f.facts, packet, bytes,
+            &workspace, output, 1U, &written) == UCN_ERR_NO_SPACE);
+        CHECK(memcmp(&f.owner, &before, sizeof(before)) == 0 && written == SIZE_MAX);
+        CHECK(ucn_i_security_c0_refresh_hop(&f.owner, f.handle, &f.facts, packet, bytes,
+            &workspace, output, sizeof(output), &written) == UCN_OK);
+        CHECK(memcmp(packet, output, bytes - UCN_I_SECURITY_HOP_TRAILER_BYTES) == 0);
+        CHECK(ucn_i_c0_decode(output, written, 1U, UCN_I_CONTROL_H1, &frame) == UCN_OK && frame.hop_sequence == 3U);
+    }
+    before = f.owner;
+    CHECK(ucn_i_security_c0_refresh_hop(&f.owner, f.handle, &f.facts, packet, bytes,
+        &workspace, packet, sizeof(packet), &written) == UCN_ERR_ARGUMENT);
+    CHECK(memcmp(&f.owner, &before, sizeof(before)) == 0);
+    CHECK(fixture_destroy(&f) == 0);
+    return 0;
+}
+
+static int test_signed_reauth_uses_both_histories_without_faking_local_prior(void)
+{
+    static session_fixture_t f;
+    static ucn_i_security_reauth_workspace_t work;
+    static ucn_i_security_owner_t before;
+    static union {
+        ucn_i_security_reauth_workspace_t workspace_sized;
+        ucn_i_security_acl_rule_t rule;
+    } borrowed_policy, policy_before;
+    ucn_i_security_candidate_t previous = candidate_make(0x20U, 1U), next;
+    ucn_i_peer_reauth_record_t record;
+    ucn_i_security_reauth_call_t call;
+    ucn_i_security_durability_base_t base = durability_make(0x8001U, 2U);
+    ucn_i_security_handle_t successor, sentinel;
+    uint8_t local_record[192], message[227], challenge[16], response[16], digest[32];
+    ucn_i_sha256_workspace_t hash;
+    uint8_t *b = record.canonical;
+    bool fenced = true;
+    const uint8_t old_proof = 0xC3U;
+    previous.origin_tx.key_id = 1U; previous.origin_rx.key_id = 2U;
+    previous.origin_tx.key_generation = previous.origin_rx.key_generation = 1U;
+    previous.hop_profile = UCN_I_HOP_PROFILE_H1;
+    previous.hop_tx.suite_id = previous.hop_rx.suite_id = 16U;
+    previous.hop_tx.key_id = 3U; previous.hop_rx.key_id = 4U;
+    previous.hop_tx.key_generation = previous.hop_rx.key_generation = 1U;
+    memset(&borrowed_policy, 0, sizeof(borrowed_policy));
+    borrowed_policy.rule = acl_make(&previous, UCN_I_SECURITY_ACCESS_OUTBOUND);
+    CHECK(fixture_activate_profile_policy(&f, &previous, UCN_I_SECURITY_ACCESS_OUTBOUND,
+        88U, 89U, 0x1201U, 0U, UINT32_C(0x12345678), 1U, &borrowed_policy.rule, 1U, NULL) == 0);
+    CHECK(ucn_i_security_peer_is_fenced(&f.owner, &previous.local, &previous.peer, &fenced) == UCN_OK && !fenced);
+    memcpy(local_record, f.owner.sessions[f.handle.slot].body, sizeof(local_record));
+    CHECK(ucn_i_security_fence(&f.owner, f.handle) == UCN_OK);
+    CHECK(ucn_i_security_peer_is_fenced(&f.owner, &previous.local, &previous.peer, &fenced) == UCN_OK && fenced);
+    memset(&record, 0, sizeof(record)); b[0] = 2U; b[1] = 2U; b[2] = 1U;
+    test_write_be(b + 4U, f.owner.realm_id, 4U);
+    test_write_be(b + 8U, previous.local.address, 4U); test_write_be(b + 12U, previous.local.binding_generation, 4U); memcpy(b + 16U, previous.local.principal, 16U);
+    test_write_be(b + 32U, previous.peer.address, 4U); test_write_be(b + 36U, previous.peer.binding_generation, 4U); memcpy(b + 40U, previous.peer.principal, 16U);
+    test_write_be(b + 56U, 1U, 4U); test_write_be(b + 60U, 3U, 4U);
+    b[64] = 1U; b[65] = 16U; test_write_be(b + 66U, 1U, 2U); test_write_be(b + 68U, 3U, 2U);
+    test_write_be(b + 72U, 3U, 4U); test_write_be(b + 76U, 3U, 4U);
+    test_write_be(b + 80U, 1U, 2U); test_write_be(b + 82U, 2U, 2U);
+    test_write_be(b + 84U, previous.link_generation, 4U); test_write_be(b + 88U, 12U, 4U);
+    test_write_be(b + 92U, 100U, 8U); test_write_be(b + 100U, 101U, 8U); test_write_be(b + 108U, 102U, 8U); test_write_be(b + 116U, 2000U, 8U);
+    memcpy(b + 124U, previous.transcript_digest, 32U);
+    test_write_be(b + 156U, 1U, 4U); test_write_be(b + 160U, 1U, 4U);
+    test_write_be(b + 164U, 2U, 4U); test_write_be(b + 168U, 2U, 4U); test_write_be(b + 172U, 2U, 4U); memset(b + 176U, 0x91, 32U);
+    memcpy(message, "UCN6-PEER-REAUTH-V2", 19U); memcpy(message + 19U, b, 208U);
+    CHECK(ucn_i_sha256_256(message, sizeof(message), digest, &hash) == UCN_OK);
+    next = previous; next.session_generation = 3U; next.expires_at_us = 3000U;
+    next.origin_tx.key_generation = next.origin_rx.key_generation = 3U;
+    next.hop_tx.key_generation = next.hop_rx.key_generation = 3U;
+    memcpy(next.origin_fingerprint, digest, 16U); memcpy(next.hop_fingerprint, digest + 16U, 16U); memcpy(next.transcript_digest, digest, 32U);
+    message[20] = 1U; reauth_identity_sign(previous.peer.principal, message, challenge);
+    message[20] = 2U; reauth_identity_sign(previous.local.principal, message, response);
+    memset(&call, 0, sizeof(call)); call.candidate = &next; call.previous = &previous;
+    call.local_record = local_record; call.record = &record; call.durability = &base;
+    call.challenge_proof = challenge; call.response_proof = response;
+    call.challenge_proof_bytes = call.response_proof_bytes = 16U;
+    call.verify_identity = reauth_identity_verify; call.verify_context = &f.provider;
+    call.started_us = 1000U; call.parent_deadline_us = 4500U; call.now_us = 1500U; call.initiator = 1U;
+    f.provider.reauth_record = &record; f.provider.reauth_candidate = &next;
+    memset(&successor, 0xA5, sizeof(successor)); sentinel = successor; before = f.owner;
+    CHECK(ucn_i_security_prepare_static_session(&f.owner, &next, &old_proof, 1U, &base, 1500U, &successor) == UCN_ERR_STATE);
+    CHECK(memcmp(&f.owner, &before, sizeof(before)) == 0);
+    policy_before = borrowed_policy;
+    CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call,
+        &borrowed_policy.workspace_sized, &successor) == UCN_ERR_ARGUMENT);
+    CHECK(memcmp(&borrowed_policy, &policy_before, sizeof(borrowed_policy)) == 0);
+    CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work,
+        (ucn_i_security_handle_t *)(void *)&borrowed_policy) == UCN_ERR_ARGUMENT);
+    CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work,
+        (ucn_i_security_handle_t *)(void *)&f.acl) == UCN_ERR_ARGUMENT);
+    CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work,
+        (ucn_i_security_handle_t *)(void *)&f.rule) == UCN_ERR_ARGUMENT);
+    CHECK(memcmp(&borrowed_policy, &policy_before, sizeof(borrowed_policy)) == 0);
+    CHECK(memcmp(&f.owner, &before, sizeof(before)) == 0 && f.provider.reauth_verify_calls == 0U);
+    {
+        static const uint16_t changed[] = {0, 1, 2, 3, 4, 8, 12, 16, 32, 36, 40, 56, 60,
+            64, 65, 66, 68, 70, 72, 76, 80, 82, 84, 88, 92, 100, 108, 116, 124, 156, 160, 164, 168, 172, 176};
+        size_t i;
+        for (i = 0U; i < sizeof(changed) / sizeof(changed[0]); ++i) {
+            b[changed[i]] ^= 1U;
+            CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, &successor) != UCN_OK);
+            CHECK(memcmp(&f.owner, &before, sizeof(before)) == 0 && memcmp(&successor, &sentinel, sizeof(sentinel)) == 0);
+            b[changed[i]] ^= 1U;
+        }
+        call.challenge_proof_bytes = 15U;
+        CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, &successor) == UCN_ERR_ARGUMENT);
+        call.challenge_proof_bytes = 65U;
+        CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, &successor) == UCN_ERR_ARGUMENT);
+        call.challenge_proof_bytes = 16U;
+        call.local_record = work.message;
+        CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, &successor) == UCN_ERR_ARGUMENT);
+        call.local_record = local_record;
+        CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, (ucn_i_security_handle_t *)&next) == UCN_ERR_ARGUMENT);
+        CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, (ucn_i_security_reauth_workspace_t *)&f.owner, &successor) == UCN_ERR_ARGUMENT);
+        call.now_us = 3000U;
+        CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, &successor) != UCN_OK);
+        call.now_us = 1500U;
+        base.prior_session_generation = 2U;
+        CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, &successor) != UCN_OK);
+        base.prior_session_generation = 1U;
+        CHECK(memcmp(&f.owner, &before, sizeof(before)) == 0 && f.provider.reauth_verify_calls == 0U);
+    }
+    CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, &successor) == UCN_OK);
+    CHECK(base.prior_session_generation == 1U && f.provider.reauth_verify_calls == 2U);
+    CHECK(f.owner.sessions[successor.slot].candidate.session_generation == 3U);
+    CHECK(ucn_i_security_fence(&f.owner, successor) == UCN_OK);
+    CHECK(ucn_i_security_retire_fenced(&f.owner, successor) == UCN_OK);
+    successor = sentinel; challenge[0] ^= 1U;
+    CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, &successor) == UCN_ERR_SECURITY);
+    CHECK(memcmp(&successor, &sentinel, sizeof(sentinel)) == 0); challenge[0] ^= 1U;
+    response[0] ^= 1U;
+    CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, &successor) == UCN_ERR_SECURITY);
+    CHECK(memcmp(&successor, &sentinel, sizeof(sentinel)) == 0); response[0] ^= 1U;
+    before = f.owner; local_record[148] ^= 1U;
+    CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, &successor) != UCN_OK);
+    CHECK(memcmp(&f.owner, &before, sizeof(before)) == 0); local_record[148] ^= 1U;
+#if UCN_I_SECURITY_SESSION_COUNT >= 3
+    {
+        ucn_i_security_handle_t tombstone;
+        CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, &tombstone) == UCN_OK);
+        CHECK(ucn_i_security_fence(&f.owner, tombstone) == UCN_OK);
+        /* A newer fenced slot than the supplied local Foundation baseline
+         * still rejects, even when both signatures are otherwise valid. */
+        before = f.owner;
+        CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, &successor) == UCN_ERR_STATE);
+        CHECK(memcmp(&f.owner, &before, sizeof(before)) == 0);
+        previous = next;
+        memcpy(local_record, f.owner.sessions[tombstone.slot].body, sizeof(local_record));
+        base = durability_make(0x8001U, 4U);
+        test_write_be(b + 56U, 3U, 4U); test_write_be(b + 60U, 4U, 4U);
+        test_write_be(b + 156U, 3U, 4U); test_write_be(b + 160U, 3U, 4U);
+        test_write_be(b + 72U, 4U, 4U); test_write_be(b + 76U, 4U, 4U);
+        memcpy(b + 124U, previous.transcript_digest, 32U);
+        memcpy(message + 19U, b, 208U);
+        CHECK(ucn_i_sha256_256(message, sizeof(message), digest, &hash) == UCN_OK);
+        next.session_generation = 4U;
+        next.origin_tx.key_generation = next.origin_rx.key_generation = 4U;
+        next.hop_tx.key_generation = next.hop_rx.key_generation = 4U;
+        memcpy(next.origin_fingerprint, digest, 16U); memcpy(next.hop_fingerprint, digest + 16U, 16U); memcpy(next.transcript_digest, digest, 32U);
+        message[20] = 1U; reauth_identity_sign(previous.peer.principal, message, challenge);
+        message[20] = 2U; reauth_identity_sign(previous.local.principal, message, response);
+        CHECK(ucn_i_security_prepare_static_session(&f.owner, &next, &old_proof, 1U, &base, 1500U, &successor) == UCN_ERR_STATE);
+        CHECK(ucn_i_security_prepare_reauth_session(&f.owner, &call, &work, &successor) == UCN_OK);
+        CHECK(ucn_i_security_fence(&f.owner, successor) == UCN_OK);
+        CHECK(ucn_i_security_retire_fenced(&f.owner, successor) == UCN_OK);
+        CHECK(ucn_i_security_retire_fenced(&f.owner, tombstone) == UCN_OK);
+    }
+#endif
+    CHECK(sizeof(work) <= 512U);
+    printf("reauth workspace=%zu descriptor=%zu bytes\n", sizeof(work), sizeof(call));
+    CHECK(fixture_destroy(&f) == 0);
+    return 0;
+}
+
 int main(void)
 {
+    CHECK(test_signed_reauth_uses_both_histories_without_faking_local_prior() == 0);
+    CHECK(test_local_c0_retry_refresh_preserves_origin() == 0);
+    CHECK(test_explicit_pending_session_policy_replaces_defaults() == 0);
+    CHECK(test_fenced_successor_requires_exact_prior() == 0);
     CHECK(test_peer_reauth_codec() == 0);
     CHECK(test_record_codec() == 0);
     CHECK(test_session_prepare_and_lifecycle() == 0);

@@ -17,6 +17,7 @@ Testing/
 /.codex_docx_review/
 
 # Python tooling caches.
+.superpowers/native-dynamic/
 __pycache__/
 *.py[cod]
 

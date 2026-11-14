@@ -1,4 +1,7 @@
 #include "internal/ucn_native_route_control.h"
+#if UCN_FEATURE_NATIVE_DYNAMIC_ENABLED
+#include "internal/ucn_native_dynamic.h"
+#endif
 #include "internal/ucn_stack.h"
 #include "internal/ucn_checked.h"
 #include <string.h>
@@ -17,13 +20,16 @@ static UCN_I_STACK_PHASE ucn_result_t peer(ucn_i_native_routed_t *b, uint16_t in
     ucn_i_native_route_control_t *c = b->control;
     const ucn_i_native_neighbor_t *n = &b->neighbors[index];
     bool ready; ucn_result_t r;
-    if (b->now >= b->expires_at) { return UCN_ERR_STATE; }
+    if (b->now >= b->expires_at || b->neighbor_fenced[index]) { return UCN_ERR_STATE; }
+#if UCN_FEATURE_NATIVE_DYNAMIC_ENABLED
+    if(b->dynamic) { r=ucn_i_native_dynamic_neighbor(b->dynamic,index,127U,b->now); if(r!=UCN_OK) return r; }
+#endif
     memset(&c->ingress, 0, sizeof(c->ingress));
     r = ucn_i_adapter_link_snapshot(b->adapter, n->link_slot,
         &c->ingress.link_generation, &c->ingress.frame_mtu, &ready);
     if (r != UCN_OK || !ready || c->ingress.link_generation != n->facts.link_generation || c->ingress.frame_mtu < 127U) { return UCN_ERR_STATE; }
     c->facts = n->facts; c->facts.now_us = b->now;
-    r = ucn_i_security_c1_context_check(n->security, n->session, &c->facts, n->control_fingerprint, n->fingerprint);
+    r = ucn_i_security_c1_context_check(n->security, &n->session, &c->facts, n->control_fingerprint, n->fingerprint);
     if (r != UCN_OK) { return r; }
     r = ucn_i_security_session_get(n->security, n->session, &c->session);
     if (r != UCN_OK || c->session.origin_level != UCN_I_ORIGIN_O1 || c->session.hop_profile != UCN_I_HOP_PROFILE_H1) { return UCN_ERR_SECURITY; }
@@ -38,6 +44,9 @@ static UCN_I_STACK_PHASE ucn_result_t peer(ucn_i_native_routed_t *b, uint16_t in
     c->ingress.cost = 1U;
     if (c->ingress.frame_mtu > UCN_ADAPTER_FRAME_BYTES) { c->ingress.frame_mtu = UCN_ADAPTER_FRAME_BYTES; }
     c->ingress.capability_bits = n->capability_bits;
+#if UCN_FEATURE_NATIVE_DYNAMIC_ENABLED
+    if(b->dynamic) c->ingress=b->dynamic->peer_history[index];
+#endif
     return UCN_OK;
 }
 static int neighbor_for(ucn_i_native_routed_t *b, const ucn_i_route_link_ref_t *link)

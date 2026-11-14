@@ -883,8 +883,47 @@ static void test_failure_no_write(void)
     CHECK(memcmp(&adapter, &before, sizeof(adapter)) == 0);
 }
 
+static void test_handoff_holder_view_keeps_ingress_enabled(void)
+{
+    static ucn_i_adapter_t adapter;
+    fixture_t fixture = {0};
+    ucn_ports_t ports;
+    ucn_link_port_t link;
+    ucn_link_handle_t handle;
+    ucn_driver_token_t tx;
+    ucn_i_adapter_rx_view_t rx;
+    ucn_rx_meta_t meta = {0};
+    bool drained = false, quiet = true;
+    const uint8_t byte = 0x55U;
+    make_ports(&ports, &link, &fixture);
+    CHECK(ucn_i_adapter_init(&adapter, 61U, 62U, &ports) == UCN_OK);
+    fixture.adapter = &adapter;
+    CHECK(ucn_i_adapter_set_rx_enabled(&adapter, true) == UCN_OK);
+    CHECK(ucn_i_adapter_obligations_drained(&adapter, &drained) == UCN_OK && drained);
+    CHECK(ucn_i_adapter_quiescent(&adapter, &quiet) == UCN_OK && !quiet);
+    CHECK(ucn_i_adapter_link_handle(&adapter, 0U, &handle) == UCN_OK);
+    meta.struct_size = sizeof(meta); meta.api_version = UCN_API_VERSION;
+    meta.timestamp_us = 100U;
+    CHECK(ucn_i_adapter_rx_publish(&adapter, handle, &byte, 1U, &meta) == UCN_OK);
+    CHECK(ucn_i_adapter_obligations_drained(&adapter, &drained) == UCN_OK && !drained);
+    CHECK(ucn_i_adapter_rx_claim(&adapter, &rx) == UCN_OK);
+    CHECK(ucn_i_adapter_obligations_drained(&adapter, &drained) == UCN_OK && !drained);
+    CHECK(ucn_i_adapter_rx_retire(&adapter, &rx.token) == UCN_OK);
+    CHECK(ucn_i_adapter_tx_reserve(&adapter, 0U, 10U, 0U, &tx) == UCN_OK);
+    CHECK(ucn_i_adapter_obligations_drained(&adapter, &drained) == UCN_OK && !drained);
+    CHECK(ucn_i_adapter_tx_cancel(&adapter, &tx) == UCN_OK);
+    CHECK(ucn_i_adapter_obligations_drained(&adapter, &drained) == UCN_OK && !drained);
+    CHECK(ucn_i_adapter_tx_retire(&adapter, &tx) == UCN_OK);
+    CHECK(ucn_i_adapter_obligations_drained(&adapter, &drained) == UCN_OK && drained);
+    CHECK(adapter.rx_enabled != 0U);
+    CHECK(ucn_i_adapter_obligations_drained(&adapter, (bool *)&adapter) == UCN_ERR_ARGUMENT);
+    CHECK(ucn_i_adapter_set_rx_enabled(&adapter, false) == UCN_OK);
+    CHECK(ucn_i_adapter_quiescent(&adapter, &quiet) == UCN_OK && quiet);
+}
+
 int main(void)
 {
+    test_handoff_holder_view_keeps_ingress_enabled();
     test_submit_lifecycle();
     test_submit_outcomes_and_link_fence();
     test_cancel_does_not_overwrite_synchronous_completion();

@@ -466,9 +466,11 @@ fn candidate(
 type Security = SecurityOwner<'static, 2, 4>;
 
 #[allow(clippy::too_many_lines)]
-fn activate_candidate(
+fn activate_candidate_policy(
     candidate: HandshakeCandidate,
     opcode: u16,
+    session_acl: Option<&'static [AclRule]>,
+    default_context: Option<Fingerprint>,
 ) -> (
     Security,
     SessionHandle,
@@ -486,7 +488,7 @@ fn activate_candidate(
         AclRule {
             peer_principal: candidate.peer.principal,
             peer_binding_generation: candidate.peer.generation,
-            context_fingerprint: candidate.origin_fingerprint,
+            context_fingerprint: default_context.unwrap_or(candidate.origin_fingerprint),
             service: ServiceId::new(1).unwrap(),
             protocol_opcode: opcode,
             direction: AccessDirection::Outbound,
@@ -494,7 +496,7 @@ fn activate_candidate(
         AclRule {
             peer_principal: candidate.peer.principal,
             peer_binding_generation: candidate.peer.generation,
-            context_fingerprint: candidate.origin_fingerprint,
+            context_fingerprint: default_context.unwrap_or(candidate.origin_fingerprint),
             service: ServiceId::new(1).unwrap(),
             protocol_opcode: opcode,
             direction: AccessDirection::Inbound,
@@ -609,6 +611,37 @@ fn activate_candidate(
         )
         .unwrap();
     assert_eq!(security.session_get(handle, facts), Err(Error::State));
+    if let Some(rules) = session_acl {
+        let lease = callback_gate
+            .try_enter(ucn_owner::CallbackClaim::new(99, 100, 1, 1).unwrap())
+            .unwrap();
+        assert_eq!(security.bind_session_acl(handle, rules), Err(Error::State));
+        callback_gate.leave(lease).unwrap();
+        assert_eq!(security.bind_session_acl(handle, &[]), Err(Error::Argument));
+        assert_eq!(
+            security.bind_session_acl(handle, Box::leak(Box::new([rules[0]; 65]))),
+            Err(Error::Argument)
+        );
+        assert_eq!(
+            security.bind_session_acl(handle, Box::leak(Box::new([rules[0]; 2]))),
+            Err(Error::Argument)
+        );
+        for i in 0..4 {
+            let mut bad = rules[0];
+            match i {
+                0 => bad.peer_principal[0] ^= 1,
+                1 => bad.peer_binding_generation = BindingGeneration::active(99).unwrap(),
+                2 => bad.context_fingerprint = Fingerprint::new([0xFE; 16]).unwrap(),
+                _ => bad.protocol_opcode = u16::MAX,
+            }
+            assert_eq!(
+                security.bind_session_acl(handle, Box::leak(Box::new([bad]))),
+                Err(Error::Argument)
+            );
+        }
+        security.bind_session_acl(handle, rules).unwrap();
+        assert_eq!(security.bind_session_acl(handle, rules), Err(Error::State));
+    }
     let persistence_handle = persistence
         .submit(&requirement.persistence_request(), 20)
         .unwrap();
@@ -640,6 +673,105 @@ fn activate_candidate(
         committed_view,
         committed_body,
     )
+}
+
+fn activate_candidate(
+    candidate: HandshakeCandidate,
+    opcode: u16,
+) -> (
+    Security,
+    SessionHandle,
+    CurrentFacts,
+    OracleCrypto,
+    ucn_persistence::DomainView,
+    [u8; ucn_security::SESSION_RECORD_BYTES],
+) {
+    activate_candidate_policy(candidate, opcode, None, None)
+}
+
+#[test]
+fn explicit_pending_session_acl_replaces_default_instead_of_union() {
+    let candidate = candidate(
+        SecurityLevel::Authenticated,
+        HopProfile::H0,
+        SuiteId::OriginHmacSha256_128,
+        [0x91; 16],
+        [0x92; 16],
+    );
+    let grant = Box::leak(Box::new([AclRule {
+        peer_principal: candidate.peer.principal,
+        peer_binding_generation: candidate.peer.generation,
+        context_fingerprint: candidate.origin_fingerprint,
+        service: ServiceId::new(2).unwrap(),
+        protocol_opcode: 0,
+        direction: AccessDirection::Outbound,
+    }]));
+    let old_context = Fingerprint::new([0x81; 16]).unwrap();
+    let (mut security, session, facts, mut crypto, view, body) =
+        activate_candidate_policy(candidate, 0, Some(grant), Some(old_context));
+    assert_eq!(security.bind_session_acl(session, grant), Err(Error::State));
+    let mut request = access(
+        session,
+        AccessDirection::Outbound,
+        0,
+        candidate.origin_fingerprint,
+    );
+    request.service = ServiceId::new(2).unwrap();
+    assert_eq!(security.authorize(request, facts), Ok(()));
+    request.service = ServiceId::new(1).unwrap();
+    request.context_fingerprint = old_context;
+    assert_eq!(security.authorize(request, facts), Err(Error::Access));
+    security.fence(session).unwrap();
+    assert_eq!(security.bind_session_acl(session, grant), Err(Error::State));
+    let mut codec = ucn_persistence::CodecWorkspace::new();
+    let base = DurabilityBase::from_view(11, 21, view, &body, 1_000, 79, &mut codec).unwrap();
+    let mut next = candidate;
+    next.session_generation = PeerSessionGeneration::new(2).unwrap();
+    next.origin_tx.key_generation += 1;
+    next.origin_rx.key_generation += 1;
+    next.origin_fingerprint = Fingerprint::new([0xA1; 16]).unwrap();
+    next.transcript_digest = [0xCD; 32];
+    crypto.expected_candidate = next;
+    let (successor, _) = security
+        .prepare_static_session(
+            &mut crypto,
+            next,
+            HandshakeProof { bytes: b"proof" },
+            base,
+            facts,
+        )
+        .unwrap();
+    assert_eq!(
+        security.bind_session_acl(successor, grant),
+        Err(Error::Argument)
+    );
+    let mut new_grant = grant[0];
+    new_grant.context_fingerprint = next.origin_fingerprint;
+    let maximum = Box::leak(Box::new([new_grant; 64]));
+    for (i, rule) in maximum.iter_mut().enumerate() {
+        rule.service = ServiceId::new(u16::try_from(i + 1).unwrap()).unwrap();
+    }
+    assert_eq!(security.bind_session_acl(successor, maximum), Ok(()));
+    security.fence(successor).unwrap();
+    security.retire_fenced(successor).unwrap();
+    assert_eq!(
+        security.bind_session_acl(successor, grant),
+        Err(Error::NotFound)
+    );
+    let (security, session, facts, _, _, _) =
+        activate_candidate_policy(candidate, 0, None, Some(old_context));
+    assert_eq!(
+        security.authorize(
+            access(
+                session,
+                AccessDirection::Outbound,
+                0,
+                candidate.origin_fingerprint
+            ),
+            facts
+        ),
+        Err(Error::Access)
+    );
 }
 
 fn bytes(hex: &str) -> Vec<u8> {

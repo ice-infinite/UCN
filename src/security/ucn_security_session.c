@@ -473,6 +473,16 @@ ucn_result_t ucn_i_security_record_decode(
     return UCN_OK;
 }
 
+static bool acl_rule_valid(const ucn_i_security_acl_rule_t *rule)
+{
+    return bytes_nonzero(rule->peer_principal, UCN_I_SECURITY_PRINCIPAL_BYTES) &&
+        bytes_nonzero(rule->context_fingerprint, UCN_I_SECURITY_FINGERPRINT_BYTES) &&
+        rule->peer_binding_generation != 0U && rule->service_id != UINT16_MAX &&
+        (rule->service_id != 0U || ucn_i_protocol_opcode_valid(rule->protocol_opcode)) &&
+        (rule->service_id == 0U || rule->protocol_opcode == 0U || ucn_i_protocol_opcode_valid(rule->protocol_opcode)) &&
+        (rule->direction == UCN_I_SECURITY_ACCESS_INBOUND || rule->direction == UCN_I_SECURITY_ACCESS_OUTBOUND) &&
+        bytes_zero(rule->reserved_zero, sizeof(rule->reserved_zero));
+}
 static bool rules_valid(const ucn_i_security_config_t *config)
 {
     uint16_t left;
@@ -506,19 +516,7 @@ static bool rules_valid(const ucn_i_security_config_t *config)
     for (left = 0U; left < config->acl_rule_count; ++left) {
         const ucn_i_security_acl_rule_t *rule = &config->acl_rules[left];
 
-        if (!bytes_nonzero(rule->peer_principal,
-                           UCN_I_SECURITY_PRINCIPAL_BYTES) ||
-            !bytes_nonzero(rule->context_fingerprint,
-                           UCN_I_SECURITY_FINGERPRINT_BYTES) ||
-            rule->peer_binding_generation == 0U ||
-            rule->service_id == UINT16_MAX ||
-            (rule->service_id == 0U &&
-             !ucn_i_protocol_opcode_valid(rule->protocol_opcode)) ||
-            (rule->service_id != 0U && rule->protocol_opcode != 0U &&
-             !ucn_i_protocol_opcode_valid(rule->protocol_opcode)) ||
-            (rule->direction != UCN_I_SECURITY_ACCESS_INBOUND &&
-             rule->direction != UCN_I_SECURITY_ACCESS_OUTBOUND) ||
-            !bytes_zero(rule->reserved_zero, sizeof(rule->reserved_zero))) {
+        if (!acl_rule_valid(rule)) {
             return false;
         }
         for (right = (uint16_t)(left + 1U);
@@ -671,14 +669,32 @@ static void clear_callback(ucn_i_security_owner_t *owner)
     memset(owner->callback_proof, 0, sizeof(owner->callback_proof));
 }
 
-ucn_result_t ucn_i_security_prepare_static_session(
+static ucn_result_t reauth_verify_identities(ucn_i_security_owner_t *owner,
+    const ucn_i_security_reauth_call_t *call, ucn_i_security_reauth_workspace_t *work)
+{
+    ucn_result_t result;
+    memcpy(work->message, "UCN6-PEER-REAUTH-V2", 19U);
+    memcpy(work->message + 19U, call->record->canonical, 208U);
+    work->message[20] = 1U;
+    result = call->verify_identity(call->verify_context, work->message + 59U,
+        work->message, owner->callback_proof, call->challenge_proof_bytes);
+    if (result != UCN_OK) { return result; }
+    work->message[20] = 2U;
+    return call->verify_identity(call->verify_context, work->message + 35U,
+        work->message, owner->callback_proof + call->challenge_proof_bytes,
+        call->response_proof_bytes);
+}
+
+static ucn_result_t prepare_session(
     ucn_i_security_owner_t *owner,
     const ucn_i_security_candidate_t *candidate,
     const uint8_t *proof,
     size_t proof_bytes,
     const ucn_i_security_durability_base_t *durability,
     uint64_t now_us,
-    ucn_i_security_handle_t *handle_out)
+    ucn_i_security_handle_t *handle_out,
+    const ucn_i_security_reauth_call_t *reauth,
+    ucn_i_security_reauth_workspace_t *reauth_work)
 {
     ucn_i_security_handle_t handle;
     ucn_i_security_slot_t *slot;
@@ -721,8 +737,9 @@ ucn_result_t ucn_i_security_prepare_static_session(
         durability->domain_generation == 0U ||
         durability->volatile_continuation == 0U ||
         durability->prior_session_generation >= UINT32_MAX ||
-        candidate->session_generation !=
-            durability->prior_session_generation + UINT64_C(1)) {
+        (reauth == NULL ? candidate->session_generation !=
+            durability->prior_session_generation + UINT64_C(1) :
+            candidate->session_generation <= durability->prior_session_generation)) {
         owner_unlock(owner);
         return UCN_ERR_STATE;
     }
@@ -747,8 +764,20 @@ ucn_result_t ucn_i_security_prepare_static_session(
                 memcmp(existing->candidate.peer.principal,
                        candidate->peer.principal,
                        UCN_I_SECURITY_PRINCIPAL_BYTES) == 0) {
-                if (peer_session_found ||
-                    existing->phase != UCN_I_SECURITY_SESSION_ACTIVE) {
+                /* Generic prepare preserves its unique exact predecessor rule.
+                 * Signed reauth may retain several fenced historical holders,
+                 * but none may exceed the actual local Foundation baseline.
+                 * Neither path revives slots or replaces physical draining.
+                 * ZH: 普通prepare保持唯一精确前驱；双签名续接可保留多个已围栏
+                 * 历史槽，但不允许任何槽高于本端真实耐久历史。 */
+                if (reauth != NULL ?
+                    (existing->phase != UCN_I_SECURITY_SESSION_FENCED ||
+                     existing->candidate.session_generation > durability->prior_session_generation) :
+                    (peer_session_found ||
+                     (existing->phase != UCN_I_SECURITY_SESSION_ACTIVE &&
+                      existing->phase != UCN_I_SECURITY_SESSION_FENCED) ||
+                     (existing->phase == UCN_I_SECURITY_SESSION_FENCED &&
+                      existing->candidate.session_generation != durability->prior_session_generation))) {
                     owner_unlock(owner);
                     return UCN_ERR_STATE;
                 }
@@ -775,9 +804,12 @@ ucn_result_t ucn_i_security_prepare_static_session(
     gate_result = ucn_i_callback_gate_enter(owner->provider_gate,
                                              &owner->callback_claim);
     if (gate_result == UCN_OK) {
-        result = owner->provider.verify_session(
-            owner->provider.context, &owner->callback_candidate,
-            owner->callback_proof, owner->callback_proof_bytes);
+        result = reauth == NULL ? UCN_OK : reauth_verify_identities(owner, reauth, reauth_work);
+        if (result == UCN_OK) {
+            result = owner->provider.verify_session(
+                owner->provider.context, &owner->callback_candidate,
+                owner->callback_proof, owner->callback_proof_bytes);
+        }
         leave_result = ucn_i_callback_gate_leave(owner->provider_gate,
                                                   &owner->callback_claim);
         if (leave_result != UCN_OK) {
@@ -837,6 +869,249 @@ ucn_result_t ucn_i_security_prepare_static_session(
     *handle_out = handle;
     owner_unlock(owner);
     return UCN_OK;
+}
+
+ucn_result_t ucn_i_security_prepare_static_session(ucn_i_security_owner_t *owner,
+    const ucn_i_security_candidate_t *candidate, const uint8_t *proof, size_t proof_bytes,
+    const ucn_i_security_durability_base_t *durability, uint64_t now_us,
+    ucn_i_security_handle_t *out)
+{
+    return prepare_session(owner, candidate, proof, proof_bytes, durability, now_us, out, NULL, NULL);
+}
+
+static bool borrowed_output_disjoint_locked(const ucn_i_security_owner_t *owner,
+    const void *output, size_t bytes);
+
+ucn_result_t ucn_i_security_peer_is_fenced(ucn_i_security_owner_t *owner,
+    const ucn_i_security_binding_t *local, const ucn_i_security_binding_t *peer, bool *out)
+{
+    uint16_t i; bool fenced = true; ucn_result_t result;
+    if (owner == NULL || local == NULL || peer == NULL || out == NULL ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), local, sizeof(*local)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), peer, sizeof(*peer)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), out, sizeof(*out)) ||
+        ucn_i_ranges_overlap(local, sizeof(*local), out, sizeof(*out)) ||
+        ucn_i_ranges_overlap(peer, sizeof(*peer), out, sizeof(*out))) { return UCN_ERR_ARGUMENT; }
+    result = owner_lock(owner); if (result != UCN_OK) { return result; }
+    if (!borrowed_output_disjoint_locked(owner, out, sizeof(*out))) {
+        owner_unlock(owner); return UCN_ERR_ARGUMENT;
+    }
+    if (owner->callback_active || !binding_valid(local, owner->address_width) ||
+        !binding_valid(peer, owner->address_width)) { owner_unlock(owner); return UCN_ERR_STATE; }
+    /* Match identity, not an attacker-selected Binding generation: an active
+     * slot for this identity pair cannot be hidden by a stale Binding. */
+    for (i = 0U; i < UCN_I_SECURITY_SESSION_COUNT; ++i) {
+        const ucn_i_security_slot_t *slot = &owner->sessions[i];
+        if (slot->occupied && memcmp(slot->candidate.local.principal, local->principal, 16U) == 0 &&
+            memcmp(slot->candidate.peer.principal, peer->principal, 16U) == 0 &&
+            slot->phase != UCN_I_SECURITY_SESSION_FENCED) { fenced = false; }
+    }
+    *out = fenced; owner_unlock(owner); return UCN_OK;
+}
+
+static bool reauth_input_disjoint(const ucn_i_security_owner_t *owner,
+    const ucn_i_security_reauth_workspace_t *work, const ucn_i_security_handle_t *out,
+    const void *input, size_t bytes)
+{
+    return input != NULL && !ucn_i_ranges_overlap(input, bytes, owner, sizeof(*owner)) &&
+        !ucn_i_ranges_overlap(input, bytes, work, sizeof(*work)) &&
+        !ucn_i_ranges_overlap(input, bytes, out, sizeof(*out));
+}
+
+static bool reauth_ranges_valid(const ucn_i_security_owner_t *owner,
+    const ucn_i_security_reauth_call_t *call, const ucn_i_security_reauth_workspace_t *work,
+    const ucn_i_security_handle_t *out)
+{
+    if (owner == NULL || call == NULL || work == NULL || out == NULL ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), work, sizeof(*work)) ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), out, sizeof(*out)) ||
+        ucn_i_ranges_overlap(work, sizeof(*work), out, sizeof(*out)) ||
+        call->verify_identity == NULL || call->initiator > 1U ||
+        call->challenge_proof_bytes < 16U || call->challenge_proof_bytes > 64U ||
+        call->response_proof_bytes != call->challenge_proof_bytes ||
+        !bytes_zero(call->reserved_zero, sizeof(call->reserved_zero))) { return false; }
+    return reauth_input_disjoint(owner, work, out, call, sizeof(*call)) &&
+        reauth_input_disjoint(owner, work, out, call->candidate, sizeof(*call->candidate)) &&
+        reauth_input_disjoint(owner, work, out, call->previous, sizeof(*call->previous)) &&
+        reauth_input_disjoint(owner, work, out, call->durability, sizeof(*call->durability)) &&
+        reauth_input_disjoint(owner, work, out, call->local_record, UCN_I_SECURITY_RECORD_BYTES) &&
+        reauth_input_disjoint(owner, work, out, call->record, sizeof(*call->record)) &&
+        reauth_input_disjoint(owner, work, out, call->challenge_proof, call->challenge_proof_bytes) &&
+        reauth_input_disjoint(owner, work, out, call->response_proof, call->response_proof_bytes);
+}
+
+static bool reauth_binding_matches(const ucn_i_security_binding_t *binding, const uint8_t *b)
+{
+    return binding->address == read_be32(b) && binding->binding_generation == read_be32(b + 4U) &&
+        memcmp(binding->principal, b + 8U, 16U) == 0;
+}
+
+static bool reauth_history_matches(const ucn_i_security_reauth_call_t *call)
+{
+    const ucn_i_security_candidate_t *p = call->previous;
+    const uint8_t *b = call->record->canonical;
+    size_t history = call->initiator ? 56U : 164U;
+    size_t origin = call->initiator ? 156U : 168U;
+    size_t digest = call->initiator ? 124U : 176U;
+    return p->hop_profile == UCN_I_HOP_PROFILE_H1 &&
+        call->durability->prior_session_generation == p->session_generation &&
+        p->session_generation == read_be32(b + history) &&
+        p->origin_tx.key_generation == read_be32(b + origin) &&
+        p->origin_rx.key_generation == read_be32(b + origin) &&
+        p->hop_tx.key_generation == read_be32(b + origin + 4U) &&
+        p->hop_rx.key_generation == read_be32(b + origin + 4U) &&
+        memcmp(p->transcript_digest, b + digest, 32U) == 0;
+}
+
+static bool reauth_selectors_match(const ucn_i_security_reauth_call_t *call)
+{
+    const ucn_i_security_candidate_t *c = call->candidate, *p = call->previous;
+    const uint8_t *b = call->record->canonical;
+    uint16_t tx = call->initiator ? 0U : 1U, rx = call->initiator ? 1U : 0U;
+    return c->origin_level == (b[64] == 1U ? UCN_I_SECURITY_AUTHENTICATED : UCN_I_SECURITY_CONFIDENTIAL) &&
+        c->hop_profile == UCN_I_HOP_PROFILE_H1 &&
+        c->origin_tx.suite_id == b[64] && c->origin_rx.suite_id == b[64] &&
+        c->origin_tx.key_id == read_be16(b + 66U) + tx && c->origin_rx.key_id == read_be16(b + 66U) + rx &&
+        c->hop_tx.key_id == read_be16(b + 68U) + tx && c->hop_rx.key_id == read_be16(b + 68U) + rx &&
+        c->origin_tx.key_generation == read_be32(b + 72U) && c->origin_rx.key_generation == read_be32(b + 72U) &&
+        c->hop_tx.key_generation == read_be32(b + 76U) && c->hop_rx.key_generation == read_be32(b + 76U) &&
+        c->origin_tx.key_id == p->origin_tx.key_id && c->origin_rx.key_id == p->origin_rx.key_id &&
+        c->hop_tx.key_id == p->hop_tx.key_id && c->hop_rx.key_id == p->hop_rx.key_id &&
+        c->origin_tx.suite_id == p->origin_tx.suite_id && c->origin_rx.suite_id == p->origin_rx.suite_id;
+}
+
+static bool reauth_candidate_matches(const ucn_i_security_owner_t *owner,
+    const ucn_i_security_reauth_call_t *call, ucn_i_security_reauth_workspace_t *work)
+{
+    const ucn_i_security_candidate_t *c = call->candidate;
+    const uint8_t *b = call->record->canonical;
+    uint64_t lifetime = read_be64(b + 116U), expiry;
+    if (!candidate_valid(c, owner->address_width, call->now_us) ||
+        !peer_reauth_valid(b) || b[1] != 2U || b[2] != owner->address_width ||
+        read_be32(b + 4U) != owner->realm_id || !reauth_history_matches(call) ||
+        !reauth_selectors_match(call) || call->started_us == 0U || call->started_us > call->now_us ||
+        UINT64_MAX - call->started_us < lifetime || call->parent_deadline_us == 0U ||
+        c->session_generation != read_be32(b + 60U) ||
+        c->link_generation != read_be32(b + (call->initiator ? 84U : 88U)) ||
+        !reauth_binding_matches(&c->local, b + (call->initiator ? 8U : 32U)) ||
+        !reauth_binding_matches(&c->peer, b + (call->initiator ? 32U : 8U)) ||
+        memcmp(&c->local, &call->previous->local, sizeof(c->local)) != 0 ||
+        memcmp(&c->peer, &call->previous->peer, sizeof(c->peer)) != 0) { return false; }
+    expiry = call->started_us + lifetime;
+    if (expiry > call->parent_deadline_us) { expiry = call->parent_deadline_us; }
+    if (c->expires_at_us != expiry ||
+        ucn_i_security_record_encode(owner->realm_id, call->previous, work->message) != UCN_OK ||
+        memcmp(work->message, call->local_record, UCN_I_SECURITY_RECORD_BYTES) != 0) { return false; }
+    memcpy(work->message, "UCN6-PEER-REAUTH-V2", 19U); memcpy(work->message + 19U, b, 208U);
+    return ucn_i_sha256_256(work->message, sizeof(work->message), work->digest, &work->hash) == UCN_OK &&
+        memcmp(c->transcript_digest, work->digest, 32U) == 0 &&
+        memcmp(c->origin_fingerprint, work->digest, 16U) == 0 &&
+        memcmp(c->hop_fingerprint, work->digest + 16U, 16U) == 0;
+}
+
+ucn_result_t ucn_i_security_prepare_reauth_session(ucn_i_security_owner_t *owner,
+    const ucn_i_security_reauth_call_t *call, ucn_i_security_reauth_workspace_t *work,
+    ucn_i_security_handle_t *out)
+{
+    ucn_result_t result; bool fenced;
+    if (!reauth_ranges_valid(owner, call, work, out)) { return UCN_ERR_ARGUMENT; }
+    result = owner_lock(owner); if (result != UCN_OK) { return result; }
+    if (!borrowed_output_disjoint_locked(owner, work, sizeof(*work)) ||
+        !borrowed_output_disjoint_locked(owner, out, sizeof(*out))) { result = UCN_ERR_ARGUMENT; }
+    owner_unlock(owner); if (result != UCN_OK) { return result; }
+    result = ucn_i_security_peer_is_fenced(owner, &call->candidate->local, &call->candidate->peer, &fenced);
+    if (result != UCN_OK || !fenced) { return result == UCN_OK ? UCN_ERR_STATE : result; }
+    if (!reauth_candidate_matches(owner, call, work)) { return UCN_ERR_SECURITY; }
+    memcpy(work->proof, call->challenge_proof, call->challenge_proof_bytes);
+    memcpy(work->proof + call->challenge_proof_bytes, call->response_proof, call->response_proof_bytes);
+    return prepare_session(owner, call->candidate, work->proof,
+        (size_t)call->challenge_proof_bytes + call->response_proof_bytes,
+        call->durability, call->now_us, out, call, work);
+}
+
+ucn_result_t ucn_i_security_bind_session_acl(ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t session, const ucn_i_security_acl_rule_t *rules,
+    uint16_t count)
+{
+    uint16_t i, j, slot_index; ucn_result_t result;
+    ucn_i_security_slot_t *slot;
+    ucn_i_callback_claim_t claim; bool active;
+    if (owner == NULL || rules == NULL || count == 0U || count > UCN_I_SECURITY_SESSION_ACL_MAX ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), rules, sizeof(*rules) * count)) { return UCN_ERR_ARGUMENT; }
+    /* The shared gate may use the same non-recursive lock as this Owner.
+     * Observe it before taking the Owner lock, then recheck this Owner's actor
+     * latch under that lock before publishing anything. */
+    if (!owner_valid(owner)) { return UCN_ERR_STATE; }
+    result = ucn_i_callback_gate_view(owner->provider_gate, &active, &claim);
+    if (result != UCN_OK || active) { return result == UCN_OK ? UCN_ERR_STATE : result; }
+    result = owner_lock(owner); if (result != UCN_OK) { return result; }
+    if (owner->callback_active != 0U || !handle_matches(owner, &session, &slot_index)) {
+        owner_unlock(owner); return UCN_ERR_STATE;
+    }
+    slot = &owner->sessions[slot_index];
+    if (slot->phase != UCN_I_SECURITY_SESSION_AWAITING_DURABILITY || slot->session_acl != NULL) {
+        owner_unlock(owner); return UCN_ERR_STATE;
+    }
+    for (i = 0U; i < count; ++i) {
+        const ucn_i_security_acl_rule_t *rule = &rules[i];
+        if (!acl_rule_valid(rule) ||
+            rule->peer_binding_generation != slot->candidate.peer.binding_generation ||
+            memcmp(rule->peer_principal, slot->candidate.peer.principal, UCN_I_SECURITY_PRINCIPAL_BYTES) != 0 ||
+            (memcmp(rule->context_fingerprint, slot->candidate.origin_fingerprint, UCN_I_SECURITY_FINGERPRINT_BYTES) != 0 &&
+             (slot->candidate.hop_profile == UCN_I_HOP_PROFILE_H0 ||
+              memcmp(rule->context_fingerprint, slot->candidate.hop_fingerprint, UCN_I_SECURITY_FINGERPRINT_BYTES) != 0))) {
+            owner_unlock(owner); return UCN_ERR_ARGUMENT;
+        }
+        for (j = 0U; j < i; ++j) {
+            if (memcmp(rule, &rules[j], sizeof(*rule)) == 0) { owner_unlock(owner); return UCN_ERR_ARGUMENT; }
+        }
+    }
+    slot->session_acl = rules; slot->session_acl_count = count;
+    owner_unlock(owner); return UCN_OK;
+}
+/* Caller holds the Owner lock; shared with snapshot getters to avoid nested locks. */
+static bool borrowed_output_disjoint_locked(const ucn_i_security_owner_t *owner,
+    const void *output, size_t bytes)
+{
+    uint16_t i;
+    if (ucn_i_ranges_overlap(owner->acl_rules, owner->acl_rule_count * sizeof(*owner->acl_rules), output, bytes) ||
+        ucn_i_ranges_overlap(owner->domain_rules, owner->domain_rule_count * sizeof(*owner->domain_rules), output, bytes)) {
+        return false;
+    }
+    for (i = 0U; i < UCN_I_SECURITY_SESSION_COUNT; ++i) {
+        const ucn_i_security_slot_t *slot = &owner->sessions[i];
+        if (slot->occupied && ucn_i_ranges_overlap(slot->session_acl,
+            slot->session_acl_count * sizeof(*slot->session_acl), output, bytes)) { return false; }
+    }
+    return true;
+}
+ucn_result_t ucn_i_security_borrowed_output_check(ucn_i_security_owner_t *owner,
+    const void *output, size_t bytes)
+{
+    ucn_result_t result;
+    if (owner == NULL || output == NULL || bytes == 0U ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), output, bytes)) { return UCN_ERR_ARGUMENT; }
+    result = owner_lock(owner); if (result != UCN_OK) { return result; }
+    result = borrowed_output_disjoint_locked(owner, output, bytes) ? UCN_OK : UCN_ERR_ARGUMENT;
+    owner_unlock(owner); return result;
+}
+
+ucn_result_t ucn_i_security_session_candidate_get(ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t session, ucn_i_security_candidate_t *out)
+{
+    uint16_t index; ucn_result_t result;
+    if (owner == NULL || out == NULL ||
+        ucn_i_ranges_overlap(owner, sizeof(*owner), out, sizeof(*out))) { return UCN_ERR_ARGUMENT; }
+    result = owner_lock(owner); if (result != UCN_OK) { return result; }
+    if (!borrowed_output_disjoint_locked(owner, out, sizeof(*out))) {
+        owner_unlock(owner); return UCN_ERR_ARGUMENT;
+    }
+    if (owner->callback_active || !handle_matches(owner, &session, &index) ||
+        owner->sessions[index].phase != UCN_I_SECURITY_SESSION_ACTIVE) {
+        owner_unlock(owner); return UCN_ERR_STATE;
+    }
+    *out = owner->sessions[index].candidate;
+    owner_unlock(owner); return UCN_OK;
 }
 
 ucn_result_t ucn_i_security_requirement_get(
@@ -979,9 +1254,11 @@ static UCN_I_STACK_PHASE bool acl_rule_matches(
     uint8_t direction)
 {
     uint16_t index;
+    const ucn_i_security_acl_rule_t *rules = slot->session_acl != NULL ? slot->session_acl : owner->acl_rules;
+    uint16_t count = slot->session_acl != NULL ? slot->session_acl_count : owner->acl_rule_count;
 
-    for (index = 0U; index < owner->acl_rule_count; ++index) {
-        const ucn_i_security_acl_rule_t *rule = &owner->acl_rules[index];
+    for (index = 0U; index < count; ++index) {
+        const ucn_i_security_acl_rule_t *rule = &rules[index];
 
         if (rule->peer_binding_generation ==
                 slot->candidate.peer.binding_generation &&
@@ -2170,8 +2447,8 @@ static bool open_ranges_valid(
  * those calls; no automatic candidate copy, new state or weaker check.
  * ZH: 候选快照发布独立于Provider/摘要阶段，避免编译器结构复制寄存器副本贯穿深链。
  * 不新增候选栈副本、状态或弱化校验。Caller holds the Owner lock. */
-static UCN_I_STACK_PHASE void prepare_open_callback(ucn_i_security_owner_t *owner,
-    ucn_i_security_packet_workspace_t *workspace, uint16_t slot_index)
+static UCN_I_STACK_PHASE void prepare_packet_callback(ucn_i_security_owner_t *owner,
+    ucn_i_security_packet_workspace_t *workspace, uint16_t slot_index, uint16_t kind)
 {
     workspace->candidate = owner->sessions[slot_index].candidate;
     owner->callback_active = 1U;
@@ -2180,7 +2457,7 @@ static UCN_I_STACK_PHASE void prepare_open_callback(ucn_i_security_owner_t *owne
     owner->callback_claim.owner_instance = owner->owner_instance;
     owner->callback_claim.operation_id = owner->next_operation_id++;
     owner->callback_claim.operation_generation = 1U;
-    owner->callback_claim.operation_kind = UCN_I_SECURITY_CALLBACK_OPEN;
+    owner->callback_claim.operation_kind = kind;
 }
 
 /* EN: Both C0/C1 use the same unlocked Provider transaction. A missing Hop tag
@@ -2355,7 +2632,7 @@ ucn_result_t ucn_i_security_c1_open_borrowed(
     workspace->origin_open.origin_tag = origin_tag;
     workspace->origin_open.payload_bytes = workspace->material.payload_bytes;
     workspace->origin_open.plaintext = workspace->plaintext;
-    prepare_open_callback(owner, workspace, slot_index);
+    prepare_packet_callback(owner, workspace, slot_index, UCN_I_SECURITY_CALLBACK_OPEN);
     owner_unlock(owner);
 
     result = open_provider_run(owner, workspace, hop_tag,
@@ -2463,16 +2740,17 @@ ucn_result_t ucn_i_security_c1_origin_open(
 }
 
 ucn_result_t ucn_i_security_c1_context_check(ucn_i_security_owner_t *o,
-    ucn_i_security_handle_t session, const ucn_i_security_current_facts_t *f,
+    const ucn_i_security_handle_t *session, const ucn_i_security_current_facts_t *f,
     const uint8_t *origin_fingerprint, const uint8_t *hop_fingerprint)
 {
     uint16_t index; ucn_result_t r; const ucn_i_security_slot_t *s;
-    if (!o || !f || (!origin_fingerprint && !hop_fingerprint) ||
+    if (!o || !session || !f || (!origin_fingerprint && !hop_fingerprint) ||
+        ucn_i_ranges_overlap(o, sizeof(*o), session, sizeof(*session)) ||
         ucn_i_ranges_overlap(o, sizeof(*o), f, sizeof(*f)) ||
         (origin_fingerprint && ucn_i_ranges_overlap(o, sizeof(*o), origin_fingerprint, 16U)) ||
         (hop_fingerprint && ucn_i_ranges_overlap(o, sizeof(*o), hop_fingerprint, 16U))) { return UCN_ERR_ARGUMENT; }
     r = owner_lock(o); if (r != UCN_OK) { return r; }
-    if (o->callback_active || !handle_matches(o, &session, &index)) { owner_unlock(o); return UCN_ERR_STATE; }
+    if (o->callback_active || !handle_matches(o, session, &index)) { owner_unlock(o); return UCN_ERR_STATE; }
     s = &o->sessions[index];
     r = s->phase == UCN_I_SECURITY_SESSION_ACTIVE && current_facts_match(s, f) &&
         (!origin_fingerprint || acl_identifier_equal(origin_fingerprint, s->candidate.origin_fingerprint)) &&
@@ -2910,14 +3188,7 @@ ucn_result_t ucn_i_security_c0_protect(
     workspace->origin_protect.payload_bytes = plaintext_bytes;
     workspace->origin_protect.protected_payload = workspace->packet;
     workspace->origin_protect.origin_tag = workspace->digest;
-    workspace->candidate = slot->candidate;
-    owner->callback_active = 1U;
-    owner->callback_slot = slot_index;
-    owner->callback_candidate = workspace->candidate;
-    owner->callback_claim.owner_instance = owner->owner_instance;
-    owner->callback_claim.operation_id = owner->next_operation_id++;
-    owner->callback_claim.operation_generation = 1U;
-    owner->callback_claim.operation_kind = UCN_I_SECURITY_CALLBACK_PROTECT;
+    prepare_packet_callback(owner, workspace, slot_index, UCN_I_SECURITY_CALLBACK_PROTECT);
     owner_unlock(owner);
 
     gate_result = ucn_i_callback_gate_enter(owner->provider_gate,
@@ -3510,7 +3781,7 @@ UCN_I_STACK_PHASE ucn_result_t ucn_i_security_c0_open_borrowed(
     workspace->origin_open.payload_bytes =
         workspace->control_frame.payload_bytes;
     workspace->origin_open.plaintext = workspace->plaintext;
-    prepare_open_callback(owner, workspace, slot_index);
+    prepare_packet_callback(owner, workspace, slot_index, UCN_I_SECURITY_CALLBACK_OPEN);
     owner_unlock(owner);
 
     result = open_provider_run(owner, workspace,
@@ -4092,7 +4363,8 @@ static ucn_result_t c0_hop_wrap_protected(
     ucn_i_security_packet_workspace_t *workspace,
     uint8_t *output,
     size_t output_capacity,
-    size_t *output_bytes)
+    size_t *output_bytes,
+    uint8_t input_hop_profile)
 {
     ucn_i_security_slot_t *slot;
     size_t encoded_bytes = 0U;
@@ -4149,10 +4421,15 @@ static ucn_result_t c0_hop_wrap_protected(
         owner_unlock(owner);
         return UCN_ERR_STATE;
     }
+    if (!borrowed_output_disjoint_locked(owner, workspace, sizeof(*workspace)) ||
+        !borrowed_output_disjoint_locked(owner, output, output_capacity) ||
+        !borrowed_output_disjoint_locked(owner, output_bytes, sizeof(*output_bytes))) {
+        owner_unlock(owner); return UCN_ERR_ARGUMENT;
+    }
     slot = &owner->sessions[slot_index];
     memset(workspace, 0, sizeof(*workspace));
     result = ucn_i_c0_decode(protected_packet, protected_packet_bytes,
-                             owner->address_width, UCN_I_CONTROL_H0,
+                             owner->address_width, input_hop_profile,
                              &workspace->control_frame);
     if (result != UCN_OK ||
         workspace->control_frame.realm_id != owner->realm_id ||
@@ -4168,6 +4445,18 @@ static ucn_result_t c0_hop_wrap_protected(
         owner->next_operation_id == UINT32_MAX) {
         owner_unlock(owner);
         return result == UCN_OK ? UCN_ERR_STATE : result;
+    }
+    if (input_hop_profile == UCN_I_CONTROL_H1 &&
+        (workspace->control_frame.origin_security != slot->candidate.origin_level ||
+         workspace->control_frame.source_address != slot->candidate.local.address ||
+         workspace->control_frame.destination_address != slot->candidate.peer.address ||
+         workspace->control_frame.source_binding_generation != slot->candidate.local.binding_generation ||
+         workspace->control_frame.destination_binding_generation != slot->candidate.peer.binding_generation ||
+         workspace->control_frame.transaction_id > slot->c0_tx_highest_consumed ||
+         workspace->control_frame.hop_sequence > slot->hop_tx_highest_reserved ||
+         !acl_rule_matches(owner, slot, slot->candidate.origin_fingerprint, 0U,
+             workspace->control_frame.opcode, UCN_I_SECURITY_ACCESS_OUTBOUND))) {
+        owner_unlock(owner); return UCN_ERR_ACCESS;
     }
     workspace->control_frame.hop_sequence =
         slot->hop_tx_highest_reserved + 1U;
@@ -4257,6 +4546,30 @@ static ucn_result_t c0_hop_wrap_protected(
     return result;
 }
 
+ucn_result_t ucn_i_security_c0_refresh_hop(ucn_i_security_owner_t *owner,
+    ucn_i_security_handle_t session, const ucn_i_security_current_facts_t *facts,
+    const uint8_t *packet, size_t packet_bytes, ucn_i_security_packet_workspace_t *workspace,
+    uint8_t *output, size_t capacity, size_t *written)
+{
+    return c0_hop_wrap_protected(owner, session, facts, packet, packet_bytes,
+        workspace, output, capacity, written, UCN_I_CONTROL_H1);
+}
+
+/* A split path owns an H0 end-to-end Origin and an independent H1 next Hop.
+ * Direct H1 Sessions already emit/consume one Hop trailer in c0_protect/open;
+ * interpreting that frame as H0 would turn its old trailer into payload. */
+static ucn_result_t c0_path_origin_check(ucn_i_security_owner_t *owner,
+    const ucn_i_security_handle_t *session, const ucn_i_security_current_facts_t *facts)
+{
+    uint16_t slot; ucn_result_t result = owner_lock(owner);
+    if (result != UCN_OK) { return result; }
+    if (owner->callback_active || !handle_matches(owner, session, &slot) ||
+        owner->sessions[slot].phase != UCN_I_SECURITY_SESSION_ACTIVE ||
+        owner->sessions[slot].candidate.hop_profile != UCN_I_HOP_PROFILE_H0 ||
+        !current_facts_match(&owner->sessions[slot], facts)) { result = UCN_ERR_STATE; }
+    owner_unlock(owner); return result;
+}
+
 ucn_result_t ucn_i_security_c0_path_protect(
     ucn_i_security_owner_t *owner,
     const ucn_i_security_c0_protect_request_t *origin_request,
@@ -4296,6 +4609,8 @@ ucn_result_t ucn_i_security_c0_path_protect(
                              sizeof(*output_bytes))) {
         return UCN_ERR_ARGUMENT;
     }
+    result = c0_path_origin_check(owner, &origin_request->session, &origin_request->facts);
+    if (result != UCN_OK) { return result; }
     memset(workspace, 0, sizeof(*workspace));
     result = ucn_i_security_c0_protect(
         owner, origin_request, plaintext, plaintext_bytes,
@@ -4307,7 +4622,7 @@ ucn_result_t ucn_i_security_c0_path_protect(
     return c0_hop_wrap_protected(
         owner, hop_session, hop_facts, workspace->origin_packet,
         origin_packet_bytes, &workspace->packet, output, output_capacity,
-        output_bytes);
+        output_bytes, UCN_I_CONTROL_H0);
 }
 
 ucn_result_t ucn_i_security_c0_path_open(
@@ -4351,6 +4666,8 @@ ucn_result_t ucn_i_security_c0_path_open(
                              hop_replay_out, sizeof(*hop_replay_out))) {
         return UCN_ERR_ARGUMENT;
     }
+    result = c0_path_origin_check(owner, &origin_access->session, origin_facts);
+    if (result != UCN_OK) { return result; }
     memset(workspace, 0, sizeof(*workspace));
     result = ucn_i_security_c0_hop_open(
         owner, hop_session, hop_facts, packet, packet_bytes, workspace);

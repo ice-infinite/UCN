@@ -1359,8 +1359,34 @@ static void test_pending_and_witness_repair(void)
     CHECK(view.record_generation == 1U);
 }
 
+static void test_domain_view_exact_transaction_history(void)
+{
+    static fixture_t fixture;
+    static const uint8_t body[] = {0x72U};
+    uint8_t empty_digest[16] = {0};
+    ucn_handle_t handle;
+    ucn_persistence_domain_view_t view;
+    fixture_build_manifest(&fixture);
+    fixture_init_runtime(&fixture, true);
+    CHECK(ucn_i_persistence_start_recovery(fixture.owner) == UCN_OK);
+    run_until_idle(&fixture);
+    handle = submit_body(&fixture, 37U, 0U, empty_digest, body, sizeof(body));
+    run_until_idle(&fixture);
+    CHECK(ucn_i_persistence_proof_retire(fixture.owner, handle) == UCN_OK);
+    CHECK(ucn_i_persistence_domain_get(fixture.owner, fixture.entries[0].domain, &view) == UCN_OK);
+    CHECK(view.record_generation == 1U && view.current_transaction_id == 37U);
+    CHECK(ucn_persistence_deinit(fixture.owner) == UCN_OK);
+    CHECK(ucn_persist_callback_gate_deinit(fixture.gate) == UCN_OK);
+    fixture_init_runtime(&fixture, false);
+    CHECK(ucn_i_persistence_start_recovery(fixture.owner) == UCN_OK);
+    run_until_idle(&fixture);
+    CHECK(ucn_i_persistence_domain_get(fixture.owner, fixture.entries[0].domain, &view) == UCN_OK);
+    CHECK(view.record_generation == 1U && view.current_transaction_id == 37U);
+}
+
 int main(void)
 {
+    test_domain_view_exact_transaction_history();
     test_state_lock_must_be_distinct_from_callback_gate();
     test_init_rejects_digest_workspace_storage_alias();
     test_gate_lifetime_is_bound_to_owner_references();

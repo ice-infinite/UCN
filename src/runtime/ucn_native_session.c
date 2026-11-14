@@ -287,7 +287,7 @@ ucn_result_t ucn_i_native_session_init(ucn_i_native_session_backend_t *b,
     b->access.session = session; b->access.service_id = service;
     memcpy(b->access.context_fingerprint, fingerprint, 16U);
     if (current(b, facts->now_us) != UCN_OK) { memset(b, 0, sizeof(*b)); return UCN_ERR_STATE; }
-    if (ucn_i_security_c1_context_check(security, session, facts, fingerprint, NULL) != UCN_OK) {
+    if (ucn_i_security_c1_context_check(security, &session, facts, fingerprint, NULL) != UCN_OK) {
         memset(b, 0, sizeof(*b)); return UCN_ERR_STATE;
     }
     /* Exact fingerprint and at least one usable Service direction are required

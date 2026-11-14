@@ -1803,6 +1803,7 @@ ucn_result_t ucn_i_persistence_domain_get(
     view.api_version = UCN_PERSIST_API_VERSION;
     view.domain = mutable_owner->domains[index].manifest.domain;
     view.record_generation = mutable_owner->domains[index].record_generation;
+    view.current_transaction_id = mutable_owner->domains[index].current_transaction_id;
     view.body_bytes = mutable_owner->domains[index].body_bytes;
     view.schema_id = mutable_owner->domains[index].manifest.schema_id;
     view.schema_version = mutable_owner->domains[index].manifest.schema_version;

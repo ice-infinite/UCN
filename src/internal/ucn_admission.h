@@ -176,6 +176,10 @@ typedef struct ucn_i_admission_wire_workspace {
  * 中文：校验精确阶段字段，不产生Owner副作用。 */
 bool ucn_i_admission_transcript_valid(const ucn_i_admission_transcript_t *value,
                                      ucn_i_admission_phase_t phase);
+/* Pure monotonic phase relation, also used by the Device coordinator which
+ * must not manufacture a server-side CookieVerified Admission handle. */
+bool ucn_i_admission_transition_valid(const ucn_i_admission_transcript_t *,
+    const ucn_i_admission_transcript_t *, ucn_i_admission_event_t);
 /* EN: Canonical BE logical event; failure preserves output and length sentinel.
  * 中文：规范大端逻辑事件；失败保持输出及长度哨兵不变。 */
 ucn_result_t ucn_i_admission_logical_encode(
@@ -431,6 +435,16 @@ ucn_result_t ucn_i_admission_open_after_cookie(
     ucn_i_admission_owner_t *owner,
     const ucn_i_admission_hello_cookie_t *hello_cookie,
     const ucn_i_admission_transcript_t *transcript,
+    uint64_t now_us,
+    ucn_i_admission_handle_t *handle_out);
+/* Coordinator captured start precedes any local freshness-bearing emission.
+ * Exact repeats retain the original start/deadline; future/expired starts fail.
+ * 协调器在发出新鲜度消息前捕获起点；重复不得续租。 */
+ucn_result_t ucn_i_admission_open_after_cookie_started(
+    ucn_i_admission_owner_t *owner,
+    const ucn_i_admission_hello_cookie_t *hello_cookie,
+    const ucn_i_admission_transcript_t *transcript,
+    uint64_t original_started_us,
     uint64_t now_us,
     ucn_i_admission_handle_t *handle_out);
 ucn_result_t ucn_i_admission_advance(

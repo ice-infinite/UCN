@@ -7865,7 +7865,7 @@ ucn_result_t ucn_i_composition_publish(
     ucn_send_handle_t *handle_out)
 {
     ucn_i_callback_claim_t claim;
-    ucn_send_handle_t handle;
+    ucn_send_handle_t handle = {0};
     ucn_result_t result;
 
     if (!composition_runtime_header_valid(runtime) || target == NULL ||

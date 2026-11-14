@@ -641,6 +641,17 @@ static bool transition_valid(const ucn_i_admission_transcript_t *previous,
     return event == UCN_I_ADMISSION_EVENT_ABORT;
 }
 
+bool ucn_i_admission_transition_valid(const ucn_i_admission_transcript_t *previous,
+    const ucn_i_admission_transcript_t *next, ucn_i_admission_event_t event)
+{
+    if (previous == NULL || next == NULL || event < 1U || event > 5U ||
+        !transcript_phase_valid(previous, event) ||
+        !transcript_phase_valid(next, (uint8_t)(event + 1U))) {
+        return false;
+    }
+    return transition_valid(previous, next, event);
+}
+
 static void clear_callback(ucn_i_admission_owner_t *owner)
 {
     owner->callback_active = 0U;
@@ -951,11 +962,13 @@ ucn_result_t ucn_i_admission_issue_cookie(
     return UCN_OK;
 }
 
-ucn_result_t ucn_i_admission_open_after_cookie(
+static ucn_result_t open_after_cookie_at(
     ucn_i_admission_owner_t *owner,
     const ucn_i_admission_hello_cookie_t *hello_cookie,
     const ucn_i_admission_transcript_t *transcript,
+    uint64_t original_started_us,
     uint64_t now_us,
+    bool exact_start,
     ucn_i_admission_handle_t *handle_out)
 {
     uint16_t index;
@@ -968,6 +981,7 @@ ucn_result_t ucn_i_admission_open_after_cookie(
     if (owner == NULL || !hello_cookie_valid(hello_cookie) ||
         !transcript_phase_valid(transcript,
                                 UCN_I_ADMISSION_COOKIE_VERIFIED) ||
+        original_started_us == 0U || original_started_us > now_us ||
         now_us == 0U || handle_out == NULL ||
         memcmp(hello_cookie->key.identity_digest,
                transcript->joining_device_identity_digest, 16U) != 0 ||
@@ -1000,6 +1014,12 @@ ucn_result_t ucn_i_admission_open_after_cookie(
         owner_unlock(owner);
         return UCN_ERR_STATE;
     }
+    result = ucn_i_deadline_from_duration_us(original_started_us,
+        owner->pending_timeout_us, &deadline);
+    if (result != UCN_OK || now_us >= deadline) {
+        owner_unlock(owner);
+        return result == UCN_OK ? UCN_ERR_TIMEOUT : result;
+    }
     owner->callback_active = 1U;
     owner->callback_hello_cookie = *hello_cookie;
     owner->callback_key = hello_cookie->key;
@@ -1027,7 +1047,9 @@ ucn_result_t ucn_i_admission_open_after_cookie(
         if (slot->occupied != 0U &&
             memcmp(&slot->key, &owner->callback_hello_cookie.key,
                    sizeof(slot->key)) == 0) {
-            if (memcmp(&slot->transcript, &owner->callback_transcript,
+            if ((exact_start &&
+                 slot->challenge_started_local_us != original_started_us) ||
+                memcmp(&slot->transcript, &owner->callback_transcript,
                        sizeof(owner->callback_transcript)) != 0 ||
                 now_us >= slot->deadline_us || now_us < slot->challenge_started_local_us) {
                 clear_callback(owner);
@@ -1054,7 +1076,7 @@ ucn_result_t ucn_i_admission_open_after_cookie(
         return UCN_ERR_NO_SPACE;
     }
     result = ucn_i_deadline_from_duration_us(
-        now_us, owner->pending_timeout_us, &deadline);
+        original_started_us, owner->pending_timeout_us, &deadline);
     if (result != UCN_OK) {
         clear_callback(owner);
         owner_unlock(owner);
@@ -1072,12 +1094,33 @@ ucn_result_t ucn_i_admission_open_after_cookie(
     owner->pending[empty].slot_generation = generation;
     owner->pending[empty].key = owner->callback_hello_cookie.key;
     owner->pending[empty].transcript = owner->callback_transcript;
-    owner->pending[empty].challenge_started_local_us = now_us;
+    owner->pending[empty].challenge_started_local_us = original_started_us;
     owner->pending[empty].deadline_us = deadline;
     *handle_out = make_handle(owner, empty);
     clear_callback(owner);
     owner_unlock(owner);
     return UCN_OK;
+}
+
+ucn_result_t ucn_i_admission_open_after_cookie(
+    ucn_i_admission_owner_t *owner,
+    const ucn_i_admission_hello_cookie_t *hello_cookie,
+    const ucn_i_admission_transcript_t *transcript,
+    uint64_t now_us, ucn_i_admission_handle_t *handle_out)
+{
+    return open_after_cookie_at(owner, hello_cookie, transcript,
+        now_us, now_us, false, handle_out);
+}
+
+ucn_result_t ucn_i_admission_open_after_cookie_started(
+    ucn_i_admission_owner_t *owner,
+    const ucn_i_admission_hello_cookie_t *hello_cookie,
+    const ucn_i_admission_transcript_t *transcript,
+    uint64_t original_started_us, uint64_t now_us,
+    ucn_i_admission_handle_t *handle_out)
+{
+    return open_after_cookie_at(owner, hello_cookie, transcript,
+        original_started_us, now_us, true, handle_out);
 }
 
 ucn_result_t ucn_i_admission_advance(

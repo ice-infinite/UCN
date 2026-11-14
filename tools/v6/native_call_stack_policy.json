@@ -7,7 +7,9 @@
       "memset": "libc",
       "memcmp": "libc",
       "memmove": "libc",
-      "__stack_chk_fail": "compiler-runtime"
+      "__stack_chk_fail": "compiler-runtime",
+      "__aeabi_uldivmod": "compiler-runtime",
+      "__aeabi_ldivmod": "compiler-runtime"
     },
     "indirect": [
       {
@@ -199,16 +201,216 @@
         "source": "src/runtime/ucn_node.c",
         "expression": "completion",
         "boundary": "application"
+      },
+      {
+        "source": "src/runtime/ucn_native_join.c",
+        "expression": "j->config.configure_session_policy",
+        "boundary": "session-policy"
+      },
+      {
+        "source": "src/runtime/ucn_native_join.c",
+        "expression": "j->config.current_authority",
+        "boundary": "authority-trust"
+      },
+      {
+        "source": "src/runtime/ucn_native_join.c",
+        "expression": "j->config.sign_event",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/runtime/ucn_native_join.c",
+        "expression": "j->config.authentication.authorize_event",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/runtime/ucn_native_reauth.c",
+        "expression": "r->config.sign",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/runtime/ucn_native_reauth.c",
+        "expression": "r->config.verify",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/runtime/ucn_native_reauth_durability.c",
+        "expression": "r->config.configure_session_policy",
+        "boundary": "session-policy"
+      },
+      {
+        "source": "src/runtime/ucn_native_capability.c",
+        "expression": "c->config.reserve_c0",
+        "boundary": "c0-counter"
+      },
+      {
+        "source": "src/security/ucn_security_session.c",
+        "expression": "call->verify_identity",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/admission/ucn_admission.c",
+        "expression": "owner->provider.issue_cookie",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/admission/ucn_admission.c",
+        "expression": "owner->provider.verify_cookie",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/admission/ucn_admission.c",
+        "expression": "owner->provider.authorize_event",
+        "boundary": "crypto"
+      },
+      {
+        "source": "src/admission/ucn_admission.c",
+        "expression": "owner->state_lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/admission/ucn_admission.c",
+        "expression": "owner->state_lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/admission/ucn_admission.c",
+        "expression": "config->state_lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/admission/ucn_admission.c",
+        "expression": "config->state_lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/admission/ucn_admission.c",
+        "expression": "lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/admission/ucn_identity_binding.c",
+        "expression": "owner->state_lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/admission/ucn_identity_binding.c",
+        "expression": "owner->state_lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/admission/ucn_identity_binding.c",
+        "expression": "config->state_lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/admission/ucn_identity_binding.c",
+        "expression": "config->state_lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/admission/ucn_identity_binding.c",
+        "expression": "lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/admission/ucn_identity_binding.c",
+        "expression": "lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/capability/ucn_capability.c",
+        "expression": "owner->state_lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/capability/ucn_capability.c",
+        "expression": "owner->state_lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/capability/ucn_capability.c",
+        "expression": "state_lock->enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/capability/ucn_capability.c",
+        "expression": "state_lock->leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/capability/ucn_capability.c",
+        "expression": "lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/persistence/ucn_persistence.c",
+        "expression": "owner->lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/persistence/ucn_persistence.c",
+        "expression": "owner->lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/persistence/ucn_persistence.c",
+        "expression": "gate->lock.enter",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/persistence/ucn_persistence.c",
+        "expression": "gate->lock.leave",
+        "boundary": "lock"
+      },
+      {
+        "source": "src/persistence/ucn_persistence.c",
+        "expression": "vtable->poll",
+        "boundary": "persistence-provider"
+      },
+      {
+        "source": "src/persistence/ucn_persistence.c",
+        "expression": "vtable->begin_load_slot",
+        "boundary": "persistence-provider"
+      },
+      {
+        "source": "src/persistence/ucn_persistence.c",
+        "expression": "vtable->begin_write_inactive",
+        "boundary": "persistence-provider"
+      },
+      {
+        "source": "src/persistence/ucn_persistence.c",
+        "expression": "vtable->begin_readback",
+        "boundary": "persistence-provider"
+      },
+      {
+        "source": "src/persistence/ucn_persistence.c",
+        "expression": "vtable->begin_publish_commit_marker",
+        "boundary": "persistence-provider"
+      },
+      {
+        "source": "src/persistence/ucn_persistence.c",
+        "expression": "vtable->begin_load_witness",
+        "boundary": "persistence-provider"
+      },
+      {
+        "source": "src/persistence/ucn_persistence.c",
+        "expression": "vtable->begin_advance_witness",
+        "boundary": "persistence-provider"
+      },
+      {
+        "source": "src/runtime/ucn_native_reauth_durability.c",
+        "expression": "r->config.verify",
+        "boundary": "crypto"
       }
     ],
     "source_sha256": {
-      "CMakeLists.txt": "af4c8d085709cf3136a67bc90211cb41fc3c0619a499935a88de974751d8ad2e",
+      "CMakeLists.txt": "6b40be2e58a33bab3e40c3cde83d83d29e93382215f9cd2a3c8d6ebfab8281b2",
       "include/ucn/ucn.h": "81ae9f4c4893b3b620d10688c39977065f2e5998c1d6532f054b2f962fd5bf05",
       "include/ucn/ucn_config.h": "02162a4c493befd3b56f497b3a4ab732a71d20d7c4dc3cbc9f650355628f0963",
       "include/ucn/ucn_core.h": "6e0a0adad33e880aad0b8d683082309ca068b9b7fdde0a7ba52395583dbb5325",
       "include/ucn/ucn_driver.h": "df75b4de915946620c3fbb5f03f66352e53be6c4f4da52438b80bc06c1d8df69",
-      "include/ucn/ucn_native.h": "f842375097e9cccb556e1de90a1e6fe7b26ff1addc1c61a0ae71df96fabafe46",
-      "include/ucn/ucn_native_backend.h": "62d66c07af0b89914997c65e78786fca550f44cea705ca534fafb948a073128b",
+      "include/ucn/ucn_native.h": "2eaf6caff52eb31f7b62dc85c7a7923cf42cbfe53b806ee5be3e959ff88bacea",
+      "include/ucn/ucn_native_backend.h": "b9aff1dca1d8216aa490691c8c41a01e9713fdcf066718936ec0a4a89773d7f6",
       "include/ucn/ucn_persistence.h": "e575c33a94c44c7217b32c93b2f5bd4c2afcb8fbf5d63cef550d34766ae3481d",
       "include/ucn/ucn_product.h": "4922ee21446e3175bdaab4c3f7d93063a32d18fddf27d70e1725cede83e6e23b",
       "include/ucn/ucn_simplified.h": "cb20023d0c4d739823bcae81f0476fd8e938c8db3c9efcb0b64a35c6886049e5",
@@ -235,11 +437,11 @@
       "include/ucn/v6/ucn_v6_transfer.h": "c906603beae9fbb174bce8bcf3ed32d8db5d04aa1c8c4f1da3db4094f21c9f32",
       "include/ucn/v6/ucn_v6_types.h": "63aa044b96b83df98a5bbeef012a69eabe18d3c989e199fd63ec334ce98340d1",
       "include/ucn/v6/ucn_v6_wire.h": "acd3c740546c1e5a64849dfa1032a89b0863a15a17c040966f5a282ff646464b",
-      "src/adapter/ucn_adapter.c": "f0dc176e1115bdd882eca8180a45938d979760704e3129df04214e09349c3a87",
-      "src/admission/ucn_admission.c": "b80042b6af74ba71875621f4d1d43639cc987e988c18f15bdcd42b47a7bae333",
+      "src/adapter/ucn_adapter.c": "e5960a4b3975a05a13a90ac40b4d5abf56684c3058a672af4f4ada77e2215b0e",
+      "src/admission/ucn_admission.c": "cefcea106d06b3dddf1424be4e8be0946d1a0924a90f986b510d6c244f84bb90",
       "src/admission/ucn_admission_scaffold.c": "c4c8ac3192f60777414f694f2f4781d92494e915896410764ed164e8e8a9b408",
       "src/admission/ucn_admission_wire.c": "b9f0de4da8548d2fd213aed8ab3a151f669186cb59bb9719dcb14202bbda0a31",
-      "src/admission/ucn_identity_binding.c": "9f9cd81234336a684f09d41c102fdcbf616ebccbda8ea723c2319e2b60d974d5",
+      "src/admission/ucn_identity_binding.c": "b3fc00a92fd664d02aeeec228ff603686bbd1446ddb6de9af909481096803f1a",
       "src/capability/ucn_capability.c": "a413d6482a9f8c5e96fafaf79e3c1a80ab542da2a2be0ffbd4a50c8831275ba9",
       "src/cluster/ucn_cluster.c": "51c852d0c735b978d4890c571e3e3b3c63c141db3e85a1f1c26660b43e3cfdca",
       "src/cluster/ucn_cluster_config.c": "bedd8708f240aaf81f09f06a4c61b4cf23e186a5363021371f06f8d989f806a9",
@@ -260,8 +462,8 @@
       "src/group/ucn_group_scaffold.c": "1a1a61f288d52ca0704b42ac81df1ae0d0f7cc82c2202d966819a529f18f2b32",
       "src/group/ucn_group_send.c": "25f7f461c3ddbc3b49593cb7f65470c0d287c167be4a8c0613feeeec68f8337c",
       "src/group/ucn_group_step.c": "1d1eae46552c3e7c0a8fdc1e4f256c1bcc03dcf6910fb51bbf8da50ef13a3655",
-      "src/internal/ucn_adapter.h": "fb4347ad743f770acf97757e64beb01fc369e06d9f271ef94b4340e4fd43e831",
-      "src/internal/ucn_admission.h": "99c0ddbcb74ae4a1c3d068b5d935083f90495ef47d11a0e9c484530399269483",
+      "src/internal/ucn_adapter.h": "0cabe9fb66081d435e8d64432d40a9c0f66488c1bbef9372ab6c3d99bbf533c8",
+      "src/internal/ucn_admission.h": "c83b8ca8d052ec3fedf72ec4a23c10051716063302f28408c57d066ad36164be",
       "src/internal/ucn_capability.h": "d5d5d4a25a7a3fe444211bdc18f1a7a6493560d8a3aa0421fe7831385e1b0e90",
       "src/internal/ucn_checked.h": "0f9c98a9e22935ec39a8059b5ed96a1b2f68887d6ab3d27264bf8fe3209fb8de",
       "src/internal/ucn_cluster.h": "2e7b356c6aeaca0ef18d830d73b07db0cebe3b260d9a5399579c3ed853fd681e",
@@ -271,25 +473,29 @@
       "src/internal/ucn_digest.h": "334f1b724ad9e9abd7c110cf0e72332e89425776d67d726233e702a1e7258e91",
       "src/internal/ucn_flow.h": "96137baaebf14bd7a7b93269cce2e1e8310c37f28bb751c95f1ee22b4c1be381",
       "src/internal/ucn_group.h": "040f197343b0707f304100e639f467ab7865c208edbd65a73d365b3a2475aa65",
-      "src/internal/ucn_identity.h": "ee16955b0580523d12dd2b518ec43a30c16842368ccd7d532056c735ed476790",
+      "src/internal/ucn_identity.h": "5da56a25c5512ef20960074a864b66b41e1239f6ed846b2977b40b794cf93809",
       "src/internal/ucn_module_scaffold.h": "f126daef26ef559d5fb0f0973957e99b5a6dcdec87600dfb0314822cb99c5dc2",
+      "src/internal/ucn_native_capability.h": "1f26ac51a65447db0fcab5b515312f62af0ef42042721b856bae914f1f57947e",
+      "src/internal/ucn_native_dynamic.h": "befc4790f9484f89100152aae1fb65b5406c22ff9d9d6eeae3dea9f79dc0b6b2",
+      "src/internal/ucn_native_join.h": "cff2fd61c2d12823825056b1aea2b124b390a1e6000934bec72c4ff62c0a2b5c",
+      "src/internal/ucn_native_reauth.h": "688b081a0ed2d4dcf0ddf3450f1353294a1a573fc09cd85ed2110c19d5ae5203",
       "src/internal/ucn_native_route_control.h": "40bd483f42238cbae8d3c1c0b2d0276b6abea2f70f7db24fd917acd1bebc860e",
-      "src/internal/ucn_native_routed.h": "316450b0e0b1f5598e134e651755a704e78bf4e46d7850f8928f89fc8c5e9334",
+      "src/internal/ucn_native_routed.h": "1c02c357f5c22880a9e956b1229bfb43ac20272acea2e04d8b8aec6ec500b1fb",
       "src/internal/ucn_native_session.h": "b5db504cb9e7019a1744f82ca09596f0de5bdb0eca5503252fa82a36e44ab3fa",
       "src/internal/ucn_operation_wire.h": "f401c9683e4ee240b7a4a570722fe9122834757bed44bc98be86650e5dddf683",
       "src/internal/ucn_owner.h": "e4b19aa2607597cd2c91e327b65975607885daca7458d6cad2796f3651ed2422",
-      "src/internal/ucn_persistence.h": "870b4685217c8a762e8fd3c052e3b65039a7542ce0799c9470833b997a1450fa",
+      "src/internal/ucn_persistence.h": "8d912182ff81a9cdcc6a3f4825a6fe801420e8c64362a3945b7ce0baff2f877b",
       "src/internal/ucn_persistence_coordinator.h": "15af2b51b8d22fe27aa2890bf17bf4542fdba4eb422d532507ca16c14c9af426",
       "src/internal/ucn_realtime.h": "906f12cdb8e9780aa1bd15947be3ef015bdde90a32be240061efe0fab14f9d7b",
       "src/internal/ucn_route.h": "c77a9bd87f82033e5b5f2aa7451f5f7d94539e50e10a419e9029b959dfeca4d5",
       "src/internal/ucn_runtime.h": "c03f2a42f54b966205a87d74bcdadb92b5bcd5540ac493fc29df0426d4faac3b",
-      "src/internal/ucn_security.h": "4a54628fa9b950afdcd4e67ff4b77393b83a28419b9376dbdacc154173f5034e",
+      "src/internal/ucn_security.h": "b2d3a689e663208ff33fbd648e829d6b7ae6742b4457aa2245e0d092eee6fb65",
       "src/internal/ucn_service.h": "29e191af0fb632eb43b0fb17d77a1f95b0daf4b10d20c35ce9f28e67058436a1",
       "src/internal/ucn_stack.h": "739e3685d6da860582dd62f9e74a91ae5d6f60ebce6c0e4570b47fd4007f8a5b",
       "src/internal/ucn_transport.h": "86e227e6624e53e2323de9a6cf3cb2114d2f5c82f724de80c43cd559fd6ad028",
       "src/internal/ucn_wire.h": "16cc34d3732426ee59c151bb8e18045afa62f2759e13e98d2a38ecc744bac6c9",
-      "src/native/ucn_native.c": "906a84d6520579ec197a8faba66c8e1bf1c9ec42a0255ac868ba86a3491071e2",
-      "src/persistence/ucn_persistence.c": "b624da76cda3083047bb768f535345faffd6a090f711f23e9cec377f1495e1ff",
+      "src/native/ucn_native.c": "048d5b02b80357e219a34a296e41b7ed8cfc0c7a16314847cbe13ef8b655da5d",
+      "src/persistence/ucn_persistence.c": "471ca3f6cae032e67e146d00ca2d183fe9f7755adefc1520c80d22773c53fc68",
       "src/persistence/ucn_persistence_codec.c": "a98e81063f6785b8bea9b0e7188db1d1903dfdab409acb8372dceab60cf393be",
       "src/persistence/ucn_persistence_coordinator.c": "6f388ce8916bc43fc51e854828c4a76548e3cce5ef66b5088c2f1e5fe3580236",
       "src/persistence/ucn_persistence_record_header.c": "9e4c772fce619d24edc240a75ac4c0ceb4b930c53f5c41d81c59fd105e3bc669",
@@ -302,14 +508,20 @@
       "src/routing/ucn_flow.c": "5ae95fb408e50edd7b920d3fbd0b4fc5add2a15bfc4a771d3b623257e1c9a1d9",
       "src/routing/ucn_route.c": "b8da4db7f77d61d373a301499bc3004990eef1a98e2fdee5477349bcec3dcbd0",
       "src/routing/ucn_routing_scaffold.c": "eaa4ab2220cc8729bd86509e4f4a0f9ad57e0e2f98aac0f5df6a92569e6c560d",
-      "src/runtime/ucn_composition.c": "295e9003f62dcb28544b6d324f9fbade576057b13bf87f89cce250707d6142f8",
-      "src/runtime/ucn_native_route_control.c": "b99859bab2f72445a24d7d07ee404baeae85d8e8171a7e14c10d4b0f425808ba",
-      "src/runtime/ucn_native_routed.c": "f66d1c0a3eb30b3c63079d4b87b4250cc75ab45bfd62111b03bb612ef374a561",
-      "src/runtime/ucn_native_session.c": "4fbe17c6651a6b236969b38635d073bf1960d5493dffc78fa1703c8b81761bab",
+      "src/runtime/ucn_composition.c": "ce968f02e32e0b8da81edb84e8d59336de068f83f1c261f61c09cb9046bf86f5",
+      "src/runtime/ucn_native_capability.c": "159d5af3107fe8ef6dde1956bd6c1065ef19180bae9eb74193d5cceefa9f50ef",
+      "src/runtime/ucn_native_dynamic.c": "d04072d28100f483b8705872e7fa01cd2d46ad57e55fc939bba84c29429e7637",
+      "src/runtime/ucn_native_join.c": "0f11b89de06478157526d1b2c820bcf3a2ef83b8f875f705c0d5d50ace111b3d",
+      "src/runtime/ucn_native_join_durability.c": "8cf398afa44b62e66109e6563483e9634fc51f2331b76f584d51d39cd99f240f",
+      "src/runtime/ucn_native_reauth.c": "2d69b64b62a3382ae4aee806fef7466040388bebbcbca7fdbad75f5bc86a63f0",
+      "src/runtime/ucn_native_reauth_durability.c": "c6d5fdd708fb427710aef838a37ed620e361feb88e33a64e0faaa65b54993b23",
+      "src/runtime/ucn_native_route_control.c": "02a7c85c317d497e0aaa09e3f1e482a6eacf48a5afb2d4215a4e2619f426f7f9",
+      "src/runtime/ucn_native_routed.c": "3f23daee2ea4d2a3d9dfa754dfcb8474b6a4178247f9bc3023f2770a444e8d4a",
+      "src/runtime/ucn_native_session.c": "7398bc9937e786ce669cf2f8cdfebab357e01f7a152aa286950ec84d77c74c2e",
       "src/runtime/ucn_node.c": "4880e6868ef173e8a1272a4934ef20f329eaeed5e17216d9ccc175bf7fa36b4c",
       "src/runtime/ucn_tx.c": "78d45620c924061841506b1e2a63ebe01f83bd2bfe65157b8e1cf33738417738",
       "src/security/ucn_security_scaffold.c": "e65e8e4ffe2f2fd8c99ba838ea69f7170a6990966ce677a25ca07067ae00553b",
-      "src/security/ucn_security_session.c": "f314c53404222e10fab17a8cb3d387b44e128eb6a008325d2ca8f776687fad35",
+      "src/security/ucn_security_session.c": "7f3c4623dfe4d1adbbd7021fdeadcd9e2a488e4ed2d3a55ad27da8b3e2ce2b0d",
       "src/service/ucn_operation.c": "0177f79781a5968050f5f9d7f21e8255aab252cce4adb530d4fae07bfd7dfccb",
       "src/service/ucn_operation_id.c": "83c2e9d99d95a8cdbb53df33407170ec0968d3c7159105d816f2f9d630aff0ac",
       "src/service/ucn_qos.c": "6199185fe223408a55be785a712a6a95c90ea52f8671aa93cf09d4bb4427c1a0",
@@ -384,7 +596,12 @@
         "src/native/ucn_native.c:ucn_native_stop",
         "src/native/ucn_native.c:ucn_native_status",
         "src/native/ucn_native.c:ucn_native_deinit",
-        "src/runtime/ucn_native_session.c:ucn_i_native_session_init"
+        "src/runtime/ucn_native_session.c:ucn_i_native_session_init",
+        "src/native/ucn_native.c:ucn_native_backend_enable_lifecycle",
+        "src/native/ucn_native.c:ucn_native_backend_lifecycle_range",
+        "src/native/ucn_native.c:ucn_native_backend_check_binding",
+        "src/native/ucn_native.c:ucn_native_backend_retire_peer",
+        "src/native/ucn_native.c:ucn_native_backend_peer_quiescent"
       ],
       "indirect": [
         {
@@ -534,7 +751,14 @@
         "src/native/ucn_native.c:ucn_native_stop",
         "src/native/ucn_native.c:ucn_native_status",
         "src/native/ucn_native.c:ucn_native_deinit",
-        "src/runtime/ucn_native_routed.c:ucn_i_native_routed_init"
+        "src/runtime/ucn_native_routed.c:ucn_i_native_routed_init",
+        "src/native/ucn_native.c:ucn_native_backend_enable_lifecycle",
+        "src/native/ucn_native.c:ucn_native_backend_lifecycle_range",
+        "src/native/ucn_native.c:ucn_native_backend_check_binding",
+        "src/native/ucn_native.c:ucn_native_backend_retire_peer",
+        "src/native/ucn_native.c:ucn_native_backend_peer_quiescent",
+        "src/runtime/ucn_native_routed.c:ucn_i_native_routed_fence_session",
+        "src/runtime/ucn_native_routed.c:ucn_i_native_routed_session_drained"
       ],
       "indirect": [
         {
@@ -667,6 +891,104 @@
           "object": "b->port",
           "field": "validate",
           "target": "validate"
+        }
+      ]
+    },
+    "dynamic": {
+      "inherits": "h1",
+      "entries": [
+        "src/runtime/ucn_native_join.c:ucn_i_native_join_retirement_check",
+        "src/runtime/ucn_native_join.c:ucn_i_native_join_configure_policy",
+        "src/runtime/ucn_native_join.c:ucn_i_native_join_check",
+        "src/runtime/ucn_native_join.c:ucn_i_native_join_parents",
+        "src/runtime/ucn_native_join.c:ucn_i_native_join_init",
+        "src/runtime/ucn_native_join.c:ucn_i_native_join_retire_one",
+        "src/runtime/ucn_native_join.c:ucn_i_native_join_drive_one",
+        "src/runtime/ucn_native_join.c:ucn_i_native_join_receive_claimed",
+        "src/runtime/ucn_native_join.c:ucn_i_native_join_session_current",
+        "src/runtime/ucn_native_join.c:ucn_i_native_join_bindings_current",
+        "src/runtime/ucn_native_join.c:ucn_i_native_join_handoff",
+        "src/runtime/ucn_native_join.c:ucn_i_native_join_stop",
+        "src/runtime/ucn_native_join.c:ucn_i_native_join_quiescent",
+        "src/runtime/ucn_native_join_durability.c:ucn_i_native_join_persist_binding",
+        "src/runtime/ucn_native_join_durability.c:ucn_i_native_join_persist_session",
+        "src/runtime/ucn_native_join_durability.c:ucn_i_native_join_finish_durability",
+        "src/runtime/ucn_native_reauth.c:ucn_i_native_reauth_enter",
+        "src/runtime/ucn_native_reauth.c:ucn_i_native_reauth_leave",
+        "src/runtime/ucn_native_reauth.c:ucn_i_native_reauth_check",
+        "src/runtime/ucn_native_reauth.c:ucn_i_native_reauth_init",
+        "src/runtime/ucn_native_reauth.c:ucn_i_native_reauth_retire_one",
+        "src/runtime/ucn_native_reauth.c:ucn_i_native_reauth_drive_one",
+        "src/runtime/ucn_native_reauth.c:ucn_i_native_reauth_receive_claimed",
+        "src/runtime/ucn_native_reauth.c:ucn_i_native_reauth_session_current",
+        "src/runtime/ucn_native_reauth.c:ucn_i_native_reauth_bindings_current",
+        "src/runtime/ucn_native_reauth.c:ucn_i_native_reauth_stop",
+        "src/runtime/ucn_native_reauth.c:ucn_i_native_reauth_quiescent",
+        "src/runtime/ucn_native_reauth.c:ucn_i_native_reauth_handoff",
+        "src/runtime/ucn_native_reauth_durability.c:ucn_i_native_reauth_load_base",
+        "src/runtime/ucn_native_reauth_durability.c:ucn_i_native_reauth_candidate",
+        "src/runtime/ucn_native_reauth_durability.c:ucn_i_native_reauth_persist",
+        "src/runtime/ucn_native_reauth_durability.c:ucn_i_native_reauth_finish_durability",
+        "src/runtime/ucn_native_capability.c:ucn_i_native_capability_init",
+        "src/runtime/ucn_native_capability.c:ucn_i_native_capability_selected",
+        "src/runtime/ucn_native_capability.c:ucn_i_native_capability_receive_claimed",
+        "src/runtime/ucn_native_capability.c:ucn_i_native_capability_drive_one",
+        "src/runtime/ucn_native_capability.c:ucn_i_native_capability_retire_one",
+        "src/runtime/ucn_native_capability.c:ucn_i_native_capability_stop",
+        "src/runtime/ucn_native_capability.c:ucn_i_native_capability_quiescent",
+        "src/runtime/ucn_native_dynamic.c:ucn_i_native_dynamic_output_safe",
+        "src/runtime/ucn_native_dynamic.c:ucn_i_native_dynamic_init",
+        "src/runtime/ucn_native_dynamic.c:ucn_i_native_dynamic_neighbor",
+        "src/runtime/ucn_native_dynamic.c:ucn_i_native_dynamic_endpoint",
+        "src/runtime/ucn_native_dynamic.c:ucn_i_native_dynamic_message",
+        "src/runtime/ucn_native_dynamic.c:ucn_i_native_dynamic_stop_session",
+        "src/runtime/ucn_native_dynamic.c:ucn_i_native_dynamic_step",
+        "src/runtime/ucn_native_dynamic.c:ucn_i_native_dynamic_quiet",
+        "src/runtime/ucn_native_dynamic.c:ucn_i_native_dynamic_receive",
+        "src/runtime/ucn_native_dynamic.c:ucn_i_native_dynamic_attach_reauth",
+        "src/runtime/ucn_native_dynamic.c:ucn_i_native_dynamic_stage",
+        "src/runtime/ucn_native_dynamic.c:ucn_i_native_dynamic_commit",
+        "src/runtime/ucn_native_dynamic.c:ucn_i_native_dynamic_detach_reauth",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_owner_lock",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_owner_unlock",
+        "src/persistence/ucn_persistence.c:ucn_persist_callback_gate_init_in_place",
+        "src/persistence/ucn_persistence.c:ucn_persist_callback_gate_deinit",
+        "src/persistence/ucn_persistence.c:ucn_persistence_init_in_place",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_start_recovery",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_attach_consumer",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_detach_consumer",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_submit",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_cancel",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_step",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_domain_get",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_domain_copy_body",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_proof_get",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_request_get",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_proof_retire",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_request_retire",
+        "src/persistence/ucn_persistence.c:ucn_persistence_deinit",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_handle_matches",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_request_is_well_formed",
+        "src/persistence/ucn_persistence.c:ucn_i_persistence_pending_request_equal",
+        "src/runtime/ucn_native_reauth.c:ucn_i_native_reauth_provider_enter"
+      ],
+      "indirect": [
+        {
+          "source": "src/security/ucn_security_session.c",
+          "expression": "call->verify_identity",
+          "replaces_boundary": "crypto",
+          "targets": [
+            "src/runtime/ucn_native_reauth_durability.c:verify_with_budget"
+          ]
+        }
+      ],
+      "bindings": [
+        {
+          "source": "src/runtime/ucn_native_reauth_durability.c",
+          "object": "call",
+          "member": "->",
+          "field": "verify_identity",
+          "target": "verify_with_budget"
         }
       ]
     }
